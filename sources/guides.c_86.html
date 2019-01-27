@@ -1,0 +1,168 @@
+
+<html>
+<head>
+  <link rel="stylesheet" href="../style.css"/>
+  <script src="../jquery-3.2.1.min.js"></script>
+</head>
+<body>
+<pre><code class = "cpp">
+<a name="ln1">/*</a>
+<a name="ln2"> *   This file is part of darktable,</a>
+<a name="ln3"> *   copyright (c) 2015 tobias ellinghaus</a>
+<a name="ln4"> *</a>
+<a name="ln5"> *   darktable is free software: you can redistribute it and/or modify</a>
+<a name="ln6"> *   it under the terms of the GNU General Public License as published by</a>
+<a name="ln7"> *   the Free Software Foundation, either version 3 of the License, or</a>
+<a name="ln8"> *   (at your option) any later version.</a>
+<a name="ln9"> *</a>
+<a name="ln10"> *   darktable is distributed in the hope that it will be useful,</a>
+<a name="ln11"> *   but WITHOUT ANY WARRANTY; without even the implied warranty of</a>
+<a name="ln12"> *   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the</a>
+<a name="ln13"> *   GNU General Public License for more details.</a>
+<a name="ln14"> *</a>
+<a name="ln15"> *   You should have received a copy of the GNU General Public License</a>
+<a name="ln16"> *   along with darktable.  If not, see &lt;http://www.gnu.org/licenses/&gt;.</a>
+<a name="ln17"> */</a>
+<a name="ln18">#include &quot;gui/guides.h&quot;</a>
+<a name="ln19">#include &quot;common/darktable.h&quot;</a>
+<a name="ln20">#include &quot;lua/cairo.h&quot;</a>
+<a name="ln21">#include &quot;lua/call.h&quot;</a>
+<a name="ln22">#include &quot;lua/lua.h&quot;</a>
+<a name="ln23">#include &quot;lua/widget/widget.h&quot;</a>
+<a name="ln24"> </a>
+<a name="ln25">typedef struct callback_data_t</a>
+<a name="ln26">{</a>
+<a name="ln27">  int draw_callback_id;</a>
+<a name="ln28">  int gui_callback_id;</a>
+<a name="ln29">} callback_data_t;</a>
+<a name="ln30"> </a>
+<a name="ln31">static void _guides_draw_callback(cairo_t *cr, const float x, const float y,</a>
+<a name="ln32">                                  const float w, const float h,</a>
+<a name="ln33">                                  const float zoom_scale, void *user_data)</a>
+<a name="ln34">{</a>
+<a name="ln35">  callback_data_t *d = (callback_data_t *)user_data;</a>
+<a name="ln36"> </a>
+<a name="ln37">  dt_lua_lock_silent(); // this code is called from the C side so we have to lock</a>
+<a name="ln38"> </a>
+<a name="ln39">  lua_State *L = darktable.lua_state.state;</a>
+<a name="ln40">  lua_rawgeti(L, LUA_REGISTRYINDEX, d-&gt;draw_callback_id);</a>
+<a name="ln41"> </a>
+<a name="ln42">  luaA_push(L, dt_lua_cairo_t, &amp;cr);</a>
+<a name="ln43">  lua_pushnumber(L, x);</a>
+<a name="ln44">  lua_pushnumber(L, y);</a>
+<a name="ln45">  lua_pushnumber(L, w);</a>
+<a name="ln46">  lua_pushnumber(L, h);</a>
+<a name="ln47">  lua_pushnumber(L, zoom_scale);</a>
+<a name="ln48"> </a>
+<a name="ln49">  // this will be called directly from the gui thread so we can just execute it, without caring about the gtk lock</a>
+<a name="ln50">  dt_lua_treated_pcall(L,6,0);</a>
+<a name="ln51"> </a>
+<a name="ln52">  dt_lua_type_gpointer_drop(L,cr);</a>
+<a name="ln53"> </a>
+<a name="ln54">  dt_lua_unlock();</a>
+<a name="ln55">}</a>
+<a name="ln56"> </a>
+<a name="ln57">static GtkWidget *_guides_gui_callback(dt_iop_module_t *self, void *user_data)</a>
+<a name="ln58">{</a>
+<a name="ln59">  callback_data_t *d = (callback_data_t *)user_data;</a>
+<a name="ln60">  dt_lua_lock_silent(); // this code is called from the C side so we have to lock</a>
+<a name="ln61">  lua_State *L = darktable.lua_state.state;</a>
+<a name="ln62">  lua_rawgeti(L, LUA_REGISTRYINDEX, d-&gt;gui_callback_id);</a>
+<a name="ln63">  dt_lua_treated_pcall(L,0,1);</a>
+<a name="ln64"> </a>
+<a name="ln65">//   dt_lua_debug_stack(L);</a>
+<a name="ln66">  lua_widget widget;</a>
+<a name="ln67">  luaA_to(L, lua_widget, &amp;widget, -1);</a>
+<a name="ln68">  dt_lua_widget_bind(L, widget);</a>
+<a name="ln69">  lua_pop(L,1);</a>
+<a name="ln70"> </a>
+<a name="ln71">  dt_lua_unlock();</a>
+<a name="ln72"> </a>
+<a name="ln73">  return widget-&gt;widget;</a>
+<a name="ln74">}</a>
+<a name="ln75"> </a>
+<a name="ln76">static int register_guide(lua_State *L)</a>
+<a name="ln77">{</a>
+<a name="ln78">  int draw_callback_id = -1, gui_callback_id = -1;</a>
+<a name="ln79">  dt_guides_widget_callback gui_callback = NULL;</a>
+<a name="ln80"> </a>
+<a name="ln81">  lua_settop(L, 3);</a>
+<a name="ln82"> </a>
+<a name="ln83">  const char *name = luaL_checkstring(L, 1);</a>
+<a name="ln84"> </a>
+<a name="ln85">  if(!lua_isnil(L, 3))</a>
+<a name="ln86">  {</a>
+<a name="ln87">    luaL_checktype(L, 3, LUA_TFUNCTION);</a>
+<a name="ln88">    gui_callback = _guides_gui_callback;</a>
+<a name="ln89">    gui_callback_id = luaL_ref(L, LUA_REGISTRYINDEX);</a>
+<a name="ln90">  }</a>
+<a name="ln91">  else</a>
+<a name="ln92">    lua_pop(L, 1); // get rid of the nil</a>
+<a name="ln93"> </a>
+<a name="ln94">  if(lua_isnil(L, 2))</a>
+<a name="ln95">    return luaL_error(L, &quot;missing draw callback&quot;);</a>
+<a name="ln96"> </a>
+<a name="ln97">  luaL_checktype(L, 2, LUA_TFUNCTION);</a>
+<a name="ln98">  draw_callback_id = luaL_ref(L, LUA_REGISTRYINDEX);</a>
+<a name="ln99"> </a>
+<a name="ln100">  callback_data_t *user_data = (callback_data_t *)malloc(sizeof(callback_data_t));</a>
+<a name="ln101">  user_data-&gt;draw_callback_id = draw_callback_id;</a>
+<a name="ln102">  user_data-&gt;gui_callback_id = gui_callback_id;</a>
+<a name="ln103"> </a>
+<a name="ln104">  dt_guides_add_guide(name, _guides_draw_callback, gui_callback, user_data, free);</a>
+<a name="ln105">  return 0;</a>
+<a name="ln106">}</a>
+<a name="ln107"> </a>
+<a name="ln108">int dt_lua_init_guides(lua_State *L)</a>
+<a name="ln109">{</a>
+<a name="ln110">  dt_lua_push_darktable_lib(L);</a>
+<a name="ln111"> </a>
+<a name="ln112">  dt_lua_goto_subtable(L, &quot;guides&quot;);</a>
+<a name="ln113">  // build the table containing the guides</a>
+<a name="ln114"> </a>
+<a name="ln115">  lua_pushstring(L, &quot;register_guide&quot;);</a>
+<a name="ln116">  lua_pushcfunction(L, register_guide);</a>
+<a name="ln117">  lua_settable(L, -3);</a>
+<a name="ln118"> </a>
+<a name="ln119">  lua_pop(L, 1); // remove the configuration table from the stack</a>
+<a name="ln120">  return 0;</a>
+<a name="ln121">}</a>
+<a name="ln122"> </a>
+<a name="ln123"> </a>
+<a name="ln124"> </a>
+<a name="ln125">// modelines: These editor modelines have been set for all relevant files by tools/update_modelines.sh</a>
+<a name="ln126">// vim: shiftwidth=2 expandtab tabstop=2 cindent</a>
+<a name="ln127">// kate: tab-indents: off; indent-width 2; replace-tabs on; indent-mode cstyle; remove-trailing-spaces modified;</a>
+
+</code></pre>
+<div class="balloon" rel="101"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v522/" target="_blank">V522</a> There might be dereferencing of a potential null pointer 'user_data'. Check lines: 101, 100.</p></div>
+
+<link rel="stylesheet" href="highlight.css">
+<script src="highlight.pack.js"></script>
+<script src="highlightjs-line-numbers.js"></script>
+<script>hljs.initHighlightingOnLoad();</script>
+<script>hljs.initLineNumbersOnLoad();</script>
+<script>
+  $(document).ready(function() {
+      $('.balloon').each(function () {
+          var bl = $(this);
+          var line = bl.attr('rel');
+          var text = $('a[name="ln'+line+'"]').text();
+
+          var space_count = 0;
+          for(var i = 0; i<text.length; i++){
+              var char = text[i];
+              if((char !== ' ')&&(char !== '\t'))break;
+              if(char === '\t')space_count++;
+              space_count++;
+          }
+
+          bl.css('margin-left', space_count*8);
+          $('a[name="ln'+line+'"]').after(bl);
+      });
+
+      window.location = window.location;
+  });
+</script>
+</body>
+</html>

@@ -1,0 +1,1538 @@
+
+<html>
+<head>
+  <link rel="stylesheet" href="../style.css"/>
+  <script src="../jquery-3.2.1.min.js"></script>
+</head>
+<body>
+<pre><code class = "cpp">
+<a name="ln1">/*</a>
+<a name="ln2">    This file is part of darktable,</a>
+<a name="ln3">    copyright (c) 2009--2013 johannes hanika.</a>
+<a name="ln4">    copyright (c) 2015 LebedevRI.</a>
+<a name="ln5">    copyright (c) 2016 Pedro Côrte-Real</a>
+<a name="ln6"> </a>
+<a name="ln7">    darktable is free software: you can redistribute it and/or modify</a>
+<a name="ln8">    it under the terms of the GNU General Public License as published by</a>
+<a name="ln9">    the Free Software Foundation, either version 3 of the License, or</a>
+<a name="ln10">    (at your option) any later version.</a>
+<a name="ln11"> </a>
+<a name="ln12">    darktable is distributed in the hope that it will be useful,</a>
+<a name="ln13">    but WITHOUT ANY WARRANTY; without even the implied warranty of</a>
+<a name="ln14">    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the</a>
+<a name="ln15">    GNU General Public License for more details.</a>
+<a name="ln16"> </a>
+<a name="ln17">    You should have received a copy of the GNU General Public License</a>
+<a name="ln18">    along with darktable.  If not, see &lt;http://www.gnu.org/licenses/&gt;.</a>
+<a name="ln19">*/</a>
+<a name="ln20">#ifdef HAVE_CONFIG_H</a>
+<a name="ln21">#include &quot;config.h&quot;</a>
+<a name="ln22">#endif</a>
+<a name="ln23">#if defined(__SSE__)</a>
+<a name="ln24">#include &lt;xmmintrin.h&gt;</a>
+<a name="ln25">#endif</a>
+<a name="ln26">#include &lt;assert.h&gt;</a>
+<a name="ln27">#include &lt;lcms2.h&gt;</a>
+<a name="ln28">#include &lt;math.h&gt;</a>
+<a name="ln29">#include &lt;stdlib.h&gt;</a>
+<a name="ln30">#include &lt;string.h&gt;</a>
+<a name="ln31"> </a>
+<a name="ln32">#include &quot;bauhaus/bauhaus.h&quot;</a>
+<a name="ln33">#include &quot;common/colorspaces_inline_conversions.h&quot;</a>
+<a name="ln34">#include &quot;common/darktable.h&quot;</a>
+<a name="ln35">#include &quot;common/opencl.h&quot;</a>
+<a name="ln36">#include &quot;control/control.h&quot;</a>
+<a name="ln37">#include &quot;develop/develop.h&quot;</a>
+<a name="ln38">#include &quot;develop/imageop_math.h&quot;</a>
+<a name="ln39">#include &quot;develop/tiling.h&quot;</a>
+<a name="ln40">#include &quot;external/wb_presets.c&quot;</a>
+<a name="ln41">#include &quot;gui/accelerators.h&quot;</a>
+<a name="ln42">#include &quot;gui/gtk.h&quot;</a>
+<a name="ln43">#include &quot;iop/iop_api.h&quot;</a>
+<a name="ln44"> </a>
+<a name="ln45">// for Kelvin temperature and bogus WB</a>
+<a name="ln46">#include &quot;common/colorspaces.h&quot;</a>
+<a name="ln47">#include &quot;external/cie_colorimetric_tables.c&quot;</a>
+<a name="ln48"> </a>
+<a name="ln49">DT_MODULE_INTROSPECTION(3, dt_iop_temperature_params_t)</a>
+<a name="ln50"> </a>
+<a name="ln51">#define INITIALBLACKBODYTEMPERATURE 4000</a>
+<a name="ln52"> </a>
+<a name="ln53">#define DT_IOP_LOWEST_TEMPERATURE 1901</a>
+<a name="ln54">#define DT_IOP_HIGHEST_TEMPERATURE 25000</a>
+<a name="ln55"> </a>
+<a name="ln56">#define DT_IOP_LOWEST_TINT 0.135</a>
+<a name="ln57">#define DT_IOP_HIGHEST_TINT 2.326</a>
+<a name="ln58"> </a>
+<a name="ln59">#define DT_IOP_NUM_OF_STD_TEMP_PRESETS 3</a>
+<a name="ln60"> </a>
+<a name="ln61">#define COLORED_SLIDERS 0</a>
+<a name="ln62"> </a>
+<a name="ln63">//storing the last picked color (if any)</a>
+<a name="ln64">static float old[4] = { 0.0f, 0.0f, 0.0f, 0.0f };</a>
+<a name="ln65"> </a>
+<a name="ln66">static void gui_sliders_update(struct dt_iop_module_t *self);</a>
+<a name="ln67"> </a>
+<a name="ln68">typedef struct dt_iop_temperature_params_t</a>
+<a name="ln69">{</a>
+<a name="ln70">  float coeffs[4];</a>
+<a name="ln71">} dt_iop_temperature_params_t;</a>
+<a name="ln72"> </a>
+<a name="ln73">typedef struct dt_iop_temperature_gui_data_t</a>
+<a name="ln74">{</a>
+<a name="ln75">  GtkWidget *scale_k, *scale_tint, *coeff_widgets, *scale_r, *scale_g, *scale_b, *scale_g2;</a>
+<a name="ln76">  GtkWidget *presets;</a>
+<a name="ln77">  GtkWidget *finetune;</a>
+<a name="ln78">  GtkWidget *box_enabled;</a>
+<a name="ln79">  GtkWidget *label_disabled;</a>
+<a name="ln80">  GtkWidget *stack;</a>
+<a name="ln81">  int preset_cnt;</a>
+<a name="ln82">  int preset_num[50];</a>
+<a name="ln83">  double daylight_wb[4];</a>
+<a name="ln84">  double XYZ_to_CAM[4][3], CAM_to_XYZ[3][4];</a>
+<a name="ln85">} dt_iop_temperature_gui_data_t;</a>
+<a name="ln86"> </a>
+<a name="ln87">typedef struct dt_iop_temperature_data_t</a>
+<a name="ln88">{</a>
+<a name="ln89">  float coeffs[4];</a>
+<a name="ln90">} dt_iop_temperature_data_t;</a>
+<a name="ln91"> </a>
+<a name="ln92"> </a>
+<a name="ln93">typedef struct dt_iop_temperature_global_data_t</a>
+<a name="ln94">{</a>
+<a name="ln95">  int kernel_whitebalance_4f;</a>
+<a name="ln96">  int kernel_whitebalance_1f;</a>
+<a name="ln97">  int kernel_whitebalance_1f_xtrans;</a>
+<a name="ln98">} dt_iop_temperature_global_data_t;</a>
+<a name="ln99"> </a>
+<a name="ln100">int legacy_params(dt_iop_module_t *self, const void *const old_params, const int old_version,</a>
+<a name="ln101">                  void *new_params, const int new_version)</a>
+<a name="ln102">{</a>
+<a name="ln103">  if(old_version == 2 &amp;&amp; new_version == 3)</a>
+<a name="ln104">  {</a>
+<a name="ln105">    typedef struct dt_iop_temperature_params_v2_t</a>
+<a name="ln106">    {</a>
+<a name="ln107">      float temp_out;</a>
+<a name="ln108">      float coeffs[3];</a>
+<a name="ln109">    } dt_iop_temperature_params_v2_t;</a>
+<a name="ln110"> </a>
+<a name="ln111">    dt_iop_temperature_params_v2_t *o = (dt_iop_temperature_params_v2_t *)old_params;</a>
+<a name="ln112">    dt_iop_temperature_params_t *n = (dt_iop_temperature_params_t *)new_params;</a>
+<a name="ln113"> </a>
+<a name="ln114">    n-&gt;coeffs[0] = o-&gt;coeffs[0];</a>
+<a name="ln115">    n-&gt;coeffs[1] = o-&gt;coeffs[1];</a>
+<a name="ln116">    n-&gt;coeffs[2] = o-&gt;coeffs[2];</a>
+<a name="ln117">    n-&gt;coeffs[3] = NAN;</a>
+<a name="ln118"> </a>
+<a name="ln119">    return 0;</a>
+<a name="ln120">  }</a>
+<a name="ln121">  return 1;</a>
+<a name="ln122">}</a>
+<a name="ln123"> </a>
+<a name="ln124">static int ignore_missing_wb(dt_image_t *img)</a>
+<a name="ln125">{</a>
+<a name="ln126">  // Ignore files that end with &quot;-hdr.dng&quot; since these are broken files we</a>
+<a name="ln127">  // generated without any proper WB tagged</a>
+<a name="ln128">  if(g_str_has_suffix(img-&gt;filename,&quot;-hdr.dng&quot;))</a>
+<a name="ln129">    return TRUE;</a>
+<a name="ln130"> </a>
+<a name="ln131">  static const char *const ignored_cameras[] = {</a>
+<a name="ln132">    &quot;Canon PowerShot A610&quot;,</a>
+<a name="ln133">    &quot;Canon PowerShot S3 IS&quot;,</a>
+<a name="ln134">    &quot;Canon PowerShot A620&quot;,</a>
+<a name="ln135">    &quot;Canon PowerShot A720 IS&quot;,</a>
+<a name="ln136">    &quot;Canon PowerShot A630&quot;,</a>
+<a name="ln137">    &quot;Canon PowerShot A640&quot;,</a>
+<a name="ln138">    &quot;Canon PowerShot A650&quot;,</a>
+<a name="ln139">    &quot;Canon PowerShot SX110 IS&quot;,</a>
+<a name="ln140">    &quot;Mamiya ZD&quot;,</a>
+<a name="ln141">    &quot;Canon EOS D2000C&quot;,</a>
+<a name="ln142">    &quot;Kodak EOS DCS 1&quot;,</a>
+<a name="ln143">    &quot;Kodak DCS560C&quot;,</a>
+<a name="ln144">    &quot;Kodak DCS460D&quot;,</a>
+<a name="ln145">    &quot;Nikon E5700&quot;,</a>
+<a name="ln146">    &quot;Sony DSC-F828&quot;,</a>
+<a name="ln147">    &quot;GITUP GIT2&quot;,</a>
+<a name="ln148">  };</a>
+<a name="ln149"> </a>
+<a name="ln150">  for(int i=0; i &lt; sizeof(ignored_cameras)/sizeof(ignored_cameras[1]); i++)</a>
+<a name="ln151">    if(!strcmp(img-&gt;camera_makermodel, ignored_cameras[i]))</a>
+<a name="ln152">      return TRUE;</a>
+<a name="ln153"> </a>
+<a name="ln154">  return FALSE;</a>
+<a name="ln155">}</a>
+<a name="ln156"> </a>
+<a name="ln157"> </a>
+<a name="ln158">const char *name()</a>
+<a name="ln159">{</a>
+<a name="ln160">  return C_(&quot;modulename&quot;, &quot;white balance&quot;);</a>
+<a name="ln161">}</a>
+<a name="ln162"> </a>
+<a name="ln163">int default_group()</a>
+<a name="ln164">{</a>
+<a name="ln165">  return IOP_GROUP_BASIC;</a>
+<a name="ln166">}</a>
+<a name="ln167"> </a>
+<a name="ln168">int flags()</a>
+<a name="ln169">{</a>
+<a name="ln170">  return IOP_FLAGS_ALLOW_TILING | IOP_FLAGS_ONE_INSTANCE;</a>
+<a name="ln171">}</a>
+<a name="ln172"> </a>
+<a name="ln173">static gboolean _set_preset_camera(GtkAccelGroup *accel_group, GObject *acceleratable, guint keyval,</a>
+<a name="ln174">                                   GdkModifierType modifier, gpointer data)</a>
+<a name="ln175">{</a>
+<a name="ln176">  dt_iop_module_t *self = data;</a>
+<a name="ln177">  dt_iop_temperature_gui_data_t *g = self-&gt;gui_data;</a>
+<a name="ln178">  dt_bauhaus_combobox_set(g-&gt;presets, 0);</a>
+<a name="ln179">  return TRUE;</a>
+<a name="ln180">}</a>
+<a name="ln181"> </a>
+<a name="ln182">static gboolean _set_preset_camera_neutral(GtkAccelGroup *accel_group, GObject *acceleratable, guint keyval,</a>
+<a name="ln183">                                           GdkModifierType modifier, gpointer data)</a>
+<a name="ln184">{</a>
+<a name="ln185">  dt_iop_module_t *self = data;</a>
+<a name="ln186">  dt_iop_temperature_gui_data_t *g = self-&gt;gui_data;</a>
+<a name="ln187">  dt_bauhaus_combobox_set(g-&gt;presets, 1);</a>
+<a name="ln188">  return TRUE;</a>
+<a name="ln189">}</a>
+<a name="ln190"> </a>
+<a name="ln191">static gboolean _set_preset_spot(GtkAccelGroup *accel_group, GObject *acceleratable, guint keyval,</a>
+<a name="ln192">                                 GdkModifierType modifier, gpointer data)</a>
+<a name="ln193">{</a>
+<a name="ln194">  dt_iop_module_t *self = data;</a>
+<a name="ln195">  dt_iop_temperature_gui_data_t *g = self-&gt;gui_data;</a>
+<a name="ln196">  dt_bauhaus_combobox_set(g-&gt;presets, 2);</a>
+<a name="ln197">  return TRUE;</a>
+<a name="ln198">}</a>
+<a name="ln199"> </a>
+<a name="ln200">void init_key_accels(dt_iop_module_so_t *self)</a>
+<a name="ln201">{</a>
+<a name="ln202">  dt_accel_register_slider_iop(self, FALSE, NC_(&quot;accel&quot;, &quot;tint&quot;));</a>
+<a name="ln203">  dt_accel_register_slider_iop(self, FALSE, NC_(&quot;accel&quot;, &quot;temperature&quot;));</a>
+<a name="ln204">  dt_accel_register_slider_iop(self, FALSE, NC_(&quot;accel&quot;, &quot;red&quot;));</a>
+<a name="ln205">  dt_accel_register_slider_iop(self, FALSE, NC_(&quot;accel&quot;, &quot;green&quot;));</a>
+<a name="ln206">  dt_accel_register_slider_iop(self, FALSE, NC_(&quot;accel&quot;, &quot;blue&quot;));</a>
+<a name="ln207"> </a>
+<a name="ln208">  dt_accel_register_iop(self, TRUE, NC_(&quot;accel&quot;, &quot;preset/camera&quot;), 0, 0);</a>
+<a name="ln209">  dt_accel_register_iop(self, TRUE, NC_(&quot;accel&quot;, &quot;preset/camera neutral&quot;), 0, 0);</a>
+<a name="ln210">  dt_accel_register_iop(self, TRUE, NC_(&quot;accel&quot;, &quot;preset/spot&quot;), 0, 0);</a>
+<a name="ln211">}</a>
+<a name="ln212"> </a>
+<a name="ln213">void connect_key_accels(dt_iop_module_t *self)</a>
+<a name="ln214">{</a>
+<a name="ln215">  dt_iop_temperature_gui_data_t *g = (dt_iop_temperature_gui_data_t *)self-&gt;gui_data;</a>
+<a name="ln216"> </a>
+<a name="ln217">  dt_accel_connect_slider_iop(self, &quot;tint&quot;, GTK_WIDGET(g-&gt;scale_tint));</a>
+<a name="ln218">  dt_accel_connect_slider_iop(self, &quot;temperature&quot;, GTK_WIDGET(g-&gt;scale_k));</a>
+<a name="ln219">  dt_accel_connect_slider_iop(self, &quot;red&quot;, GTK_WIDGET(g-&gt;scale_r));</a>
+<a name="ln220">  dt_accel_connect_slider_iop(self, &quot;green&quot;, GTK_WIDGET(g-&gt;scale_g));</a>
+<a name="ln221">  dt_accel_connect_slider_iop(self, &quot;blue&quot;, GTK_WIDGET(g-&gt;scale_b));</a>
+<a name="ln222">  dt_accel_connect_slider_iop(self, &quot;green2&quot;, GTK_WIDGET(g-&gt;scale_g2));</a>
+<a name="ln223"> </a>
+<a name="ln224">  GClosure *closure;</a>
+<a name="ln225"> </a>
+<a name="ln226">  closure = g_cclosure_new(G_CALLBACK(_set_preset_camera), (gpointer)self, NULL);</a>
+<a name="ln227">  dt_accel_connect_iop(self, &quot;preset/camera&quot;, closure);</a>
+<a name="ln228"> </a>
+<a name="ln229">  closure = g_cclosure_new(G_CALLBACK(_set_preset_camera_neutral), (gpointer)self, NULL);</a>
+<a name="ln230">  dt_accel_connect_iop(self, &quot;preset/camera neutral&quot;, closure);</a>
+<a name="ln231"> </a>
+<a name="ln232">  closure = g_cclosure_new(G_CALLBACK(_set_preset_spot), (gpointer)self, NULL);</a>
+<a name="ln233">  dt_accel_connect_iop(self, &quot;preset/spot&quot;, closure);</a>
+<a name="ln234">}</a>
+<a name="ln235"> </a>
+<a name="ln236">/*</a>
+<a name="ln237"> * Spectral power distribution functions</a>
+<a name="ln238"> * https://en.wikipedia.org/wiki/Spectral_power_distribution</a>
+<a name="ln239"> */</a>
+<a name="ln240">typedef double((*spd)(unsigned long int wavelength, double TempK));</a>
+<a name="ln241"> </a>
+<a name="ln242">/*</a>
+<a name="ln243"> * Bruce Lindbloom, &quot;Spectral Power Distribution of a Blackbody Radiator&quot;</a>
+<a name="ln244"> * http://www.brucelindbloom.com/Eqn_Blackbody.html</a>
+<a name="ln245"> */</a>
+<a name="ln246">static double spd_blackbody(unsigned long int wavelength, double TempK)</a>
+<a name="ln247">{</a>
+<a name="ln248">  // convert wavelength from nm to m</a>
+<a name="ln249">  const long double lambda = (double)wavelength * 1e-9;</a>
+<a name="ln250"> </a>
+<a name="ln251">/*</a>
+<a name="ln252"> * these 2 constants were computed using following Sage code:</a>
+<a name="ln253"> *</a>
+<a name="ln254"> * (from http://physics.nist.gov/cgi-bin/cuu/Value?h)</a>
+<a name="ln255"> * h = 6.62606957 * 10^-34 # Planck</a>
+<a name="ln256"> * c= 299792458 # speed of light in vacuum</a>
+<a name="ln257"> * k = 1.3806488 * 10^-23 # Boltzmann</a>
+<a name="ln258"> *</a>
+<a name="ln259"> * c_1 = 2 * pi * h * c^2</a>
+<a name="ln260"> * c_2 = h * c / k</a>
+<a name="ln261"> *</a>
+<a name="ln262"> * print 'c_1 = ', c_1, ' ~= ', RealField(128)(c_1)</a>
+<a name="ln263"> * print 'c_2 = ', c_2, ' ~= ', RealField(128)(c_2)</a>
+<a name="ln264"> */</a>
+<a name="ln265"> </a>
+<a name="ln266">#define c1 3.7417715246641281639549488324352159753e-16L</a>
+<a name="ln267">#define c2 0.014387769599838156481252937624049081933L</a>
+<a name="ln268"> </a>
+<a name="ln269">  return (double)(c1 / (powl(lambda, 5) * (expl(c2 / (lambda * TempK)) - 1.0L)));</a>
+<a name="ln270"> </a>
+<a name="ln271">#undef c2</a>
+<a name="ln272">#undef c1</a>
+<a name="ln273">}</a>
+<a name="ln274"> </a>
+<a name="ln275">/*</a>
+<a name="ln276"> * Bruce Lindbloom, &quot;Spectral Power Distribution of a CIE D-Illuminant&quot;</a>
+<a name="ln277"> * http://www.brucelindbloom.com/Eqn_DIlluminant.html</a>
+<a name="ln278"> * and https://en.wikipedia.org/wiki/Standard_illuminant#Illuminant_series_D</a>
+<a name="ln279"> */</a>
+<a name="ln280">static double spd_daylight(unsigned long int wavelength, double TempK)</a>
+<a name="ln281">{</a>
+<a name="ln282">  cmsCIExyY WhitePoint = { 0.3127, 0.3290, 1.0 };</a>
+<a name="ln283"> </a>
+<a name="ln284">  /*</a>
+<a name="ln285">   * Bruce Lindbloom, &quot;TempK to xy&quot;</a>
+<a name="ln286">   * http://www.brucelindbloom.com/Eqn_T_to_xy.html</a>
+<a name="ln287">   */</a>
+<a name="ln288">  cmsWhitePointFromTemp(&amp;WhitePoint, TempK);</a>
+<a name="ln289"> </a>
+<a name="ln290">  const double M = (0.0241 + 0.2562 * WhitePoint.x - 0.7341 * WhitePoint.y),</a>
+<a name="ln291">               m1 = (-1.3515 - 1.7703 * WhitePoint.x + 5.9114 * WhitePoint.y) / M,</a>
+<a name="ln292">               m2 = (0.0300 - 31.4424 * WhitePoint.x + 30.0717 * WhitePoint.y) / M;</a>
+<a name="ln293"> </a>
+<a name="ln294">  const unsigned long int j</a>
+<a name="ln295">      = ((wavelength - cie_daylight_components[0].wavelength)</a>
+<a name="ln296">         / (cie_daylight_components[1].wavelength - cie_daylight_components[0].wavelength));</a>
+<a name="ln297"> </a>
+<a name="ln298">  return (cie_daylight_components[j].S[0] + m1 * cie_daylight_components[j].S[1]</a>
+<a name="ln299">          + m2 * cie_daylight_components[j].S[2]);</a>
+<a name="ln300">}</a>
+<a name="ln301"> </a>
+<a name="ln302">/*</a>
+<a name="ln303"> * Bruce Lindbloom, &quot;Computing XYZ From Spectral Data (Emissive Case)&quot;</a>
+<a name="ln304"> * http://www.brucelindbloom.com/Eqn_Spect_to_XYZ.html</a>
+<a name="ln305"> */</a>
+<a name="ln306">static cmsCIEXYZ spectrum_to_XYZ(double TempK, spd I)</a>
+<a name="ln307">{</a>
+<a name="ln308">  cmsCIEXYZ Source = {.X = 0.0, .Y = 0.0, .Z = 0.0 };</a>
+<a name="ln309"> </a>
+<a name="ln310">  /*</a>
+<a name="ln311">   * Color matching functions</a>
+<a name="ln312">   * https://en.wikipedia.org/wiki/CIE_1931_color_space#Color_matching_functions</a>
+<a name="ln313">   */</a>
+<a name="ln314">  for(size_t i = 0; i &lt; cie_1931_std_colorimetric_observer_count; i++)</a>
+<a name="ln315">  {</a>
+<a name="ln316">    const unsigned long int lambda = cie_1931_std_colorimetric_observer[0].wavelength</a>
+<a name="ln317">                                     + (cie_1931_std_colorimetric_observer[1].wavelength</a>
+<a name="ln318">                                        - cie_1931_std_colorimetric_observer[0].wavelength) * i;</a>
+<a name="ln319">    const double P = I(lambda, TempK);</a>
+<a name="ln320">    Source.X += P * cie_1931_std_colorimetric_observer[i].xyz.X;</a>
+<a name="ln321">    Source.Y += P * cie_1931_std_colorimetric_observer[i].xyz.Y;</a>
+<a name="ln322">    Source.Z += P * cie_1931_std_colorimetric_observer[i].xyz.Z;</a>
+<a name="ln323">  }</a>
+<a name="ln324"> </a>
+<a name="ln325">  // normalize so that each component is in [0.0, 1.0] range</a>
+<a name="ln326">  const double _max = MAX(MAX(Source.X, Source.Y), Source.Z);</a>
+<a name="ln327">  Source.X /= _max;</a>
+<a name="ln328">  Source.Y /= _max;</a>
+<a name="ln329">  Source.Z /= _max;</a>
+<a name="ln330"> </a>
+<a name="ln331">  return Source;</a>
+<a name="ln332">}</a>
+<a name="ln333"> </a>
+<a name="ln334">//</a>
+<a name="ln335">static cmsCIEXYZ temperature_to_XYZ(double TempK)</a>
+<a name="ln336">{</a>
+<a name="ln337">  if(TempK &lt; DT_IOP_LOWEST_TEMPERATURE) TempK = DT_IOP_LOWEST_TEMPERATURE;</a>
+<a name="ln338">  if(TempK &gt; DT_IOP_HIGHEST_TEMPERATURE) TempK = DT_IOP_HIGHEST_TEMPERATURE;</a>
+<a name="ln339"> </a>
+<a name="ln340">  if(TempK &lt; INITIALBLACKBODYTEMPERATURE)</a>
+<a name="ln341">  {</a>
+<a name="ln342">    // if temperature is less than 4000K we use blackbody,</a>
+<a name="ln343">    // because there will be no Daylight reference below 4000K...</a>
+<a name="ln344">    return spectrum_to_XYZ(TempK, spd_blackbody);</a>
+<a name="ln345">  }</a>
+<a name="ln346">  else</a>
+<a name="ln347">  {</a>
+<a name="ln348">    return spectrum_to_XYZ(TempK, spd_daylight);</a>
+<a name="ln349">  }</a>
+<a name="ln350">}</a>
+<a name="ln351"> </a>
+<a name="ln352">// binary search inversion</a>
+<a name="ln353">static void XYZ_to_temperature(cmsCIEXYZ XYZ, double *TempK, double *tint)</a>
+<a name="ln354">{</a>
+<a name="ln355">  double maxtemp = DT_IOP_HIGHEST_TEMPERATURE, mintemp = DT_IOP_LOWEST_TEMPERATURE;</a>
+<a name="ln356">  cmsCIEXYZ _xyz;</a>
+<a name="ln357"> </a>
+<a name="ln358">  for(*TempK = (maxtemp + mintemp) / 2.0; (maxtemp - mintemp) &gt; 1.0; *TempK = (maxtemp + mintemp) / 2.0)</a>
+<a name="ln359">  {</a>
+<a name="ln360">    _xyz = temperature_to_XYZ(*TempK);</a>
+<a name="ln361">    if(_xyz.Z / _xyz.X &gt; XYZ.Z / XYZ.X)</a>
+<a name="ln362">      maxtemp = *TempK;</a>
+<a name="ln363">    else</a>
+<a name="ln364">      mintemp = *TempK;</a>
+<a name="ln365">  }</a>
+<a name="ln366"> </a>
+<a name="ln367">  *tint = (_xyz.Y / _xyz.X) / (XYZ.Y / XYZ.X);</a>
+<a name="ln368"> </a>
+<a name="ln369">  if(*TempK &lt; DT_IOP_LOWEST_TEMPERATURE) *TempK = DT_IOP_LOWEST_TEMPERATURE;</a>
+<a name="ln370">  if(*TempK &gt; DT_IOP_HIGHEST_TEMPERATURE) *TempK = DT_IOP_HIGHEST_TEMPERATURE;</a>
+<a name="ln371">  if(*tint &lt; DT_IOP_LOWEST_TINT) *tint = DT_IOP_LOWEST_TINT;</a>
+<a name="ln372">  if(*tint &gt; DT_IOP_HIGHEST_TINT) *tint = DT_IOP_HIGHEST_TINT;</a>
+<a name="ln373">}</a>
+<a name="ln374"> </a>
+<a name="ln375">static void xyz2mul(dt_iop_module_t *self, cmsCIEXYZ xyz, double mul[4])</a>
+<a name="ln376">{</a>
+<a name="ln377">  dt_iop_temperature_gui_data_t *g = (dt_iop_temperature_gui_data_t *)self-&gt;gui_data;</a>
+<a name="ln378"> </a>
+<a name="ln379">  double XYZ[3] = { xyz.X, xyz.Y, xyz.Z };</a>
+<a name="ln380"> </a>
+<a name="ln381">  double CAM[4];</a>
+<a name="ln382">  for(int k = 0; k &lt; 4; k++)</a>
+<a name="ln383">  {</a>
+<a name="ln384">    CAM[k] = 0.0;</a>
+<a name="ln385">    for(int i = 0; i &lt; 3; i++)</a>
+<a name="ln386">    {</a>
+<a name="ln387">      CAM[k] += g-&gt;XYZ_to_CAM[k][i] * XYZ[i];</a>
+<a name="ln388">    }</a>
+<a name="ln389">  }</a>
+<a name="ln390"> </a>
+<a name="ln391">  for(int k = 0; k &lt; 4; k++) mul[k] = 1.0 / CAM[k];</a>
+<a name="ln392">}</a>
+<a name="ln393"> </a>
+<a name="ln394">static void temp2mul(dt_iop_module_t *self, double TempK, double tint, double mul[4])</a>
+<a name="ln395">{</a>
+<a name="ln396">  cmsCIEXYZ xyz = temperature_to_XYZ(TempK);</a>
+<a name="ln397"> </a>
+<a name="ln398">  xyz.Y /= tint;</a>
+<a name="ln399"> </a>
+<a name="ln400">  xyz2mul(self, xyz, mul);</a>
+<a name="ln401">}</a>
+<a name="ln402"> </a>
+<a name="ln403">static cmsCIEXYZ mul2xyz(dt_iop_module_t *self, const float coeffs[4])</a>
+<a name="ln404">{</a>
+<a name="ln405">  dt_iop_temperature_gui_data_t *g = (dt_iop_temperature_gui_data_t *)self-&gt;gui_data;</a>
+<a name="ln406"> </a>
+<a name="ln407">  double CAM[4];</a>
+<a name="ln408">  for(int k = 0; k &lt; 4; k++) CAM[k] = coeffs[k] &gt; 0.0f ? 1.0 / coeffs[k] : 0.0f;</a>
+<a name="ln409"> </a>
+<a name="ln410">  double XYZ[3];</a>
+<a name="ln411">  for(int k = 0; k &lt; 3; k++)</a>
+<a name="ln412">  {</a>
+<a name="ln413">    XYZ[k] = 0.0;</a>
+<a name="ln414">    for(int i = 0; i &lt; 4; i++)</a>
+<a name="ln415">    {</a>
+<a name="ln416">      XYZ[k] += g-&gt;CAM_to_XYZ[k][i] * CAM[i];</a>
+<a name="ln417">    }</a>
+<a name="ln418">  }</a>
+<a name="ln419"> </a>
+<a name="ln420">  return (cmsCIEXYZ){ XYZ[0], XYZ[1], XYZ[2] };</a>
+<a name="ln421">}</a>
+<a name="ln422"> </a>
+<a name="ln423">static void mul2temp(dt_iop_module_t *self, float coeffs[4], double *TempK, double *tint)</a>
+<a name="ln424">{</a>
+<a name="ln425">  XYZ_to_temperature(mul2xyz(self, coeffs), TempK, tint);</a>
+<a name="ln426">}</a>
+<a name="ln427"> </a>
+<a name="ln428">/*</a>
+<a name="ln429"> * interpolate values from p1 and p2 into out.</a>
+<a name="ln430"> */</a>
+<a name="ln431">static void dt_wb_preset_interpolate(const wb_data *const p1, // the smaller tuning</a>
+<a name="ln432">                                     const wb_data *const p2, // the larger tuning (can't be == p1)</a>
+<a name="ln433">                                     wb_data *out)            // has tuning initialized</a>
+<a name="ln434">{</a>
+<a name="ln435">  const double t = CLAMP((double)(out-&gt;tuning - p1-&gt;tuning) / (double)(p2-&gt;tuning - p1-&gt;tuning), 0.0, 1.0);</a>
+<a name="ln436">  for(int k = 0; k &lt; 3; k++)</a>
+<a name="ln437">  {</a>
+<a name="ln438">    out-&gt;channel[k] = 1.0 / (((1.0 - t) / p1-&gt;channel[k]) + (t / p2-&gt;channel[k]));</a>
+<a name="ln439">  }</a>
+<a name="ln440">}</a>
+<a name="ln441"> </a>
+<a name="ln442">void process(struct dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, const void *const ivoid,</a>
+<a name="ln443">             void *const ovoid, const dt_iop_roi_t *const roi_in, const dt_iop_roi_t *const roi_out)</a>
+<a name="ln444">{</a>
+<a name="ln445">  const uint32_t filters = piece-&gt;pipe-&gt;dsc.filters;</a>
+<a name="ln446">  const uint8_t(*const xtrans)[6] = (const uint8_t(*const)[6])piece-&gt;pipe-&gt;dsc.xtrans;</a>
+<a name="ln447">  const dt_iop_temperature_data_t *const d = (dt_iop_temperature_data_t *)piece-&gt;data;</a>
+<a name="ln448"> </a>
+<a name="ln449">  const float *const in = (const float *const)ivoid;</a>
+<a name="ln450">  float *const out = (float *const)ovoid;</a>
+<a name="ln451"> </a>
+<a name="ln452">  if(filters == 9u)</a>
+<a name="ln453">  { // xtrans float mosaiced</a>
+<a name="ln454">#ifdef _OPENMP</a>
+<a name="ln455">#pragma omp parallel for SIMD() default(none) schedule(static) collapse(2)</a>
+<a name="ln456">#endif</a>
+<a name="ln457">    for(int j = 0; j &lt; roi_out-&gt;height; j++)</a>
+<a name="ln458">    {</a>
+<a name="ln459">      for(int i = 0; i &lt; roi_out-&gt;width; i++)</a>
+<a name="ln460">      {</a>
+<a name="ln461">        const size_t p = (size_t)j * roi_out-&gt;width + i;</a>
+<a name="ln462">        out[p] = in[p] * d-&gt;coeffs[FCxtrans(j, i, roi_out, xtrans)];</a>
+<a name="ln463">      }</a>
+<a name="ln464">    }</a>
+<a name="ln465">  }</a>
+<a name="ln466">  else if(filters)</a>
+<a name="ln467">  { // bayer float mosaiced</a>
+<a name="ln468">#ifdef _OPENMP</a>
+<a name="ln469">#pragma omp parallel for SIMD() default(none) schedule(static) collapse(2)</a>
+<a name="ln470">#endif</a>
+<a name="ln471">    for(int j = 0; j &lt; roi_out-&gt;height; j++)</a>
+<a name="ln472">    {</a>
+<a name="ln473">      for(int i = 0; i &lt; roi_out-&gt;width; i++)</a>
+<a name="ln474">      {</a>
+<a name="ln475">        const size_t p = (size_t)j * roi_out-&gt;width + i;</a>
+<a name="ln476">        out[p] = in[p] * d-&gt;coeffs[FC(j + roi_out-&gt;y, i + roi_out-&gt;x, filters)];</a>
+<a name="ln477">      }</a>
+<a name="ln478">    }</a>
+<a name="ln479">  }</a>
+<a name="ln480">  else</a>
+<a name="ln481">  { // non-mosaiced</a>
+<a name="ln482">    const int ch = piece-&gt;colors;</a>
+<a name="ln483"> </a>
+<a name="ln484">#ifdef _OPENMP</a>
+<a name="ln485">#pragma omp parallel for SIMD() default(none) schedule(static) collapse(2)</a>
+<a name="ln486">#endif</a>
+<a name="ln487">    for(size_t k = 0; k &lt; (size_t)ch * roi_out-&gt;width * roi_out-&gt;height; k += ch)</a>
+<a name="ln488">    {</a>
+<a name="ln489">      for(int c = 0; c &lt; 3; c++)</a>
+<a name="ln490">      {</a>
+<a name="ln491">        const size_t p = (size_t)k + c;</a>
+<a name="ln492">        out[p] = in[p] * d-&gt;coeffs[c];</a>
+<a name="ln493">      }</a>
+<a name="ln494">    }</a>
+<a name="ln495"> </a>
+<a name="ln496">    if(piece-&gt;pipe-&gt;mask_display &amp; DT_DEV_PIXELPIPE_DISPLAY_MASK) dt_iop_alpha_copy(ivoid, ovoid, roi_out-&gt;width, roi_out-&gt;height);</a>
+<a name="ln497">  }</a>
+<a name="ln498"> </a>
+<a name="ln499">  piece-&gt;pipe-&gt;dsc.temperature.enabled = 1;</a>
+<a name="ln500">  for(int k = 0; k &lt; 4; k++)</a>
+<a name="ln501">  {</a>
+<a name="ln502">    piece-&gt;pipe-&gt;dsc.temperature.coeffs[k] = d-&gt;coeffs[k];</a>
+<a name="ln503">    piece-&gt;pipe-&gt;dsc.processed_maximum[k] = d-&gt;coeffs[k] * piece-&gt;pipe-&gt;dsc.processed_maximum[k];</a>
+<a name="ln504">  }</a>
+<a name="ln505">}</a>
+<a name="ln506"> </a>
+<a name="ln507">#if defined(__SSE__)</a>
+<a name="ln508">void process_sse2(struct dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, const void *const ivoid,</a>
+<a name="ln509">                  void *const ovoid, const dt_iop_roi_t *const roi_in, const dt_iop_roi_t *const roi_out)</a>
+<a name="ln510">{</a>
+<a name="ln511">  const uint32_t filters = piece-&gt;pipe-&gt;dsc.filters;</a>
+<a name="ln512">  const uint8_t(*const xtrans)[6] = (const uint8_t(*const)[6])piece-&gt;pipe-&gt;dsc.xtrans;</a>
+<a name="ln513">  dt_iop_temperature_data_t *d = (dt_iop_temperature_data_t *)piece-&gt;data;</a>
+<a name="ln514">  if(filters == 9u)</a>
+<a name="ln515">  { // xtrans float mosaiced</a>
+<a name="ln516">#ifdef _OPENMP</a>
+<a name="ln517">#pragma omp parallel for default(none) shared(d) schedule(static)</a>
+<a name="ln518">#endif</a>
+<a name="ln519">    for(int j = 0; j &lt; roi_out-&gt;height; j++)</a>
+<a name="ln520">    {</a>
+<a name="ln521">      const float *in = ((float *)ivoid) + (size_t)j * roi_out-&gt;width;</a>
+<a name="ln522">      float *out = ((float *)ovoid) + (size_t)j * roi_out-&gt;width;</a>
+<a name="ln523"> </a>
+<a name="ln524">      int i = 0;</a>
+<a name="ln525">      int alignment = ((4 - (j * roi_out-&gt;width &amp; (4 - 1))) &amp; (4 - 1));</a>
+<a name="ln526"> </a>
+<a name="ln527">      // process unaligned pixels</a>
+<a name="ln528">      for(; i &lt; alignment &amp;&amp; i &lt; roi_out-&gt;width; i++, out++, in++)</a>
+<a name="ln529">        *out = *in * d-&gt;coeffs[FCxtrans(j, i, roi_out, xtrans)];</a>
+<a name="ln530"> </a>
+<a name="ln531">      const __m128 coeffs[3] = {</a>
+<a name="ln532">        _mm_set_ps(d-&gt;coeffs[FCxtrans(j, i + 3, roi_out, xtrans)], d-&gt;coeffs[FCxtrans(j, i + 2, roi_out, xtrans)],</a>
+<a name="ln533">                   d-&gt;coeffs[FCxtrans(j, i + 1, roi_out, xtrans)], d-&gt;coeffs[FCxtrans(j, i + 0, roi_out, xtrans)]),</a>
+<a name="ln534">        _mm_set_ps(d-&gt;coeffs[FCxtrans(j, i + 7, roi_out, xtrans)], d-&gt;coeffs[FCxtrans(j, i + 6, roi_out, xtrans)],</a>
+<a name="ln535">                   d-&gt;coeffs[FCxtrans(j, i + 5, roi_out, xtrans)], d-&gt;coeffs[FCxtrans(j, i + 4, roi_out, xtrans)]),</a>
+<a name="ln536">        _mm_set_ps(d-&gt;coeffs[FCxtrans(j, i + 11, roi_out, xtrans)], d-&gt;coeffs[FCxtrans(j, i + 10, roi_out, xtrans)],</a>
+<a name="ln537">                   d-&gt;coeffs[FCxtrans(j, i + 9, roi_out, xtrans)], d-&gt;coeffs[FCxtrans(j, i + 8, roi_out, xtrans)])</a>
+<a name="ln538">      };</a>
+<a name="ln539"> </a>
+<a name="ln540">      // process aligned pixels with SSE</a>
+<a name="ln541">      for(int c = 0; c &lt; 3 &amp;&amp; i &lt; roi_out-&gt;width - (4 - 1); c++, i += 4, in += 4, out += 4)</a>
+<a name="ln542">      {</a>
+<a name="ln543">        __m128 v;</a>
+<a name="ln544"> </a>
+<a name="ln545">        v = _mm_load_ps(in);</a>
+<a name="ln546">        v = _mm_mul_ps(v, coeffs[c]);</a>
+<a name="ln547">        _mm_stream_ps(out, v);</a>
+<a name="ln548">      }</a>
+<a name="ln549"> </a>
+<a name="ln550">      // process the rest</a>
+<a name="ln551">      for(; i &lt; roi_out-&gt;width; i++, out++, in++) *out = *in * d-&gt;coeffs[FCxtrans(j, i, roi_out, xtrans)];</a>
+<a name="ln552">    }</a>
+<a name="ln553">    _mm_sfence();</a>
+<a name="ln554">  }</a>
+<a name="ln555">  else if(filters)</a>
+<a name="ln556">  { // bayer float mosaiced</a>
+<a name="ln557">#ifdef _OPENMP</a>
+<a name="ln558">#pragma omp parallel for default(none) shared(d) schedule(static)</a>
+<a name="ln559">#endif</a>
+<a name="ln560">    for(int j = 0; j &lt; roi_out-&gt;height; j++)</a>
+<a name="ln561">    {</a>
+<a name="ln562">      const float *in = ((float *)ivoid) + (size_t)j * roi_out-&gt;width;</a>
+<a name="ln563">      float *out = ((float *)ovoid) + (size_t)j * roi_out-&gt;width;</a>
+<a name="ln564"> </a>
+<a name="ln565">      int i = 0;</a>
+<a name="ln566">      int alignment = ((4 - (j * roi_out-&gt;width &amp; (4 - 1))) &amp; (4 - 1));</a>
+<a name="ln567"> </a>
+<a name="ln568">      // process unaligned pixels</a>
+<a name="ln569">      for(; i &lt; alignment &amp;&amp; i &lt; roi_out-&gt;width; i++, out++, in++)</a>
+<a name="ln570">        *out = *in * d-&gt;coeffs[FC(j + roi_out-&gt;y, i + roi_out-&gt;x, filters)];</a>
+<a name="ln571"> </a>
+<a name="ln572">      const __m128 coeffs = _mm_set_ps(d-&gt;coeffs[FC(j + roi_out-&gt;y, roi_out-&gt;x + i + 3, filters)],</a>
+<a name="ln573">                                       d-&gt;coeffs[FC(j + roi_out-&gt;y, roi_out-&gt;x + i + 2, filters)],</a>
+<a name="ln574">                                       d-&gt;coeffs[FC(j + roi_out-&gt;y, roi_out-&gt;x + i + 1, filters)],</a>
+<a name="ln575">                                       d-&gt;coeffs[FC(j + roi_out-&gt;y, roi_out-&gt;x + i, filters)]);</a>
+<a name="ln576"> </a>
+<a name="ln577">      // process aligned pixels with SSE</a>
+<a name="ln578">      for(; i &lt; roi_out-&gt;width - (4 - 1); i += 4, in += 4, out += 4)</a>
+<a name="ln579">      {</a>
+<a name="ln580">        const __m128 input = _mm_load_ps(in);</a>
+<a name="ln581"> </a>
+<a name="ln582">        const __m128 multiplied = _mm_mul_ps(input, coeffs);</a>
+<a name="ln583"> </a>
+<a name="ln584">        _mm_stream_ps(out, multiplied);</a>
+<a name="ln585">      }</a>
+<a name="ln586"> </a>
+<a name="ln587">      // process the rest</a>
+<a name="ln588">      for(; i &lt; roi_out-&gt;width; i++, out++, in++)</a>
+<a name="ln589">        *out = *in * d-&gt;coeffs[FC(j + roi_out-&gt;y, i + roi_out-&gt;x, filters)];</a>
+<a name="ln590">    }</a>
+<a name="ln591">    _mm_sfence();</a>
+<a name="ln592">  }</a>
+<a name="ln593">  else</a>
+<a name="ln594">  { // non-mosaiced</a>
+<a name="ln595">    const int ch = piece-&gt;colors;</a>
+<a name="ln596"> </a>
+<a name="ln597">    const __m128 coeffs = _mm_set_ps(1.0f, d-&gt;coeffs[2], d-&gt;coeffs[1], d-&gt;coeffs[0]);</a>
+<a name="ln598"> </a>
+<a name="ln599">#ifdef _OPENMP</a>
+<a name="ln600">#pragma omp parallel for default(none) shared(d) schedule(static)</a>
+<a name="ln601">#endif</a>
+<a name="ln602">    for(int k = 0; k &lt; roi_out-&gt;height; k++)</a>
+<a name="ln603">    {</a>
+<a name="ln604">      const float *in = ((float *)ivoid) + (size_t)ch * k * roi_out-&gt;width;</a>
+<a name="ln605">      float *out = ((float *)ovoid) + (size_t)ch * k * roi_out-&gt;width;</a>
+<a name="ln606">      for(int j = 0; j &lt; roi_out-&gt;width; j++, in += ch, out += ch)</a>
+<a name="ln607">      {</a>
+<a name="ln608">        const __m128 input = _mm_load_ps(in);</a>
+<a name="ln609">        const __m128 multiplied = _mm_mul_ps(input, coeffs);</a>
+<a name="ln610">        _mm_stream_ps(out, multiplied);</a>
+<a name="ln611">      }</a>
+<a name="ln612">    }</a>
+<a name="ln613">    _mm_sfence();</a>
+<a name="ln614"> </a>
+<a name="ln615">    if(piece-&gt;pipe-&gt;mask_display &amp; DT_DEV_PIXELPIPE_DISPLAY_MASK) dt_iop_alpha_copy(ivoid, ovoid, roi_out-&gt;width, roi_out-&gt;height);</a>
+<a name="ln616">  }</a>
+<a name="ln617"> </a>
+<a name="ln618">  piece-&gt;pipe-&gt;dsc.temperature.enabled = 1;</a>
+<a name="ln619">  for(int k = 0; k &lt; 4; k++)</a>
+<a name="ln620">  {</a>
+<a name="ln621">    piece-&gt;pipe-&gt;dsc.temperature.coeffs[k] = d-&gt;coeffs[k];</a>
+<a name="ln622">    piece-&gt;pipe-&gt;dsc.processed_maximum[k] = d-&gt;coeffs[k] * piece-&gt;pipe-&gt;dsc.processed_maximum[k];</a>
+<a name="ln623">  }</a>
+<a name="ln624">}</a>
+<a name="ln625">#endif</a>
+<a name="ln626"> </a>
+<a name="ln627">#ifdef HAVE_OPENCL</a>
+<a name="ln628">int process_cl(struct dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, cl_mem dev_in, cl_mem dev_out,</a>
+<a name="ln629">               const dt_iop_roi_t *const roi_in, const dt_iop_roi_t *const roi_out)</a>
+<a name="ln630">{</a>
+<a name="ln631">  dt_iop_temperature_data_t *d = (dt_iop_temperature_data_t *)piece-&gt;data;</a>
+<a name="ln632">  dt_iop_temperature_global_data_t *gd = (dt_iop_temperature_global_data_t *)self-&gt;data;</a>
+<a name="ln633"> </a>
+<a name="ln634">  const int devid = piece-&gt;pipe-&gt;devid;</a>
+<a name="ln635">  const uint32_t filters = piece-&gt;pipe-&gt;dsc.filters;</a>
+<a name="ln636">  cl_mem dev_coeffs = NULL;</a>
+<a name="ln637">  cl_mem dev_xtrans = NULL;</a>
+<a name="ln638">  cl_int err = -999;</a>
+<a name="ln639">  int kernel = -1;</a>
+<a name="ln640"> </a>
+<a name="ln641">  if(filters == 9u)</a>
+<a name="ln642">  {</a>
+<a name="ln643">    kernel = gd-&gt;kernel_whitebalance_1f_xtrans;</a>
+<a name="ln644">  }</a>
+<a name="ln645">  else if(filters)</a>
+<a name="ln646">  {</a>
+<a name="ln647">    kernel = gd-&gt;kernel_whitebalance_1f;</a>
+<a name="ln648">  }</a>
+<a name="ln649">  else</a>
+<a name="ln650">  {</a>
+<a name="ln651">    kernel = gd-&gt;kernel_whitebalance_4f;</a>
+<a name="ln652">  }</a>
+<a name="ln653"> </a>
+<a name="ln654">  if(filters == 9u)</a>
+<a name="ln655">  {</a>
+<a name="ln656">    dev_xtrans</a>
+<a name="ln657">        = dt_opencl_copy_host_to_device_constant(devid, sizeof(piece-&gt;pipe-&gt;dsc.xtrans), piece-&gt;pipe-&gt;dsc.xtrans);</a>
+<a name="ln658">    if(dev_xtrans == NULL) goto error;</a>
+<a name="ln659">  }</a>
+<a name="ln660"> </a>
+<a name="ln661">  dev_coeffs = dt_opencl_copy_host_to_device_constant(devid, sizeof(float) * 3, d-&gt;coeffs);</a>
+<a name="ln662">  if(dev_coeffs == NULL) goto error;</a>
+<a name="ln663"> </a>
+<a name="ln664">  const int width = roi_in-&gt;width;</a>
+<a name="ln665">  const int height = roi_in-&gt;height;</a>
+<a name="ln666"> </a>
+<a name="ln667">  size_t sizes[] = { ROUNDUPWD(width), ROUNDUPHT(height), 1 };</a>
+<a name="ln668">  dt_opencl_set_kernel_arg(devid, kernel, 0, sizeof(cl_mem), (void *)&amp;dev_in);</a>
+<a name="ln669">  dt_opencl_set_kernel_arg(devid, kernel, 1, sizeof(cl_mem), (void *)&amp;dev_out);</a>
+<a name="ln670">  dt_opencl_set_kernel_arg(devid, kernel, 2, sizeof(int), (void *)&amp;width);</a>
+<a name="ln671">  dt_opencl_set_kernel_arg(devid, kernel, 3, sizeof(int), (void *)&amp;height);</a>
+<a name="ln672">  dt_opencl_set_kernel_arg(devid, kernel, 4, sizeof(cl_mem), (void *)&amp;dev_coeffs);</a>
+<a name="ln673">  dt_opencl_set_kernel_arg(devid, kernel, 5, sizeof(uint32_t), (void *)&amp;filters);</a>
+<a name="ln674">  dt_opencl_set_kernel_arg(devid, kernel, 6, sizeof(uint32_t), (void *)&amp;roi_out-&gt;x);</a>
+<a name="ln675">  dt_opencl_set_kernel_arg(devid, kernel, 7, sizeof(uint32_t), (void *)&amp;roi_out-&gt;y);</a>
+<a name="ln676">  dt_opencl_set_kernel_arg(devid, kernel, 8, sizeof(cl_mem), (void *)&amp;dev_xtrans);</a>
+<a name="ln677">  err = dt_opencl_enqueue_kernel_2d(devid, kernel, sizes);</a>
+<a name="ln678">  if(err != CL_SUCCESS) goto error;</a>
+<a name="ln679"> </a>
+<a name="ln680">  dt_opencl_release_mem_object(dev_coeffs);</a>
+<a name="ln681">  dt_opencl_release_mem_object(dev_xtrans);</a>
+<a name="ln682"> </a>
+<a name="ln683">  piece-&gt;pipe-&gt;dsc.temperature.enabled = 1;</a>
+<a name="ln684">  for(int k = 0; k &lt; 4; k++)</a>
+<a name="ln685">  {</a>
+<a name="ln686">    piece-&gt;pipe-&gt;dsc.temperature.coeffs[k] = d-&gt;coeffs[k];</a>
+<a name="ln687">    piece-&gt;pipe-&gt;dsc.processed_maximum[k] = d-&gt;coeffs[k] * piece-&gt;pipe-&gt;dsc.processed_maximum[k];</a>
+<a name="ln688">  }</a>
+<a name="ln689">  return TRUE;</a>
+<a name="ln690"> </a>
+<a name="ln691">error:</a>
+<a name="ln692">  dt_opencl_release_mem_object(dev_coeffs);</a>
+<a name="ln693">  dt_opencl_release_mem_object(dev_xtrans);</a>
+<a name="ln694">  dt_print(DT_DEBUG_OPENCL, &quot;[opencl_white_balance] couldn't enqueue kernel! %d\n&quot;, err);</a>
+<a name="ln695">  return FALSE;</a>
+<a name="ln696">}</a>
+<a name="ln697">#endif</a>
+<a name="ln698"> </a>
+<a name="ln699">void commit_params(struct dt_iop_module_t *self, dt_iop_params_t *p1, dt_dev_pixelpipe_t *pipe,</a>
+<a name="ln700">                   dt_dev_pixelpipe_iop_t *piece)</a>
+<a name="ln701">{</a>
+<a name="ln702">  dt_iop_temperature_params_t *p = (dt_iop_temperature_params_t *)p1;</a>
+<a name="ln703">  dt_iop_temperature_data_t *d = (dt_iop_temperature_data_t *)piece-&gt;data;</a>
+<a name="ln704"> </a>
+<a name="ln705">  if(self-&gt;hide_enable_button)</a>
+<a name="ln706">  {</a>
+<a name="ln707">    piece-&gt;enabled = 0;</a>
+<a name="ln708">    return;</a>
+<a name="ln709">  }</a>
+<a name="ln710"> </a>
+<a name="ln711">  for(int k = 0; k &lt; 4; k++) d-&gt;coeffs[k] = p-&gt;coeffs[k];</a>
+<a name="ln712"> </a>
+<a name="ln713">  // 4Bayer images not implemented in OpenCL yet</a>
+<a name="ln714">  if(self-&gt;dev-&gt;image_storage.flags &amp; DT_IMAGE_4BAYER) piece-&gt;process_cl_ready = 0;</a>
+<a name="ln715">}</a>
+<a name="ln716"> </a>
+<a name="ln717">void init_pipe(struct dt_iop_module_t *self, dt_dev_pixelpipe_t *pipe, dt_dev_pixelpipe_iop_t *piece)</a>
+<a name="ln718">{</a>
+<a name="ln719">  piece-&gt;data = malloc(sizeof(dt_iop_temperature_data_t));</a>
+<a name="ln720">  self-&gt;commit_params(self, self-&gt;default_params, pipe, piece);</a>
+<a name="ln721">}</a>
+<a name="ln722"> </a>
+<a name="ln723">void cleanup_pipe(struct dt_iop_module_t *self, dt_dev_pixelpipe_t *pipe, dt_dev_pixelpipe_iop_t *piece)</a>
+<a name="ln724">{</a>
+<a name="ln725">  free(piece-&gt;data);</a>
+<a name="ln726">  piece-&gt;data = NULL;</a>
+<a name="ln727">}</a>
+<a name="ln728"> </a>
+<a name="ln729">void gui_update(struct dt_iop_module_t *self)</a>
+<a name="ln730">{</a>
+<a name="ln731">  dt_iop_module_t *module = (dt_iop_module_t *)self;</a>
+<a name="ln732">  dt_iop_temperature_gui_data_t *g = (dt_iop_temperature_gui_data_t *)self-&gt;gui_data;</a>
+<a name="ln733">  dt_iop_temperature_params_t *p = (dt_iop_temperature_params_t *)module-&gt;params;</a>
+<a name="ln734">  dt_iop_temperature_params_t *fp = (dt_iop_temperature_params_t *)module-&gt;default_params;</a>
+<a name="ln735"> </a>
+<a name="ln736">  if(self-&gt;hide_enable_button)</a>
+<a name="ln737">  {</a>
+<a name="ln738">    gtk_stack_set_visible_child_name(GTK_STACK(g-&gt;stack), &quot;disabled&quot;);</a>
+<a name="ln739">    return;</a>
+<a name="ln740">  }</a>
+<a name="ln741">  gtk_stack_set_visible_child_name(GTK_STACK(g-&gt;stack), &quot;enabled&quot;);</a>
+<a name="ln742"> </a>
+<a name="ln743">  self-&gt;request_color_pick = DT_REQUEST_COLORPICK_OFF;</a>
+<a name="ln744">  self-&gt;color_picker_box[0] = self-&gt;color_picker_box[1] = .25f;</a>
+<a name="ln745">  self-&gt;color_picker_box[2] = self-&gt;color_picker_box[3] = .75f;</a>
+<a name="ln746">  self-&gt;color_picker_point[0] = self-&gt;color_picker_point[1] = 0.5f;</a>
+<a name="ln747"> </a>
+<a name="ln748">  double TempK, tint;</a>
+<a name="ln749">  mul2temp(self, p-&gt;coeffs, &amp;TempK, &amp;tint);</a>
+<a name="ln750"> </a>
+<a name="ln751">  dt_bauhaus_slider_set(g-&gt;scale_r, p-&gt;coeffs[0]);</a>
+<a name="ln752">  dt_bauhaus_slider_set(g-&gt;scale_g, p-&gt;coeffs[1]);</a>
+<a name="ln753">  dt_bauhaus_slider_set(g-&gt;scale_b, p-&gt;coeffs[2]);</a>
+<a name="ln754">  dt_bauhaus_slider_set(g-&gt;scale_g2, p-&gt;coeffs[3]);</a>
+<a name="ln755">  dt_bauhaus_slider_set(g-&gt;scale_k, TempK);</a>
+<a name="ln756">  dt_bauhaus_slider_set(g-&gt;scale_tint, tint);</a>
+<a name="ln757"> </a>
+<a name="ln758">  gui_sliders_update(self);</a>
+<a name="ln759"> </a>
+<a name="ln760">  dt_bauhaus_combobox_clear(g-&gt;presets);</a>
+<a name="ln761">  dt_bauhaus_combobox_add(g-&gt;presets, C_(&quot;white balance&quot;, &quot;camera&quot;));</a>
+<a name="ln762">  dt_bauhaus_combobox_add(g-&gt;presets, C_(&quot;white balance&quot;, &quot;camera neutral&quot;));</a>
+<a name="ln763">  dt_bauhaus_combobox_add(g-&gt;presets, C_(&quot;white balance&quot;, &quot;spot&quot;));</a>
+<a name="ln764">  g-&gt;preset_cnt = DT_IOP_NUM_OF_STD_TEMP_PRESETS;</a>
+<a name="ln765">  memset(g-&gt;preset_num, 0, sizeof(g-&gt;preset_num));</a>
+<a name="ln766"> </a>
+<a name="ln767">  dt_bauhaus_combobox_set(g-&gt;presets, -1);</a>
+<a name="ln768">  dt_bauhaus_slider_set(g-&gt;finetune, 0);</a>
+<a name="ln769">  gtk_widget_set_sensitive(g-&gt;finetune, 0);</a>
+<a name="ln770"> </a>
+<a name="ln771">  const char *wb_name = NULL;</a>
+<a name="ln772">  if(!dt_image_is_ldr(&amp;self-&gt;dev-&gt;image_storage))</a>
+<a name="ln773">    for(int i = 0; i &lt; wb_preset_count; i++)</a>
+<a name="ln774">    {</a>
+<a name="ln775">      if(g-&gt;preset_cnt &gt;= 50) break;</a>
+<a name="ln776">      if(!strcmp(wb_preset[i].make, self-&gt;dev-&gt;image_storage.camera_maker)</a>
+<a name="ln777">         &amp;&amp; !strcmp(wb_preset[i].model, self-&gt;dev-&gt;image_storage.camera_model))</a>
+<a name="ln778">      {</a>
+<a name="ln779">        if(!wb_name || strcmp(wb_name, wb_preset[i].name))</a>
+<a name="ln780">        {</a>
+<a name="ln781">          wb_name = wb_preset[i].name;</a>
+<a name="ln782">          dt_bauhaus_combobox_add(g-&gt;presets, _(wb_preset[i].name));</a>
+<a name="ln783">          g-&gt;preset_num[g-&gt;preset_cnt] = i;</a>
+<a name="ln784">          g-&gt;preset_cnt++;</a>
+<a name="ln785">        }</a>
+<a name="ln786">      }</a>
+<a name="ln787">    }</a>
+<a name="ln788"> </a>
+<a name="ln789">  gboolean found = FALSE;</a>
+<a name="ln790">  // is this a camera white balance?</a>
+<a name="ln791">  if(memcmp(p-&gt;coeffs, fp-&gt;coeffs, 3 * sizeof(float)) == 0)</a>
+<a name="ln792">  {</a>
+<a name="ln793">    dt_bauhaus_combobox_set(g-&gt;presets, 0);</a>
+<a name="ln794">    found = TRUE;</a>
+<a name="ln795">  }</a>
+<a name="ln796">  else</a>
+<a name="ln797">  {</a>
+<a name="ln798">    // is this a &quot;camera neutral white balance&quot;?</a>
+<a name="ln799">    if((p-&gt;coeffs[0] == (float)g-&gt;daylight_wb[0]) &amp;&amp; (p-&gt;coeffs[1] == (float)g-&gt;daylight_wb[1])</a>
+<a name="ln800">       &amp;&amp; (p-&gt;coeffs[2] == (float)g-&gt;daylight_wb[2]))</a>
+<a name="ln801">    {</a>
+<a name="ln802">      dt_bauhaus_combobox_set(g-&gt;presets, 1);</a>
+<a name="ln803">      found = TRUE;</a>
+<a name="ln804">    }</a>
+<a name="ln805">  }</a>
+<a name="ln806"> </a>
+<a name="ln807">  if(!found)</a>
+<a name="ln808">  {</a>
+<a name="ln809">    // look through all added presets</a>
+<a name="ln810">    for(int j = DT_IOP_NUM_OF_STD_TEMP_PRESETS; !found &amp;&amp; (j &lt; g-&gt;preset_cnt); j++)</a>
+<a name="ln811">    {</a>
+<a name="ln812">      // look through all variants of this preset, with different tuning</a>
+<a name="ln813">      for(int i = g-&gt;preset_num[j]; !found &amp;&amp; (i &lt; wb_preset_count)</a>
+<a name="ln814">                                    &amp;&amp; !strcmp(wb_preset[i].make, self-&gt;dev-&gt;image_storage.camera_maker)</a>
+<a name="ln815">                                    &amp;&amp; !strcmp(wb_preset[i].model, self-&gt;dev-&gt;image_storage.camera_model)</a>
+<a name="ln816">                                    &amp;&amp; !strcmp(wb_preset[i].name, wb_preset[g-&gt;preset_num[j]].name);</a>
+<a name="ln817">          i++)</a>
+<a name="ln818">      {</a>
+<a name="ln819">        float coeffs[3];</a>
+<a name="ln820">        for(int k = 0; k &lt; 3; k++) coeffs[k] = wb_preset[i].channel[k];</a>
+<a name="ln821"> </a>
+<a name="ln822">        if(memcmp(coeffs, p-&gt;coeffs, 3 * sizeof(float)) == 0)</a>
+<a name="ln823">        {</a>
+<a name="ln824">          // got exact match!</a>
+<a name="ln825">          dt_bauhaus_combobox_set(g-&gt;presets, j);</a>
+<a name="ln826">          gtk_widget_set_sensitive(g-&gt;finetune, 1);</a>
+<a name="ln827">          dt_bauhaus_slider_set(g-&gt;finetune, wb_preset[i].tuning);</a>
+<a name="ln828">          found = TRUE;</a>
+<a name="ln829">          break;</a>
+<a name="ln830">        }</a>
+<a name="ln831">      }</a>
+<a name="ln832">    }</a>
+<a name="ln833"> </a>
+<a name="ln834">    if(!found)</a>
+<a name="ln835">    {</a>
+<a name="ln836">      // ok, we haven't found exact match, maybe this was interpolated?</a>
+<a name="ln837"> </a>
+<a name="ln838">      // look through all added presets</a>
+<a name="ln839">      for(int j = DT_IOP_NUM_OF_STD_TEMP_PRESETS; !found &amp;&amp; (j &lt; g-&gt;preset_cnt); j++)</a>
+<a name="ln840">      {</a>
+<a name="ln841">        // look through all variants of this preset, with different tuning</a>
+<a name="ln842">        int i = g-&gt;preset_num[j] + 1;</a>
+<a name="ln843">        while(!found &amp;&amp; (i &lt; wb_preset_count) &amp;&amp; !strcmp(wb_preset[i].make, self-&gt;dev-&gt;image_storage.camera_maker)</a>
+<a name="ln844">              &amp;&amp; !strcmp(wb_preset[i].model, self-&gt;dev-&gt;image_storage.camera_maker)</a>
+<a name="ln845">              &amp;&amp; !strcmp(wb_preset[i].name, wb_preset[g-&gt;preset_num[j]].name))</a>
+<a name="ln846">        {</a>
+<a name="ln847">          // let's find gaps</a>
+<a name="ln848">          if(wb_preset[i - 1].tuning + 1 == wb_preset[i].tuning)</a>
+<a name="ln849">          {</a>
+<a name="ln850">            i++;</a>
+<a name="ln851">            continue;</a>
+<a name="ln852">          }</a>
+<a name="ln853"> </a>
+<a name="ln854">          // we have a gap!</a>
+<a name="ln855"> </a>
+<a name="ln856">          // we do not know what finetuning value was set, we need to bruteforce to find it</a>
+<a name="ln857">          for(int tune = wb_preset[i - 1].tuning + 1; !found &amp;&amp; (tune &lt; wb_preset[i].tuning); tune++)</a>
+<a name="ln858">          {</a>
+<a name="ln859">            wb_data interpolated = {.tuning = tune };</a>
+<a name="ln860">            dt_wb_preset_interpolate(&amp;wb_preset[i - 1], &amp;wb_preset[i], &amp;interpolated);</a>
+<a name="ln861"> </a>
+<a name="ln862">            float coeffs[3];</a>
+<a name="ln863">            for(int k = 0; k &lt; 3; k++) coeffs[k] = interpolated.channel[k];</a>
+<a name="ln864"> </a>
+<a name="ln865">            if(memcmp(coeffs, p-&gt;coeffs, 3 * sizeof(float)) == 0)</a>
+<a name="ln866">            {</a>
+<a name="ln867">              // got exact match!</a>
+<a name="ln868"> </a>
+<a name="ln869">              dt_bauhaus_combobox_set(g-&gt;presets, j);</a>
+<a name="ln870">              gtk_widget_set_sensitive(g-&gt;finetune, 1);</a>
+<a name="ln871">              dt_bauhaus_slider_set(g-&gt;finetune, tune);</a>
+<a name="ln872">              found = TRUE;</a>
+<a name="ln873">              break;</a>
+<a name="ln874">            }</a>
+<a name="ln875">          }</a>
+<a name="ln876">          i++;</a>
+<a name="ln877">        }</a>
+<a name="ln878">      }</a>
+<a name="ln879">    }</a>
+<a name="ln880">  }</a>
+<a name="ln881">}</a>
+<a name="ln882"> </a>
+<a name="ln883">static int calculate_bogus_daylight_wb(dt_iop_module_t *module, double bwb[4])</a>
+<a name="ln884">{</a>
+<a name="ln885">  if(!dt_image_is_raw(&amp;module-&gt;dev-&gt;image_storage))</a>
+<a name="ln886">  {</a>
+<a name="ln887">    bwb[0] = 1.0;</a>
+<a name="ln888">    bwb[2] = 1.0;</a>
+<a name="ln889">    bwb[1] = 1.0;</a>
+<a name="ln890">    bwb[3] = 1.0;</a>
+<a name="ln891"> </a>
+<a name="ln892">    return 0;</a>
+<a name="ln893">  }</a>
+<a name="ln894"> </a>
+<a name="ln895">  double mul[4];</a>
+<a name="ln896">  if (dt_colorspaces_conversion_matrices_rgb(module-&gt;dev-&gt;image_storage.camera_makermodel, NULL, NULL, mul))</a>
+<a name="ln897">  {</a>
+<a name="ln898">    // normalize green:</a>
+<a name="ln899">    bwb[0] = mul[0] / mul[1];</a>
+<a name="ln900">    bwb[2] = mul[2] / mul[1];</a>
+<a name="ln901">    bwb[1] = 1.0;</a>
+<a name="ln902">    bwb[3] = mul[3] / mul[1];</a>
+<a name="ln903"> </a>
+<a name="ln904">    return 0;</a>
+<a name="ln905">  }</a>
+<a name="ln906"> </a>
+<a name="ln907">  return 1;</a>
+<a name="ln908">}</a>
+<a name="ln909"> </a>
+<a name="ln910">static void prepare_matrices(dt_iop_module_t *module)</a>
+<a name="ln911">{</a>
+<a name="ln912">  dt_iop_temperature_gui_data_t *g = (dt_iop_temperature_gui_data_t *)module-&gt;gui_data;</a>
+<a name="ln913"> </a>
+<a name="ln914">  // sRGB D65</a>
+<a name="ln915">  const double RGB_to_XYZ[3][4] = { { 0.4124564, 0.3575761, 0.1804375, 0 },</a>
+<a name="ln916">                                    { 0.2126729, 0.7151522, 0.0721750, 0 },</a>
+<a name="ln917">                                    { 0.0193339, 0.1191920, 0.9503041, 0 } };</a>
+<a name="ln918"> </a>
+<a name="ln919">  // sRGB D65</a>
+<a name="ln920">  const double XYZ_to_RGB[4][3] = { { 3.2404542, -1.5371385, -0.4985314 },</a>
+<a name="ln921">                                    { -0.9692660, 1.8760108, 0.0415560 },</a>
+<a name="ln922">                                    { 0.0556434, -0.2040259, 1.0572252 },</a>
+<a name="ln923">                                    { 0, 0, 0 } };</a>
+<a name="ln924"> </a>
+<a name="ln925">  if(!dt_image_is_raw(&amp;module-&gt;dev-&gt;image_storage))</a>
+<a name="ln926">  {</a>
+<a name="ln927">    // let's just assume for now(TM) that if it is not raw, it is sRGB</a>
+<a name="ln928">    memcpy(g-&gt;XYZ_to_CAM, XYZ_to_RGB, sizeof(g-&gt;XYZ_to_CAM));</a>
+<a name="ln929">    memcpy(g-&gt;CAM_to_XYZ, RGB_to_XYZ, sizeof(g-&gt;CAM_to_XYZ));</a>
+<a name="ln930">    return;</a>
+<a name="ln931">  }</a>
+<a name="ln932"> </a>
+<a name="ln933">  char *camera = module-&gt;dev-&gt;image_storage.camera_makermodel;</a>
+<a name="ln934">  if (!dt_colorspaces_conversion_matrices_xyz(camera, module-&gt;dev-&gt;image_storage.d65_color_matrix,</a>
+<a name="ln935">                                                      g-&gt;XYZ_to_CAM, g-&gt;CAM_to_XYZ))</a>
+<a name="ln936">  {</a>
+<a name="ln937">    fprintf(stderr, &quot;[temperature] `%s' color matrix not found for image\n&quot;, camera);</a>
+<a name="ln938">    dt_control_log(_(&quot;`%s' color matrix not found for image&quot;), camera);</a>
+<a name="ln939">  }</a>
+<a name="ln940">}</a>
+<a name="ln941"> </a>
+<a name="ln942">static void find_coeffs(dt_iop_module_t *module, float coeffs[4])</a>
+<a name="ln943">{</a>
+<a name="ln944">  const dt_image_t *img = &amp;module-&gt;dev-&gt;image_storage;</a>
+<a name="ln945"> </a>
+<a name="ln946">  // the raw should provide wb coeffs:</a>
+<a name="ln947">  int ok = 1;</a>
+<a name="ln948">  // Only check the first three values, the fourth is usually NAN for RGB</a>
+<a name="ln949">  int num_coeffs = (img-&gt;flags &amp; DT_IMAGE_4BAYER) ? 4 : 3;</a>
+<a name="ln950">  for(int k = 0; ok &amp;&amp; k &lt; num_coeffs; k++)</a>
+<a name="ln951">  {</a>
+<a name="ln952">    if(!isnormal(img-&gt;wb_coeffs[k]) || img-&gt;wb_coeffs[k] == 0.0f) ok = 0;</a>
+<a name="ln953">  }</a>
+<a name="ln954">  if(ok)</a>
+<a name="ln955">  {</a>
+<a name="ln956">    for(int k = 0; k &lt; 4; k++) coeffs[k] = img-&gt;wb_coeffs[k];</a>
+<a name="ln957">    return;</a>
+<a name="ln958">  }</a>
+<a name="ln959"> </a>
+<a name="ln960">  if(!ignore_missing_wb(&amp;(module-&gt;dev-&gt;image_storage)))</a>
+<a name="ln961">  {</a>
+<a name="ln962">    dt_control_log(_(&quot;failed to read camera white balance information from `%s'!&quot;),</a>
+<a name="ln963">                   img-&gt;filename);</a>
+<a name="ln964">    fprintf(stderr, &quot;[temperature] failed to read camera white balance information from `%s'!\n&quot;,</a>
+<a name="ln965">            img-&gt;filename);</a>
+<a name="ln966">  }</a>
+<a name="ln967"> </a>
+<a name="ln968">  double bwb[4];</a>
+<a name="ln969">  if(!calculate_bogus_daylight_wb(module, bwb))</a>
+<a name="ln970">  {</a>
+<a name="ln971">    // found camera matrix and used it to calculate bogus daylight wb</a>
+<a name="ln972">    for(int c = 0; c &lt; 4; c++) coeffs[c] = bwb[c];</a>
+<a name="ln973">    return;</a>
+<a name="ln974">  }</a>
+<a name="ln975"> </a>
+<a name="ln976">  // no cam matrix??? try presets:</a>
+<a name="ln977">  for(int i = 0; i &lt; wb_preset_count; i++)</a>
+<a name="ln978">  {</a>
+<a name="ln979">    if(!strcmp(wb_preset[i].make, img-&gt;camera_maker)</a>
+<a name="ln980">       &amp;&amp; !strcmp(wb_preset[i].model, img-&gt;camera_model))</a>
+<a name="ln981">    {</a>
+<a name="ln982">      // just take the first preset we find for this camera</a>
+<a name="ln983">      for(int k = 0; k &lt; 3; k++) coeffs[k] = wb_preset[i].channel[k];</a>
+<a name="ln984">      return;</a>
+<a name="ln985">    }</a>
+<a name="ln986">  }</a>
+<a name="ln987"> </a>
+<a name="ln988">  // did not find preset either?</a>
+<a name="ln989">  // final security net: hardcoded default that fits most cams.</a>
+<a name="ln990">  coeffs[0] = 2.0f;</a>
+<a name="ln991">  coeffs[1] = 1.0f;</a>
+<a name="ln992">  coeffs[2] = 1.5f;</a>
+<a name="ln993">  coeffs[3] = 1.0f;</a>
+<a name="ln994">}</a>
+<a name="ln995"> </a>
+<a name="ln996">void reload_defaults(dt_iop_module_t *module)</a>
+<a name="ln997">{</a>
+<a name="ln998">  dt_iop_temperature_params_t tmp</a>
+<a name="ln999">      = (dt_iop_temperature_params_t){.coeffs = { 1.0, 1.0, 1.0, 1.0 } };</a>
+<a name="ln1000"> </a>
+<a name="ln1001">  // we might be called from presets update infrastructure =&gt; there is no image</a>
+<a name="ln1002">  if(!module-&gt;dev) goto end;</a>
+<a name="ln1003"> </a>
+<a name="ln1004">  const int is_raw = dt_image_is_raw(&amp;module-&gt;dev-&gt;image_storage);</a>
+<a name="ln1005"> </a>
+<a name="ln1006">  module-&gt;default_enabled = 0;</a>
+<a name="ln1007">  module-&gt;hide_enable_button = 0;</a>
+<a name="ln1008"> </a>
+<a name="ln1009">  // White balance module doesn't need to be enabled for monochrome raws (like</a>
+<a name="ln1010">  // for leica monochrom cameras). prepare_matrices is a noop as well, as there</a>
+<a name="ln1011">  // isn't a color matrix, so we can skip that as well.</a>
+<a name="ln1012">  if(is_raw &amp;&amp; dt_image_is_monochrome(&amp;(module-&gt;dev-&gt;image_storage)))</a>
+<a name="ln1013">  {</a>
+<a name="ln1014">    module-&gt;hide_enable_button = 1;</a>
+<a name="ln1015">  }</a>
+<a name="ln1016">  else</a>
+<a name="ln1017">  {</a>
+<a name="ln1018">    if(module-&gt;gui_data) prepare_matrices(module);</a>
+<a name="ln1019"> </a>
+<a name="ln1020">    /* check if file is raw / hdr */</a>
+<a name="ln1021">    if(is_raw)</a>
+<a name="ln1022">    {</a>
+<a name="ln1023">      // raw images need wb:</a>
+<a name="ln1024">      module-&gt;default_enabled = 1;</a>
+<a name="ln1025"> </a>
+<a name="ln1026">      // do best to find starting coeffs</a>
+<a name="ln1027">      find_coeffs(module, tmp.coeffs);</a>
+<a name="ln1028">      tmp.coeffs[0] /= tmp.coeffs[1];</a>
+<a name="ln1029">      tmp.coeffs[2] /= tmp.coeffs[1];</a>
+<a name="ln1030">      tmp.coeffs[3] /= tmp.coeffs[1];</a>
+<a name="ln1031">      tmp.coeffs[1] = 1.0f;</a>
+<a name="ln1032">    }</a>
+<a name="ln1033">  }</a>
+<a name="ln1034"> </a>
+<a name="ln1035">  // remember daylight wb used for temperature/tint conversion,</a>
+<a name="ln1036">  // assuming it corresponds to CIE daylight (D65)</a>
+<a name="ln1037">  if(module-&gt;gui_data)</a>
+<a name="ln1038">  {</a>
+<a name="ln1039">    dt_iop_temperature_gui_data_t *g = (dt_iop_temperature_gui_data_t *)module-&gt;gui_data;</a>
+<a name="ln1040"> </a>
+<a name="ln1041">    dt_bauhaus_slider_set_default(g-&gt;scale_r, tmp.coeffs[0]);</a>
+<a name="ln1042">    dt_bauhaus_slider_set_default(g-&gt;scale_g, tmp.coeffs[1]);</a>
+<a name="ln1043">    dt_bauhaus_slider_set_default(g-&gt;scale_b, tmp.coeffs[2]);</a>
+<a name="ln1044">    dt_bauhaus_slider_set_default(g-&gt;scale_g2, tmp.coeffs[3]);</a>
+<a name="ln1045"> </a>
+<a name="ln1046">    // to have at least something and definitely not crash</a>
+<a name="ln1047">    for(int c = 0; c &lt; 4; c++) g-&gt;daylight_wb[c] = tmp.coeffs[c];</a>
+<a name="ln1048"> </a>
+<a name="ln1049">    if(!calculate_bogus_daylight_wb(module, g-&gt;daylight_wb))</a>
+<a name="ln1050">    {</a>
+<a name="ln1051">      // found camera matrix and used it to calculate bogus daylight wb</a>
+<a name="ln1052">    }</a>
+<a name="ln1053">    else</a>
+<a name="ln1054">    {</a>
+<a name="ln1055">      // if we didn't find anything for daylight wb, look for a wb preset with appropriate name.</a>
+<a name="ln1056">      // we're normalizing that to be D65</a>
+<a name="ln1057">      for(int i = 0; i &lt; wb_preset_count; i++)</a>
+<a name="ln1058">      {</a>
+<a name="ln1059">        if(!strcmp(wb_preset[i].make, module-&gt;dev-&gt;image_storage.camera_maker)</a>
+<a name="ln1060">           &amp;&amp; !strcmp(wb_preset[i].model, module-&gt;dev-&gt;image_storage.camera_model)</a>
+<a name="ln1061">           &amp;&amp; !strcmp(wb_preset[i].name, Daylight) &amp;&amp; wb_preset[i].tuning == 0)</a>
+<a name="ln1062">        {</a>
+<a name="ln1063">          for(int k = 0; k &lt; 4; k++) g-&gt;daylight_wb[k] = wb_preset[i].channel[k];</a>
+<a name="ln1064">          break;</a>
+<a name="ln1065">        }</a>
+<a name="ln1066">      }</a>
+<a name="ln1067">    }</a>
+<a name="ln1068"> </a>
+<a name="ln1069">    double TempK, tint;</a>
+<a name="ln1070">    mul2temp(module, tmp.coeffs, &amp;TempK, &amp;tint);</a>
+<a name="ln1071"> </a>
+<a name="ln1072">    dt_bauhaus_slider_set_default(g-&gt;scale_k, TempK);</a>
+<a name="ln1073">    dt_bauhaus_slider_set_default(g-&gt;scale_tint, tint);</a>
+<a name="ln1074"> </a>
+<a name="ln1075">#if COLORED_SLIDERS</a>
+<a name="ln1076">    const float neutral_stop_tint = (tint - DT_IOP_LOWEST_TINT) / (DT_IOP_HIGHEST_TINT - DT_IOP_LOWEST_TINT);</a>
+<a name="ln1077">    dt_bauhaus_slider_clear_stops(g-&gt;scale_tint);</a>
+<a name="ln1078">    dt_bauhaus_slider_set_stop(g-&gt;scale_tint, 0.0, 1.0, 0.0, 1.0);</a>
+<a name="ln1079">    dt_bauhaus_slider_set_stop(g-&gt;scale_tint, neutral_stop_tint, 1.0, 1.0, 1.0);</a>
+<a name="ln1080">    dt_bauhaus_slider_set_stop(g-&gt;scale_tint, 1.0, 0.0, 1.0, 0.0);</a>
+<a name="ln1081">#endif</a>
+<a name="ln1082">  }</a>
+<a name="ln1083"> </a>
+<a name="ln1084">end:</a>
+<a name="ln1085">  memcpy(module-&gt;params, &amp;tmp, sizeof(dt_iop_temperature_params_t));</a>
+<a name="ln1086">  memcpy(module-&gt;default_params, &amp;tmp, sizeof(dt_iop_temperature_params_t));</a>
+<a name="ln1087">}</a>
+<a name="ln1088"> </a>
+<a name="ln1089">void init_global(dt_iop_module_so_t *module)</a>
+<a name="ln1090">{</a>
+<a name="ln1091">  const int program = 2; // basic.cl, from programs.conf</a>
+<a name="ln1092">  dt_iop_temperature_global_data_t *gd</a>
+<a name="ln1093">      = (dt_iop_temperature_global_data_t *)malloc(sizeof(dt_iop_temperature_global_data_t));</a>
+<a name="ln1094">  module-&gt;data = gd;</a>
+<a name="ln1095">  gd-&gt;kernel_whitebalance_4f = dt_opencl_create_kernel(program, &quot;whitebalance_4f&quot;);</a>
+<a name="ln1096">  gd-&gt;kernel_whitebalance_1f = dt_opencl_create_kernel(program, &quot;whitebalance_1f&quot;);</a>
+<a name="ln1097">  gd-&gt;kernel_whitebalance_1f_xtrans = dt_opencl_create_kernel(program, &quot;whitebalance_1f_xtrans&quot;);</a>
+<a name="ln1098">}</a>
+<a name="ln1099"> </a>
+<a name="ln1100">void init(dt_iop_module_t *module)</a>
+<a name="ln1101">{</a>
+<a name="ln1102">  module-&gt;params = calloc(1, sizeof(dt_iop_temperature_params_t));</a>
+<a name="ln1103">  module-&gt;default_params = calloc(1, sizeof(dt_iop_temperature_params_t));</a>
+<a name="ln1104">  module-&gt;priority = 42; // module order created by iop_dependencies.py, do not edit!</a>
+<a name="ln1105">  module-&gt;params_size = sizeof(dt_iop_temperature_params_t);</a>
+<a name="ln1106">  module-&gt;gui_data = NULL;</a>
+<a name="ln1107">}</a>
+<a name="ln1108"> </a>
+<a name="ln1109">void cleanup(dt_iop_module_t *module)</a>
+<a name="ln1110">{</a>
+<a name="ln1111">  free(module-&gt;params);</a>
+<a name="ln1112">  module-&gt;params = NULL;</a>
+<a name="ln1113">}</a>
+<a name="ln1114"> </a>
+<a name="ln1115">void cleanup_global(dt_iop_module_so_t *module)</a>
+<a name="ln1116">{</a>
+<a name="ln1117">  dt_iop_temperature_global_data_t *gd = (dt_iop_temperature_global_data_t *)module-&gt;data;</a>
+<a name="ln1118">  dt_opencl_free_kernel(gd-&gt;kernel_whitebalance_4f);</a>
+<a name="ln1119">  dt_opencl_free_kernel(gd-&gt;kernel_whitebalance_1f);</a>
+<a name="ln1120">  dt_opencl_free_kernel(gd-&gt;kernel_whitebalance_1f_xtrans);</a>
+<a name="ln1121">  free(module-&gt;data);</a>
+<a name="ln1122">  module-&gt;data = NULL;</a>
+<a name="ln1123">}</a>
+<a name="ln1124"> </a>
+<a name="ln1125">static void gui_update_from_coeffs(dt_iop_module_t *self)</a>
+<a name="ln1126">{</a>
+<a name="ln1127">  dt_iop_temperature_gui_data_t *g = (dt_iop_temperature_gui_data_t *)self-&gt;gui_data;</a>
+<a name="ln1128">  dt_iop_temperature_params_t *p = (dt_iop_temperature_params_t *)self-&gt;params;</a>
+<a name="ln1129"> </a>
+<a name="ln1130">  double TempK, tint;</a>
+<a name="ln1131">  mul2temp(self, p-&gt;coeffs, &amp;TempK, &amp;tint);</a>
+<a name="ln1132"> </a>
+<a name="ln1133">  darktable.gui-&gt;reset = 1;</a>
+<a name="ln1134">  dt_bauhaus_slider_set(g-&gt;scale_k, TempK);</a>
+<a name="ln1135">  dt_bauhaus_slider_set(g-&gt;scale_tint, tint);</a>
+<a name="ln1136">  dt_bauhaus_slider_set(g-&gt;scale_r, p-&gt;coeffs[0]);</a>
+<a name="ln1137">  dt_bauhaus_slider_set(g-&gt;scale_g, p-&gt;coeffs[1]);</a>
+<a name="ln1138">  dt_bauhaus_slider_set(g-&gt;scale_b, p-&gt;coeffs[2]);</a>
+<a name="ln1139">  dt_bauhaus_slider_set(g-&gt;scale_g2, p-&gt;coeffs[3]);</a>
+<a name="ln1140">  darktable.gui-&gt;reset = 0;</a>
+<a name="ln1141">}</a>
+<a name="ln1142"> </a>
+<a name="ln1143"> </a>
+<a name="ln1144">static gboolean draw(GtkWidget *widget, cairo_t *cr, dt_iop_module_t *self)</a>
+<a name="ln1145">{</a>
+<a name="ln1146">  // capture gui color picked event.</a>
+<a name="ln1147">  if(darktable.gui-&gt;reset) return FALSE;</a>
+<a name="ln1148">  if(self-&gt;picked_color_max[0] &lt; self-&gt;picked_color_min[0]) return FALSE;</a>
+<a name="ln1149">  if(self-&gt;request_color_pick == DT_REQUEST_COLORPICK_OFF) return FALSE;</a>
+<a name="ln1150">  const float *grayrgb = self-&gt;picked_color;</a>
+<a name="ln1151">  //test the newly picked color: if the same as the last, do not process further</a>
+<a name="ln1152">  if(grayrgb[0] == old[0] &amp;&amp; grayrgb[1] == old[1] &amp;&amp; grayrgb[2] == old[2] &amp;&amp; grayrgb[3] == old[3]) return FALSE;</a>
+<a name="ln1153">  for(int k = 0; k &lt; 4; k++) old[k] = grayrgb[k];</a>
+<a name="ln1154">  dt_iop_temperature_params_t *p = (dt_iop_temperature_params_t *)self-&gt;params;</a>
+<a name="ln1155">  for(int k = 0; k &lt; 4; k++) p-&gt;coeffs[k] = (grayrgb[k] &gt; 0.001f) ? 1.0f / grayrgb[k] : 1.0f;</a>
+<a name="ln1156">  // normalize green:</a>
+<a name="ln1157">  p-&gt;coeffs[0] /= p-&gt;coeffs[1];</a>
+<a name="ln1158">  p-&gt;coeffs[2] /= p-&gt;coeffs[1];</a>
+<a name="ln1159">  p-&gt;coeffs[3] /= p-&gt;coeffs[1];</a>
+<a name="ln1160">  p-&gt;coeffs[1] = 1.0;</a>
+<a name="ln1161">  // clamp</a>
+<a name="ln1162">  for(int k = 0; k &lt; 4; k++) p-&gt;coeffs[k] = fmaxf(0.0f, fminf(8.0f, p-&gt;coeffs[k]));</a>
+<a name="ln1163"> </a>
+<a name="ln1164">  gui_update_from_coeffs(self);</a>
+<a name="ln1165">  dt_dev_add_history_item(darktable.develop, self, TRUE);</a>
+<a name="ln1166">  return FALSE;</a>
+<a name="ln1167">}</a>
+<a name="ln1168"> </a>
+<a name="ln1169">static void temp_changed(dt_iop_module_t *self)</a>
+<a name="ln1170">{</a>
+<a name="ln1171">  dt_iop_temperature_gui_data_t *g = (dt_iop_temperature_gui_data_t *)self-&gt;gui_data;</a>
+<a name="ln1172">  dt_iop_temperature_params_t *p = (dt_iop_temperature_params_t *)self-&gt;params;</a>
+<a name="ln1173"> </a>
+<a name="ln1174">  const double TempK = dt_bauhaus_slider_get(g-&gt;scale_k);</a>
+<a name="ln1175">  const double tint = dt_bauhaus_slider_get(g-&gt;scale_tint);</a>
+<a name="ln1176"> </a>
+<a name="ln1177">  double coeffs[4];</a>
+<a name="ln1178">  temp2mul(self, TempK, tint, coeffs);</a>
+<a name="ln1179"> </a>
+<a name="ln1180">  // normalize</a>
+<a name="ln1181">  coeffs[0] /= coeffs[1];</a>
+<a name="ln1182">  coeffs[2] /= coeffs[1];</a>
+<a name="ln1183">  coeffs[3] /= coeffs[1];</a>
+<a name="ln1184">  coeffs[1] = 1.0;</a>
+<a name="ln1185"> </a>
+<a name="ln1186">  for(int c = 0; c &lt; 4; c++) p-&gt;coeffs[c] = coeffs[c];</a>
+<a name="ln1187"> </a>
+<a name="ln1188">  darktable.gui-&gt;reset = 1;</a>
+<a name="ln1189">  dt_bauhaus_slider_set(g-&gt;scale_r, p-&gt;coeffs[0]);</a>
+<a name="ln1190">  dt_bauhaus_slider_set(g-&gt;scale_g, p-&gt;coeffs[1]);</a>
+<a name="ln1191">  dt_bauhaus_slider_set(g-&gt;scale_b, p-&gt;coeffs[2]);</a>
+<a name="ln1192">  dt_bauhaus_slider_set(g-&gt;scale_g2, p-&gt;coeffs[3]);</a>
+<a name="ln1193">  darktable.gui-&gt;reset = 0;</a>
+<a name="ln1194">  dt_dev_add_history_item(darktable.develop, self, TRUE);</a>
+<a name="ln1195">}</a>
+<a name="ln1196"> </a>
+<a name="ln1197">static void tint_callback(GtkWidget *slider, gpointer user_data)</a>
+<a name="ln1198">{</a>
+<a name="ln1199">  dt_iop_module_t *self = (dt_iop_module_t *)user_data;</a>
+<a name="ln1200">  if(self-&gt;dt-&gt;gui-&gt;reset) return;</a>
+<a name="ln1201">  temp_changed(self);</a>
+<a name="ln1202">  dt_iop_temperature_gui_data_t *g = (dt_iop_temperature_gui_data_t *)self-&gt;gui_data;</a>
+<a name="ln1203">  dt_bauhaus_combobox_set(g-&gt;presets, -1);</a>
+<a name="ln1204">}</a>
+<a name="ln1205"> </a>
+<a name="ln1206">static void temp_callback(GtkWidget *slider, gpointer user_data)</a>
+<a name="ln1207">{</a>
+<a name="ln1208">  dt_iop_module_t *self = (dt_iop_module_t *)user_data;</a>
+<a name="ln1209">  if(self-&gt;dt-&gt;gui-&gt;reset) return;</a>
+<a name="ln1210">  temp_changed(self);</a>
+<a name="ln1211">  dt_iop_temperature_gui_data_t *g = (dt_iop_temperature_gui_data_t *)self-&gt;gui_data;</a>
+<a name="ln1212">  dt_bauhaus_combobox_set(g-&gt;presets, -1);</a>
+<a name="ln1213">}</a>
+<a name="ln1214"> </a>
+<a name="ln1215">static void rgb_callback(GtkWidget *slider, gpointer user_data)</a>
+<a name="ln1216">{</a>
+<a name="ln1217">  dt_iop_module_t *self = (dt_iop_module_t *)user_data;</a>
+<a name="ln1218">  if(self-&gt;dt-&gt;gui-&gt;reset) return;</a>
+<a name="ln1219">  dt_iop_temperature_gui_data_t *g = (dt_iop_temperature_gui_data_t *)self-&gt;gui_data;</a>
+<a name="ln1220">  dt_iop_temperature_params_t *p = (dt_iop_temperature_params_t *)self-&gt;params;</a>
+<a name="ln1221">  const float value = dt_bauhaus_slider_get(slider);</a>
+<a name="ln1222">  if(slider == g-&gt;scale_r)</a>
+<a name="ln1223">    p-&gt;coeffs[0] = value;</a>
+<a name="ln1224">  else if(slider == g-&gt;scale_g)</a>
+<a name="ln1225">    p-&gt;coeffs[1] = value;</a>
+<a name="ln1226">  else if(slider == g-&gt;scale_b)</a>
+<a name="ln1227">    p-&gt;coeffs[2] = value;</a>
+<a name="ln1228">  else if(slider == g-&gt;scale_g2)</a>
+<a name="ln1229">    p-&gt;coeffs[3] = value;</a>
+<a name="ln1230"> </a>
+<a name="ln1231">  gui_update_from_coeffs(self);</a>
+<a name="ln1232">  dt_dev_add_history_item(darktable.develop, self, TRUE);</a>
+<a name="ln1233">  dt_bauhaus_combobox_set(g-&gt;presets, -1);</a>
+<a name="ln1234">}</a>
+<a name="ln1235"> </a>
+<a name="ln1236">static void apply_preset(dt_iop_module_t *self)</a>
+<a name="ln1237">{</a>
+<a name="ln1238">  self-&gt;request_color_pick = DT_REQUEST_COLORPICK_OFF;</a>
+<a name="ln1239">  if(self-&gt;dt-&gt;gui-&gt;reset) return;</a>
+<a name="ln1240">  dt_iop_temperature_gui_data_t *g = (dt_iop_temperature_gui_data_t *)self-&gt;gui_data;</a>
+<a name="ln1241">  dt_iop_temperature_params_t *p = (dt_iop_temperature_params_t *)self-&gt;params;</a>
+<a name="ln1242">  dt_iop_temperature_params_t *fp = (dt_iop_temperature_params_t *)self-&gt;default_params;</a>
+<a name="ln1243">  const int tune = dt_bauhaus_slider_get(g-&gt;finetune);</a>
+<a name="ln1244">  const int pos = dt_bauhaus_combobox_get(g-&gt;presets);</a>
+<a name="ln1245">  switch(pos)</a>
+<a name="ln1246">  {</a>
+<a name="ln1247">    case -1: // just un-setting.</a>
+<a name="ln1248">      return;</a>
+<a name="ln1249">    case 0: // camera wb</a>
+<a name="ln1250">      for(int k = 0; k &lt; 4; k++) p-&gt;coeffs[k] = fp-&gt;coeffs[k];</a>
+<a name="ln1251">      break;</a>
+<a name="ln1252">    case 1: // camera neutral wb</a>
+<a name="ln1253">      for(int k = 0; k &lt; 4; k++) p-&gt;coeffs[k] = g-&gt;daylight_wb[k];</a>
+<a name="ln1254">      break;</a>
+<a name="ln1255">    case 2: // spot wb, expose callback will set p-&gt;coeffs.</a>
+<a name="ln1256"> </a>
+<a name="ln1257">      //reset previously stored color picker information</a>
+<a name="ln1258">      for(int k = 0; k &lt; 4; k++) old[k] = 0.0f;</a>
+<a name="ln1259"> </a>
+<a name="ln1260">      dt_iop_request_focus(self);</a>
+<a name="ln1261">      self-&gt;request_color_pick = DT_REQUEST_COLORPICK_MODULE;</a>
+<a name="ln1262"> </a>
+<a name="ln1263">      /* set the area sample size*/</a>
+<a name="ln1264">      if(self-&gt;request_color_pick != DT_REQUEST_COLORPICK_OFF)</a>
+<a name="ln1265">        dt_lib_colorpicker_set_area(darktable.lib, 0.99);</a>
+<a name="ln1266"> </a>
+<a name="ln1267">      break;</a>
+<a name="ln1268">    default: // camera WB presets</a>
+<a name="ln1269">    {</a>
+<a name="ln1270">      gboolean found = FALSE;</a>
+<a name="ln1271">      // look through all variants of this preset, with different tuning</a>
+<a name="ln1272">      for(int i = g-&gt;preset_num[pos]; (i &lt; wb_preset_count)</a>
+<a name="ln1273">                                      &amp;&amp; !strcmp(wb_preset[i].make, self-&gt;dev-&gt;image_storage.camera_maker)</a>
+<a name="ln1274">                                      &amp;&amp; !strcmp(wb_preset[i].model, self-&gt;dev-&gt;image_storage.camera_model)</a>
+<a name="ln1275">                                      &amp;&amp; !strcmp(wb_preset[i].name, wb_preset[g-&gt;preset_num[pos]].name);</a>
+<a name="ln1276">          i++)</a>
+<a name="ln1277">      {</a>
+<a name="ln1278">        if(wb_preset[i].tuning == tune)</a>
+<a name="ln1279">        {</a>
+<a name="ln1280">          // got exact match!</a>
+<a name="ln1281">          for(int k = 0; k &lt; 4; k++) p-&gt;coeffs[k] = wb_preset[i].channel[k];</a>
+<a name="ln1282">          found = TRUE;</a>
+<a name="ln1283">          break;</a>
+<a name="ln1284">        }</a>
+<a name="ln1285">      }</a>
+<a name="ln1286"> </a>
+<a name="ln1287">      if(!found)</a>
+<a name="ln1288">      {</a>
+<a name="ln1289">        // ok, we haven't found exact match, need to interpolate</a>
+<a name="ln1290"> </a>
+<a name="ln1291">        // let's find 2 most closest tunings with needed_tuning in-between</a>
+<a name="ln1292">        int min_id = INT_MIN, max_id = INT_MIN;</a>
+<a name="ln1293"> </a>
+<a name="ln1294">        // look through all variants of this preset, with different tuning, starting from second entry (if</a>
+<a name="ln1295">        // any)</a>
+<a name="ln1296">        int i = g-&gt;preset_num[pos] + 1;</a>
+<a name="ln1297">        while((i &lt; wb_preset_count) &amp;&amp; !strcmp(wb_preset[i].make, self-&gt;dev-&gt;image_storage.camera_maker)</a>
+<a name="ln1298">              &amp;&amp; !strcmp(wb_preset[i].model, self-&gt;dev-&gt;image_storage.camera_model)</a>
+<a name="ln1299">              &amp;&amp; !strcmp(wb_preset[i].name, wb_preset[g-&gt;preset_num[pos]].name))</a>
+<a name="ln1300">        {</a>
+<a name="ln1301">          if(wb_preset[i - 1].tuning &lt; tune &amp;&amp; wb_preset[i].tuning &gt; tune)</a>
+<a name="ln1302">          {</a>
+<a name="ln1303">            min_id = i - 1;</a>
+<a name="ln1304">            max_id = i;</a>
+<a name="ln1305">            break;</a>
+<a name="ln1306">          }</a>
+<a name="ln1307"> </a>
+<a name="ln1308">          i++;</a>
+<a name="ln1309">        }</a>
+<a name="ln1310"> </a>
+<a name="ln1311">        // have we found enough good data?</a>
+<a name="ln1312">        if(min_id == INT_MIN || max_id == INT_MIN || min_id == max_id) break; // hysteresis</a>
+<a name="ln1313"> </a>
+<a name="ln1314">        wb_data interpolated = {.tuning = tune };</a>
+<a name="ln1315">        dt_wb_preset_interpolate(&amp;wb_preset[min_id], &amp;wb_preset[max_id], &amp;interpolated);</a>
+<a name="ln1316">        for(int k = 0; k &lt; 4; k++) p-&gt;coeffs[k] = interpolated.channel[k];</a>
+<a name="ln1317">      }</a>
+<a name="ln1318">    }</a>
+<a name="ln1319">    break;</a>
+<a name="ln1320">  }</a>
+<a name="ln1321">  if(self-&gt;off) gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(self-&gt;off), 1);</a>
+<a name="ln1322">  gui_update_from_coeffs(self);</a>
+<a name="ln1323">  dt_dev_add_history_item(darktable.develop, self, TRUE);</a>
+<a name="ln1324">}</a>
+<a name="ln1325"> </a>
+<a name="ln1326">static void presets_changed(GtkWidget *widget, gpointer user_data)</a>
+<a name="ln1327">{</a>
+<a name="ln1328">  dt_iop_module_t *self = (dt_iop_module_t *)user_data;</a>
+<a name="ln1329">  apply_preset(self);</a>
+<a name="ln1330">  const int pos = dt_bauhaus_combobox_get(widget);</a>
+<a name="ln1331">  dt_iop_temperature_gui_data_t *g = (dt_iop_temperature_gui_data_t *)self-&gt;gui_data;</a>
+<a name="ln1332">  gtk_widget_set_sensitive(g-&gt;finetune, pos &gt;= DT_IOP_NUM_OF_STD_TEMP_PRESETS);</a>
+<a name="ln1333">}</a>
+<a name="ln1334"> </a>
+<a name="ln1335">static void finetune_changed(GtkWidget *widget, gpointer user_data)</a>
+<a name="ln1336">{</a>
+<a name="ln1337">  apply_preset((dt_iop_module_t *)user_data);</a>
+<a name="ln1338">}</a>
+<a name="ln1339"> </a>
+<a name="ln1340">static void gui_sliders_update(struct dt_iop_module_t *self)</a>
+<a name="ln1341">{</a>
+<a name="ln1342">  const dt_image_t *img = &amp;self-&gt;dev-&gt;image_storage;</a>
+<a name="ln1343">  dt_iop_temperature_gui_data_t *g = (dt_iop_temperature_gui_data_t *)self-&gt;gui_data;</a>
+<a name="ln1344"> </a>
+<a name="ln1345">  if(FILTERS_ARE_CYGM(img-&gt;buf_dsc.filters))</a>
+<a name="ln1346">  {</a>
+<a name="ln1347">    dt_bauhaus_widget_set_label(g-&gt;scale_r, NULL, _(&quot;green&quot;));</a>
+<a name="ln1348">    dt_bauhaus_widget_set_label(g-&gt;scale_g, NULL, _(&quot;magenta&quot;));</a>
+<a name="ln1349">    dt_bauhaus_widget_set_label(g-&gt;scale_b, NULL, _(&quot;cyan&quot;));</a>
+<a name="ln1350">    dt_bauhaus_widget_set_label(g-&gt;scale_g2, NULL, _(&quot;yellow&quot;));</a>
+<a name="ln1351"> </a>
+<a name="ln1352">    gtk_box_reorder_child(GTK_BOX(g-&gt;coeff_widgets), g-&gt;scale_b, 0);</a>
+<a name="ln1353">    gtk_box_reorder_child(GTK_BOX(g-&gt;coeff_widgets), g-&gt;scale_g2, 1);</a>
+<a name="ln1354">    gtk_box_reorder_child(GTK_BOX(g-&gt;coeff_widgets), g-&gt;scale_g, 2);</a>
+<a name="ln1355">    gtk_box_reorder_child(GTK_BOX(g-&gt;coeff_widgets), g-&gt;scale_r, 3);</a>
+<a name="ln1356">  }</a>
+<a name="ln1357">  else</a>
+<a name="ln1358">  {</a>
+<a name="ln1359">    dt_bauhaus_widget_set_label(g-&gt;scale_r, NULL, _(&quot;red&quot;));</a>
+<a name="ln1360">    dt_bauhaus_widget_set_label(g-&gt;scale_g, NULL, _(&quot;green&quot;));</a>
+<a name="ln1361">    dt_bauhaus_widget_set_label(g-&gt;scale_b, NULL, _(&quot;blue&quot;));</a>
+<a name="ln1362">    dt_bauhaus_widget_set_label(g-&gt;scale_g2, NULL, _(&quot;emerald&quot;));</a>
+<a name="ln1363">    gtk_box_reorder_child(GTK_BOX(g-&gt;coeff_widgets), g-&gt;scale_r, 0);</a>
+<a name="ln1364">    gtk_box_reorder_child(GTK_BOX(g-&gt;coeff_widgets), g-&gt;scale_g, 1);</a>
+<a name="ln1365">    gtk_box_reorder_child(GTK_BOX(g-&gt;coeff_widgets), g-&gt;scale_b, 2);</a>
+<a name="ln1366">    gtk_box_reorder_child(GTK_BOX(g-&gt;coeff_widgets), g-&gt;scale_g2, 3);</a>
+<a name="ln1367">  }</a>
+<a name="ln1368"> </a>
+<a name="ln1369">  gtk_widget_set_visible(GTK_WIDGET(g-&gt;scale_g2), (img-&gt;flags &amp; DT_IMAGE_4BAYER));</a>
+<a name="ln1370">}</a>
+<a name="ln1371"> </a>
+<a name="ln1372">void gui_init(struct dt_iop_module_t *self)</a>
+<a name="ln1373">{</a>
+<a name="ln1374">  self-&gt;gui_data = calloc(1, sizeof(dt_iop_temperature_gui_data_t));</a>
+<a name="ln1375">  dt_iop_temperature_gui_data_t *g = (dt_iop_temperature_gui_data_t *)self-&gt;gui_data;</a>
+<a name="ln1376">  dt_iop_temperature_params_t *p = (dt_iop_temperature_params_t *)self-&gt;default_params;</a>
+<a name="ln1377"> </a>
+<a name="ln1378">  self-&gt;request_color_pick = DT_REQUEST_COLORPICK_OFF;</a>
+<a name="ln1379">  self-&gt;widget = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);</a>
+<a name="ln1380">  dt_gui_add_help_link(self-&gt;widget, dt_get_help_url(self-&gt;op));</a>
+<a name="ln1381">  g_signal_connect(G_OBJECT(self-&gt;widget), &quot;draw&quot;, G_CALLBACK(draw), self);</a>
+<a name="ln1382"> </a>
+<a name="ln1383">  g-&gt;stack = gtk_stack_new();</a>
+<a name="ln1384">  gtk_stack_set_homogeneous(GTK_STACK(g-&gt;stack), FALSE);</a>
+<a name="ln1385">  gtk_box_pack_start(GTK_BOX(self-&gt;widget), g-&gt;stack, TRUE, TRUE, 0);</a>
+<a name="ln1386"> </a>
+<a name="ln1387">  g-&gt;box_enabled = gtk_box_new(GTK_ORIENTATION_VERTICAL, DT_BAUHAUS_SPACE);</a>
+<a name="ln1388"> </a>
+<a name="ln1389">  for(int k = 0; k &lt; 4; k++) g-&gt;daylight_wb[k] = 1.0;</a>
+<a name="ln1390">  g-&gt;scale_tint</a>
+<a name="ln1391">      = dt_bauhaus_slider_new_with_range(self, DT_IOP_LOWEST_TINT, DT_IOP_HIGHEST_TINT, .01, 1.0, 3);</a>
+<a name="ln1392">  g-&gt;scale_k = dt_bauhaus_slider_new_with_range(self, DT_IOP_LOWEST_TEMPERATURE, DT_IOP_HIGHEST_TEMPERATURE,</a>
+<a name="ln1393">                                                10., 5000.0, 0);</a>
+<a name="ln1394"> </a>
+<a name="ln1395">  g-&gt;coeff_widgets = gtk_box_new(GTK_ORIENTATION_VERTICAL, DT_BAUHAUS_SPACE);</a>
+<a name="ln1396">  g-&gt;scale_r = dt_bauhaus_slider_new_with_range(self, 0.0, 8.0, .001, p-&gt;coeffs[0], 3);</a>
+<a name="ln1397">  g-&gt;scale_g = dt_bauhaus_slider_new_with_range(self, 0.0, 8.0, .001, p-&gt;coeffs[1], 3);</a>
+<a name="ln1398">  g-&gt;scale_b = dt_bauhaus_slider_new_with_range(self, 0.0, 8.0, .001, p-&gt;coeffs[2], 3);</a>
+<a name="ln1399">  g-&gt;scale_g2 = dt_bauhaus_slider_new_with_range(self, 0.0, 8.0, .001, p-&gt;coeffs[3], 3);</a>
+<a name="ln1400"> </a>
+<a name="ln1401">#if COLORED_SLIDERS</a>
+<a name="ln1402">  // reflect actual black body colors for the temperature slider</a>
+<a name="ln1403">  const double temp_step = (double)(DT_IOP_HIGHEST_TEMPERATURE - DT_IOP_LOWEST_TEMPERATURE) / (DT_BAUHAUS_SLIDER_MAX_STOPS - 1.0);</a>
+<a name="ln1404">  for(int i = 0; i &lt; DT_BAUHAUS_SLIDER_MAX_STOPS; i++)</a>
+<a name="ln1405">  {</a>
+<a name="ln1406">    const float stop = i / (DT_BAUHAUS_SLIDER_MAX_STOPS - 1.0);</a>
+<a name="ln1407">    const double K = DT_IOP_LOWEST_TEMPERATURE + i * temp_step;</a>
+<a name="ln1408">    cmsCIEXYZ cmsXYZ = temperature_to_XYZ(K);</a>
+<a name="ln1409">    float sRGB[3], XYZ[3] = {cmsXYZ.X, cmsXYZ.Y, cmsXYZ.Z};</a>
+<a name="ln1410">    dt_XYZ_to_sRGB_clipped(XYZ, sRGB);</a>
+<a name="ln1411">    dt_bauhaus_slider_set_stop(g-&gt;scale_k, stop, sRGB[0], sRGB[1], sRGB[2]);</a>
+<a name="ln1412">  }</a>
+<a name="ln1413"> </a>
+<a name="ln1414">  dt_bauhaus_slider_set_stop(g-&gt;scale_tint, 0.0, 1.0, 0.0, 1.0);</a>
+<a name="ln1415">  dt_bauhaus_slider_set_stop(g-&gt;scale_tint, 1.0, 0.0, 1.0, 0.0);</a>
+<a name="ln1416">  dt_bauhaus_slider_set_stop(g-&gt;scale_r, 0.0, 0.0, 0.0, 0.0);</a>
+<a name="ln1417">  dt_bauhaus_slider_set_stop(g-&gt;scale_r, 1.0, 1.0, 0.0, 0.0);</a>
+<a name="ln1418">  dt_bauhaus_slider_set_stop(g-&gt;scale_g, 0.0, 0.0, 0.0, 0.0);</a>
+<a name="ln1419">  dt_bauhaus_slider_set_stop(g-&gt;scale_g, 1.0, 0.0, 1.0, 0.0);</a>
+<a name="ln1420">  dt_bauhaus_slider_set_stop(g-&gt;scale_b, 0.0, 0.0, 0.0, 0.0);</a>
+<a name="ln1421">  dt_bauhaus_slider_set_stop(g-&gt;scale_b, 1.0, 0.0, 0.0, 1.0);</a>
+<a name="ln1422">  dt_bauhaus_slider_set_stop(g-&gt;scale_g2, 0.0, 0.0, 0.0, 0.0);</a>
+<a name="ln1423">  dt_bauhaus_slider_set_stop(g-&gt;scale_g2, 1.0, 0.0, 1.0, 0.0);</a>
+<a name="ln1424">#endif</a>
+<a name="ln1425"> </a>
+<a name="ln1426">  dt_bauhaus_slider_set_format(g-&gt;scale_k, &quot;%.0fK&quot;);</a>
+<a name="ln1427">  dt_bauhaus_widget_set_label(g-&gt;scale_tint, NULL, _(&quot;tint&quot;));</a>
+<a name="ln1428">  dt_bauhaus_widget_set_label(g-&gt;scale_k, NULL, _(&quot;temperature&quot;));</a>
+<a name="ln1429"> </a>
+<a name="ln1430">  gtk_box_pack_start(GTK_BOX(g-&gt;box_enabled), g-&gt;scale_tint, TRUE, TRUE, 0);</a>
+<a name="ln1431">  gtk_box_pack_start(GTK_BOX(g-&gt;box_enabled), g-&gt;scale_k, TRUE, TRUE, 0);</a>
+<a name="ln1432">  gtk_box_pack_start(GTK_BOX(g-&gt;coeff_widgets), g-&gt;scale_r, TRUE, TRUE, 0);</a>
+<a name="ln1433">  gtk_box_pack_start(GTK_BOX(g-&gt;coeff_widgets), g-&gt;scale_g, TRUE, TRUE, 0);</a>
+<a name="ln1434">  gtk_box_pack_start(GTK_BOX(g-&gt;coeff_widgets), g-&gt;scale_b, TRUE, TRUE, 0);</a>
+<a name="ln1435">  gtk_box_pack_start(GTK_BOX(g-&gt;coeff_widgets), g-&gt;scale_g2, TRUE, TRUE, 0);</a>
+<a name="ln1436">  gtk_box_pack_start(GTK_BOX(g-&gt;box_enabled), g-&gt;coeff_widgets, TRUE, TRUE, 0);</a>
+<a name="ln1437">  gtk_widget_set_no_show_all(g-&gt;scale_g2, TRUE);</a>
+<a name="ln1438"> </a>
+<a name="ln1439">  gui_sliders_update(self);</a>
+<a name="ln1440"> </a>
+<a name="ln1441">  g-&gt;presets = dt_bauhaus_combobox_new(self);</a>
+<a name="ln1442">  dt_bauhaus_widget_set_label(g-&gt;presets, NULL, _(&quot;preset&quot;));</a>
+<a name="ln1443">  gtk_box_pack_start(GTK_BOX(g-&gt;box_enabled), g-&gt;presets, TRUE, TRUE, 0);</a>
+<a name="ln1444">  gtk_widget_set_tooltip_text(g-&gt;presets, _(&quot;choose white balance preset from camera&quot;));</a>
+<a name="ln1445"> </a>
+<a name="ln1446">  g-&gt;finetune = dt_bauhaus_slider_new_with_range(self, -9.0, 9.0, 1.0, 0.0, 0);</a>
+<a name="ln1447">  dt_bauhaus_widget_set_label(g-&gt;finetune, NULL, _(&quot;finetune&quot;));</a>
+<a name="ln1448">  dt_bauhaus_slider_set_format(g-&gt;finetune, _(&quot;%.0f mired&quot;));</a>
+<a name="ln1449">  // initially doesn't have fine tuning stuff (camera wb)</a>
+<a name="ln1450">  gtk_widget_set_sensitive(g-&gt;finetune, FALSE);</a>
+<a name="ln1451">  gtk_box_pack_start(GTK_BOX(g-&gt;box_enabled), g-&gt;finetune, TRUE, TRUE, 0);</a>
+<a name="ln1452">  gtk_widget_set_tooltip_text(g-&gt;finetune, _(&quot;fine tune white balance preset&quot;));</a>
+<a name="ln1453"> </a>
+<a name="ln1454">  gtk_widget_show_all(g-&gt;box_enabled);</a>
+<a name="ln1455">  gtk_stack_add_named(GTK_STACK(g-&gt;stack), g-&gt;box_enabled, &quot;enabled&quot;);</a>
+<a name="ln1456"> </a>
+<a name="ln1457">  g-&gt;label_disabled = gtk_label_new(_(&quot;white balance disabled for camera&quot;));</a>
+<a name="ln1458">  gtk_widget_set_halign(g-&gt;label_disabled, GTK_ALIGN_START);</a>
+<a name="ln1459"> </a>
+<a name="ln1460">  gtk_widget_show_all(g-&gt;label_disabled);</a>
+<a name="ln1461">  gtk_stack_add_named(GTK_STACK(g-&gt;stack), g-&gt;label_disabled, &quot;disabled&quot;);</a>
+<a name="ln1462"> </a>
+<a name="ln1463">  gtk_stack_set_visible_child_name(GTK_STACK(g-&gt;stack), self-&gt;hide_enable_button ? &quot;disabled&quot; : &quot;enabled&quot;);</a>
+<a name="ln1464"> </a>
+<a name="ln1465">  self-&gt;gui_update(self);</a>
+<a name="ln1466"> </a>
+<a name="ln1467">  g_signal_connect(G_OBJECT(g-&gt;scale_tint), &quot;value-changed&quot;, G_CALLBACK(tint_callback), self);</a>
+<a name="ln1468">  g_signal_connect(G_OBJECT(g-&gt;scale_k), &quot;value-changed&quot;, G_CALLBACK(temp_callback), self);</a>
+<a name="ln1469">  g_signal_connect(G_OBJECT(g-&gt;scale_r), &quot;value-changed&quot;, G_CALLBACK(rgb_callback), self);</a>
+<a name="ln1470">  g_signal_connect(G_OBJECT(g-&gt;scale_g), &quot;value-changed&quot;, G_CALLBACK(rgb_callback), self);</a>
+<a name="ln1471">  g_signal_connect(G_OBJECT(g-&gt;scale_b), &quot;value-changed&quot;, G_CALLBACK(rgb_callback), self);</a>
+<a name="ln1472">  g_signal_connect(G_OBJECT(g-&gt;scale_g2), &quot;value-changed&quot;, G_CALLBACK(rgb_callback), self);</a>
+<a name="ln1473">  g_signal_connect(G_OBJECT(g-&gt;presets), &quot;value-changed&quot;, G_CALLBACK(presets_changed), self);</a>
+<a name="ln1474">  g_signal_connect(G_OBJECT(g-&gt;finetune), &quot;value-changed&quot;, G_CALLBACK(finetune_changed), self);</a>
+<a name="ln1475">}</a>
+<a name="ln1476"> </a>
+<a name="ln1477">void gui_reset(struct dt_iop_module_t *self)</a>
+<a name="ln1478">{</a>
+<a name="ln1479">  gui_sliders_update(self);</a>
+<a name="ln1480">}</a>
+<a name="ln1481"> </a>
+<a name="ln1482">void gui_cleanup(struct dt_iop_module_t *self)</a>
+<a name="ln1483">{</a>
+<a name="ln1484">  self-&gt;request_color_pick = DT_REQUEST_COLORPICK_OFF;</a>
+<a name="ln1485">  free(self-&gt;gui_data);</a>
+<a name="ln1486">  self-&gt;gui_data = NULL;</a>
+<a name="ln1487">}</a>
+<a name="ln1488"> </a>
+<a name="ln1489">// modelines: These editor modelines have been set for all relevant files by tools/update_modelines.sh</a>
+<a name="ln1490">// vim: shiftwidth=2 expandtab tabstop=2 cindent</a>
+<a name="ln1491">// kate: tab-indents: off; indent-width 2; replace-tabs on; indent-mode cstyle; remove-trailing-spaces modified;</a>
+
+</code></pre>
+<div class="balloon" rel="791"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v512/" target="_blank">V512</a> A call of the 'memcmp' function will lead to underflow of the buffer 'p->coeffs'.</p></div>
+<div class="balloon" rel="791"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v512/" target="_blank">V512</a> A call of the 'memcmp' function will lead to underflow of the buffer 'fp->coeffs'.</p></div>
+<div class="balloon" rel="813"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v560/" target="_blank">V560</a> A part of conditional expression is always true: !found.</p></div>
+<div class="balloon" rel="857"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v560/" target="_blank">V560</a> A part of conditional expression is always true: !found.</p></div>
+<div class="balloon" rel="1095"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v522/" target="_blank">V522</a> There might be dereferencing of a potential null pointer 'gd'. Check lines: 1095, 1093.</p></div>
+<div class="balloon" rel="1264"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v547/" target="_blank">V547</a> Expression is always true.</p></div>
+<div class="balloon" rel="1383"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v522/" target="_blank">V522</a> There might be dereferencing of a potential null pointer 'g'. Check lines: 1383, 1374.</p></div>
+
+<link rel="stylesheet" href="highlight.css">
+<script src="highlight.pack.js"></script>
+<script src="highlightjs-line-numbers.js"></script>
+<script>hljs.initHighlightingOnLoad();</script>
+<script>hljs.initLineNumbersOnLoad();</script>
+<script>
+  $(document).ready(function() {
+      $('.balloon').each(function () {
+          var bl = $(this);
+          var line = bl.attr('rel');
+          var text = $('a[name="ln'+line+'"]').text();
+
+          var space_count = 0;
+          for(var i = 0; i<text.length; i++){
+              var char = text[i];
+              if((char !== ' ')&&(char !== '\t'))break;
+              if(char === '\t')space_count++;
+              space_count++;
+          }
+
+          bl.css('margin-left', space_count*8);
+          $('a[name="ln'+line+'"]').after(bl);
+      });
+
+      window.location = window.location;
+  });
+</script>
+</body>
+</html>

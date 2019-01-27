@@ -1,0 +1,436 @@
+
+<html>
+<head>
+  <link rel="stylesheet" href="../style.css"/>
+  <script src="../jquery-3.2.1.min.js"></script>
+</head>
+<body>
+<pre><code class = "cpp">
+<a name="ln1">/*</a>
+<a name="ln2"> *    This file is part of darktable,</a>
+<a name="ln3"> *    copyright (c) 2013 johannes hanika.</a>
+<a name="ln4"> *    copyright (c) 2015 tobias ellinghaus.</a>
+<a name="ln5"> *</a>
+<a name="ln6"> *    darktable is free software: you can redistribute it and/or modify</a>
+<a name="ln7"> *    it under the terms of the GNU General Public License as published by</a>
+<a name="ln8"> *    the Free Software Foundation, either version 3 of the License, or</a>
+<a name="ln9"> *    (at your option) any later version.</a>
+<a name="ln10"> *</a>
+<a name="ln11"> *    darktable is distributed in the hope that it will be useful,</a>
+<a name="ln12"> *    but WITHOUT ANY WARRANTY; without even the implied warranty of</a>
+<a name="ln13"> *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the</a>
+<a name="ln14"> *    GNU General Public License for more details.</a>
+<a name="ln15"> *</a>
+<a name="ln16"> *    You should have received a copy of the GNU General Public License</a>
+<a name="ln17"> *    along with darktable.  If not, see &lt;http://www.gnu.org/licenses/&gt;.</a>
+<a name="ln18"> */</a>
+<a name="ln19"> </a>
+<a name="ln20">#include &quot;common/noiseprofiles.h&quot;</a>
+<a name="ln21">#include &quot;common/file_location.h&quot;</a>
+<a name="ln22">#include &quot;control/control.h&quot;</a>
+<a name="ln23"> </a>
+<a name="ln24">// bump this when the noiseprofiles are getting a differen layout or meaning (raw-raw data, ...)</a>
+<a name="ln25">#define DT_NOISE_PROFILE_VERSION 0</a>
+<a name="ln26"> </a>
+<a name="ln27">const dt_noiseprofile_t dt_noiseprofile_generic = {N_(&quot;generic poissonian&quot;), &quot;&quot;, &quot;&quot;, 0, {0.0001f, 0.0001f, 0.0001}, {0.0f, 0.0f, 0.0f}};</a>
+<a name="ln28"> </a>
+<a name="ln29">static gboolean dt_noiseprofile_verify(JsonParser *parser);</a>
+<a name="ln30"> </a>
+<a name="ln31">JsonParser *dt_noiseprofile_init(const char *alternative)</a>
+<a name="ln32">{</a>
+<a name="ln33">  GError *error = NULL;</a>
+<a name="ln34">  char filename[PATH_MAX] = { 0 };</a>
+<a name="ln35"> </a>
+<a name="ln36">  if(alternative == NULL)</a>
+<a name="ln37">  {</a>
+<a name="ln38">    // TODO: shall we look for profiles in the user config dir?</a>
+<a name="ln39">    char datadir[PATH_MAX] = { 0 };</a>
+<a name="ln40">    dt_loc_get_datadir(datadir, sizeof(datadir));</a>
+<a name="ln41">    snprintf(filename, sizeof(filename), &quot;%s/%s&quot;, datadir, &quot;noiseprofiles.json&quot;);</a>
+<a name="ln42">  }</a>
+<a name="ln43">  else</a>
+<a name="ln44">    snprintf(filename, sizeof(filename), &quot;%s&quot;, alternative);</a>
+<a name="ln45"> </a>
+<a name="ln46">  dt_print(DT_DEBUG_CONTROL, &quot;[noiseprofile] loading noiseprofiles from `%s'\n&quot;, filename);</a>
+<a name="ln47">  if(!g_file_test(filename, G_FILE_TEST_EXISTS)) return NULL;</a>
+<a name="ln48"> </a>
+<a name="ln49">  // TODO: shall we cache the content? for now this looks fast enough(TM)</a>
+<a name="ln50">  JsonParser *parser = json_parser_new();</a>
+<a name="ln51">  if(!json_parser_load_from_file(parser, filename, &amp;error))</a>
+<a name="ln52">  {</a>
+<a name="ln53">    fprintf(stderr, &quot;[noiseprofile] error: parsing json from `%s' failed\n%s\n&quot;, filename, error-&gt;message);</a>
+<a name="ln54">    g_error_free(error);</a>
+<a name="ln55">    g_object_unref(parser);</a>
+<a name="ln56">    return NULL;</a>
+<a name="ln57">  }</a>
+<a name="ln58"> </a>
+<a name="ln59">  // run over the file once to verify that it is sane</a>
+<a name="ln60">  if(!dt_noiseprofile_verify(parser))</a>
+<a name="ln61">  {</a>
+<a name="ln62">    dt_control_log(_(&quot;noiseprofile file `%s' is not valid&quot;), filename);</a>
+<a name="ln63">    fprintf(stderr, &quot;[noiseprofile] error: `%s' is not a valid noiseprofile file. run with -d control for details\n&quot;, filename);</a>
+<a name="ln64">    g_object_unref(parser);</a>
+<a name="ln65">    return NULL;</a>
+<a name="ln66">  }</a>
+<a name="ln67"> </a>
+<a name="ln68">  return parser;</a>
+<a name="ln69">}</a>
+<a name="ln70"> </a>
+<a name="ln71">int is_member(gchar** names, char* name)</a>
+<a name="ln72">{</a>
+<a name="ln73">  while(*names)</a>
+<a name="ln74">  {</a>
+<a name="ln75">    if(!g_strcmp0(*names, name))</a>
+<a name="ln76">      return 1;</a>
+<a name="ln77">    names++;</a>
+<a name="ln78">  }</a>
+<a name="ln79">  return 0;</a>
+<a name="ln80">}</a>
+<a name="ln81"> </a>
+<a name="ln82">static gint _sort_by_iso(gconstpointer a, gconstpointer b)</a>
+<a name="ln83">{</a>
+<a name="ln84">  const dt_noiseprofile_t *profile_a = (dt_noiseprofile_t *)a;</a>
+<a name="ln85">  const dt_noiseprofile_t *profile_b = (dt_noiseprofile_t *)b;</a>
+<a name="ln86"> </a>
+<a name="ln87">  return profile_a-&gt;iso - profile_b-&gt;iso;</a>
+<a name="ln88">}</a>
+<a name="ln89"> </a>
+<a name="ln90">#define _ERROR(...)     {\</a>
+<a name="ln91">                          dt_print(DT_DEBUG_CONTROL, &quot;[noiseprofile] error: &quot; );\</a>
+<a name="ln92">                          dt_print(DT_DEBUG_CONTROL, __VA_ARGS__);\</a>
+<a name="ln93">                          dt_print(DT_DEBUG_CONTROL, &quot;\n&quot;);\</a>
+<a name="ln94">                          valid = FALSE;\</a>
+<a name="ln95">                          goto end;\</a>
+<a name="ln96">                        }</a>
+<a name="ln97"> </a>
+<a name="ln98">static gboolean dt_noiseprofile_verify(JsonParser *parser)</a>
+<a name="ln99">{</a>
+<a name="ln100">  JsonReader *reader = NULL;</a>
+<a name="ln101">  gboolean valid = TRUE;</a>
+<a name="ln102"> </a>
+<a name="ln103">  dt_print(DT_DEBUG_CONTROL, &quot;[noiseprofile] verifying noiseprofile file\n&quot;);</a>
+<a name="ln104"> </a>
+<a name="ln105">  JsonNode *root = json_parser_get_root(parser);</a>
+<a name="ln106">  if(!root) _ERROR(&quot;can't get the root node&quot;);</a>
+<a name="ln107"> </a>
+<a name="ln108">  reader = json_reader_new(root);</a>
+<a name="ln109"> </a>
+<a name="ln110">  if(!json_reader_read_member(reader, &quot;version&quot;)) _ERROR(&quot;can't find file version.&quot;);</a>
+<a name="ln111"> </a>
+<a name="ln112">  // check the file version</a>
+<a name="ln113">  const int version = json_reader_get_int_value(reader);</a>
+<a name="ln114">  json_reader_end_member(reader);</a>
+<a name="ln115"> </a>
+<a name="ln116">  if(version != DT_NOISE_PROFILE_VERSION) _ERROR(&quot;file version is not what this code understands&quot;);</a>
+<a name="ln117"> </a>
+<a name="ln118">  if(!json_reader_read_member(reader, &quot;noiseprofiles&quot;)) _ERROR(&quot;can't find `noiseprofiles' entry.&quot;);</a>
+<a name="ln119"> </a>
+<a name="ln120">  if(!json_reader_is_array(reader)) _ERROR(&quot;`noiseprofiles' is supposed to be an array&quot;);</a>
+<a name="ln121"> </a>
+<a name="ln122">  size_t n_profiles_total = 0;</a>
+<a name="ln123"> </a>
+<a name="ln124">  // go through all makers</a>
+<a name="ln125">  const int n_makers = json_reader_count_elements(reader);</a>
+<a name="ln126">  dt_print(DT_DEBUG_CONTROL, &quot;[noiseprofile] found %d makers\n&quot;, n_makers);</a>
+<a name="ln127">  for(int i = 0; i &lt; n_makers; i++)</a>
+<a name="ln128">  {</a>
+<a name="ln129">    if(!json_reader_read_element(reader, i)) _ERROR(&quot;can't access maker at position %d / %d&quot;, i+1, n_makers);</a>
+<a name="ln130"> </a>
+<a name="ln131">    if(!json_reader_read_member(reader, &quot;maker&quot;)) _ERROR(&quot;missing `maker`&quot;);</a>
+<a name="ln132"> </a>
+<a name="ln133">    dt_print(DT_DEBUG_CONTROL, &quot;[noiseprofile] found maker `%s'\n&quot;, json_reader_get_string_value(reader));</a>
+<a name="ln134">    // go through all models and check those</a>
+<a name="ln135">    json_reader_end_member(reader);</a>
+<a name="ln136"> </a>
+<a name="ln137">    if(!json_reader_read_member(reader, &quot;models&quot;)) _ERROR(&quot;missing `models`&quot;);</a>
+<a name="ln138"> </a>
+<a name="ln139">    const int n_models = json_reader_count_elements(reader);</a>
+<a name="ln140">    dt_print(DT_DEBUG_CONTROL, &quot;[noiseprofile] found %d models\n&quot;, n_models);</a>
+<a name="ln141">    n_profiles_total += n_models;</a>
+<a name="ln142">    for(int j = 0; j &lt; n_models; j++)</a>
+<a name="ln143">    {</a>
+<a name="ln144">      if(!json_reader_read_element(reader, j)) _ERROR(&quot;can't access model at position %d / %d&quot;, j+1, n_models);</a>
+<a name="ln145"> </a>
+<a name="ln146">      if(!json_reader_read_member(reader, &quot;model&quot;)) _ERROR(&quot;missing `model`&quot;);</a>
+<a name="ln147"> </a>
+<a name="ln148">      dt_print(DT_DEBUG_CONTROL, &quot;[noiseprofile] found %s\n&quot;, json_reader_get_string_value(reader));</a>
+<a name="ln149">      json_reader_end_member(reader);</a>
+<a name="ln150"> </a>
+<a name="ln151">      if(!json_reader_read_member(reader, &quot;profiles&quot;)) _ERROR(&quot;missing `profiles`&quot;);</a>
+<a name="ln152"> </a>
+<a name="ln153">      const int n_profiles = json_reader_count_elements(reader);</a>
+<a name="ln154">      dt_print(DT_DEBUG_CONTROL, &quot;[noiseprofile] found %d profiles\n&quot;, n_profiles);</a>
+<a name="ln155">      for(int k = 0; k &lt; n_profiles; k++)</a>
+<a name="ln156">      {</a>
+<a name="ln157">        if(!json_reader_read_element(reader, k)) _ERROR(&quot;can't access profile at position %d / %d&quot;, k+1, n_profiles);</a>
+<a name="ln158"> </a>
+<a name="ln159">        gchar** member_names = json_reader_list_members(reader);</a>
+<a name="ln160"> </a>
+<a name="ln161">        // name</a>
+<a name="ln162">        if(!is_member(member_names, &quot;name&quot;))</a>
+<a name="ln163">        {</a>
+<a name="ln164">          g_strfreev(member_names);</a>
+<a name="ln165">          _ERROR(&quot;missing `name`&quot;);</a>
+<a name="ln166">        }</a>
+<a name="ln167"> </a>
+<a name="ln168">        // iso</a>
+<a name="ln169">        if(!is_member(member_names, &quot;iso&quot;))</a>
+<a name="ln170">        {</a>
+<a name="ln171">          g_strfreev(member_names);</a>
+<a name="ln172">          _ERROR(&quot;missing `iso`&quot;);</a>
+<a name="ln173">        }</a>
+<a name="ln174"> </a>
+<a name="ln175">        // a</a>
+<a name="ln176">        if(!is_member(member_names, &quot;a&quot;))</a>
+<a name="ln177">        {</a>
+<a name="ln178">          g_strfreev(member_names);</a>
+<a name="ln179">          _ERROR(&quot;missing `a`&quot;);</a>
+<a name="ln180">        }</a>
+<a name="ln181">        json_reader_read_member(reader, &quot;a&quot;);</a>
+<a name="ln182">        if(json_reader_count_elements(reader) != 3)</a>
+<a name="ln183">        {</a>
+<a name="ln184">          g_strfreev(member_names);</a>
+<a name="ln185">          _ERROR(&quot;`a` with size != 3&quot;);</a>
+<a name="ln186">        }</a>
+<a name="ln187">        json_reader_end_member(reader);</a>
+<a name="ln188"> </a>
+<a name="ln189">        // b</a>
+<a name="ln190">        if(!is_member(member_names, &quot;b&quot;))</a>
+<a name="ln191">        {</a>
+<a name="ln192">          g_strfreev(member_names);</a>
+<a name="ln193">          _ERROR(&quot;missing `b`&quot;);</a>
+<a name="ln194">        }</a>
+<a name="ln195">        json_reader_read_member(reader, &quot;b&quot;);</a>
+<a name="ln196">        if(json_reader_count_elements(reader) != 3)</a>
+<a name="ln197">        {</a>
+<a name="ln198">          g_strfreev(member_names);</a>
+<a name="ln199">          _ERROR(&quot;`b` with size != 3&quot;);</a>
+<a name="ln200">        }</a>
+<a name="ln201">        json_reader_end_member(reader);</a>
+<a name="ln202"> </a>
+<a name="ln203">        json_reader_end_element(reader);</a>
+<a name="ln204"> </a>
+<a name="ln205">        g_strfreev(member_names);</a>
+<a name="ln206">      } // profiles</a>
+<a name="ln207"> </a>
+<a name="ln208">      json_reader_end_member(reader);</a>
+<a name="ln209">      json_reader_end_element(reader);</a>
+<a name="ln210">    } // models</a>
+<a name="ln211"> </a>
+<a name="ln212">    json_reader_end_member(reader);</a>
+<a name="ln213">    json_reader_end_element(reader);</a>
+<a name="ln214">  } // makers</a>
+<a name="ln215"> </a>
+<a name="ln216">  json_reader_end_member(reader);</a>
+<a name="ln217"> </a>
+<a name="ln218">  dt_print(DT_DEBUG_CONTROL, &quot;[noiseprofile] verifying noiseprofile completed\n&quot;);</a>
+<a name="ln219">  dt_print(DT_DEBUG_CONTROL, &quot;[noiseprofile] found %zu profiles total\n&quot;, n_profiles_total);</a>
+<a name="ln220"> </a>
+<a name="ln221">end:</a>
+<a name="ln222">  if(reader) g_object_unref(reader);</a>
+<a name="ln223">  return valid;</a>
+<a name="ln224">}</a>
+<a name="ln225">#undef _ERROR</a>
+<a name="ln226"> </a>
+<a name="ln227">GList *dt_noiseprofile_get_matching(const dt_image_t *cimg)</a>
+<a name="ln228">{</a>
+<a name="ln229">  JsonParser *parser = darktable.noiseprofile_parser;</a>
+<a name="ln230">  JsonReader *reader = NULL;</a>
+<a name="ln231">  GList *result = NULL;</a>
+<a name="ln232"> </a>
+<a name="ln233">  if(!parser) goto end;</a>
+<a name="ln234"> </a>
+<a name="ln235">  dt_print(DT_DEBUG_CONTROL, &quot;[noiseprofile] looking for maker `%s', model `%s'\n&quot;, cimg-&gt;camera_maker, cimg-&gt;camera_model);</a>
+<a name="ln236"> </a>
+<a name="ln237">  JsonNode *root = json_parser_get_root(parser);</a>
+<a name="ln238"> </a>
+<a name="ln239">  reader = json_reader_new(root);</a>
+<a name="ln240"> </a>
+<a name="ln241">  json_reader_read_member(reader, &quot;noiseprofiles&quot;);</a>
+<a name="ln242"> </a>
+<a name="ln243">  // go through all makers</a>
+<a name="ln244">  const int n_makers = json_reader_count_elements(reader);</a>
+<a name="ln245">  dt_print(DT_DEBUG_CONTROL, &quot;[noiseprofile] found %d makers\n&quot;, n_makers);</a>
+<a name="ln246">  for(int i = 0; i &lt; n_makers; i++)</a>
+<a name="ln247">  {</a>
+<a name="ln248">    json_reader_read_element(reader, i);</a>
+<a name="ln249"> </a>
+<a name="ln250">    json_reader_read_member(reader, &quot;maker&quot;);</a>
+<a name="ln251"> </a>
+<a name="ln252">    if(g_strstr_len(cimg-&gt;camera_maker, -1, json_reader_get_string_value(reader)))</a>
+<a name="ln253">    {</a>
+<a name="ln254">      dt_print(DT_DEBUG_CONTROL, &quot;[noiseprofile] found `%s' as `%s'\n&quot;, cimg-&gt;camera_maker, json_reader_get_string_value(reader));</a>
+<a name="ln255">      // go through all models and check those</a>
+<a name="ln256">      json_reader_end_member(reader);</a>
+<a name="ln257"> </a>
+<a name="ln258">      json_reader_read_member(reader, &quot;models&quot;);</a>
+<a name="ln259"> </a>
+<a name="ln260">      const int n_models = json_reader_count_elements(reader);</a>
+<a name="ln261">      dt_print(DT_DEBUG_CONTROL, &quot;[noiseprofile] found %d models\n&quot;, n_models);</a>
+<a name="ln262">      for(int j = 0; j &lt; n_models; j++)</a>
+<a name="ln263">      {</a>
+<a name="ln264">        json_reader_read_element(reader, j);</a>
+<a name="ln265"> </a>
+<a name="ln266">        json_reader_read_member(reader, &quot;model&quot;);</a>
+<a name="ln267"> </a>
+<a name="ln268">        if(!g_strcmp0(cimg-&gt;camera_model, json_reader_get_string_value(reader)))</a>
+<a name="ln269">        {</a>
+<a name="ln270">          dt_print(DT_DEBUG_CONTROL, &quot;[noiseprofile] found %s\n&quot;, cimg-&gt;camera_model);</a>
+<a name="ln271">          // we got a match, return at most bufsize elements</a>
+<a name="ln272">          json_reader_end_member(reader);</a>
+<a name="ln273"> </a>
+<a name="ln274">          json_reader_read_member(reader, &quot;profiles&quot;);</a>
+<a name="ln275"> </a>
+<a name="ln276">          const int n_profiles = json_reader_count_elements(reader);</a>
+<a name="ln277">          dt_print(DT_DEBUG_CONTROL, &quot;[noiseprofile] found %d profiles\n&quot;, n_profiles);</a>
+<a name="ln278">          for(int k = 0; k &lt; n_profiles; k++)</a>
+<a name="ln279">          {</a>
+<a name="ln280">            dt_noiseprofile_t tmp_profile = { 0 };</a>
+<a name="ln281"> </a>
+<a name="ln282">            json_reader_read_element(reader, k);</a>
+<a name="ln283"> </a>
+<a name="ln284">            gchar** member_names = json_reader_list_members(reader);</a>
+<a name="ln285"> </a>
+<a name="ln286">            // do we want to skip this entry?</a>
+<a name="ln287">            if(is_member(member_names, &quot;skip&quot;))</a>
+<a name="ln288">            {</a>
+<a name="ln289">              json_reader_read_member(reader, &quot;skip&quot;);</a>
+<a name="ln290">              gboolean skip = json_reader_get_boolean_value(reader);</a>
+<a name="ln291">              json_reader_end_member(reader);</a>
+<a name="ln292">              if(skip)</a>
+<a name="ln293">              {</a>
+<a name="ln294">                json_reader_end_element(reader);</a>
+<a name="ln295">                g_strfreev(member_names);</a>
+<a name="ln296">                continue;</a>
+<a name="ln297">              }</a>
+<a name="ln298">            }</a>
+<a name="ln299"> </a>
+<a name="ln300">            // maker</a>
+<a name="ln301">            tmp_profile.maker = g_strdup(cimg-&gt;camera_maker);</a>
+<a name="ln302"> </a>
+<a name="ln303">            // model</a>
+<a name="ln304">            tmp_profile.model = g_strdup(cimg-&gt;camera_model);</a>
+<a name="ln305"> </a>
+<a name="ln306">            // name</a>
+<a name="ln307">            json_reader_read_member(reader, &quot;name&quot;);</a>
+<a name="ln308">            tmp_profile.name = g_strdup(json_reader_get_string_value(reader));</a>
+<a name="ln309">            json_reader_end_member(reader);</a>
+<a name="ln310"> </a>
+<a name="ln311">            // iso</a>
+<a name="ln312">            json_reader_read_member(reader, &quot;iso&quot;);</a>
+<a name="ln313">            tmp_profile.iso = json_reader_get_double_value(reader);</a>
+<a name="ln314">            json_reader_end_member(reader);</a>
+<a name="ln315"> </a>
+<a name="ln316">            // a</a>
+<a name="ln317">            json_reader_read_member(reader, &quot;a&quot;);</a>
+<a name="ln318">            for(int a = 0; a &lt; 3; a++)</a>
+<a name="ln319">            {</a>
+<a name="ln320">              json_reader_read_element(reader, a);</a>
+<a name="ln321">              tmp_profile.a[a] = json_reader_get_double_value(reader);</a>
+<a name="ln322">              json_reader_end_element(reader);</a>
+<a name="ln323">            }</a>
+<a name="ln324">            json_reader_end_member(reader);</a>
+<a name="ln325"> </a>
+<a name="ln326">            // b</a>
+<a name="ln327">            json_reader_read_member(reader, &quot;b&quot;);</a>
+<a name="ln328">            for(int b = 0; b &lt; 3; b++)</a>
+<a name="ln329">            {</a>
+<a name="ln330">              json_reader_read_element(reader, b);</a>
+<a name="ln331">              tmp_profile.b[b] = json_reader_get_double_value(reader);</a>
+<a name="ln332">              json_reader_end_element(reader);</a>
+<a name="ln333">            }</a>
+<a name="ln334">            json_reader_end_member(reader);</a>
+<a name="ln335"> </a>
+<a name="ln336">            json_reader_end_element(reader);</a>
+<a name="ln337"> </a>
+<a name="ln338">            // everything worked out, add tmp_profile to result</a>
+<a name="ln339">            dt_noiseprofile_t *new_profile = (dt_noiseprofile_t *)malloc(sizeof(dt_noiseprofile_t));</a>
+<a name="ln340">            *new_profile = tmp_profile;</a>
+<a name="ln341">            result = g_list_append(result, new_profile);</a>
+<a name="ln342"> </a>
+<a name="ln343">            g_strfreev(member_names);</a>
+<a name="ln344">          } // profiles</a>
+<a name="ln345"> </a>
+<a name="ln346">          goto end;</a>
+<a name="ln347">        }</a>
+<a name="ln348"> </a>
+<a name="ln349">        json_reader_end_member(reader);</a>
+<a name="ln350">        json_reader_end_element(reader);</a>
+<a name="ln351">      } // models</a>
+<a name="ln352">    }</a>
+<a name="ln353"> </a>
+<a name="ln354">    json_reader_end_member(reader);</a>
+<a name="ln355">    json_reader_end_element(reader);</a>
+<a name="ln356">  } // makers</a>
+<a name="ln357"> </a>
+<a name="ln358">  json_reader_end_member(reader);</a>
+<a name="ln359"> </a>
+<a name="ln360">end:</a>
+<a name="ln361">  if(reader) g_object_unref(reader);</a>
+<a name="ln362">  if(result) result = g_list_sort(result, _sort_by_iso);</a>
+<a name="ln363">  return result;</a>
+<a name="ln364">}</a>
+<a name="ln365"> </a>
+<a name="ln366">void dt_noiseprofile_free(gpointer data)</a>
+<a name="ln367">{</a>
+<a name="ln368">  dt_noiseprofile_t *profile = (dt_noiseprofile_t *)data;</a>
+<a name="ln369">  g_free(profile-&gt;name);</a>
+<a name="ln370">  g_free(profile-&gt;maker);</a>
+<a name="ln371">  g_free(profile-&gt;model);</a>
+<a name="ln372">  free(profile);</a>
+<a name="ln373">}</a>
+<a name="ln374"> </a>
+<a name="ln375">void dt_noiseprofile_interpolate(</a>
+<a name="ln376">  const dt_noiseprofile_t *const p1,  // the smaller iso</a>
+<a name="ln377">  const dt_noiseprofile_t *const p2,  // the larger iso (can't be == iso1)</a>
+<a name="ln378">  dt_noiseprofile_t *out)             // has iso initialized</a>
+<a name="ln379">{</a>
+<a name="ln380">  // stupid linear interpolation.</a>
+<a name="ln381">  // to be confirmed for gaussian part.</a>
+<a name="ln382">  const float t = CLAMP(</a>
+<a name="ln383">    (float)(out-&gt;iso - p1-&gt;iso) / (float)(p2-&gt;iso - p1-&gt;iso),</a>
+<a name="ln384">                        0.0f, 1.0f);</a>
+<a name="ln385">  for(int k=0; k&lt;3; k++)</a>
+<a name="ln386">  {</a>
+<a name="ln387">    out-&gt;a[k] = (1.0f-t)*p1-&gt;a[k] + t*p2-&gt;a[k];</a>
+<a name="ln388">    out-&gt;b[k] = (1.0f-t)*p1-&gt;b[k] + t*p2-&gt;b[k];</a>
+<a name="ln389">  }</a>
+<a name="ln390">}</a>
+<a name="ln391"> </a>
+<a name="ln392"> </a>
+<a name="ln393">// modelines: These editor modelines have been set for all relevant files by tools/update_modelines.sh</a>
+<a name="ln394">// vim: shiftwidth=2 expandtab tabstop=2 cindent</a>
+<a name="ln395">// kate: tab-indents: off; indent-width 2; replace-tabs on; indent-mode cstyle; remove-trailing-spaces modified;</a>
+
+</code></pre>
+<div class="balloon" rel="340"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v522/" target="_blank">V522</a> There might be dereferencing of a potential null pointer 'new_profile'. Check lines: 340, 339.</p></div>
+
+<link rel="stylesheet" href="highlight.css">
+<script src="highlight.pack.js"></script>
+<script src="highlightjs-line-numbers.js"></script>
+<script>hljs.initHighlightingOnLoad();</script>
+<script>hljs.initLineNumbersOnLoad();</script>
+<script>
+  $(document).ready(function() {
+      $('.balloon').each(function () {
+          var bl = $(this);
+          var line = bl.attr('rel');
+          var text = $('a[name="ln'+line+'"]').text();
+
+          var space_count = 0;
+          for(var i = 0; i<text.length; i++){
+              var char = text[i];
+              if((char !== ' ')&&(char !== '\t'))break;
+              if(char === '\t')space_count++;
+              space_count++;
+          }
+
+          bl.css('margin-left', space_count*8);
+          $('a[name="ln'+line+'"]').after(bl);
+      });
+
+      window.location = window.location;
+  });
+</script>
+</body>
+</html>

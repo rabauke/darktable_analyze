@@ -1,0 +1,585 @@
+
+<html>
+<head>
+  <link rel="stylesheet" href="../style.css"/>
+  <script src="../jquery-3.2.1.min.js"></script>
+</head>
+<body>
+<pre><code class = "cpp">
+<a name="ln1">/*</a>
+<a name="ln2">    RawSpeed - RAW file decoder.</a>
+<a name="ln3"> </a>
+<a name="ln4">    Copyright (C) 2009-2014 Klaus Post</a>
+<a name="ln5"> </a>
+<a name="ln6">    This library is free software; you can redistribute it and/or</a>
+<a name="ln7">    modify it under the terms of the GNU Lesser General Public</a>
+<a name="ln8">    License as published by the Free Software Foundation; either</a>
+<a name="ln9">    version 2 of the License, or (at your option) any later version.</a>
+<a name="ln10"> </a>
+<a name="ln11">    This library is distributed in the hope that it will be useful,</a>
+<a name="ln12">    but WITHOUT ANY WARRANTY; without even the implied warranty of</a>
+<a name="ln13">    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU</a>
+<a name="ln14">    Lesser General Public License for more details.</a>
+<a name="ln15"> </a>
+<a name="ln16">    You should have received a copy of the GNU Lesser General Public</a>
+<a name="ln17">    License along with this library; if not, write to the Free Software</a>
+<a name="ln18">    Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA</a>
+<a name="ln19">*/</a>
+<a name="ln20"> </a>
+<a name="ln21">#include &quot;decompressors/NikonDecompressor.h&quot;</a>
+<a name="ln22">#include &quot;common/Common.h&quot;                // for uint32, clampBits, ushort16</a>
+<a name="ln23">#include &quot;common/Point.h&quot;                 // for iPoint2D</a>
+<a name="ln24">#include &quot;common/RawImage.h&quot;              // for RawImage, RawImageData</a>
+<a name="ln25">#include &quot;decoders/RawDecoderException.h&quot; // for ThrowRDE</a>
+<a name="ln26">#include &quot;decompressors/HuffmanTable.h&quot;   // for HuffmanTable</a>
+<a name="ln27">#include &quot;io/BitPumpMSB.h&quot;                // for BitPumpMSB, BitStream&lt;&gt;::f...</a>
+<a name="ln28">#include &quot;io/Buffer.h&quot;                    // for Buffer</a>
+<a name="ln29">#include &quot;io/ByteStream.h&quot;                // for ByteStream</a>
+<a name="ln30">#include &lt;cassert&gt;                        // for assert</a>
+<a name="ln31">#include &lt;cstdio&gt;                         // for size_t</a>
+<a name="ln32">#include &lt;vector&gt;                         // for vector</a>
+<a name="ln33"> </a>
+<a name="ln34">namespace rawspeed {</a>
+<a name="ln35"> </a>
+<a name="ln36">const std::array&lt;std::array&lt;std::array&lt;uchar8, 16&gt;, 2&gt;, 6&gt;</a>
+<a name="ln37">    NikonDecompressor::nikon_tree = {{</a>
+<a name="ln38">        {{/* 12-bit lossy */</a>
+<a name="ln39">          {0, 1, 5, 1, 1, 1, 1, 1, 1, 2, 0, 0, 0, 0, 0, 0},</a>
+<a name="ln40">          {5, 4, 3, 6, 2, 7, 1, 0, 8, 9, 11, 10, 12}}},</a>
+<a name="ln41">        {{/* 12-bit lossy after split */</a>
+<a name="ln42">          {0, 1, 5, 1, 1, 1, 1, 1, 1, 2, 0, 0, 0, 0, 0, 0},</a>
+<a name="ln43">          {0x39, 0x5a, 0x38, 0x27, 0x16, 5, 4, 3, 2, 1, 0, 11, 12, 12}}},</a>
+<a name="ln44">        {{/* 12-bit lossless */</a>
+<a name="ln45">          {0, 1, 4, 2, 3, 1, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0},</a>
+<a name="ln46">          {5, 4, 6, 3, 7, 2, 8, 1, 9, 0, 10, 11, 12}}},</a>
+<a name="ln47">        {{/* 14-bit lossy */</a>
+<a name="ln48">          {0, 1, 4, 3, 1, 1, 1, 1, 1, 2, 0, 0, 0, 0, 0, 0},</a>
+<a name="ln49">          {5, 6, 4, 7, 8, 3, 9, 2, 1, 0, 10, 11, 12, 13, 14}}},</a>
+<a name="ln50">        {{/* 14-bit lossy after split */</a>
+<a name="ln51">          {0, 1, 5, 1, 1, 1, 1, 1, 1, 1, 2, 0, 0, 0, 0, 0},</a>
+<a name="ln52">          {8, 0x5c, 0x4b, 0x3a, 0x29, 7, 6, 5, 4, 3, 2, 1, 0, 13, 14}}},</a>
+<a name="ln53">        {{/* 14-bit lossless */</a>
+<a name="ln54">          {0, 1, 4, 2, 2, 3, 1, 2, 0, 0, 0, 0, 0, 0, 0, 0},</a>
+<a name="ln55">          {7, 6, 8, 5, 9, 4, 10, 3, 11, 12, 2, 0, 1, 13, 14}}},</a>
+<a name="ln56">    }};</a>
+<a name="ln57"> </a>
+<a name="ln58">namespace {</a>
+<a name="ln59"> </a>
+<a name="ln60">const std::array&lt;uint32, 32&gt; bitMask = {</a>
+<a name="ln61">    {0xffffffff, 0x7fffffff, 0x3fffffff, 0x1fffffff, 0x0fffffff, 0x07ffffff,</a>
+<a name="ln62">     0x03ffffff, 0x01ffffff, 0x00ffffff, 0x007fffff, 0x003fffff, 0x001fffff,</a>
+<a name="ln63">     0x000fffff, 0x0007ffff, 0x0003ffff, 0x0001ffff, 0x0000ffff, 0x00007fff,</a>
+<a name="ln64">     0x00003fff, 0x00001fff, 0x00000fff, 0x000007ff, 0x000003ff, 0x000001ff,</a>
+<a name="ln65">     0x000000ff, 0x0000007f, 0x0000003f, 0x0000001f, 0x0000000f, 0x00000007,</a>
+<a name="ln66">     0x00000003, 0x00000001}};</a>
+<a name="ln67"> </a>
+<a name="ln68">class NikonLASDecompressor {</a>
+<a name="ln69">  bool mUseBigtable = true;</a>
+<a name="ln70">  bool mDNGCompatible = false;</a>
+<a name="ln71"> </a>
+<a name="ln72">  struct HuffmanTable {</a>
+<a name="ln73">    /*</a>
+<a name="ln74">     * These two fields directly represent the contents of a JPEG DHT</a>
+<a name="ln75">     * marker</a>
+<a name="ln76">     */</a>
+<a name="ln77">    std::array&lt;uint32, 17&gt; bits;</a>
+<a name="ln78">    std::array&lt;uint32, 256&gt; huffval;</a>
+<a name="ln79"> </a>
+<a name="ln80">    /*</a>
+<a name="ln81">     * The remaining fields are computed from the above to allow more</a>
+<a name="ln82">     * efficient coding and decoding.  These fields should be considered</a>
+<a name="ln83">     * private to the Huffman compression &amp; decompression modules.</a>
+<a name="ln84">     */</a>
+<a name="ln85"> </a>
+<a name="ln86">    std::array&lt;ushort16, 17&gt; mincode;</a>
+<a name="ln87">    std::array&lt;int, 18&gt; maxcode;</a>
+<a name="ln88">    std::array&lt;short, 17&gt; valptr;</a>
+<a name="ln89">    std::array&lt;uint32, 256&gt; numbits;</a>
+<a name="ln90">    std::vector&lt;int&gt; bigTable;</a>
+<a name="ln91">    bool initialized;</a>
+<a name="ln92">  } dctbl1;</a>
+<a name="ln93"> </a>
+<a name="ln94">  void createHuffmanTable() {</a>
+<a name="ln95">    int p;</a>
+<a name="ln96">    int i;</a>
+<a name="ln97">    int l;</a>
+<a name="ln98">    int lastp;</a>
+<a name="ln99">    int si;</a>
+<a name="ln100">    std::array&lt;char, 257&gt; huffsize;</a>
+<a name="ln101">    std::array&lt;ushort16, 257&gt; huffcode;</a>
+<a name="ln102">    ushort16 code;</a>
+<a name="ln103">    int size;</a>
+<a name="ln104">    int value;</a>
+<a name="ln105">    int ll;</a>
+<a name="ln106">    int ul;</a>
+<a name="ln107"> </a>
+<a name="ln108">    /*</a>
+<a name="ln109">     * Figure C.1: make table of Huffman code length for each symbol</a>
+<a name="ln110">     * Note that this is in code-length order.</a>
+<a name="ln111">     */</a>
+<a name="ln112">    p = 0;</a>
+<a name="ln113">    for (l = 1; l &lt;= 16; l++) {</a>
+<a name="ln114">      for (i = 1; i &lt;= static_cast&lt;int&gt;(dctbl1.bits[l]); i++) {</a>
+<a name="ln115">        huffsize[p++] = static_cast&lt;char&gt;(l);</a>
+<a name="ln116">        if (p &gt; 256)</a>
+<a name="ln117">          ThrowRDE(&quot;LJpegDecompressor::createHuffmanTable: Code length too &quot;</a>
+<a name="ln118">                   &quot;long. Corrupt data.&quot;);</a>
+<a name="ln119">      }</a>
+<a name="ln120">    }</a>
+<a name="ln121">    huffsize[p] = 0;</a>
+<a name="ln122">    lastp = p;</a>
+<a name="ln123"> </a>
+<a name="ln124">    /*</a>
+<a name="ln125">     * Figure C.2: generate the codes themselves</a>
+<a name="ln126">     * Note that this is in code-length order.</a>
+<a name="ln127">     */</a>
+<a name="ln128">    code = 0;</a>
+<a name="ln129">    si = huffsize[0];</a>
+<a name="ln130">    p = 0;</a>
+<a name="ln131">    while (huffsize[p]) {</a>
+<a name="ln132">      while ((static_cast&lt;int&gt;(huffsize[p])) == si) {</a>
+<a name="ln133">        huffcode[p++] = code;</a>
+<a name="ln134">        code++;</a>
+<a name="ln135">      }</a>
+<a name="ln136">      code &lt;&lt;= 1;</a>
+<a name="ln137">      si++;</a>
+<a name="ln138">      if (p &gt; 256)</a>
+<a name="ln139">        ThrowRDE(&quot;createHuffmanTable: Code length too long. Corrupt data.&quot;);</a>
+<a name="ln140">    }</a>
+<a name="ln141"> </a>
+<a name="ln142">    /*</a>
+<a name="ln143">     * Figure F.15: generate decoding tables</a>
+<a name="ln144">     */</a>
+<a name="ln145">    dctbl1.mincode[0] = 0;</a>
+<a name="ln146">    dctbl1.maxcode[0] = 0;</a>
+<a name="ln147">    p = 0;</a>
+<a name="ln148">    for (l = 1; l &lt;= 16; l++) {</a>
+<a name="ln149">      if (dctbl1.bits[l]) {</a>
+<a name="ln150">        dctbl1.valptr[l] = p;</a>
+<a name="ln151">        dctbl1.mincode[l] = huffcode[p];</a>
+<a name="ln152">        p += dctbl1.bits[l];</a>
+<a name="ln153">        dctbl1.maxcode[l] = huffcode[p - 1];</a>
+<a name="ln154">      } else {</a>
+<a name="ln155">        dctbl1.valptr[l] =</a>
+<a name="ln156">            0xff; // This check must be present to avoid crash on junk</a>
+<a name="ln157">        dctbl1.maxcode[l] = -1;</a>
+<a name="ln158">      }</a>
+<a name="ln159">      if (p &gt; 256)</a>
+<a name="ln160">        ThrowRDE(&quot;createHuffmanTable: Code length too long. Corrupt data.&quot;);</a>
+<a name="ln161">    }</a>
+<a name="ln162"> </a>
+<a name="ln163">    /*</a>
+<a name="ln164">     * We put in this value to ensure HuffDecode terminates.</a>
+<a name="ln165">     */</a>
+<a name="ln166">    dctbl1.maxcode[17] = 0xFFFFFL;</a>
+<a name="ln167"> </a>
+<a name="ln168">    /*</a>
+<a name="ln169">     * Build the numbits, value lookup tables.</a>
+<a name="ln170">     * These table allow us to gather 8 bits from the bits stream,</a>
+<a name="ln171">     * and immediately lookup the size and value of the huffman codes.</a>
+<a name="ln172">     * If size is zero, it means that more than 8 bits are in the huffman</a>
+<a name="ln173">     * code (this happens about 3-4% of the time).</a>
+<a name="ln174">     */</a>
+<a name="ln175">    dctbl1.numbits.fill(0);</a>
+<a name="ln176">    for (p = 0; p &lt; lastp; p++) {</a>
+<a name="ln177">      size = huffsize[p];</a>
+<a name="ln178">      if (size &lt;= 8) {</a>
+<a name="ln179">        value = dctbl1.huffval[p];</a>
+<a name="ln180">        code = huffcode[p];</a>
+<a name="ln181">        ll = code &lt;&lt; (8 - size);</a>
+<a name="ln182">        if (size &lt; 8) {</a>
+<a name="ln183">          ul = ll | bitMask[24 + size];</a>
+<a name="ln184">        } else {</a>
+<a name="ln185">          ul = ll;</a>
+<a name="ln186">        }</a>
+<a name="ln187">        if (ul &gt; 256 || ll &gt; ul)</a>
+<a name="ln188">          ThrowRDE(&quot;createHuffmanTable: Code length too long. Corrupt data.&quot;);</a>
+<a name="ln189">        for (i = ll; i &lt;= ul; i++) {</a>
+<a name="ln190">          dctbl1.numbits[i] = size | (value &lt;&lt; 4);</a>
+<a name="ln191">        }</a>
+<a name="ln192">      }</a>
+<a name="ln193">    }</a>
+<a name="ln194">    if (mUseBigtable)</a>
+<a name="ln195">      createBigTable();</a>
+<a name="ln196">    dctbl1.initialized = true;</a>
+<a name="ln197">  }</a>
+<a name="ln198"> </a>
+<a name="ln199">  /************************************</a>
+<a name="ln200">   * Bitable creation</a>
+<a name="ln201">   *</a>
+<a name="ln202">   * This is expanding the concept of fast lookups</a>
+<a name="ln203">   *</a>
+<a name="ln204">   * A complete table for 14 arbitrary bits will be</a>
+<a name="ln205">   * created that enables fast lookup of number of bits used,</a>
+<a name="ln206">   * and final delta result.</a>
+<a name="ln207">   * Hit rate is about 90-99% for typical LJPEGS, usually about 98%</a>
+<a name="ln208">   *</a>
+<a name="ln209">   ************************************/</a>
+<a name="ln210"> </a>
+<a name="ln211">  void createBigTable() {</a>
+<a name="ln212">    const uint32 bits =</a>
+<a name="ln213">        14; // HuffDecode functions must be changed, if this is modified.</a>
+<a name="ln214">    const uint32 size = 1 &lt;&lt; bits;</a>
+<a name="ln215">    int rv = 0;</a>
+<a name="ln216">    int temp;</a>
+<a name="ln217">    uint32 l;</a>
+<a name="ln218"> </a>
+<a name="ln219">    dctbl1.bigTable.resize(size);</a>
+<a name="ln220">    for (uint32 i = 0; i &lt; size; i++) {</a>
+<a name="ln221">      ushort16 input = i &lt;&lt; 2; // Calculate input value</a>
+<a name="ln222">      int code = input &gt;&gt; 8;   // Get 8 bits</a>
+<a name="ln223">      uint32 val = dctbl1.numbits[code];</a>
+<a name="ln224">      l = val &amp; 15;</a>
+<a name="ln225">      if (l) {</a>
+<a name="ln226">        rv = val &gt;&gt; 4;</a>
+<a name="ln227">      } else {</a>
+<a name="ln228">        l = 8;</a>
+<a name="ln229">        while (code &gt; dctbl1.maxcode[l]) {</a>
+<a name="ln230">          temp = input &gt;&gt; (15 - l) &amp; 1;</a>
+<a name="ln231">          code = (code &lt;&lt; 1) | temp;</a>
+<a name="ln232">          l++;</a>
+<a name="ln233">        }</a>
+<a name="ln234"> </a>
+<a name="ln235">        /*</a>
+<a name="ln236">         * With garbage input we may reach the sentinel value l = 17.</a>
+<a name="ln237">         */</a>
+<a name="ln238"> </a>
+<a name="ln239">        if (l &gt; 16 || dctbl1.valptr[l] == 0xff) {</a>
+<a name="ln240">          dctbl1.bigTable[i] = 0xff;</a>
+<a name="ln241">          continue;</a>
+<a name="ln242">        }</a>
+<a name="ln243">        rv = dctbl1.huffval[dctbl1.valptr[l] + (code - dctbl1.mincode[l])];</a>
+<a name="ln244">      }</a>
+<a name="ln245"> </a>
+<a name="ln246">      if (rv == 16) {</a>
+<a name="ln247">        if (mDNGCompatible)</a>
+<a name="ln248">          dctbl1.bigTable[i] = (-(32768 &lt;&lt; 8)) | (16 + l);</a>
+<a name="ln249">        else</a>
+<a name="ln250">          dctbl1.bigTable[i] = (-(32768 &lt;&lt; 8)) | l;</a>
+<a name="ln251">        continue;</a>
+<a name="ln252">      }</a>
+<a name="ln253"> </a>
+<a name="ln254">      if (rv + l &gt; bits) {</a>
+<a name="ln255">        dctbl1.bigTable[i] = 0xff;</a>
+<a name="ln256">        continue;</a>
+<a name="ln257">      }</a>
+<a name="ln258"> </a>
+<a name="ln259">      if (rv) {</a>
+<a name="ln260">        int x = input &gt;&gt; (16 - l - rv) &amp; ((1 &lt;&lt; rv) - 1);</a>
+<a name="ln261">        if ((x &amp; (1 &lt;&lt; (rv - 1))) == 0)</a>
+<a name="ln262">          x -= (1 &lt;&lt; rv) - 1;</a>
+<a name="ln263">        dctbl1.bigTable[i] =</a>
+<a name="ln264">            static_cast&lt;int&gt;((static_cast&lt;unsigned&gt;(x) &lt;&lt; 8) | (l + rv));</a>
+<a name="ln265">      } else {</a>
+<a name="ln266">        dctbl1.bigTable[i] = l;</a>
+<a name="ln267">      }</a>
+<a name="ln268">    }</a>
+<a name="ln269">  }</a>
+<a name="ln270"> </a>
+<a name="ln271">public:</a>
+<a name="ln272">  uint32 setNCodesPerLength(const Buffer&amp; data) {</a>
+<a name="ln273">    uint32 acc = 0;</a>
+<a name="ln274">    for (uint32 i = 0; i &lt; 16; i++) {</a>
+<a name="ln275">      dctbl1.bits[i + 1] = data[i];</a>
+<a name="ln276">      acc += dctbl1.bits[i + 1];</a>
+<a name="ln277">    }</a>
+<a name="ln278">    dctbl1.bits[0] = 0;</a>
+<a name="ln279">    return acc;</a>
+<a name="ln280">  }</a>
+<a name="ln281"> </a>
+<a name="ln282">  void setCodeValues(const Buffer&amp; data) {</a>
+<a name="ln283">    for (uint32 i = 0; i &lt; data.getSize(); i++)</a>
+<a name="ln284">      dctbl1.huffval[i] = data[i];</a>
+<a name="ln285">  }</a>
+<a name="ln286"> </a>
+<a name="ln287">  void setup(bool fullDecode_, bool fixDNGBug16_) { createHuffmanTable(); }</a>
+<a name="ln288"> </a>
+<a name="ln289">  /*</a>
+<a name="ln290">   *--------------------------------------------------------------</a>
+<a name="ln291">   *</a>
+<a name="ln292">   * HuffDecode --</a>
+<a name="ln293">   *</a>
+<a name="ln294">   * Taken from Figure F.16: extract next coded symbol from</a>
+<a name="ln295">   * input stream.  This should becode a macro.</a>
+<a name="ln296">   *</a>
+<a name="ln297">   * Results:</a>
+<a name="ln298">   * Next coded symbol</a>
+<a name="ln299">   *</a>
+<a name="ln300">   * Side effects:</a>
+<a name="ln301">   * Bitstream is parsed.</a>
+<a name="ln302">   *</a>
+<a name="ln303">   *--------------------------------------------------------------</a>
+<a name="ln304">   */</a>
+<a name="ln305">  int decodeNext(BitPumpMSB&amp; bits) { // NOLINT: google-runtime-references</a>
+<a name="ln306">    int rv;</a>
+<a name="ln307">    int l;</a>
+<a name="ln308">    int temp;</a>
+<a name="ln309">    int code;</a>
+<a name="ln310">    unsigned val;</a>
+<a name="ln311"> </a>
+<a name="ln312">    bits.fill();</a>
+<a name="ln313">    code = bits.peekBitsNoFill(14);</a>
+<a name="ln314">    val = static_cast&lt;unsigned&gt;(dctbl1.bigTable[code]);</a>
+<a name="ln315">    if ((val &amp; 0xff) != 0xff) {</a>
+<a name="ln316">      bits.skipBitsNoFill(val &amp; 0xff);</a>
+<a name="ln317">      return static_cast&lt;int&gt;(val) &gt;&gt; 8;</a>
+<a name="ln318">    }</a>
+<a name="ln319"> </a>
+<a name="ln320">    rv = 0;</a>
+<a name="ln321">    code = bits.peekBitsNoFill(8);</a>
+<a name="ln322">    val = dctbl1.numbits[code];</a>
+<a name="ln323">    l = val &amp; 15;</a>
+<a name="ln324">    if (l) {</a>
+<a name="ln325">      bits.skipBitsNoFill(l);</a>
+<a name="ln326">      rv = static_cast&lt;int&gt;(val) &gt;&gt; 4;</a>
+<a name="ln327">    } else {</a>
+<a name="ln328">      bits.skipBits(8);</a>
+<a name="ln329">      l = 8;</a>
+<a name="ln330">      while (code &gt; dctbl1.maxcode[l]) {</a>
+<a name="ln331">        temp = bits.getBitsNoFill(1);</a>
+<a name="ln332">        code = (code &lt;&lt; 1) | temp;</a>
+<a name="ln333">        l++;</a>
+<a name="ln334">      }</a>
+<a name="ln335"> </a>
+<a name="ln336">      if (l &gt; 16) {</a>
+<a name="ln337">        ThrowRDE(&quot;Corrupt JPEG data: bad Huffman code:%u\n&quot;, l);</a>
+<a name="ln338">      } else {</a>
+<a name="ln339">        rv = dctbl1.huffval[dctbl1.valptr[l] + (code - dctbl1.mincode[l])];</a>
+<a name="ln340">      }</a>
+<a name="ln341">    }</a>
+<a name="ln342"> </a>
+<a name="ln343">    if (rv == 16)</a>
+<a name="ln344">      return -32768;</a>
+<a name="ln345"> </a>
+<a name="ln346">    /*</a>
+<a name="ln347">     * Section F.2.2.1: decode the difference and</a>
+<a name="ln348">     * Figure F.12: extend sign bit</a>
+<a name="ln349">     */</a>
+<a name="ln350">    uint32 len = rv &amp; 15;</a>
+<a name="ln351">    uint32 shl = rv &gt;&gt; 4;</a>
+<a name="ln352">    int diff = ((bits.getBits(len - shl) &lt;&lt; 1) + 1) &lt;&lt; shl &gt;&gt; 1;</a>
+<a name="ln353">    if ((diff &amp; (1 &lt;&lt; (len - 1))) == 0)</a>
+<a name="ln354">      diff -= (1 &lt;&lt; len) - !shl;</a>
+<a name="ln355">    return diff;</a>
+<a name="ln356">  }</a>
+<a name="ln357">};</a>
+<a name="ln358"> </a>
+<a name="ln359">} // namespace</a>
+<a name="ln360"> </a>
+<a name="ln361">std::vector&lt;ushort16&gt; NikonDecompressor::createCurve(ByteStream* metadata,</a>
+<a name="ln362">                                                     uint32 bitsPS, uint32 v0,</a>
+<a name="ln363">                                                     uint32 v1, uint32* split) {</a>
+<a name="ln364">  // Nikon Z7 12/14 bit compressed hack.</a>
+<a name="ln365">  if (v0 == 68 &amp;&amp; v1 == 64)</a>
+<a name="ln366">    bitsPS -= 2;</a>
+<a name="ln367"> </a>
+<a name="ln368">  // 'curve' will hold a peace wise linearly interpolated function.</a>
+<a name="ln369">  // there are 'csize' segments, each is 'step' values long.</a>
+<a name="ln370">  // the very last value is not part of the used table but necessary</a>
+<a name="ln371">  // to linearly interpolate the last segment, therefore the '+1/-1'</a>
+<a name="ln372">  // size adjustments of 'curve'.</a>
+<a name="ln373">  std::vector&lt;ushort16&gt; curve((1 &lt;&lt; bitsPS &amp; 0x7fff) + 1);</a>
+<a name="ln374">  assert(curve.size() &gt; 1);</a>
+<a name="ln375"> </a>
+<a name="ln376">  for (size_t i = 0; i &lt; curve.size(); i++)</a>
+<a name="ln377">    curve[i] = i;</a>
+<a name="ln378"> </a>
+<a name="ln379">  uint32 step = 0;</a>
+<a name="ln380">  uint32 csize = metadata-&gt;getU16();</a>
+<a name="ln381">  if (csize &gt; 1)</a>
+<a name="ln382">    step = curve.size() / (csize - 1);</a>
+<a name="ln383"> </a>
+<a name="ln384">  if (v0 == 68 &amp;&amp; (v1 == 32 || v1 == 64) &amp;&amp; step &gt; 0) {</a>
+<a name="ln385">    if ((csize - 1) * step != curve.size() - 1)</a>
+<a name="ln386">      ThrowRDE(&quot;Bad curve segment count (%u)&quot;, csize);</a>
+<a name="ln387"> </a>
+<a name="ln388">    for (size_t i = 0; i &lt; csize; i++)</a>
+<a name="ln389">      curve[i * step] = metadata-&gt;getU16();</a>
+<a name="ln390">    for (size_t i = 0; i &lt; curve.size() - 1; i++) {</a>
+<a name="ln391">      const uint32 b_scale = i % step;</a>
+<a name="ln392"> </a>
+<a name="ln393">      const uint32 a_pos = i - b_scale;</a>
+<a name="ln394">      const uint32 b_pos = a_pos + step;</a>
+<a name="ln395">      assert(a_pos &lt; curve.size());</a>
+<a name="ln396">      assert(b_pos &gt; 0);</a>
+<a name="ln397">      assert(b_pos &lt; curve.size());</a>
+<a name="ln398">      assert(a_pos &lt; b_pos);</a>
+<a name="ln399"> </a>
+<a name="ln400">      const uint32 a_scale = step - b_scale;</a>
+<a name="ln401">      curve[i] = (a_scale * curve[a_pos] + b_scale * curve[b_pos]) / step;</a>
+<a name="ln402">    }</a>
+<a name="ln403"> </a>
+<a name="ln404">    metadata-&gt;setPosition(562);</a>
+<a name="ln405">    *split = metadata-&gt;getU16();</a>
+<a name="ln406">  } else if (v0 != 70) {</a>
+<a name="ln407">    if (csize == 0 || csize &gt; 0x4001)</a>
+<a name="ln408">      ThrowRDE(&quot;Don't know how to compute curve! csize = %u&quot;, csize);</a>
+<a name="ln409"> </a>
+<a name="ln410">    curve.resize(csize + 1UL);</a>
+<a name="ln411">    assert(curve.size() &gt; 1);</a>
+<a name="ln412"> </a>
+<a name="ln413">    for (uint32 i = 0; i &lt; csize; i++) {</a>
+<a name="ln414">      curve[i] = metadata-&gt;getU16();</a>
+<a name="ln415">    }</a>
+<a name="ln416">  }</a>
+<a name="ln417"> </a>
+<a name="ln418">  // and drop the last value</a>
+<a name="ln419">  curve.resize(curve.size() - 1);</a>
+<a name="ln420">  assert(!curve.empty());</a>
+<a name="ln421"> </a>
+<a name="ln422">  return curve;</a>
+<a name="ln423">}</a>
+<a name="ln424"> </a>
+<a name="ln425">template &lt;typename Huffman&gt;</a>
+<a name="ln426">Huffman NikonDecompressor::createHuffmanTable(uint32 huffSelect) {</a>
+<a name="ln427">  Huffman ht;</a>
+<a name="ln428">  uint32 count =</a>
+<a name="ln429">      ht.setNCodesPerLength(Buffer(nikon_tree[huffSelect][0].data(), 16));</a>
+<a name="ln430">  ht.setCodeValues(Buffer(nikon_tree[huffSelect][1].data(), count));</a>
+<a name="ln431">  ht.setup(true, false);</a>
+<a name="ln432">  return ht;</a>
+<a name="ln433">}</a>
+<a name="ln434"> </a>
+<a name="ln435">NikonDecompressor::NikonDecompressor(const RawImage&amp; raw, ByteStream metadata,</a>
+<a name="ln436">                                     uint32 bitsPS_)</a>
+<a name="ln437">    : mRaw(raw), bitsPS(bitsPS_) {</a>
+<a name="ln438">  if (mRaw-&gt;getCpp() != 1 || mRaw-&gt;getDataType() != TYPE_USHORT16 ||</a>
+<a name="ln439">      mRaw-&gt;getBpp() != 2)</a>
+<a name="ln440">    ThrowRDE(&quot;Unexpected component count / data type&quot;);</a>
+<a name="ln441"> </a>
+<a name="ln442">  if (mRaw-&gt;dim.x == 0 || mRaw-&gt;dim.y == 0 || mRaw-&gt;dim.x % 2 != 0 ||</a>
+<a name="ln443">      mRaw-&gt;dim.x &gt; 8288 || mRaw-&gt;dim.y &gt; 5520)</a>
+<a name="ln444">    ThrowRDE(&quot;Unexpected image dimensions found: (%u; %u)&quot;, mRaw-&gt;dim.x,</a>
+<a name="ln445">             mRaw-&gt;dim.y);</a>
+<a name="ln446"> </a>
+<a name="ln447">  switch (bitsPS) {</a>
+<a name="ln448">  case 12:</a>
+<a name="ln449">  case 14:</a>
+<a name="ln450">    break;</a>
+<a name="ln451">  default:</a>
+<a name="ln452">    ThrowRDE(&quot;Invalid bpp found: %u&quot;, bitsPS);</a>
+<a name="ln453">  }</a>
+<a name="ln454"> </a>
+<a name="ln455">  uint32 v0 = metadata.getByte();</a>
+<a name="ln456">  uint32 v1 = metadata.getByte();</a>
+<a name="ln457"> </a>
+<a name="ln458">  writeLog(DEBUG_PRIO_EXTRA, &quot;Nef version v0:%u, v1:%u&quot;, v0, v1);</a>
+<a name="ln459"> </a>
+<a name="ln460">  if (v0 == 73 || v1 == 88)</a>
+<a name="ln461">    metadata.skipBytes(2110);</a>
+<a name="ln462"> </a>
+<a name="ln463">  if (v0 == 70)</a>
+<a name="ln464">    huffSelect = 2;</a>
+<a name="ln465">  if (bitsPS == 14)</a>
+<a name="ln466">    huffSelect += 3;</a>
+<a name="ln467"> </a>
+<a name="ln468">  pUp1[0] = metadata.getU16();</a>
+<a name="ln469">  pUp1[1] = metadata.getU16();</a>
+<a name="ln470">  pUp2[0] = metadata.getU16();</a>
+<a name="ln471">  pUp2[1] = metadata.getU16();</a>
+<a name="ln472"> </a>
+<a name="ln473">  curve = createCurve(&amp;metadata, bitsPS, v0, v1, &amp;split);</a>
+<a name="ln474"> </a>
+<a name="ln475">  // If the 'split' happens outside of the image, it does not actually happen.</a>
+<a name="ln476">  if (split &gt;= static_cast&lt;unsigned&gt;(mRaw-&gt;dim.y))</a>
+<a name="ln477">    split = 0;</a>
+<a name="ln478">}</a>
+<a name="ln479"> </a>
+<a name="ln480">template &lt;typename Huffman&gt;</a>
+<a name="ln481">void NikonDecompressor::decompress(BitPumpMSB* bits, int start_y, int end_y) {</a>
+<a name="ln482">  Huffman ht = createHuffmanTable&lt;Huffman&gt;(huffSelect);</a>
+<a name="ln483"> </a>
+<a name="ln484">  uchar8* draw = mRaw-&gt;getData();</a>
+<a name="ln485">  uint32 pitch = mRaw-&gt;pitch;</a>
+<a name="ln486"> </a>
+<a name="ln487">  int pLeft1 = 0;</a>
+<a name="ln488">  int pLeft2 = 0;</a>
+<a name="ln489"> </a>
+<a name="ln490">  // allow gcc to devirtualize the calls below</a>
+<a name="ln491">  auto* rawdata = reinterpret_cast&lt;RawImageDataU16*&gt;(mRaw.get());</a>
+<a name="ln492"> </a>
+<a name="ln493">  const iPoint2D&amp; size = mRaw-&gt;dim;</a>
+<a name="ln494">  assert(size.x % 2 == 0);</a>
+<a name="ln495">  assert(size.x &gt;= 2);</a>
+<a name="ln496">  for (uint32 y = start_y; y &lt; static_cast&lt;uint32&gt;(end_y); y++) {</a>
+<a name="ln497">    auto* dest =</a>
+<a name="ln498">        reinterpret_cast&lt;ushort16*&gt;(&amp;draw[y * pitch]); // Adjust destination</a>
+<a name="ln499">    pUp1[y &amp; 1] += ht.decodeNext(*bits);</a>
+<a name="ln500">    pUp2[y &amp; 1] += ht.decodeNext(*bits);</a>
+<a name="ln501">    pLeft1 = pUp1[y &amp; 1];</a>
+<a name="ln502">    pLeft2 = pUp2[y &amp; 1];</a>
+<a name="ln503"> </a>
+<a name="ln504">    rawdata-&gt;setWithLookUp(clampBits(pLeft1, 15),</a>
+<a name="ln505">                           reinterpret_cast&lt;uchar8*&gt;(dest + 0), &amp;random);</a>
+<a name="ln506">    rawdata-&gt;setWithLookUp(clampBits(pLeft2, 15),</a>
+<a name="ln507">                           reinterpret_cast&lt;uchar8*&gt;(dest + 1), &amp;random);</a>
+<a name="ln508"> </a>
+<a name="ln509">    dest += 2;</a>
+<a name="ln510"> </a>
+<a name="ln511">    for (uint32 x = 2; x &lt; static_cast&lt;uint32&gt;(size.x); x += 2) {</a>
+<a name="ln512">      pLeft1 += ht.decodeNext(*bits);</a>
+<a name="ln513">      pLeft2 += ht.decodeNext(*bits);</a>
+<a name="ln514"> </a>
+<a name="ln515">      rawdata-&gt;setWithLookUp(clampBits(pLeft1, 15),</a>
+<a name="ln516">                             reinterpret_cast&lt;uchar8*&gt;(dest + 0), &amp;random);</a>
+<a name="ln517">      rawdata-&gt;setWithLookUp(clampBits(pLeft2, 15),</a>
+<a name="ln518">                             reinterpret_cast&lt;uchar8*&gt;(dest + 1), &amp;random);</a>
+<a name="ln519"> </a>
+<a name="ln520">      dest += 2;</a>
+<a name="ln521">    }</a>
+<a name="ln522">  }</a>
+<a name="ln523">}</a>
+<a name="ln524"> </a>
+<a name="ln525">void NikonDecompressor::decompress(const ByteStream&amp; data,</a>
+<a name="ln526">                                   bool uncorrectedRawValues) {</a>
+<a name="ln527">  RawImageCurveGuard curveHandler(&amp;mRaw, curve, uncorrectedRawValues);</a>
+<a name="ln528"> </a>
+<a name="ln529">  BitPumpMSB bits(data);</a>
+<a name="ln530"> </a>
+<a name="ln531">  random = bits.peekBits(24);</a>
+<a name="ln532"> </a>
+<a name="ln533">  assert(split == 0 || split &lt; static_cast&lt;unsigned&gt;(mRaw-&gt;dim.y));</a>
+<a name="ln534"> </a>
+<a name="ln535">  if (!split) {</a>
+<a name="ln536">    decompress&lt;HuffmanTable&gt;(&amp;bits, 0, mRaw-&gt;dim.y);</a>
+<a name="ln537">  } else {</a>
+<a name="ln538">    decompress&lt;HuffmanTable&gt;(&amp;bits, 0, split);</a>
+<a name="ln539">    huffSelect += 1;</a>
+<a name="ln540">    decompress&lt;NikonLASDecompressor&gt;(&amp;bits, split, mRaw-&gt;dim.y);</a>
+<a name="ln541">  }</a>
+<a name="ln542">}</a>
+<a name="ln543"> </a>
+<a name="ln544">} // namespace rawspeed</a>
+
+</code></pre>
+<div class="balloon" rel="68"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v730/" target="_blank">V730</a> Not all members of a class are initialized inside the compiler generated constructor. Consider inspecting: dctbl1.</p></div>
+
+<link rel="stylesheet" href="highlight.css">
+<script src="highlight.pack.js"></script>
+<script src="highlightjs-line-numbers.js"></script>
+<script>hljs.initHighlightingOnLoad();</script>
+<script>hljs.initLineNumbersOnLoad();</script>
+<script>
+  $(document).ready(function() {
+      $('.balloon').each(function () {
+          var bl = $(this);
+          var line = bl.attr('rel');
+          var text = $('a[name="ln'+line+'"]').text();
+
+          var space_count = 0;
+          for(var i = 0; i<text.length; i++){
+              var char = text[i];
+              if((char !== ' ')&&(char !== '\t'))break;
+              if(char === '\t')space_count++;
+              space_count++;
+          }
+
+          bl.css('margin-left', space_count*8);
+          $('a[name="ln'+line+'"]').after(bl);
+      });
+
+      window.location = window.location;
+  });
+</script>
+</body>
+</html>

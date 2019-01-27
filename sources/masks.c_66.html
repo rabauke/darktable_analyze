@@ -1,0 +1,2876 @@
+
+<html>
+<head>
+  <link rel="stylesheet" href="../style.css"/>
+  <script src="../jquery-3.2.1.min.js"></script>
+</head>
+<body>
+<pre><code class = "cpp">
+<a name="ln1">/*</a>
+<a name="ln2">    This file is part of darktable,</a>
+<a name="ln3">    copyright (c) 2012 aldric renaudin.</a>
+<a name="ln4"> </a>
+<a name="ln5">    darktable is free software: you can redistribute it and/or modify</a>
+<a name="ln6">    it under the terms of the GNU General Public License as published by</a>
+<a name="ln7">    the Free Software Foundation, either version 3 of the License, or</a>
+<a name="ln8">    (at your option) any later version.</a>
+<a name="ln9"> </a>
+<a name="ln10">    darktable is distributed in the hope that it will be useful,</a>
+<a name="ln11">    but WITHOUT ANY WARRANTY; without even the implied warranty of</a>
+<a name="ln12">    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the</a>
+<a name="ln13">    GNU General Public License for more details.</a>
+<a name="ln14"> </a>
+<a name="ln15">    You should have received a copy of the GNU General Public License</a>
+<a name="ln16">    along with darktable.  If not, see &lt;http://www.gnu.org/licenses/&gt;.</a>
+<a name="ln17">*/</a>
+<a name="ln18">#include &quot;develop/masks.h&quot;</a>
+<a name="ln19">#include &quot;bauhaus/bauhaus.h&quot;</a>
+<a name="ln20">#include &quot;common/debug.h&quot;</a>
+<a name="ln21">#include &quot;common/mipmap_cache.h&quot;</a>
+<a name="ln22">#include &quot;control/conf.h&quot;</a>
+<a name="ln23">#include &quot;control/control.h&quot;</a>
+<a name="ln24">#include &quot;common/undo.h&quot;</a>
+<a name="ln25">#include &quot;develop/blend.h&quot;</a>
+<a name="ln26">#include &quot;develop/imageop.h&quot;</a>
+<a name="ln27"> </a>
+<a name="ln28">#pragma GCC diagnostic ignored &quot;-Wshadow&quot;</a>
+<a name="ln29"> </a>
+<a name="ln30">// clang-format off</a>
+<a name="ln31">#include &quot;develop/masks/circle.c&quot;</a>
+<a name="ln32">#include &quot;develop/masks/path.c&quot;</a>
+<a name="ln33">#include &quot;develop/masks/brush.c&quot;</a>
+<a name="ln34">#include &quot;develop/masks/gradient.c&quot;</a>
+<a name="ln35">#include &quot;develop/masks/ellipse.c&quot;</a>
+<a name="ln36">#include &quot;develop/masks/group.c&quot;</a>
+<a name="ln37">// clang-format on</a>
+<a name="ln38"> </a>
+<a name="ln39">typedef struct _masks_undo_data_t</a>
+<a name="ln40">{</a>
+<a name="ln41">  GList *forms;</a>
+<a name="ln42">  dt_masks_form_t *form;</a>
+<a name="ln43">} _masks_undo_data_t;</a>
+<a name="ln44"> </a>
+<a name="ln45">static void _masks_write_form_db(dt_masks_form_t *form, const int imgid, dt_develop_t *dev);</a>
+<a name="ln46">// write a form into the database</a>
+<a name="ln47"> </a>
+<a name="ln48">static void _masks_write_forms_db(dt_develop_t *dev, const int imgid, gboolean undo);</a>
+<a name="ln49">// write all masks form into the database. record an undo if undo is true</a>
+<a name="ln50"> </a>
+<a name="ln51">static dt_masks_form_t *_dup_masks_form(const dt_masks_form_t *form)</a>
+<a name="ln52">{</a>
+<a name="ln53">  if (!form) return NULL;</a>
+<a name="ln54"> </a>
+<a name="ln55">  dt_masks_form_t *new_form = malloc(sizeof(struct dt_masks_form_t));</a>
+<a name="ln56">  memcpy(new_form, form, sizeof(struct dt_masks_form_t));</a>
+<a name="ln57"> </a>
+<a name="ln58">  // then duplicate the GList *points</a>
+<a name="ln59"> </a>
+<a name="ln60">  new_form-&gt;points = NULL;</a>
+<a name="ln61"> </a>
+<a name="ln62">  if (form-&gt;points)</a>
+<a name="ln63">  {</a>
+<a name="ln64">    int size_item = 0;</a>
+<a name="ln65"> </a>
+<a name="ln66">    if (form-&gt;type &amp; DT_MASKS_CIRCLE)</a>
+<a name="ln67">      size_item = sizeof(struct dt_masks_point_circle_t);</a>
+<a name="ln68">    else if (form-&gt;type &amp; DT_MASKS_ELLIPSE)</a>
+<a name="ln69">      size_item = sizeof(struct dt_masks_point_ellipse_t);</a>
+<a name="ln70">    else if (form-&gt;type &amp; DT_MASKS_GRADIENT)</a>
+<a name="ln71">      size_item = sizeof(struct dt_masks_point_gradient_t);</a>
+<a name="ln72">    else if (form-&gt;type &amp; DT_MASKS_BRUSH)</a>
+<a name="ln73">      size_item = sizeof(struct dt_masks_point_brush_t);</a>
+<a name="ln74">    else if (form-&gt;type &amp; DT_MASKS_GROUP)</a>
+<a name="ln75">      size_item = sizeof(struct dt_masks_point_group_t);</a>
+<a name="ln76">    else if (form-&gt;type &amp; DT_MASKS_PATH)</a>
+<a name="ln77">      size_item = sizeof(struct dt_masks_point_path_t);</a>
+<a name="ln78"> </a>
+<a name="ln79">    if (size_item != 0)</a>
+<a name="ln80">    {</a>
+<a name="ln81">      GList *pt = g_list_first(form-&gt;points);</a>
+<a name="ln82">      while (pt)</a>
+<a name="ln83">      {</a>
+<a name="ln84">        void *item = malloc(size_item);</a>
+<a name="ln85">        memcpy(item, pt-&gt;data, size_item);</a>
+<a name="ln86">        new_form-&gt;points = g_list_append(new_form-&gt;points, item);</a>
+<a name="ln87">        pt = g_list_next(pt);</a>
+<a name="ln88">      }</a>
+<a name="ln89">    }</a>
+<a name="ln90">  }</a>
+<a name="ln91"> </a>
+<a name="ln92">  return new_form;</a>
+<a name="ln93">}</a>
+<a name="ln94"> </a>
+<a name="ln95">static void *_dup_masks_form_cb(const void *formdata, gpointer user_data)</a>
+<a name="ln96">{</a>
+<a name="ln97">  // duplicate the main form struct</a>
+<a name="ln98">  dt_masks_form_t *form = (dt_masks_form_t *)formdata;</a>
+<a name="ln99">  dt_masks_form_t *uform = (dt_masks_form_t *)user_data;</a>
+<a name="ln100">  const dt_masks_form_t *f = uform == NULL || form-&gt;formid != uform-&gt;formid ? form : uform;</a>
+<a name="ln101">  return (void *)_dup_masks_form(f);</a>
+<a name="ln102">}</a>
+<a name="ln103"> </a>
+<a name="ln104">// duplicate the list of forms, replace item in the list with form with the same formid</a>
+<a name="ln105">GList *dt_masks_dup_forms_deep(GList *forms, dt_masks_form_t *form)</a>
+<a name="ln106">{</a>
+<a name="ln107">  return (GList *)g_list_copy_deep(forms, _dup_masks_form_cb, (gpointer)form);</a>
+<a name="ln108">}</a>
+<a name="ln109"> </a>
+<a name="ln110">static _masks_undo_data_t *_create_snapshot(GList *forms, dt_masks_form_t *form, dt_develop_t *dev)</a>
+<a name="ln111">{</a>
+<a name="ln112">  _masks_undo_data_t *data = malloc(sizeof(struct _masks_undo_data_t));</a>
+<a name="ln113">  data-&gt;forms = dt_masks_dup_forms_deep(forms, form);</a>
+<a name="ln114">  data-&gt;form  = dev-&gt;form_visible ? _dup_masks_form(dev-&gt;form_visible) : NULL;</a>
+<a name="ln115">  return data;</a>
+<a name="ln116">}</a>
+<a name="ln117"> </a>
+<a name="ln118">static void _masks_free_undo(gpointer data)</a>
+<a name="ln119">{</a>
+<a name="ln120">  _masks_undo_data_t *udata = (_masks_undo_data_t *)data;</a>
+<a name="ln121"> </a>
+<a name="ln122">  g_list_free_full(udata-&gt;forms, (void (*)(void *))dt_masks_free_form);</a>
+<a name="ln123">  udata-&gt;forms = NULL;</a>
+<a name="ln124">  dt_masks_free_form((dt_masks_form_t *)udata-&gt;form);</a>
+<a name="ln125">  free(udata);</a>
+<a name="ln126">}</a>
+<a name="ln127"> </a>
+<a name="ln128">static void _masks_do_undo(gpointer user_data, dt_undo_type_t type, dt_undo_data_t *item)</a>
+<a name="ln129">{</a>
+<a name="ln130">  dt_develop_t *dev = (dt_develop_t *)user_data;</a>
+<a name="ln131">  _masks_undo_data_t *udata = (_masks_undo_data_t *)item;</a>
+<a name="ln132"> </a>
+<a name="ln133">  dev-&gt;forms = dt_masks_dup_forms_deep(udata-&gt;forms, NULL);</a>
+<a name="ln134">  dev-&gt;form_gui-&gt;creation = FALSE;</a>
+<a name="ln135"> </a>
+<a name="ln136">  dt_masks_clear_form_gui(dev);</a>
+<a name="ln137">  dt_masks_change_form_gui(_dup_masks_form(udata-&gt;form));</a>
+<a name="ln138"> </a>
+<a name="ln139">  _masks_write_forms_db(dev, dev-&gt;image_storage.id, FALSE);</a>
+<a name="ln140"> </a>
+<a name="ln141">  // and we ensure that we are in edit mode</a>
+<a name="ln142">  dt_masks_iop_update(darktable.develop-&gt;gui_module);</a>
+<a name="ln143">  dt_dev_masks_list_change(dev);</a>
+<a name="ln144">  dt_masks_set_edit_mode(darktable.develop-&gt;gui_module, DT_MASKS_EDIT_FULL);</a>
+<a name="ln145">  dt_masks_update_image(dev);</a>
+<a name="ln146">  dt_control_queue_redraw_center();</a>
+<a name="ln147">}</a>
+<a name="ln148"> </a>
+<a name="ln149">static void _do_record_undo(dt_develop_t *dev, dt_masks_form_t *form)</a>
+<a name="ln150">{</a>
+<a name="ln151">  dt_undo_record(darktable.undo, dev, DT_UNDO_MASK, (dt_undo_data_t *)_create_snapshot(dev-&gt;forms, form, dev),</a>
+<a name="ln152">                 _masks_do_undo, _masks_free_undo);</a>
+<a name="ln153">}</a>
+<a name="ln154"> </a>
+<a name="ln155">static int _get_opacity(dt_masks_form_gui_t *gui, const dt_masks_form_t *form)</a>
+<a name="ln156">{</a>
+<a name="ln157">  const dt_masks_point_group_t *fpt = (dt_masks_point_group_t *)g_list_nth_data(form-&gt;points, gui-&gt;group_edited);</a>
+<a name="ln158">  const dt_masks_form_t *sel = dt_masks_get_from_id(darktable.develop, fpt-&gt;formid);</a>
+<a name="ln159">  if(!sel) return 0;</a>
+<a name="ln160">  const int formid = sel-&gt;formid;</a>
+<a name="ln161"> </a>
+<a name="ln162">  // look for apacity</a>
+<a name="ln163">  const dt_masks_form_t *grp = dt_masks_get_from_id(darktable.develop, fpt-&gt;parentid);</a>
+<a name="ln164">  if(!grp || !(grp-&gt;type &amp; DT_MASKS_GROUP)) return 0;</a>
+<a name="ln165"> </a>
+<a name="ln166">  int opacity = 0;</a>
+<a name="ln167">  GList *fpts = g_list_first(grp-&gt;points);</a>
+<a name="ln168"> </a>
+<a name="ln169">  while(fpts)</a>
+<a name="ln170">  {</a>
+<a name="ln171">    const dt_masks_point_group_t *fpt = (dt_masks_point_group_t *)fpts-&gt;data;</a>
+<a name="ln172">    if(fpt-&gt;formid == formid)</a>
+<a name="ln173">    {</a>
+<a name="ln174">      opacity = fpt-&gt;opacity * 100;</a>
+<a name="ln175">      break;</a>
+<a name="ln176">    }</a>
+<a name="ln177">    fpts = g_list_next(fpts);</a>
+<a name="ln178">  }</a>
+<a name="ln179"> </a>
+<a name="ln180">  return opacity;</a>
+<a name="ln181">}</a>
+<a name="ln182"> </a>
+<a name="ln183">static void _set_hinter_message(dt_masks_form_gui_t *gui, const dt_masks_form_t *form)</a>
+<a name="ln184">{</a>
+<a name="ln185">  char msg[256] = &quot;&quot;;</a>
+<a name="ln186"> </a>
+<a name="ln187">  int ftype = form-&gt;type;</a>
+<a name="ln188"> </a>
+<a name="ln189">  if(!(ftype &amp; DT_MASKS_GROUP) || gui-&gt;group_edited &lt; 0) return;</a>
+<a name="ln190"> </a>
+<a name="ln191">  // we get the selected form</a>
+<a name="ln192">  const dt_masks_point_group_t *fpt = (dt_masks_point_group_t *)g_list_nth_data(form-&gt;points, gui-&gt;group_edited);</a>
+<a name="ln193">  const dt_masks_form_t *sel = dt_masks_get_from_id(darktable.develop, fpt-&gt;formid);</a>
+<a name="ln194">  if(!sel) return;</a>
+<a name="ln195"> </a>
+<a name="ln196">  const dt_masks_type_t formtype = sel-&gt;type;</a>
+<a name="ln197">  const int opacity = _get_opacity(gui, form);</a>
+<a name="ln198"> </a>
+<a name="ln199">  if(formtype &amp; DT_MASKS_PATH)</a>
+<a name="ln200">  {</a>
+<a name="ln201">    if(gui-&gt;creation)</a>
+<a name="ln202">      g_strlcat(msg, _(&quot;ctrl+click to add a sharp node&quot;), sizeof(msg));</a>
+<a name="ln203">    else if(gui-&gt;point_selected &gt;= 0)</a>
+<a name="ln204">      g_strlcat(msg, _(&quot;ctrl+click to switch between smooth/sharp node&quot;), sizeof(msg));</a>
+<a name="ln205">    else if(gui-&gt;feather_selected &gt;= 0)</a>
+<a name="ln206">      g_strlcat(msg, _(&quot;right-click to reset curvature&quot;), sizeof(msg));</a>
+<a name="ln207">    else if(gui-&gt;seg_selected &gt;= 0)</a>
+<a name="ln208">      g_strlcat(msg, _(&quot;ctrl+click to add a node&quot;), sizeof(msg));</a>
+<a name="ln209">    else if(gui-&gt;form_selected)</a>
+<a name="ln210">      g_snprintf(msg, sizeof(msg), _(&quot;shift+scroll to set feather size, ctrl+scroll to set shape opacity (%d%%)&quot;), opacity);</a>
+<a name="ln211">  }</a>
+<a name="ln212">  else if(formtype &amp; DT_MASKS_GRADIENT)</a>
+<a name="ln213">  {</a>
+<a name="ln214">    if(gui-&gt;form_selected)</a>
+<a name="ln215">      g_snprintf(msg, sizeof(msg), _(&quot;ctrl+scroll to set shape opacity (%d%%)&quot;), opacity);</a>
+<a name="ln216">    else if(gui-&gt;pivot_selected)</a>
+<a name="ln217">      g_strlcat(msg, _(&quot;move to rotate shape&quot;), sizeof(msg));</a>
+<a name="ln218">  }</a>
+<a name="ln219">  else if(formtype &amp; DT_MASKS_ELLIPSE)</a>
+<a name="ln220">  {</a>
+<a name="ln221">    if(gui-&gt;creation)</a>
+<a name="ln222">      g_snprintf(msg, sizeof(msg),</a>
+<a name="ln223">                 _(&quot;scroll to set size, shift+scroll to set feather size\nctrl+scroll to set shape opacity (%d%%)&quot;), opacity);</a>
+<a name="ln224">    else if(gui-&gt;point_selected &gt;= 0)</a>
+<a name="ln225">      g_strlcat(msg, _(&quot;ctrl+click to rotate&quot;), sizeof(msg));</a>
+<a name="ln226">    else if(gui-&gt;form_selected)</a>
+<a name="ln227">      g_snprintf(msg, sizeof(msg),</a>
+<a name="ln228">                 _(&quot;shift+click to switch feathering mode, ctrl+click to rotate\nshift+scroll to set feather size, ctrl+scroll to set shape opacity (%d%%),&quot;), opacity);</a>
+<a name="ln229">  }</a>
+<a name="ln230">  else if(formtype &amp; DT_MASKS_BRUSH)</a>
+<a name="ln231">  {</a>
+<a name="ln232">    if(gui-&gt;creation)</a>
+<a name="ln233">      g_snprintf(msg, sizeof(msg),</a>
+<a name="ln234">                 _(&quot;scroll to set brush size, shift+scroll to set hardness,\nctrl+scroll to set opacity (%d%%)&quot;), opacity);</a>
+<a name="ln235">    else if(gui-&gt;form_selected)</a>
+<a name="ln236">      g_snprintf(msg, sizeof(msg),</a>
+<a name="ln237">                 _(&quot;scroll to set hardness, ctrl+scroll to set shape opacity (%d%%)&quot;), opacity);</a>
+<a name="ln238">    else if(gui-&gt;border_selected)</a>
+<a name="ln239">      g_strlcat(msg, _(&quot;scroll to set brush size&quot;), sizeof(msg));</a>
+<a name="ln240">  }</a>
+<a name="ln241">  else if(formtype &amp; DT_MASKS_CIRCLE)</a>
+<a name="ln242">  {</a>
+<a name="ln243">    if(gui-&gt;creation)</a>
+<a name="ln244">      g_snprintf(msg, sizeof(msg),</a>
+<a name="ln245">                 _(&quot;scroll to set size, shift+scroll to set feather size\nctrl+scroll to set shape opacity (%d%%)&quot;), opacity);</a>
+<a name="ln246">    else if(gui-&gt;form_selected)</a>
+<a name="ln247">      g_snprintf(msg, sizeof(msg),</a>
+<a name="ln248">                 _(&quot;shift+scroll to set feather size, ctrl+scroll to set shape opacity (%d%%)&quot;), opacity);</a>
+<a name="ln249">  }</a>
+<a name="ln250"> </a>
+<a name="ln251">  dt_control_hinter_message(darktable.control, msg);</a>
+<a name="ln252">}</a>
+<a name="ln253"> </a>
+<a name="ln254">void dt_masks_init_form_gui(dt_masks_form_gui_t *gui)</a>
+<a name="ln255">{</a>
+<a name="ln256">  memset(gui, 0, sizeof(dt_masks_form_gui_t));</a>
+<a name="ln257"> </a>
+<a name="ln258">  gui-&gt;posx = gui-&gt;posy = -1.0f;</a>
+<a name="ln259">  gui-&gt;mouse_leaved_center = TRUE;</a>
+<a name="ln260">  gui-&gt;posx_source = gui-&gt;posy_source = -1.0f;</a>
+<a name="ln261">  gui-&gt;source_pos_type = DT_MASKS_SOURCE_POS_RELATIVE_TEMP;</a>
+<a name="ln262">}</a>
+<a name="ln263"> </a>
+<a name="ln264">void dt_masks_gui_form_create(dt_masks_form_t *form, dt_masks_form_gui_t *gui, int index)</a>
+<a name="ln265">{</a>
+<a name="ln266">  if(g_list_length(gui-&gt;points) == index)</a>
+<a name="ln267">  {</a>
+<a name="ln268">    dt_masks_form_gui_points_t *gpt2</a>
+<a name="ln269">        = (dt_masks_form_gui_points_t *)calloc(1, sizeof(dt_masks_form_gui_points_t));</a>
+<a name="ln270">    gui-&gt;points = g_list_append(gui-&gt;points, gpt2);</a>
+<a name="ln271">  }</a>
+<a name="ln272">  else if(g_list_length(gui-&gt;points) &lt; index)</a>
+<a name="ln273">    return;</a>
+<a name="ln274"> </a>
+<a name="ln275">  dt_masks_gui_form_remove(form, gui, index);</a>
+<a name="ln276"> </a>
+<a name="ln277">  dt_masks_form_gui_points_t *gpt = (dt_masks_form_gui_points_t *)g_list_nth_data(gui-&gt;points, index);</a>
+<a name="ln278">  if(dt_masks_get_points_border(darktable.develop, form, &amp;gpt-&gt;points, &amp;gpt-&gt;points_count, &amp;gpt-&gt;border,</a>
+<a name="ln279">                                &amp;gpt-&gt;border_count, 0))</a>
+<a name="ln280">  {</a>
+<a name="ln281">    if(form-&gt;type &amp; DT_MASKS_CLONE)</a>
+<a name="ln282">      dt_masks_get_points_border(darktable.develop, form, &amp;gpt-&gt;source, &amp;gpt-&gt;source_count, NULL, NULL, 1);</a>
+<a name="ln283">    gui-&gt;pipe_hash = darktable.develop-&gt;preview_pipe-&gt;backbuf_hash;</a>
+<a name="ln284">    gui-&gt;formid = form-&gt;formid;</a>
+<a name="ln285">  }</a>
+<a name="ln286">}</a>
+<a name="ln287"> </a>
+<a name="ln288">void dt_masks_form_gui_points_free(gpointer data)</a>
+<a name="ln289">{</a>
+<a name="ln290">  if(!data) return;</a>
+<a name="ln291"> </a>
+<a name="ln292">  dt_masks_form_gui_points_t *gpt = (dt_masks_form_gui_points_t *)data;</a>
+<a name="ln293"> </a>
+<a name="ln294">  free(gpt-&gt;points);</a>
+<a name="ln295">  free(gpt-&gt;border);</a>
+<a name="ln296">  free(gpt-&gt;source);</a>
+<a name="ln297">  free(gpt);</a>
+<a name="ln298">}</a>
+<a name="ln299"> </a>
+<a name="ln300">void dt_masks_gui_form_remove(dt_masks_form_t *form, dt_masks_form_gui_t *gui, int index)</a>
+<a name="ln301">{</a>
+<a name="ln302">  dt_masks_form_gui_points_t *gpt = (dt_masks_form_gui_points_t *)g_list_nth_data(gui-&gt;points, index);</a>
+<a name="ln303">  gui-&gt;pipe_hash = gui-&gt;formid = 0;</a>
+<a name="ln304"> </a>
+<a name="ln305">  if(gpt)</a>
+<a name="ln306">  {</a>
+<a name="ln307">    gpt-&gt;points_count = gpt-&gt;border_count = gpt-&gt;source_count = 0;</a>
+<a name="ln308">    free(gpt-&gt;points);</a>
+<a name="ln309">    gpt-&gt;points = NULL;</a>
+<a name="ln310">    free(gpt-&gt;border);</a>
+<a name="ln311">    gpt-&gt;border = NULL;</a>
+<a name="ln312">    free(gpt-&gt;source);</a>
+<a name="ln313">    gpt-&gt;source = NULL;</a>
+<a name="ln314">  }</a>
+<a name="ln315">}</a>
+<a name="ln316"> </a>
+<a name="ln317">void dt_masks_gui_form_test_create(dt_masks_form_t *form, dt_masks_form_gui_t *gui)</a>
+<a name="ln318">{</a>
+<a name="ln319">  // we test if the image has changed</a>
+<a name="ln320">  if(gui-&gt;pipe_hash &gt; 0)</a>
+<a name="ln321">  {</a>
+<a name="ln322">    if(gui-&gt;pipe_hash != darktable.develop-&gt;preview_pipe-&gt;backbuf_hash)</a>
+<a name="ln323">    {</a>
+<a name="ln324">      gui-&gt;pipe_hash = gui-&gt;formid = 0;</a>
+<a name="ln325">      g_list_free_full(gui-&gt;points, dt_masks_form_gui_points_free);</a>
+<a name="ln326">      gui-&gt;points = NULL;</a>
+<a name="ln327">    }</a>
+<a name="ln328">  }</a>
+<a name="ln329"> </a>
+<a name="ln330">  // we create the spots if needed</a>
+<a name="ln331">  if(gui-&gt;pipe_hash == 0)</a>
+<a name="ln332">  {</a>
+<a name="ln333">    if(form-&gt;type &amp; DT_MASKS_GROUP)</a>
+<a name="ln334">    {</a>
+<a name="ln335">      GList *fpts = g_list_first(form-&gt;points);</a>
+<a name="ln336">      int pos = 0;</a>
+<a name="ln337">      while(fpts)</a>
+<a name="ln338">      {</a>
+<a name="ln339">        dt_masks_point_group_t *fpt = (dt_masks_point_group_t *)fpts-&gt;data;</a>
+<a name="ln340">        dt_masks_form_t *sel = dt_masks_get_from_id(darktable.develop, fpt-&gt;formid);</a>
+<a name="ln341">        if (!sel) return;</a>
+<a name="ln342">        dt_masks_gui_form_create(sel, gui, pos);</a>
+<a name="ln343">        fpts = g_list_next(fpts);</a>
+<a name="ln344">        pos++;</a>
+<a name="ln345">      }</a>
+<a name="ln346">    }</a>
+<a name="ln347">    else</a>
+<a name="ln348">      dt_masks_gui_form_create(form, gui, 0);</a>
+<a name="ln349">  }</a>
+<a name="ln350">}</a>
+<a name="ln351"> </a>
+<a name="ln352">static void _check_id(dt_masks_form_t *form)</a>
+<a name="ln353">{</a>
+<a name="ln354">  GList *forms = g_list_first(darktable.develop-&gt;forms);</a>
+<a name="ln355">  int nid = 100;</a>
+<a name="ln356">  while(forms)</a>
+<a name="ln357">  {</a>
+<a name="ln358">    dt_masks_form_t *ff = (dt_masks_form_t *)forms-&gt;data;</a>
+<a name="ln359">    if(ff-&gt;formid == form-&gt;formid)</a>
+<a name="ln360">    {</a>
+<a name="ln361">      form-&gt;formid = nid++;</a>
+<a name="ln362">      forms = g_list_first(darktable.develop-&gt;forms);</a>
+<a name="ln363">      continue;</a>
+<a name="ln364">    }</a>
+<a name="ln365">    forms = g_list_next(forms);</a>
+<a name="ln366">  }</a>
+<a name="ln367">}</a>
+<a name="ln368"> </a>
+<a name="ln369">void dt_masks_gui_form_save_creation(dt_develop_t *dev, dt_iop_module_t *module, dt_masks_form_t *form,</a>
+<a name="ln370">                                     dt_masks_form_gui_t *gui)</a>
+<a name="ln371">{</a>
+<a name="ln372">  GList *l;</a>
+<a name="ln373"> </a>
+<a name="ln374">  // we check if the id is already registered</a>
+<a name="ln375">  _check_id(form);</a>
+<a name="ln376"> </a>
+<a name="ln377">  if(gui) gui-&gt;creation = FALSE;</a>
+<a name="ln378"> </a>
+<a name="ln379">  // mask nb will be at least the length of the list</a>
+<a name="ln380">  guint nb = 0;</a>
+<a name="ln381"> </a>
+<a name="ln382">  // count only the same forms to have a clean numbering</a>
+<a name="ln383">  l = dev-&gt;forms;</a>
+<a name="ln384">  while(l)</a>
+<a name="ln385">  {</a>
+<a name="ln386">    dt_masks_form_t *f = (dt_masks_form_t *)l-&gt;data;</a>
+<a name="ln387">    if(f-&gt;type == form-&gt;type) nb++;</a>
+<a name="ln388">    l = g_list_next(l);</a>
+<a name="ln389">  }</a>
+<a name="ln390"> </a>
+<a name="ln391">  gboolean exist = FALSE;</a>
+<a name="ln392"> </a>
+<a name="ln393">  // check that we do not have duplicate, in case some masks have been</a>
+<a name="ln394">  // removed we can have hole and so nb could already exists.</a>
+<a name="ln395">  do</a>
+<a name="ln396">  {</a>
+<a name="ln397">    exist = FALSE;</a>
+<a name="ln398">    nb++;</a>
+<a name="ln399"> </a>
+<a name="ln400">    if(form-&gt;type &amp; DT_MASKS_CIRCLE)</a>
+<a name="ln401">      snprintf(form-&gt;name, sizeof(form-&gt;name), _(&quot;circle #%d&quot;), nb);</a>
+<a name="ln402">    else if(form-&gt;type &amp; DT_MASKS_PATH)</a>
+<a name="ln403">      snprintf(form-&gt;name, sizeof(form-&gt;name), _(&quot;path #%d&quot;), nb);</a>
+<a name="ln404">    else if(form-&gt;type &amp; DT_MASKS_GRADIENT)</a>
+<a name="ln405">      snprintf(form-&gt;name, sizeof(form-&gt;name), _(&quot;gradient #%d&quot;), nb);</a>
+<a name="ln406">    else if(form-&gt;type &amp; DT_MASKS_ELLIPSE)</a>
+<a name="ln407">      snprintf(form-&gt;name, sizeof(form-&gt;name), _(&quot;ellipse #%d&quot;), nb);</a>
+<a name="ln408">    else if(form-&gt;type &amp; DT_MASKS_BRUSH)</a>
+<a name="ln409">      snprintf(form-&gt;name, sizeof(form-&gt;name), _(&quot;brush #%d&quot;), nb);</a>
+<a name="ln410"> </a>
+<a name="ln411">    l = dev-&gt;forms;</a>
+<a name="ln412">    while(l)</a>
+<a name="ln413">    {</a>
+<a name="ln414">      dt_masks_form_t *f = (dt_masks_form_t *)l-&gt;data;</a>
+<a name="ln415">      if(!strcmp(f-&gt;name, form-&gt;name))</a>
+<a name="ln416">      {</a>
+<a name="ln417">        exist = TRUE;</a>
+<a name="ln418">        break;</a>
+<a name="ln419">      }</a>
+<a name="ln420">      l = g_list_next(l);</a>
+<a name="ln421">    }</a>
+<a name="ln422">  } while(exist);</a>
+<a name="ln423"> </a>
+<a name="ln424">  dev-&gt;forms = g_list_append(dev-&gt;forms, form);</a>
+<a name="ln425"> </a>
+<a name="ln426">  dt_masks_write_form(form, dev);</a>
+<a name="ln427"> </a>
+<a name="ln428">  if(module)</a>
+<a name="ln429">  {</a>
+<a name="ln430">    // is there already a masks group for this module ?</a>
+<a name="ln431">    int grpid = module-&gt;blend_params-&gt;mask_id;</a>
+<a name="ln432">    dt_masks_form_t *grp = dt_masks_get_from_id(dev, grpid);</a>
+<a name="ln433">    if(!grp)</a>
+<a name="ln434">    {</a>
+<a name="ln435">      // we create a new group</a>
+<a name="ln436">      if(form-&gt;type &amp; (DT_MASKS_CLONE|DT_MASKS_NON_CLONE))</a>
+<a name="ln437">        grp = dt_masks_create(DT_MASKS_GROUP | DT_MASKS_CLONE);</a>
+<a name="ln438">      else</a>
+<a name="ln439">        grp = dt_masks_create(DT_MASKS_GROUP);</a>
+<a name="ln440">      gchar *module_label = dt_history_item_get_name(module);</a>
+<a name="ln441">      snprintf(grp-&gt;name, sizeof(grp-&gt;name), &quot;grp %s&quot;, module_label);</a>
+<a name="ln442">      g_free(module_label);</a>
+<a name="ln443">      _check_id(grp);</a>
+<a name="ln444">      dev-&gt;forms = g_list_append(dev-&gt;forms, grp);</a>
+<a name="ln445">      module-&gt;blend_params-&gt;mask_id = grpid = grp-&gt;formid;</a>
+<a name="ln446">    }</a>
+<a name="ln447">    // we add the form in this group</a>
+<a name="ln448">    dt_masks_point_group_t *grpt = malloc(sizeof(dt_masks_point_group_t));</a>
+<a name="ln449">    grpt-&gt;formid = form-&gt;formid;</a>
+<a name="ln450">    grpt-&gt;parentid = grpid;</a>
+<a name="ln451">    grpt-&gt;state = DT_MASKS_STATE_SHOW | DT_MASKS_STATE_USE;</a>
+<a name="ln452">    if(g_list_length(grp-&gt;points) &gt; 0) grpt-&gt;state |= DT_MASKS_STATE_UNION;</a>
+<a name="ln453">    grpt-&gt;opacity = 1.0f;</a>
+<a name="ln454">    grp-&gt;points = g_list_append(grp-&gt;points, grpt);</a>
+<a name="ln455">    // we save the group</a>
+<a name="ln456">    dt_masks_write_form(grp, dev);</a>
+<a name="ln457">    // we update module gui</a>
+<a name="ln458">    if(gui) dt_masks_iop_update(module);</a>
+<a name="ln459">    dt_dev_add_history_item(dev, module, TRUE);</a>
+<a name="ln460">  }</a>
+<a name="ln461">  // show the form if needed</a>
+<a name="ln462">  if(gui) dev-&gt;form_gui-&gt;formid = form-&gt;formid;</a>
+<a name="ln463">  if(gui) dt_dev_masks_list_change(dev);</a>
+<a name="ln464">}</a>
+<a name="ln465"> </a>
+<a name="ln466">int dt_masks_form_duplicate(dt_develop_t *dev, int formid)</a>
+<a name="ln467">{</a>
+<a name="ln468">  // we create a new empty form</a>
+<a name="ln469">  dt_masks_form_t *fbase = dt_masks_get_from_id(dev, formid);</a>
+<a name="ln470">  if(!fbase) return -1;</a>
+<a name="ln471">  dt_masks_form_t *fdest = dt_masks_create(fbase-&gt;type);</a>
+<a name="ln472">  _check_id(fdest);</a>
+<a name="ln473"> </a>
+<a name="ln474">  // we copy the base values</a>
+<a name="ln475">  fdest-&gt;source[0] = fbase-&gt;source[0];</a>
+<a name="ln476">  fdest-&gt;source[1] = fbase-&gt;source[1];</a>
+<a name="ln477">  fdest-&gt;version = fbase-&gt;version;</a>
+<a name="ln478">  snprintf(fdest-&gt;name, sizeof(fdest-&gt;name), _(&quot;copy of %s&quot;), fbase-&gt;name);</a>
+<a name="ln479"> </a>
+<a name="ln480">  darktable.develop-&gt;forms = g_list_append(dev-&gt;forms, fdest);</a>
+<a name="ln481"> </a>
+<a name="ln482">  // we copy all the points</a>
+<a name="ln483">  if(fbase-&gt;type &amp; DT_MASKS_GROUP)</a>
+<a name="ln484">  {</a>
+<a name="ln485">    GList *pts = g_list_first(fbase-&gt;points);</a>
+<a name="ln486">    while(pts)</a>
+<a name="ln487">    {</a>
+<a name="ln488">      dt_masks_point_group_t *pt = (dt_masks_point_group_t *)pts-&gt;data;</a>
+<a name="ln489">      dt_masks_point_group_t *npt = (dt_masks_point_group_t *)malloc(sizeof(dt_masks_point_group_t));</a>
+<a name="ln490"> </a>
+<a name="ln491">      npt-&gt;formid = dt_masks_form_duplicate(dev, pt-&gt;formid);</a>
+<a name="ln492">      npt-&gt;parentid = fdest-&gt;formid;</a>
+<a name="ln493">      npt-&gt;state = pt-&gt;state;</a>
+<a name="ln494">      npt-&gt;opacity = pt-&gt;opacity;</a>
+<a name="ln495">      fdest-&gt;points = g_list_append(fdest-&gt;points, npt);</a>
+<a name="ln496">      pts = g_list_next(pts);</a>
+<a name="ln497">    }</a>
+<a name="ln498">  }</a>
+<a name="ln499">  else if(fbase-&gt;type &amp; DT_MASKS_CIRCLE)</a>
+<a name="ln500">  {</a>
+<a name="ln501">    GList *pts = g_list_first(fbase-&gt;points);</a>
+<a name="ln502">    while(pts)</a>
+<a name="ln503">    {</a>
+<a name="ln504">      dt_masks_point_circle_t *pt = (dt_masks_point_circle_t *)pts-&gt;data;</a>
+<a name="ln505">      dt_masks_point_circle_t *npt = (dt_masks_point_circle_t *)malloc(sizeof(dt_masks_point_circle_t));</a>
+<a name="ln506">      memcpy(npt, pt, sizeof(dt_masks_point_circle_t));</a>
+<a name="ln507">      fdest-&gt;points = g_list_append(fdest-&gt;points, npt);</a>
+<a name="ln508">      pts = g_list_next(pts);</a>
+<a name="ln509">    }</a>
+<a name="ln510">  }</a>
+<a name="ln511">  else if(fbase-&gt;type &amp; DT_MASKS_PATH)</a>
+<a name="ln512">  {</a>
+<a name="ln513">    GList *pts = g_list_first(fbase-&gt;points);</a>
+<a name="ln514">    while(pts)</a>
+<a name="ln515">    {</a>
+<a name="ln516">      dt_masks_point_path_t *pt = (dt_masks_point_path_t *)pts-&gt;data;</a>
+<a name="ln517">      dt_masks_point_path_t *npt = (dt_masks_point_path_t *)malloc(sizeof(dt_masks_point_path_t));</a>
+<a name="ln518">      memcpy(npt, pt, sizeof(dt_masks_point_path_t));</a>
+<a name="ln519">      fdest-&gt;points = g_list_append(fdest-&gt;points, npt);</a>
+<a name="ln520">      pts = g_list_next(pts);</a>
+<a name="ln521">    }</a>
+<a name="ln522">  }</a>
+<a name="ln523">  else if(fbase-&gt;type &amp; DT_MASKS_GRADIENT)</a>
+<a name="ln524">  {</a>
+<a name="ln525">    GList *pts = g_list_first(fbase-&gt;points);</a>
+<a name="ln526">    while(pts)</a>
+<a name="ln527">    {</a>
+<a name="ln528">      dt_masks_point_gradient_t *pt = (dt_masks_point_gradient_t *)pts-&gt;data;</a>
+<a name="ln529">      dt_masks_point_gradient_t *npt = (dt_masks_point_gradient_t *)malloc(sizeof(dt_masks_point_gradient_t));</a>
+<a name="ln530">      memcpy(npt, pt, sizeof(dt_masks_point_gradient_t));</a>
+<a name="ln531">      fdest-&gt;points = g_list_append(fdest-&gt;points, npt);</a>
+<a name="ln532">      pts = g_list_next(pts);</a>
+<a name="ln533">    }</a>
+<a name="ln534">  }</a>
+<a name="ln535">  else if(fbase-&gt;type &amp; DT_MASKS_ELLIPSE)</a>
+<a name="ln536">  {</a>
+<a name="ln537">    GList *pts = g_list_first(fbase-&gt;points);</a>
+<a name="ln538">    while(pts)</a>
+<a name="ln539">    {</a>
+<a name="ln540">      dt_masks_point_ellipse_t *pt = (dt_masks_point_ellipse_t *)pts-&gt;data;</a>
+<a name="ln541">      dt_masks_point_ellipse_t *npt = (dt_masks_point_ellipse_t *)malloc(sizeof(dt_masks_point_ellipse_t));</a>
+<a name="ln542">      memcpy(npt, pt, sizeof(dt_masks_point_ellipse_t));</a>
+<a name="ln543">      fdest-&gt;points = g_list_append(fdest-&gt;points, npt);</a>
+<a name="ln544">      pts = g_list_next(pts);</a>
+<a name="ln545">    }</a>
+<a name="ln546">  }</a>
+<a name="ln547">  else if(fbase-&gt;type &amp; DT_MASKS_BRUSH)</a>
+<a name="ln548">  {</a>
+<a name="ln549">    GList *pts = g_list_first(fbase-&gt;points);</a>
+<a name="ln550">    while(pts)</a>
+<a name="ln551">    {</a>
+<a name="ln552">      dt_masks_point_brush_t *pt = (dt_masks_point_brush_t *)pts-&gt;data;</a>
+<a name="ln553">      dt_masks_point_brush_t *npt = (dt_masks_point_brush_t *)malloc(sizeof(dt_masks_point_brush_t));</a>
+<a name="ln554">      memcpy(npt, pt, sizeof(dt_masks_point_brush_t));</a>
+<a name="ln555">      fdest-&gt;points = g_list_append(fdest-&gt;points, npt);</a>
+<a name="ln556">      pts = g_list_next(pts);</a>
+<a name="ln557">    }</a>
+<a name="ln558">  }</a>
+<a name="ln559"> </a>
+<a name="ln560">  // we save the form</a>
+<a name="ln561">  dt_masks_write_form(fdest, dev);</a>
+<a name="ln562"> </a>
+<a name="ln563">  // and we return it's id</a>
+<a name="ln564">  return fdest-&gt;formid;</a>
+<a name="ln565">}</a>
+<a name="ln566"> </a>
+<a name="ln567">int dt_masks_get_points_border(dt_develop_t *dev, dt_masks_form_t *form, float **points, int *points_count,</a>
+<a name="ln568">                               float **border, int *border_count, int source)</a>
+<a name="ln569">{</a>
+<a name="ln570">  if(form-&gt;type &amp; DT_MASKS_CIRCLE)</a>
+<a name="ln571">  {</a>
+<a name="ln572">    dt_masks_point_circle_t *circle = (dt_masks_point_circle_t *)(g_list_first(form-&gt;points)-&gt;data);</a>
+<a name="ln573">    float x, y;</a>
+<a name="ln574">    if(source)</a>
+<a name="ln575">      x = form-&gt;source[0], y = form-&gt;source[1];</a>
+<a name="ln576">    else</a>
+<a name="ln577">      x = circle-&gt;center[0], y = circle-&gt;center[1];</a>
+<a name="ln578">    if(dt_circle_get_points(dev, x, y, circle-&gt;radius, points, points_count))</a>
+<a name="ln579">    {</a>
+<a name="ln580">      if(border)</a>
+<a name="ln581">        return dt_circle_get_points(dev, x, y, circle-&gt;radius + circle-&gt;border, border, border_count);</a>
+<a name="ln582">      else</a>
+<a name="ln583">        return 1;</a>
+<a name="ln584">    }</a>
+<a name="ln585">  }</a>
+<a name="ln586">  else if(form-&gt;type &amp; DT_MASKS_PATH)</a>
+<a name="ln587">  {</a>
+<a name="ln588">    return dt_path_get_points_border(dev, form, points, points_count, border, border_count, source);</a>
+<a name="ln589">  }</a>
+<a name="ln590">  else if(form-&gt;type &amp; DT_MASKS_BRUSH)</a>
+<a name="ln591">  {</a>
+<a name="ln592">    return dt_brush_get_points_border(dev, form, points, points_count, border, border_count, source);</a>
+<a name="ln593">  }</a>
+<a name="ln594">  else if(form-&gt;type &amp; DT_MASKS_GRADIENT)</a>
+<a name="ln595">  {</a>
+<a name="ln596">    dt_masks_point_gradient_t *gradient = (dt_masks_point_gradient_t *)(g_list_first(form-&gt;points)-&gt;data);</a>
+<a name="ln597">    if(dt_gradient_get_points(dev, gradient-&gt;anchor[0], gradient-&gt;anchor[1], gradient-&gt;rotation, points,</a>
+<a name="ln598">                              points_count))</a>
+<a name="ln599">    {</a>
+<a name="ln600">      if(border)</a>
+<a name="ln601">        return dt_gradient_get_points_border(dev, gradient-&gt;anchor[0], gradient-&gt;anchor[1],</a>
+<a name="ln602">                                             gradient-&gt;rotation, gradient-&gt;compression, border, border_count);</a>
+<a name="ln603">      else</a>
+<a name="ln604">        return 1;</a>
+<a name="ln605">    }</a>
+<a name="ln606">  }</a>
+<a name="ln607">  else if(form-&gt;type &amp; DT_MASKS_ELLIPSE)</a>
+<a name="ln608">  {</a>
+<a name="ln609">    dt_masks_point_ellipse_t *ellipse = (dt_masks_point_ellipse_t *)(g_list_first(form-&gt;points)-&gt;data);</a>
+<a name="ln610">    float x, y, a, b;</a>
+<a name="ln611">    if(source)</a>
+<a name="ln612">      x = form-&gt;source[0], y = form-&gt;source[1];</a>
+<a name="ln613">    else</a>
+<a name="ln614">      x = ellipse-&gt;center[0], y = ellipse-&gt;center[1];</a>
+<a name="ln615">    a = ellipse-&gt;radius[0], b = ellipse-&gt;radius[1];</a>
+<a name="ln616">    if(dt_ellipse_get_points(dev, x, y, a, b, ellipse-&gt;rotation, points, points_count))</a>
+<a name="ln617">    {</a>
+<a name="ln618">      if(border)</a>
+<a name="ln619">        return dt_ellipse_get_points(dev, x, y,</a>
+<a name="ln620">                                     (ellipse-&gt;flags &amp; DT_MASKS_ELLIPSE_PROPORTIONAL ? a * (1.0f + ellipse-&gt;border) : a + ellipse-&gt;border),</a>
+<a name="ln621">                                     (ellipse-&gt;flags &amp; DT_MASKS_ELLIPSE_PROPORTIONAL ? b * (1.0f + ellipse-&gt;border) : b + ellipse-&gt;border),</a>
+<a name="ln622">                                     ellipse-&gt;rotation, border, border_count);</a>
+<a name="ln623">      else</a>
+<a name="ln624">        return 1;</a>
+<a name="ln625">    }</a>
+<a name="ln626">  }</a>
+<a name="ln627"> </a>
+<a name="ln628">  return 0;</a>
+<a name="ln629">}</a>
+<a name="ln630"> </a>
+<a name="ln631">int dt_masks_get_area(dt_iop_module_t *module, dt_dev_pixelpipe_iop_t *piece, dt_masks_form_t *form,</a>
+<a name="ln632">                      int *width, int *height, int *posx, int *posy)</a>
+<a name="ln633">{</a>
+<a name="ln634">  if(form-&gt;type &amp; DT_MASKS_CIRCLE)</a>
+<a name="ln635">  {</a>
+<a name="ln636">    return dt_circle_get_area(module, piece, form, width, height, posx, posy);</a>
+<a name="ln637">  }</a>
+<a name="ln638">  else if(form-&gt;type &amp; DT_MASKS_PATH)</a>
+<a name="ln639">  {</a>
+<a name="ln640">    return dt_path_get_area(module, piece, form, width, height, posx, posy);</a>
+<a name="ln641">  }</a>
+<a name="ln642">  else if(form-&gt;type &amp; DT_MASKS_GRADIENT)</a>
+<a name="ln643">  {</a>
+<a name="ln644">    return dt_gradient_get_area(module, piece, form, width, height, posx, posy);</a>
+<a name="ln645">  }</a>
+<a name="ln646">  else if(form-&gt;type &amp; DT_MASKS_ELLIPSE)</a>
+<a name="ln647">  {</a>
+<a name="ln648">    return dt_ellipse_get_area(module, piece, form, width, height, posx, posy);</a>
+<a name="ln649">  }</a>
+<a name="ln650">  else if(form-&gt;type &amp; DT_MASKS_BRUSH)</a>
+<a name="ln651">  {</a>
+<a name="ln652">    return dt_brush_get_area(module, piece, form, width, height, posx, posy);</a>
+<a name="ln653">  }</a>
+<a name="ln654"> </a>
+<a name="ln655">  return 0;</a>
+<a name="ln656">}</a>
+<a name="ln657"> </a>
+<a name="ln658">int dt_masks_get_source_area(dt_iop_module_t *module, dt_dev_pixelpipe_iop_t *piece, dt_masks_form_t *form,</a>
+<a name="ln659">                             int *width, int *height, int *posx, int *posy)</a>
+<a name="ln660">{</a>
+<a name="ln661">  *width = *height = *posx = *posy = 0;</a>
+<a name="ln662"> </a>
+<a name="ln663">  // must be a clone form</a>
+<a name="ln664">  if(form-&gt;type &amp; DT_MASKS_CLONE)</a>
+<a name="ln665">  {</a>
+<a name="ln666">    if(form-&gt;type &amp; DT_MASKS_CIRCLE)</a>
+<a name="ln667">    {</a>
+<a name="ln668">      return dt_circle_get_source_area(module, piece, form, width, height, posx, posy);</a>
+<a name="ln669">    }</a>
+<a name="ln670">    else if(form-&gt;type &amp; DT_MASKS_PATH)</a>
+<a name="ln671">    {</a>
+<a name="ln672">      return dt_path_get_source_area(module, piece, form, width, height, posx, posy);</a>
+<a name="ln673">    }</a>
+<a name="ln674">    else if(form-&gt;type &amp; DT_MASKS_ELLIPSE)</a>
+<a name="ln675">    {</a>
+<a name="ln676">      return dt_ellipse_get_source_area(module, piece, form, width, height, posx, posy);</a>
+<a name="ln677">    }</a>
+<a name="ln678">    else if(form-&gt;type &amp; DT_MASKS_BRUSH)</a>
+<a name="ln679">    {</a>
+<a name="ln680">      return dt_brush_get_source_area(module, piece, form, width, height, posx, posy);</a>
+<a name="ln681">    }</a>
+<a name="ln682">  }</a>
+<a name="ln683">  return 0;</a>
+<a name="ln684">}</a>
+<a name="ln685"> </a>
+<a name="ln686">int dt_masks_get_mask(dt_iop_module_t *module, dt_dev_pixelpipe_iop_t *piece, dt_masks_form_t *form,</a>
+<a name="ln687">                      float **buffer, int *width, int *height, int *posx, int *posy)</a>
+<a name="ln688">{</a>
+<a name="ln689">  if(form-&gt;type &amp; DT_MASKS_CIRCLE)</a>
+<a name="ln690">  {</a>
+<a name="ln691">    return dt_circle_get_mask(module, piece, form, buffer, width, height, posx, posy);</a>
+<a name="ln692">  }</a>
+<a name="ln693">  else if(form-&gt;type &amp; DT_MASKS_PATH)</a>
+<a name="ln694">  {</a>
+<a name="ln695">    return dt_path_get_mask(module, piece, form, buffer, width, height, posx, posy);</a>
+<a name="ln696">  }</a>
+<a name="ln697">  else if(form-&gt;type &amp; DT_MASKS_GROUP)</a>
+<a name="ln698">  {</a>
+<a name="ln699">    return dt_group_get_mask(module, piece, form, buffer, width, height, posx, posy);</a>
+<a name="ln700">  }</a>
+<a name="ln701">  else if(form-&gt;type &amp; DT_MASKS_GRADIENT)</a>
+<a name="ln702">  {</a>
+<a name="ln703">    return dt_gradient_get_mask(module, piece, form, buffer, width, height, posx, posy);</a>
+<a name="ln704">  }</a>
+<a name="ln705">  else if(form-&gt;type &amp; DT_MASKS_ELLIPSE)</a>
+<a name="ln706">  {</a>
+<a name="ln707">    return dt_ellipse_get_mask(module, piece, form, buffer, width, height, posx, posy);</a>
+<a name="ln708">  }</a>
+<a name="ln709">  else if(form-&gt;type &amp; DT_MASKS_BRUSH)</a>
+<a name="ln710">  {</a>
+<a name="ln711">    return dt_brush_get_mask(module, piece, form, buffer, width, height, posx, posy);</a>
+<a name="ln712">  }</a>
+<a name="ln713">  return 0;</a>
+<a name="ln714">}</a>
+<a name="ln715"> </a>
+<a name="ln716">int dt_masks_get_mask_roi(dt_iop_module_t *module, dt_dev_pixelpipe_iop_t *piece, dt_masks_form_t *form,</a>
+<a name="ln717">                          const dt_iop_roi_t *roi, float *buffer)</a>
+<a name="ln718">{</a>
+<a name="ln719">  if(form-&gt;type &amp; DT_MASKS_CIRCLE)</a>
+<a name="ln720">  {</a>
+<a name="ln721">    return dt_circle_get_mask_roi(module, piece, form, roi, buffer);</a>
+<a name="ln722">  }</a>
+<a name="ln723">  else if(form-&gt;type &amp; DT_MASKS_PATH)</a>
+<a name="ln724">  {</a>
+<a name="ln725">    return dt_path_get_mask_roi(module, piece, form, roi, buffer);</a>
+<a name="ln726">  }</a>
+<a name="ln727">  else if(form-&gt;type &amp; DT_MASKS_GROUP)</a>
+<a name="ln728">  {</a>
+<a name="ln729">    return dt_group_get_mask_roi(module, piece, form, roi, buffer);</a>
+<a name="ln730">  }</a>
+<a name="ln731">  else if(form-&gt;type &amp; DT_MASKS_GRADIENT)</a>
+<a name="ln732">  {</a>
+<a name="ln733">    return dt_gradient_get_mask_roi(module, piece, form, roi, buffer);</a>
+<a name="ln734">  }</a>
+<a name="ln735">  else if(form-&gt;type &amp; DT_MASKS_ELLIPSE)</a>
+<a name="ln736">  {</a>
+<a name="ln737">    return dt_ellipse_get_mask_roi(module, piece, form, roi, buffer);</a>
+<a name="ln738">  }</a>
+<a name="ln739">  else if(form-&gt;type &amp; DT_MASKS_BRUSH)</a>
+<a name="ln740">  {</a>
+<a name="ln741">    return dt_brush_get_mask_roi(module, piece, form, roi, buffer);</a>
+<a name="ln742">  }</a>
+<a name="ln743">  return 0;</a>
+<a name="ln744">}</a>
+<a name="ln745"> </a>
+<a name="ln746">int dt_masks_version(void)</a>
+<a name="ln747">{</a>
+<a name="ln748">  return DEVELOP_MASKS_VERSION;</a>
+<a name="ln749">}</a>
+<a name="ln750"> </a>
+<a name="ln751">static int dt_masks_legacy_params_v1_to_v2(dt_develop_t *dev, void *params)</a>
+<a name="ln752">{</a>
+<a name="ln753">  /*</a>
+<a name="ln754">   * difference: before v2 images were originally rotated on load, and then</a>
+<a name="ln755">   * maybe in flip iop</a>
+<a name="ln756">   * after v2: images are only rotated in flip iop.</a>
+<a name="ln757">   */</a>
+<a name="ln758"> </a>
+<a name="ln759">  dt_masks_form_t *m = (dt_masks_form_t *)params;</a>
+<a name="ln760"> </a>
+<a name="ln761">  const dt_image_orientation_t ori = dt_image_orientation(&amp;dev-&gt;image_storage);</a>
+<a name="ln762"> </a>
+<a name="ln763">  if(ori == ORIENTATION_NONE)</a>
+<a name="ln764">  {</a>
+<a name="ln765">    // image is not rotated, we're fine!</a>
+<a name="ln766">    m-&gt;version = 2;</a>
+<a name="ln767">    return 0;</a>
+<a name="ln768">  }</a>
+<a name="ln769">  else</a>
+<a name="ln770">  {</a>
+<a name="ln771">    if(dev-&gt;iop == NULL) return 1;</a>
+<a name="ln772"> </a>
+<a name="ln773">    const char *opname = &quot;flip&quot;;</a>
+<a name="ln774">    dt_iop_module_t *module = NULL;</a>
+<a name="ln775"> </a>
+<a name="ln776">    GList *modules = dev-&gt;iop;</a>
+<a name="ln777">    while(modules)</a>
+<a name="ln778">    {</a>
+<a name="ln779">      dt_iop_module_t *find_op = (dt_iop_module_t *)modules-&gt;data;</a>
+<a name="ln780">      if(!strcmp(find_op-&gt;op, opname))</a>
+<a name="ln781">      {</a>
+<a name="ln782">        module = find_op;</a>
+<a name="ln783">        break;</a>
+<a name="ln784">      }</a>
+<a name="ln785">      modules = g_list_next(modules);</a>
+<a name="ln786">    }</a>
+<a name="ln787"> </a>
+<a name="ln788">    if(module == NULL) return 1;</a>
+<a name="ln789"> </a>
+<a name="ln790">    dt_dev_pixelpipe_iop_t piece = { 0 };</a>
+<a name="ln791"> </a>
+<a name="ln792">    module-&gt;init_pipe(module, NULL, &amp;piece);</a>
+<a name="ln793">    module-&gt;commit_params(module, module-&gt;default_params, NULL, &amp;piece);</a>
+<a name="ln794"> </a>
+<a name="ln795">    piece.buf_in.width = 1;</a>
+<a name="ln796">    piece.buf_in.height = 1;</a>
+<a name="ln797"> </a>
+<a name="ln798">    GList *p = g_list_first(m-&gt;points);</a>
+<a name="ln799"> </a>
+<a name="ln800">    if(!p) return 1;</a>
+<a name="ln801"> </a>
+<a name="ln802">    if(m-&gt;type &amp; DT_MASKS_CIRCLE)</a>
+<a name="ln803">    {</a>
+<a name="ln804">      dt_masks_point_circle_t *circle = (dt_masks_point_circle_t *)p-&gt;data;</a>
+<a name="ln805">      module-&gt;distort_backtransform(module, &amp;piece, circle-&gt;center, 1);</a>
+<a name="ln806">    }</a>
+<a name="ln807">    else if(m-&gt;type &amp; DT_MASKS_PATH)</a>
+<a name="ln808">    {</a>
+<a name="ln809">      while(p)</a>
+<a name="ln810">      {</a>
+<a name="ln811">        dt_masks_point_path_t *path = (dt_masks_point_path_t *)p-&gt;data;</a>
+<a name="ln812">        module-&gt;distort_backtransform(module, &amp;piece, path-&gt;corner, 1);</a>
+<a name="ln813">        module-&gt;distort_backtransform(module, &amp;piece, path-&gt;ctrl1, 1);</a>
+<a name="ln814">        module-&gt;distort_backtransform(module, &amp;piece, path-&gt;ctrl2, 1);</a>
+<a name="ln815"> </a>
+<a name="ln816">        p = g_list_next(p);</a>
+<a name="ln817">      }</a>
+<a name="ln818">    }</a>
+<a name="ln819">    else if(m-&gt;type &amp; DT_MASKS_GRADIENT)</a>
+<a name="ln820">    { // TODO: new ones have wrong rotation.</a>
+<a name="ln821">      dt_masks_point_gradient_t *gradient = (dt_masks_point_gradient_t *)p-&gt;data;</a>
+<a name="ln822">      module-&gt;distort_backtransform(module, &amp;piece, gradient-&gt;anchor, 1);</a>
+<a name="ln823"> </a>
+<a name="ln824">      if(ori == ORIENTATION_ROTATE_180_DEG)</a>
+<a name="ln825">        gradient-&gt;rotation -= 180.0f;</a>
+<a name="ln826">      else if(ori == ORIENTATION_ROTATE_CCW_90_DEG)</a>
+<a name="ln827">        gradient-&gt;rotation -= 90.0f;</a>
+<a name="ln828">      else if(ori == ORIENTATION_ROTATE_CW_90_DEG)</a>
+<a name="ln829">        gradient-&gt;rotation -= -90.0f;</a>
+<a name="ln830">    }</a>
+<a name="ln831">    else if(m-&gt;type &amp; DT_MASKS_ELLIPSE)</a>
+<a name="ln832">    {</a>
+<a name="ln833">      dt_masks_point_ellipse_t *ellipse = (dt_masks_point_ellipse_t *)p-&gt;data;</a>
+<a name="ln834">      module-&gt;distort_backtransform(module, &amp;piece, ellipse-&gt;center, 1);</a>
+<a name="ln835"> </a>
+<a name="ln836">      if(ori &amp; ORIENTATION_SWAP_XY)</a>
+<a name="ln837">      {</a>
+<a name="ln838">        const float y = ellipse-&gt;radius[0];</a>
+<a name="ln839">        ellipse-&gt;radius[0] = ellipse-&gt;radius[1];</a>
+<a name="ln840">        ellipse-&gt;radius[1] = y;</a>
+<a name="ln841">      }</a>
+<a name="ln842">    }</a>
+<a name="ln843">    else if(m-&gt;type &amp; DT_MASKS_BRUSH)</a>
+<a name="ln844">    {</a>
+<a name="ln845">      while(p)</a>
+<a name="ln846">      {</a>
+<a name="ln847">        dt_masks_point_brush_t *brush = (dt_masks_point_brush_t *)p-&gt;data;</a>
+<a name="ln848">        module-&gt;distort_backtransform(module, &amp;piece, brush-&gt;corner, 1);</a>
+<a name="ln849">        module-&gt;distort_backtransform(module, &amp;piece, brush-&gt;ctrl1, 1);</a>
+<a name="ln850">        module-&gt;distort_backtransform(module, &amp;piece, brush-&gt;ctrl2, 1);</a>
+<a name="ln851"> </a>
+<a name="ln852">        p = g_list_next(p);</a>
+<a name="ln853">      }</a>
+<a name="ln854">    }</a>
+<a name="ln855"> </a>
+<a name="ln856">    if(m-&gt;type &amp; DT_MASKS_CLONE)</a>
+<a name="ln857">    {</a>
+<a name="ln858">      // NOTE: can be: DT_MASKS_CIRCLE, DT_MASKS_ELLIPSE, DT_MASKS_PATH</a>
+<a name="ln859">      module-&gt;distort_backtransform(module, &amp;piece, m-&gt;source, 1);</a>
+<a name="ln860">    }</a>
+<a name="ln861"> </a>
+<a name="ln862">    m-&gt;version = 2;</a>
+<a name="ln863"> </a>
+<a name="ln864">    return 0;</a>
+<a name="ln865">  }</a>
+<a name="ln866">}</a>
+<a name="ln867"> </a>
+<a name="ln868">static void dt_masks_legacy_params_v2_to_v3_transform(const dt_image_t *img, float *points)</a>
+<a name="ln869">{</a>
+<a name="ln870">  const float w = (float)img-&gt;width, h = (float)img-&gt;height;</a>
+<a name="ln871"> </a>
+<a name="ln872">  const float cx = (float)img-&gt;crop_x, cy = (float)img-&gt;crop_y;</a>
+<a name="ln873"> </a>
+<a name="ln874">  const float cw = (float)(img-&gt;width - img-&gt;crop_x - img-&gt;crop_width),</a>
+<a name="ln875">              ch = (float)(img-&gt;height - img-&gt;crop_y - img-&gt;crop_height);</a>
+<a name="ln876"> </a>
+<a name="ln877">  /*</a>
+<a name="ln878">   * masks coordinates are normalized, so we need to:</a>
+<a name="ln879">   * 1. de-normalize them by image original cropped dimensions</a>
+<a name="ln880">   * 2. un-crop them by adding top-left crop coordinates</a>
+<a name="ln881">   * 3. normalize them by the image fully uncropped dimensions</a>
+<a name="ln882">   */</a>
+<a name="ln883">  points[0] = ((points[0] * cw) + cx) / w;</a>
+<a name="ln884">  points[1] = ((points[1] * ch) + cy) / h;</a>
+<a name="ln885">}</a>
+<a name="ln886"> </a>
+<a name="ln887">static void dt_masks_legacy_params_v2_to_v3_transform_only_rescale(const dt_image_t *img, float *points,</a>
+<a name="ln888">                                                                   size_t points_count)</a>
+<a name="ln889">{</a>
+<a name="ln890">  const float w = (float)img-&gt;width, h = (float)img-&gt;height;</a>
+<a name="ln891"> </a>
+<a name="ln892">  const float cw = (float)(img-&gt;width - img-&gt;crop_x - img-&gt;crop_width),</a>
+<a name="ln893">              ch = (float)(img-&gt;height - img-&gt;crop_y - img-&gt;crop_height);</a>
+<a name="ln894"> </a>
+<a name="ln895">  /*</a>
+<a name="ln896">   * masks coordinates are normalized, so we need to:</a>
+<a name="ln897">   * 1. de-normalize them by minimal of image original cropped dimensions</a>
+<a name="ln898">   * 2. normalize them by the minimal of image fully uncropped dimensions</a>
+<a name="ln899">   */</a>
+<a name="ln900">  for(size_t i = 0; i &lt; points_count; i++) points[i] = ((points[i] * MIN(cw, ch))) / MIN(w, h);</a>
+<a name="ln901">}</a>
+<a name="ln902"> </a>
+<a name="ln903">static int dt_masks_legacy_params_v2_to_v3(dt_develop_t *dev, void *params)</a>
+<a name="ln904">{</a>
+<a name="ln905">  /*</a>
+<a name="ln906">   * difference: before v3 images were originally cropped on load</a>
+<a name="ln907">   * after v3: images are cropped in rawprepare iop.</a>
+<a name="ln908">   */</a>
+<a name="ln909"> </a>
+<a name="ln910">  dt_masks_form_t *m = (dt_masks_form_t *)params;</a>
+<a name="ln911"> </a>
+<a name="ln912">  const dt_image_t *img = &amp;(dev-&gt;image_storage);</a>
+<a name="ln913"> </a>
+<a name="ln914">  if(img-&gt;crop_x == 0 &amp;&amp; img-&gt;crop_y == 0 &amp;&amp; img-&gt;crop_width == 0 &amp;&amp; img-&gt;crop_height == 0)</a>
+<a name="ln915">  {</a>
+<a name="ln916">    // image has no &quot;raw cropping&quot;, we're fine!</a>
+<a name="ln917">    m-&gt;version = 3;</a>
+<a name="ln918">    return 0;</a>
+<a name="ln919">  }</a>
+<a name="ln920">  else</a>
+<a name="ln921">  {</a>
+<a name="ln922">    GList *p = g_list_first(m-&gt;points);</a>
+<a name="ln923"> </a>
+<a name="ln924">    if(!p) return 1;</a>
+<a name="ln925"> </a>
+<a name="ln926">    if(m-&gt;type &amp; DT_MASKS_CIRCLE)</a>
+<a name="ln927">    {</a>
+<a name="ln928">      dt_masks_point_circle_t *circle = (dt_masks_point_circle_t *)p-&gt;data;</a>
+<a name="ln929">      dt_masks_legacy_params_v2_to_v3_transform(img, circle-&gt;center);</a>
+<a name="ln930">      dt_masks_legacy_params_v2_to_v3_transform_only_rescale(img, &amp;circle-&gt;radius, 1);</a>
+<a name="ln931">      dt_masks_legacy_params_v2_to_v3_transform_only_rescale(img, &amp;circle-&gt;border, 1);</a>
+<a name="ln932">    }</a>
+<a name="ln933">    else if(m-&gt;type &amp; DT_MASKS_PATH)</a>
+<a name="ln934">    {</a>
+<a name="ln935">      while(p)</a>
+<a name="ln936">      {</a>
+<a name="ln937">        dt_masks_point_path_t *path = (dt_masks_point_path_t *)p-&gt;data;</a>
+<a name="ln938">        dt_masks_legacy_params_v2_to_v3_transform(img, path-&gt;corner);</a>
+<a name="ln939">        dt_masks_legacy_params_v2_to_v3_transform(img, path-&gt;ctrl1);</a>
+<a name="ln940">        dt_masks_legacy_params_v2_to_v3_transform(img, path-&gt;ctrl2);</a>
+<a name="ln941">        dt_masks_legacy_params_v2_to_v3_transform_only_rescale(img, path-&gt;border, 2);</a>
+<a name="ln942"> </a>
+<a name="ln943">        p = g_list_next(p);</a>
+<a name="ln944">      }</a>
+<a name="ln945">    }</a>
+<a name="ln946">    else if(m-&gt;type &amp; DT_MASKS_GRADIENT)</a>
+<a name="ln947">    {</a>
+<a name="ln948">      dt_masks_point_gradient_t *gradient = (dt_masks_point_gradient_t *)p-&gt;data;</a>
+<a name="ln949">      dt_masks_legacy_params_v2_to_v3_transform(img, gradient-&gt;anchor);</a>
+<a name="ln950">    }</a>
+<a name="ln951">    else if(m-&gt;type &amp; DT_MASKS_ELLIPSE)</a>
+<a name="ln952">    {</a>
+<a name="ln953">      dt_masks_point_ellipse_t *ellipse = (dt_masks_point_ellipse_t *)p-&gt;data;</a>
+<a name="ln954">      dt_masks_legacy_params_v2_to_v3_transform(img, ellipse-&gt;center);</a>
+<a name="ln955">      dt_masks_legacy_params_v2_to_v3_transform_only_rescale(img, ellipse-&gt;radius, 2);</a>
+<a name="ln956">      dt_masks_legacy_params_v2_to_v3_transform_only_rescale(img, &amp;ellipse-&gt;border, 1);</a>
+<a name="ln957">    }</a>
+<a name="ln958">    else if(m-&gt;type &amp; DT_MASKS_BRUSH)</a>
+<a name="ln959">    {</a>
+<a name="ln960">      while(p)</a>
+<a name="ln961">      {</a>
+<a name="ln962">        dt_masks_point_brush_t *brush = (dt_masks_point_brush_t *)p-&gt;data;</a>
+<a name="ln963">        dt_masks_legacy_params_v2_to_v3_transform(img, brush-&gt;corner);</a>
+<a name="ln964">        dt_masks_legacy_params_v2_to_v3_transform(img, brush-&gt;ctrl1);</a>
+<a name="ln965">        dt_masks_legacy_params_v2_to_v3_transform(img, brush-&gt;ctrl2);</a>
+<a name="ln966">        dt_masks_legacy_params_v2_to_v3_transform_only_rescale(img, brush-&gt;border, 2);</a>
+<a name="ln967"> </a>
+<a name="ln968">        p = g_list_next(p);</a>
+<a name="ln969">      }</a>
+<a name="ln970">    }</a>
+<a name="ln971"> </a>
+<a name="ln972">    if(m-&gt;type &amp; DT_MASKS_CLONE)</a>
+<a name="ln973">    {</a>
+<a name="ln974">      // NOTE: can be: DT_MASKS_CIRCLE, DT_MASKS_ELLIPSE, DT_MASKS_PATH</a>
+<a name="ln975">      dt_masks_legacy_params_v2_to_v3_transform(img, m-&gt;source);</a>
+<a name="ln976">    }</a>
+<a name="ln977"> </a>
+<a name="ln978">    m-&gt;version = 3;</a>
+<a name="ln979"> </a>
+<a name="ln980">    return 0;</a>
+<a name="ln981">  }</a>
+<a name="ln982">}</a>
+<a name="ln983"> </a>
+<a name="ln984">static int dt_masks_legacy_params_v3_to_v4(dt_develop_t *dev, void *params)</a>
+<a name="ln985">{</a>
+<a name="ln986">  /*</a>
+<a name="ln987">   * difference affecting ellipse</a>
+<a name="ln988">   * up to v3: only equidistant feathering</a>
+<a name="ln989">   * after v4: choice between equidistant and proportional feathering</a>
+<a name="ln990">   * type of feathering is defined in new flags parameter</a>
+<a name="ln991">   */</a>
+<a name="ln992"> </a>
+<a name="ln993">  dt_masks_form_t *m = (dt_masks_form_t *)params;</a>
+<a name="ln994"> </a>
+<a name="ln995">  GList *p = g_list_first(m-&gt;points);</a>
+<a name="ln996"> </a>
+<a name="ln997">  if(!p) return 1;</a>
+<a name="ln998"> </a>
+<a name="ln999">  if(m-&gt;type &amp; DT_MASKS_ELLIPSE)</a>
+<a name="ln1000">  {</a>
+<a name="ln1001">    dt_masks_point_ellipse_t *ellipse = (dt_masks_point_ellipse_t *)p-&gt;data;</a>
+<a name="ln1002">    ellipse-&gt;flags = DT_MASKS_ELLIPSE_EQUIDISTANT;</a>
+<a name="ln1003">  }</a>
+<a name="ln1004"> </a>
+<a name="ln1005">  m-&gt;version = 4;</a>
+<a name="ln1006"> </a>
+<a name="ln1007">  return 0;</a>
+<a name="ln1008">}</a>
+<a name="ln1009"> </a>
+<a name="ln1010"> </a>
+<a name="ln1011">int dt_masks_legacy_params(dt_develop_t *dev, void *params, const int old_version, const int new_version)</a>
+<a name="ln1012">{</a>
+<a name="ln1013">  int res = 1;</a>
+<a name="ln1014">#if 0 // we should not need this any longer</a>
+<a name="ln1015">  if(old_version == 1 &amp;&amp; new_version == 2)</a>
+<a name="ln1016">  {</a>
+<a name="ln1017">    res = dt_masks_legacy_params_v1_to_v2(dev, params);</a>
+<a name="ln1018">  }</a>
+<a name="ln1019">#endif</a>
+<a name="ln1020"> </a>
+<a name="ln1021">  if(old_version == 1 &amp;&amp; new_version == 4)</a>
+<a name="ln1022">  {</a>
+<a name="ln1023">    res = dt_masks_legacy_params_v1_to_v2(dev, params);</a>
+<a name="ln1024">    if(!res) res = dt_masks_legacy_params_v2_to_v3(dev, params);</a>
+<a name="ln1025">    if(!res) res = dt_masks_legacy_params_v3_to_v4(dev, params);</a>
+<a name="ln1026">  }</a>
+<a name="ln1027">  else if(old_version == 2 &amp;&amp; new_version == 4)</a>
+<a name="ln1028">  {</a>
+<a name="ln1029">    res = dt_masks_legacy_params_v2_to_v3(dev, params);</a>
+<a name="ln1030">    if(!res) res = dt_masks_legacy_params_v3_to_v4(dev, params);</a>
+<a name="ln1031">  }</a>
+<a name="ln1032">  else if(old_version == 3 &amp;&amp; new_version == 4)</a>
+<a name="ln1033">  {</a>
+<a name="ln1034">    res = dt_masks_legacy_params_v3_to_v4(dev, params);</a>
+<a name="ln1035">  }</a>
+<a name="ln1036"> </a>
+<a name="ln1037">  return res;</a>
+<a name="ln1038">}</a>
+<a name="ln1039"> </a>
+<a name="ln1040">dt_masks_form_t *dt_masks_create(dt_masks_type_t type)</a>
+<a name="ln1041">{</a>
+<a name="ln1042">  dt_masks_form_t *form = (dt_masks_form_t *)calloc(1, sizeof(dt_masks_form_t));</a>
+<a name="ln1043">  if(!form) return NULL;</a>
+<a name="ln1044"> </a>
+<a name="ln1045">  form-&gt;type = type;</a>
+<a name="ln1046">  form-&gt;version = dt_masks_version();</a>
+<a name="ln1047">  form-&gt;formid = time(NULL);</a>
+<a name="ln1048"> </a>
+<a name="ln1049">  // all forms created must be registered in darktable.develop-&gt;allforms for later cleanup</a>
+<a name="ln1050">  darktable.develop-&gt;allforms = g_list_append(darktable.develop-&gt;allforms, form);</a>
+<a name="ln1051"> </a>
+<a name="ln1052">  return form;</a>
+<a name="ln1053">}</a>
+<a name="ln1054"> </a>
+<a name="ln1055">dt_masks_form_t *dt_masks_get_from_id_ext(GList *forms, int id)</a>
+<a name="ln1056">{</a>
+<a name="ln1057">  while(forms)</a>
+<a name="ln1058">  {</a>
+<a name="ln1059">    dt_masks_form_t *form = (dt_masks_form_t *)forms-&gt;data;</a>
+<a name="ln1060">    if(form-&gt;formid == id) return form;</a>
+<a name="ln1061">    forms = g_list_next(forms);</a>
+<a name="ln1062">  }</a>
+<a name="ln1063">  return NULL;</a>
+<a name="ln1064">}</a>
+<a name="ln1065"> </a>
+<a name="ln1066">dt_masks_form_t *dt_masks_get_from_id(dt_develop_t *dev, int id)</a>
+<a name="ln1067">{</a>
+<a name="ln1068">  return dt_masks_get_from_id_ext(dev-&gt;forms, id);</a>
+<a name="ln1069">}</a>
+<a name="ln1070"> </a>
+<a name="ln1071">void dt_masks_read_forms_ext(dt_develop_t *dev, const int imgid, gboolean no_image)</a>
+<a name="ln1072">{</a>
+<a name="ln1073">  // first we have to reset the list</a>
+<a name="ln1074">  g_list_free(dev-&gt;forms);</a>
+<a name="ln1075">  dev-&gt;forms = NULL;</a>
+<a name="ln1076"> </a>
+<a name="ln1077">  if(imgid &lt;= 0) return;</a>
+<a name="ln1078"> </a>
+<a name="ln1079">  sqlite3_stmt *stmt;</a>
+<a name="ln1080">  DT_DEBUG_SQLITE3_PREPARE_V2(</a>
+<a name="ln1081">      dt_database_get(darktable.db),</a>
+<a name="ln1082">      &quot;SELECT imgid, formid, form, name, version, points, points_count, source FROM main.mask WHERE imgid = ?1&quot;,</a>
+<a name="ln1083">      -1, &amp;stmt, NULL);</a>
+<a name="ln1084">  DT_DEBUG_SQLITE3_BIND_INT(stmt, 1, imgid);</a>
+<a name="ln1085"> </a>
+<a name="ln1086">  while(sqlite3_step(stmt) == SQLITE_ROW)</a>
+<a name="ln1087">  {</a>
+<a name="ln1088">    // db record:</a>
+<a name="ln1089">    // 0-img, 1-formid, 2-form_type, 3-name, 4-version, 5-points, 6-points_count, 7-source</a>
+<a name="ln1090"> </a>
+<a name="ln1091">    // we get the values</a>
+<a name="ln1092"> </a>
+<a name="ln1093">    int formid = sqlite3_column_int(stmt, 1);</a>
+<a name="ln1094">    dt_masks_type_t type = sqlite3_column_int(stmt, 2);</a>
+<a name="ln1095">    dt_masks_form_t *form = dt_masks_create(type);</a>
+<a name="ln1096">    form-&gt;formid = formid;</a>
+<a name="ln1097">    const char *name = (const char *)sqlite3_column_text(stmt, 3);</a>
+<a name="ln1098">    snprintf(form-&gt;name, sizeof(form-&gt;name), &quot;%s&quot;, name);</a>
+<a name="ln1099">    form-&gt;version = sqlite3_column_int(stmt, 4);</a>
+<a name="ln1100">    form-&gt;points = NULL;</a>
+<a name="ln1101">    int nb_points = sqlite3_column_int(stmt, 6);</a>
+<a name="ln1102">    memcpy(form-&gt;source, sqlite3_column_blob(stmt, 7), 2 * sizeof(float));</a>
+<a name="ln1103"> </a>
+<a name="ln1104">    // and now we &quot;read&quot; the blob</a>
+<a name="ln1105">    if(form-&gt;type &amp; DT_MASKS_CIRCLE)</a>
+<a name="ln1106">    {</a>
+<a name="ln1107">      dt_masks_point_circle_t *circle = (dt_masks_point_circle_t *)malloc(sizeof(dt_masks_point_circle_t));</a>
+<a name="ln1108">      memcpy(circle, sqlite3_column_blob(stmt, 5), sizeof(dt_masks_point_circle_t));</a>
+<a name="ln1109">      form-&gt;points = g_list_append(form-&gt;points, circle);</a>
+<a name="ln1110">    }</a>
+<a name="ln1111">    else if(form-&gt;type &amp; DT_MASKS_PATH)</a>
+<a name="ln1112">    {</a>
+<a name="ln1113">      dt_masks_point_path_t *ptbuf = (dt_masks_point_path_t *)sqlite3_column_blob(stmt, 5);</a>
+<a name="ln1114">      for(int i = 0; i &lt; nb_points; i++)</a>
+<a name="ln1115">      {</a>
+<a name="ln1116">        dt_masks_point_path_t *point = (dt_masks_point_path_t *)malloc(sizeof(dt_masks_point_path_t));</a>
+<a name="ln1117">        memcpy(point, ptbuf + i, sizeof(dt_masks_point_path_t));</a>
+<a name="ln1118">        form-&gt;points = g_list_append(form-&gt;points, point);</a>
+<a name="ln1119">      }</a>
+<a name="ln1120">    }</a>
+<a name="ln1121">    else if(form-&gt;type &amp; DT_MASKS_GROUP)</a>
+<a name="ln1122">    {</a>
+<a name="ln1123">      dt_masks_point_group_t *ptbuf = (dt_masks_point_group_t *)sqlite3_column_blob(stmt, 5);</a>
+<a name="ln1124">      for(int i = 0; i &lt; nb_points; i++)</a>
+<a name="ln1125">      {</a>
+<a name="ln1126">        dt_masks_point_group_t *point = (dt_masks_point_group_t *)malloc(sizeof(dt_masks_point_group_t));</a>
+<a name="ln1127">        memcpy(point, ptbuf + i, sizeof(dt_masks_point_group_t));</a>
+<a name="ln1128">        form-&gt;points = g_list_append(form-&gt;points, point);</a>
+<a name="ln1129">      }</a>
+<a name="ln1130">    }</a>
+<a name="ln1131">    else if(form-&gt;type &amp; DT_MASKS_GRADIENT)</a>
+<a name="ln1132">    {</a>
+<a name="ln1133">      dt_masks_point_gradient_t *gradient</a>
+<a name="ln1134">          = (dt_masks_point_gradient_t *)malloc(sizeof(dt_masks_point_gradient_t));</a>
+<a name="ln1135">      memcpy(gradient, sqlite3_column_blob(stmt, 5), sizeof(dt_masks_point_gradient_t));</a>
+<a name="ln1136">      form-&gt;points = g_list_append(form-&gt;points, gradient);</a>
+<a name="ln1137">    }</a>
+<a name="ln1138">    else if(form-&gt;type &amp; DT_MASKS_ELLIPSE)</a>
+<a name="ln1139">    {</a>
+<a name="ln1140">      dt_masks_point_ellipse_t *ellipse</a>
+<a name="ln1141">          = (dt_masks_point_ellipse_t *)malloc(sizeof(dt_masks_point_ellipse_t));</a>
+<a name="ln1142">      memcpy(ellipse, sqlite3_column_blob(stmt, 5), sizeof(dt_masks_point_ellipse_t));</a>
+<a name="ln1143">      form-&gt;points = g_list_append(form-&gt;points, ellipse);</a>
+<a name="ln1144">    }</a>
+<a name="ln1145">    else if(form-&gt;type &amp; DT_MASKS_BRUSH)</a>
+<a name="ln1146">    {</a>
+<a name="ln1147">      dt_masks_point_brush_t *ptbuf = (dt_masks_point_brush_t *)sqlite3_column_blob(stmt, 5);</a>
+<a name="ln1148">      for(int i = 0; i &lt; nb_points; i++)</a>
+<a name="ln1149">      {</a>
+<a name="ln1150">        dt_masks_point_brush_t *point = (dt_masks_point_brush_t *)malloc(sizeof(dt_masks_point_brush_t));</a>
+<a name="ln1151">        memcpy(point, ptbuf + i, sizeof(dt_masks_point_brush_t));</a>
+<a name="ln1152">        form-&gt;points = g_list_append(form-&gt;points, point);</a>
+<a name="ln1153">      }</a>
+<a name="ln1154">    }</a>
+<a name="ln1155"> </a>
+<a name="ln1156">    if(form-&gt;version != dt_masks_version())</a>
+<a name="ln1157">    {</a>
+<a name="ln1158">      if(dt_masks_legacy_params(dev, form, form-&gt;version, dt_masks_version()))</a>
+<a name="ln1159">      {</a>
+<a name="ln1160">        const char *fname = dev-&gt;image_storage.filename + strlen(dev-&gt;image_storage.filename);</a>
+<a name="ln1161">        while(fname &gt; dev-&gt;image_storage.filename &amp;&amp; *fname != '/') fname--;</a>
+<a name="ln1162">        if(fname &gt; dev-&gt;image_storage.filename) fname++;</a>
+<a name="ln1163"> </a>
+<a name="ln1164">        fprintf(stderr,</a>
+<a name="ln1165">                &quot;[dt_masks_read_forms] %s (imgid `%i'): mask version mismatch: history is %d, dt %d.\n&quot;,</a>
+<a name="ln1166">                fname, imgid, form-&gt;version, dt_masks_version());</a>
+<a name="ln1167">        dt_control_log(_(&quot;%s: mask version mismatch: %d != %d&quot;), fname, dt_masks_version(), form-&gt;version);</a>
+<a name="ln1168"> </a>
+<a name="ln1169">        continue;</a>
+<a name="ln1170">      }</a>
+<a name="ln1171">    }</a>
+<a name="ln1172"> </a>
+<a name="ln1173">    // and we can add the form to the list</a>
+<a name="ln1174">    dev-&gt;forms = g_list_append(dev-&gt;forms, form);</a>
+<a name="ln1175">  }</a>
+<a name="ln1176"> </a>
+<a name="ln1177">  sqlite3_finalize(stmt);</a>
+<a name="ln1178">  if(!no_image)</a>
+<a name="ln1179">  dt_dev_masks_list_change(dev);</a>
+<a name="ln1180">}</a>
+<a name="ln1181"> </a>
+<a name="ln1182">void dt_masks_read_forms(dt_develop_t *dev)</a>
+<a name="ln1183">{</a>
+<a name="ln1184">  dt_masks_read_forms_ext(dev, dev-&gt;image_storage.id, FALSE);</a>
+<a name="ln1185">}</a>
+<a name="ln1186"> </a>
+<a name="ln1187">static void _masks_write_forms_db(dt_develop_t *dev, const int imgid, gboolean undo)</a>
+<a name="ln1188">{</a>
+<a name="ln1189">  // we first erase all masks for the image present in the db</a>
+<a name="ln1190">  sqlite3_stmt *stmt;</a>
+<a name="ln1191">  DT_DEBUG_SQLITE3_PREPARE_V2(dt_database_get(darktable.db), &quot;DELETE FROM main.mask WHERE imgid = ?1&quot;, -1, &amp;stmt,</a>
+<a name="ln1192">                              NULL);</a>
+<a name="ln1193">  DT_DEBUG_SQLITE3_BIND_INT(stmt, 1, imgid);</a>
+<a name="ln1194">  sqlite3_step(stmt);</a>
+<a name="ln1195">  sqlite3_finalize(stmt);</a>
+<a name="ln1196"> </a>
+<a name="ln1197">  // and now we write each forms</a>
+<a name="ln1198">  GList *forms = g_list_first(dev-&gt;forms);</a>
+<a name="ln1199">  if (undo)</a>
+<a name="ln1200">  {</a>
+<a name="ln1201">    _do_record_undo(dev, NULL);</a>
+<a name="ln1202">  }</a>
+<a name="ln1203"> </a>
+<a name="ln1204">  while(forms)</a>
+<a name="ln1205">  {</a>
+<a name="ln1206">    dt_masks_form_t *form = (dt_masks_form_t *)forms-&gt;data;</a>
+<a name="ln1207"> </a>
+<a name="ln1208">    if (form)</a>
+<a name="ln1209">      _masks_write_form_db(form, imgid, dev);</a>
+<a name="ln1210"> </a>
+<a name="ln1211">    forms = g_list_next(forms);</a>
+<a name="ln1212">  }</a>
+<a name="ln1213">}</a>
+<a name="ln1214">static void _masks_write_form_db(dt_masks_form_t *form, const int imgid, dt_develop_t *dev)</a>
+<a name="ln1215">{</a>
+<a name="ln1216">  sqlite3_stmt *stmt;</a>
+<a name="ln1217"> </a>
+<a name="ln1218">  // write the form into the database</a>
+<a name="ln1219">  DT_DEBUG_SQLITE3_PREPARE_V2(dt_database_get(darktable.db), &quot;INSERT INTO main.mask (imgid, formid, form, name, &quot;</a>
+<a name="ln1220">                                                             &quot;version, points, points_count,source) VALUES &quot;</a>
+<a name="ln1221">                                                             &quot;(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)&quot;,</a>
+<a name="ln1222">                              -1, &amp;stmt, NULL);</a>
+<a name="ln1223">  DT_DEBUG_SQLITE3_BIND_INT(stmt, 1, imgid);</a>
+<a name="ln1224">  DT_DEBUG_SQLITE3_BIND_INT(stmt, 2, form-&gt;formid);</a>
+<a name="ln1225">  DT_DEBUG_SQLITE3_BIND_INT(stmt, 3, form-&gt;type);</a>
+<a name="ln1226">  DT_DEBUG_SQLITE3_BIND_TEXT(stmt, 4, form-&gt;name, -1, SQLITE_TRANSIENT);</a>
+<a name="ln1227">  DT_DEBUG_SQLITE3_BIND_BLOB(stmt, 8, form-&gt;source, 2 * sizeof(float), SQLITE_TRANSIENT);</a>
+<a name="ln1228">  DT_DEBUG_SQLITE3_BIND_INT(stmt, 5, form-&gt;version);</a>
+<a name="ln1229">  if(form-&gt;type &amp; DT_MASKS_CIRCLE)</a>
+<a name="ln1230">  {</a>
+<a name="ln1231">    GList *points = g_list_first(form-&gt;points);</a>
+<a name="ln1232">    if(points)</a>
+<a name="ln1233">    {</a>
+<a name="ln1234">      dt_masks_point_circle_t *circle = (dt_masks_point_circle_t *)(points-&gt;data);</a>
+<a name="ln1235">      DT_DEBUG_SQLITE3_BIND_BLOB(stmt, 6, circle, sizeof(dt_masks_point_circle_t), SQLITE_TRANSIENT);</a>
+<a name="ln1236">      DT_DEBUG_SQLITE3_BIND_INT(stmt, 7, 1);</a>
+<a name="ln1237">      sqlite3_step(stmt);</a>
+<a name="ln1238">      sqlite3_finalize(stmt);</a>
+<a name="ln1239">    }</a>
+<a name="ln1240">  }</a>
+<a name="ln1241">  else if(form-&gt;type &amp; DT_MASKS_PATH)</a>
+<a name="ln1242">  {</a>
+<a name="ln1243">    guint nb = g_list_length(form-&gt;points);</a>
+<a name="ln1244">    dt_masks_point_path_t *ptbuf = (dt_masks_point_path_t *)calloc(nb, sizeof(dt_masks_point_path_t));</a>
+<a name="ln1245">    GList *points = g_list_first(form-&gt;points);</a>
+<a name="ln1246">    int pos = 0;</a>
+<a name="ln1247">    while(points)</a>
+<a name="ln1248">    {</a>
+<a name="ln1249">      dt_masks_point_path_t *pt = (dt_masks_point_path_t *)points-&gt;data;</a>
+<a name="ln1250">      ptbuf[pos++] = *pt;</a>
+<a name="ln1251">      points = g_list_next(points);</a>
+<a name="ln1252">    }</a>
+<a name="ln1253">    DT_DEBUG_SQLITE3_BIND_BLOB(stmt, 6, ptbuf, nb * sizeof(dt_masks_point_path_t), SQLITE_TRANSIENT);</a>
+<a name="ln1254">    DT_DEBUG_SQLITE3_BIND_INT(stmt, 7, nb);</a>
+<a name="ln1255">    sqlite3_step(stmt);</a>
+<a name="ln1256">    sqlite3_finalize(stmt);</a>
+<a name="ln1257">    free(ptbuf);</a>
+<a name="ln1258">  }</a>
+<a name="ln1259">  else if(form-&gt;type &amp; DT_MASKS_GROUP)</a>
+<a name="ln1260">  {</a>
+<a name="ln1261">    guint nb = g_list_length(form-&gt;points);</a>
+<a name="ln1262">    dt_masks_point_group_t *ptbuf = (dt_masks_point_group_t *)calloc(nb, sizeof(dt_masks_point_group_t));</a>
+<a name="ln1263">    GList *points = g_list_first(form-&gt;points);</a>
+<a name="ln1264">    int pos = 0;</a>
+<a name="ln1265">    while(points)</a>
+<a name="ln1266">    {</a>
+<a name="ln1267">      dt_masks_point_group_t *pt = (dt_masks_point_group_t *)points-&gt;data;</a>
+<a name="ln1268">      ptbuf[pos++] = *pt;</a>
+<a name="ln1269">      points = g_list_next(points);</a>
+<a name="ln1270">    }</a>
+<a name="ln1271">    DT_DEBUG_SQLITE3_BIND_BLOB(stmt, 6, ptbuf, nb * sizeof(dt_masks_point_group_t), SQLITE_TRANSIENT);</a>
+<a name="ln1272">    DT_DEBUG_SQLITE3_BIND_INT(stmt, 7, nb);</a>
+<a name="ln1273">    sqlite3_step(stmt);</a>
+<a name="ln1274">    sqlite3_finalize(stmt);</a>
+<a name="ln1275">    free(ptbuf);</a>
+<a name="ln1276">  }</a>
+<a name="ln1277">  else if(form-&gt;type &amp; DT_MASKS_GRADIENT)</a>
+<a name="ln1278">  {</a>
+<a name="ln1279">    dt_masks_point_gradient_t *gradient = (dt_masks_point_gradient_t *)(g_list_first(form-&gt;points)-&gt;data);</a>
+<a name="ln1280">    DT_DEBUG_SQLITE3_BIND_BLOB(stmt, 6, gradient, sizeof(dt_masks_point_gradient_t), SQLITE_TRANSIENT);</a>
+<a name="ln1281">    DT_DEBUG_SQLITE3_BIND_INT(stmt, 7, 1);</a>
+<a name="ln1282">    sqlite3_step(stmt);</a>
+<a name="ln1283">    sqlite3_finalize(stmt);</a>
+<a name="ln1284">  }</a>
+<a name="ln1285">  else if(form-&gt;type &amp; DT_MASKS_ELLIPSE)</a>
+<a name="ln1286">  {</a>
+<a name="ln1287">    dt_masks_point_ellipse_t *ellipse = (dt_masks_point_ellipse_t *)(g_list_first(form-&gt;points)-&gt;data);</a>
+<a name="ln1288">    DT_DEBUG_SQLITE3_BIND_BLOB(stmt, 6, ellipse, sizeof(dt_masks_point_ellipse_t), SQLITE_TRANSIENT);</a>
+<a name="ln1289">    DT_DEBUG_SQLITE3_BIND_INT(stmt, 7, 1);</a>
+<a name="ln1290">    sqlite3_step(stmt);</a>
+<a name="ln1291">    sqlite3_finalize(stmt);</a>
+<a name="ln1292">  }</a>
+<a name="ln1293">  else if(form-&gt;type &amp; DT_MASKS_BRUSH)</a>
+<a name="ln1294">  {</a>
+<a name="ln1295">    guint nb = g_list_length(form-&gt;points);</a>
+<a name="ln1296">    dt_masks_point_brush_t *ptbuf = (dt_masks_point_brush_t *)calloc(nb, sizeof(dt_masks_point_brush_t));</a>
+<a name="ln1297">    GList *points = g_list_first(form-&gt;points);</a>
+<a name="ln1298">    int pos = 0;</a>
+<a name="ln1299">    while(points)</a>
+<a name="ln1300">    {</a>
+<a name="ln1301">      dt_masks_point_brush_t *pt = (dt_masks_point_brush_t *)points-&gt;data;</a>
+<a name="ln1302">      ptbuf[pos++] = *pt;</a>
+<a name="ln1303">      points = g_list_next(points);</a>
+<a name="ln1304">    }</a>
+<a name="ln1305">    DT_DEBUG_SQLITE3_BIND_BLOB(stmt, 6, ptbuf, nb * sizeof(dt_masks_point_brush_t), SQLITE_TRANSIENT);</a>
+<a name="ln1306">    DT_DEBUG_SQLITE3_BIND_INT(stmt, 7, nb);</a>
+<a name="ln1307">    sqlite3_step(stmt);</a>
+<a name="ln1308">    sqlite3_finalize(stmt);</a>
+<a name="ln1309">    free(ptbuf);</a>
+<a name="ln1310">  }</a>
+<a name="ln1311">}</a>
+<a name="ln1312"> </a>
+<a name="ln1313">void dt_masks_write_form(dt_masks_form_t *form, dt_develop_t *dev)</a>
+<a name="ln1314">{</a>
+<a name="ln1315">  _do_record_undo(dev, form);</a>
+<a name="ln1316"> </a>
+<a name="ln1317">  // we first erase all masks for the image present in the db</a>
+<a name="ln1318">  sqlite3_stmt *stmt;</a>
+<a name="ln1319">  DT_DEBUG_SQLITE3_PREPARE_V2(dt_database_get(darktable.db),</a>
+<a name="ln1320">                              &quot;DELETE FROM main.mask WHERE imgid = ?1 AND formid = ?2&quot;, -1, &amp;stmt, NULL);</a>
+<a name="ln1321">  DT_DEBUG_SQLITE3_BIND_INT(stmt, 1, dev-&gt;image_storage.id);</a>
+<a name="ln1322">  DT_DEBUG_SQLITE3_BIND_INT(stmt, 2, form-&gt;formid);</a>
+<a name="ln1323">  sqlite3_step(stmt);</a>
+<a name="ln1324">  sqlite3_finalize(stmt);</a>
+<a name="ln1325"> </a>
+<a name="ln1326">  _masks_write_form_db(form, dev-&gt;image_storage.id, dev);</a>
+<a name="ln1327">}</a>
+<a name="ln1328"> </a>
+<a name="ln1329">void dt_masks_write_forms_ext(dt_develop_t *dev, const int imgid, gboolean undo)</a>
+<a name="ln1330">{</a>
+<a name="ln1331">  _masks_write_forms_db(dev, imgid, undo);</a>
+<a name="ln1332">}</a>
+<a name="ln1333"> </a>
+<a name="ln1334">void dt_masks_write_forms(dt_develop_t *dev)</a>
+<a name="ln1335">{</a>
+<a name="ln1336">  _masks_write_forms_db(dev, dev-&gt;image_storage.id, TRUE);</a>
+<a name="ln1337">}</a>
+<a name="ln1338"> </a>
+<a name="ln1339">void dt_masks_free_form(dt_masks_form_t *form)</a>
+<a name="ln1340">{</a>
+<a name="ln1341">  if(!form) return;</a>
+<a name="ln1342">  g_list_free_full(form-&gt;points, free);</a>
+<a name="ln1343">  form-&gt;points = NULL;</a>
+<a name="ln1344">  free(form);</a>
+<a name="ln1345">}</a>
+<a name="ln1346"> </a>
+<a name="ln1347">int dt_masks_events_mouse_leave(struct dt_iop_module_t *module)</a>
+<a name="ln1348">{</a>
+<a name="ln1349">  if(darktable.develop-&gt;form_gui)</a>
+<a name="ln1350">  {</a>
+<a name="ln1351">    dt_masks_form_gui_t *gui = darktable.develop-&gt;form_gui;</a>
+<a name="ln1352">    gui-&gt;mouse_leaved_center = TRUE;</a>
+<a name="ln1353">  }</a>
+<a name="ln1354">  return 0;</a>
+<a name="ln1355">}</a>
+<a name="ln1356"> </a>
+<a name="ln1357">int dt_masks_events_mouse_enter(struct dt_iop_module_t *module)</a>
+<a name="ln1358">{</a>
+<a name="ln1359">  if(darktable.develop-&gt;form_gui)</a>
+<a name="ln1360">  {</a>
+<a name="ln1361">    dt_masks_form_gui_t *gui = darktable.develop-&gt;form_gui;</a>
+<a name="ln1362">    gui-&gt;mouse_leaved_center = FALSE;</a>
+<a name="ln1363">  }</a>
+<a name="ln1364">  return 0;</a>
+<a name="ln1365">}</a>
+<a name="ln1366"> </a>
+<a name="ln1367">int dt_masks_events_mouse_moved(struct dt_iop_module_t *module, double x, double y, double pressure, int which)</a>
+<a name="ln1368">{</a>
+<a name="ln1369">  // record mouse position even if there are no masks visible</a>
+<a name="ln1370">  dt_masks_form_gui_t *gui = darktable.develop-&gt;form_gui;</a>
+<a name="ln1371">  dt_masks_form_t *form = darktable.develop-&gt;form_visible;</a>
+<a name="ln1372">  float pzx, pzy;</a>
+<a name="ln1373"> </a>
+<a name="ln1374">  dt_dev_get_pointer_zoom_pos(darktable.develop, x, y, &amp;pzx, &amp;pzy);</a>
+<a name="ln1375">  pzx += 0.5f;</a>
+<a name="ln1376">  pzy += 0.5f;</a>
+<a name="ln1377"> </a>
+<a name="ln1378">  if(gui)</a>
+<a name="ln1379">  {</a>
+<a name="ln1380">    // This assume that if this event is generated the mouse is over the center window</a>
+<a name="ln1381">    gui-&gt;mouse_leaved_center = FALSE;</a>
+<a name="ln1382">    gui-&gt;posx = pzx * darktable.develop-&gt;preview_pipe-&gt;backbuf_width;</a>
+<a name="ln1383">    gui-&gt;posy = pzy * darktable.develop-&gt;preview_pipe-&gt;backbuf_height;</a>
+<a name="ln1384">  }</a>
+<a name="ln1385"> </a>
+<a name="ln1386">  // do not preocess if no forms visible</a>
+<a name="ln1387">  if(!form) return 0;</a>
+<a name="ln1388"> </a>
+<a name="ln1389">  // add an option to allow skip mouse events while editing masks</a>
+<a name="ln1390">  if(darktable.develop-&gt;darkroom_skip_mouse_events) return 0;</a>
+<a name="ln1391"> </a>
+<a name="ln1392">  int rep = 0;</a>
+<a name="ln1393">  if(form-&gt;type &amp; DT_MASKS_CIRCLE)</a>
+<a name="ln1394">    rep = dt_circle_events_mouse_moved(module, pzx, pzy, pressure, which, form, 0, gui, 0);</a>
+<a name="ln1395">  else if(form-&gt;type &amp; DT_MASKS_PATH)</a>
+<a name="ln1396">    rep = dt_path_events_mouse_moved(module, pzx, pzy, pressure, which, form, 0, gui, 0);</a>
+<a name="ln1397">  else if(form-&gt;type &amp; DT_MASKS_GROUP)</a>
+<a name="ln1398">    rep = dt_group_events_mouse_moved(module, pzx, pzy, pressure, which, form, gui);</a>
+<a name="ln1399">  else if(form-&gt;type &amp; DT_MASKS_GRADIENT)</a>
+<a name="ln1400">    rep = dt_gradient_events_mouse_moved(module, pzx, pzy, pressure, which, form, 0, gui, 0);</a>
+<a name="ln1401">  else if(form-&gt;type &amp; DT_MASKS_ELLIPSE)</a>
+<a name="ln1402">    rep = dt_ellipse_events_mouse_moved(module, pzx, pzy, pressure, which, form, 0, gui, 0);</a>
+<a name="ln1403">  else if(form-&gt;type &amp; DT_MASKS_BRUSH)</a>
+<a name="ln1404">    rep = dt_brush_events_mouse_moved(module, pzx, pzy, pressure, which, form, 0, gui, 0);</a>
+<a name="ln1405"> </a>
+<a name="ln1406">  if(gui) _set_hinter_message(gui, form);</a>
+<a name="ln1407"> </a>
+<a name="ln1408">  return rep;</a>
+<a name="ln1409">}</a>
+<a name="ln1410"> </a>
+<a name="ln1411">int dt_masks_events_button_released(struct dt_iop_module_t *module, double x, double y, int which,</a>
+<a name="ln1412">                                    uint32_t state)</a>
+<a name="ln1413">{</a>
+<a name="ln1414">  // add an option to allow skip mouse events while editing masks</a>
+<a name="ln1415">  if(darktable.develop-&gt;darkroom_skip_mouse_events) return 0;</a>
+<a name="ln1416"> </a>
+<a name="ln1417">  dt_masks_form_t *form = darktable.develop-&gt;form_visible;</a>
+<a name="ln1418">  dt_masks_form_gui_t *gui = darktable.develop-&gt;form_gui;</a>
+<a name="ln1419">  float pzx, pzy;</a>
+<a name="ln1420">  dt_dev_get_pointer_zoom_pos(darktable.develop, x, y, &amp;pzx, &amp;pzy);</a>
+<a name="ln1421">  pzx += 0.5f;</a>
+<a name="ln1422">  pzy += 0.5f;</a>
+<a name="ln1423"> </a>
+<a name="ln1424">  if(form-&gt;type &amp; DT_MASKS_CIRCLE)</a>
+<a name="ln1425">    return dt_circle_events_button_released(module, pzx, pzy, which, state, form, 0, gui, 0);</a>
+<a name="ln1426">  else if(form-&gt;type &amp; DT_MASKS_PATH)</a>
+<a name="ln1427">    return dt_path_events_button_released(module, pzx, pzy, which, state, form, 0, gui, 0);</a>
+<a name="ln1428">  else if(form-&gt;type &amp; DT_MASKS_GROUP)</a>
+<a name="ln1429">    return dt_group_events_button_released(module, pzx, pzy, which, state, form, gui);</a>
+<a name="ln1430">  else if(form-&gt;type &amp; DT_MASKS_GRADIENT)</a>
+<a name="ln1431">    return dt_gradient_events_button_released(module, pzx, pzy, which, state, form, 0, gui, 0);</a>
+<a name="ln1432">  else if(form-&gt;type &amp; DT_MASKS_ELLIPSE)</a>
+<a name="ln1433">    return dt_ellipse_events_button_released(module, pzx, pzy, which, state, form, 0, gui, 0);</a>
+<a name="ln1434">  else if(form-&gt;type &amp; DT_MASKS_BRUSH)</a>
+<a name="ln1435">    return dt_brush_events_button_released(module, pzx, pzy, which, state, form, 0, gui, 0);</a>
+<a name="ln1436"> </a>
+<a name="ln1437">  return 0;</a>
+<a name="ln1438">}</a>
+<a name="ln1439"> </a>
+<a name="ln1440">int dt_masks_events_button_pressed(struct dt_iop_module_t *module, double x, double y, double pressure,</a>
+<a name="ln1441">                                   int which, int type, uint32_t state)</a>
+<a name="ln1442">{</a>
+<a name="ln1443">  // add an option to allow skip mouse events while editing masks</a>
+<a name="ln1444">  if(darktable.develop-&gt;darkroom_skip_mouse_events) return 0;</a>
+<a name="ln1445"> </a>
+<a name="ln1446">  dt_masks_form_t *form = darktable.develop-&gt;form_visible;</a>
+<a name="ln1447">  dt_masks_form_gui_t *gui = darktable.develop-&gt;form_gui;</a>
+<a name="ln1448">  float pzx, pzy;</a>
+<a name="ln1449">  dt_dev_get_pointer_zoom_pos(darktable.develop, x, y, &amp;pzx, &amp;pzy);</a>
+<a name="ln1450">  pzx += 0.5f;</a>
+<a name="ln1451">  pzy += 0.5f;</a>
+<a name="ln1452"> </a>
+<a name="ln1453">  // allow to select a shape inside an iop</a>
+<a name="ln1454">  if(gui &amp;&amp; which == 1)</a>
+<a name="ln1455">  {</a>
+<a name="ln1456">    dt_masks_form_t *sel = NULL;</a>
+<a name="ln1457"> </a>
+<a name="ln1458">    if((gui-&gt;form_selected || gui-&gt;source_selected || gui-&gt;point_selected || gui-&gt;seg_selected</a>
+<a name="ln1459">        || gui-&gt;feather_selected)</a>
+<a name="ln1460">       &amp;&amp; !gui-&gt;creation &amp;&amp; gui-&gt;group_edited &gt;= 0)</a>
+<a name="ln1461">    {</a>
+<a name="ln1462">      // we get the selected form</a>
+<a name="ln1463">      dt_masks_point_group_t *fpt = (dt_masks_point_group_t *)g_list_nth_data(form-&gt;points, gui-&gt;group_edited);</a>
+<a name="ln1464">      if(fpt)</a>
+<a name="ln1465">      {</a>
+<a name="ln1466">        sel = dt_masks_get_from_id(darktable.develop, fpt-&gt;formid);</a>
+<a name="ln1467">      }</a>
+<a name="ln1468">    }</a>
+<a name="ln1469"> </a>
+<a name="ln1470">    dt_masks_select_form(module, sel);</a>
+<a name="ln1471">  }</a>
+<a name="ln1472"> </a>
+<a name="ln1473">  if(form-&gt;type &amp; DT_MASKS_CIRCLE)</a>
+<a name="ln1474">    return dt_circle_events_button_pressed(module, pzx, pzy, pressure, which, type, state, form, 0, gui, 0);</a>
+<a name="ln1475">  else if(form-&gt;type &amp; DT_MASKS_PATH)</a>
+<a name="ln1476">    return dt_path_events_button_pressed(module, pzx, pzy, pressure, which, type, state, form, 0, gui, 0);</a>
+<a name="ln1477">  else if(form-&gt;type &amp; DT_MASKS_GROUP)</a>
+<a name="ln1478">    return dt_group_events_button_pressed(module, pzx, pzy, pressure, which, type, state, form, gui);</a>
+<a name="ln1479">  else if(form-&gt;type &amp; DT_MASKS_GRADIENT)</a>
+<a name="ln1480">    return dt_gradient_events_button_pressed(module, pzx, pzy, pressure, which, type, state, form, 0, gui, 0);</a>
+<a name="ln1481">  else if(form-&gt;type &amp; DT_MASKS_ELLIPSE)</a>
+<a name="ln1482">    return dt_ellipse_events_button_pressed(module, pzx, pzy, pressure, which, type, state, form, 0, gui, 0);</a>
+<a name="ln1483">  else if(form-&gt;type &amp; DT_MASKS_BRUSH)</a>
+<a name="ln1484">    return dt_brush_events_button_pressed(module, pzx, pzy, pressure, which, type, state, form, 0, gui, 0);</a>
+<a name="ln1485"> </a>
+<a name="ln1486">  return 0;</a>
+<a name="ln1487">}</a>
+<a name="ln1488"> </a>
+<a name="ln1489">int dt_masks_events_mouse_scrolled(struct dt_iop_module_t *module, double x, double y, int up, uint32_t state)</a>
+<a name="ln1490">{</a>
+<a name="ln1491">  // add an option to allow skip mouse events while editing masks</a>
+<a name="ln1492">  if(darktable.develop-&gt;darkroom_skip_mouse_events) return 0;</a>
+<a name="ln1493"> </a>
+<a name="ln1494">  dt_masks_form_t *form = darktable.develop-&gt;form_visible;</a>
+<a name="ln1495">  dt_masks_form_gui_t *gui = darktable.develop-&gt;form_gui;</a>
+<a name="ln1496">  float pzx, pzy;</a>
+<a name="ln1497">  dt_dev_get_pointer_zoom_pos(darktable.develop, x, y, &amp;pzx, &amp;pzy);</a>
+<a name="ln1498">  pzx += 0.5f;</a>
+<a name="ln1499">  pzy += 0.5f;</a>
+<a name="ln1500"> </a>
+<a name="ln1501">  int ret = 0;</a>
+<a name="ln1502"> </a>
+<a name="ln1503">  if(form-&gt;type &amp; DT_MASKS_CIRCLE)</a>
+<a name="ln1504">    ret = dt_circle_events_mouse_scrolled(module, pzx, pzy, up, state, form, 0, gui, 0);</a>
+<a name="ln1505">  else if(form-&gt;type &amp; DT_MASKS_PATH)</a>
+<a name="ln1506">    ret = dt_path_events_mouse_scrolled(module, pzx, pzy, up, state, form, 0, gui, 0);</a>
+<a name="ln1507">  else if(form-&gt;type &amp; DT_MASKS_GROUP)</a>
+<a name="ln1508">    ret = dt_group_events_mouse_scrolled(module, pzx, pzy, up, state, form, gui);</a>
+<a name="ln1509">  else if(form-&gt;type &amp; DT_MASKS_GRADIENT)</a>
+<a name="ln1510">    ret = dt_gradient_events_mouse_scrolled(module, pzx, pzy, up, state, form, 0, gui, 0);</a>
+<a name="ln1511">  else if(form-&gt;type &amp; DT_MASKS_ELLIPSE)</a>
+<a name="ln1512">    ret = dt_ellipse_events_mouse_scrolled(module, pzx, pzy, up, state, form, 0, gui, 0);</a>
+<a name="ln1513">  else if(form-&gt;type &amp; DT_MASKS_BRUSH)</a>
+<a name="ln1514">    ret = dt_brush_events_mouse_scrolled(module, pzx, pzy, up, state, form, 0, gui, 0);</a>
+<a name="ln1515"> </a>
+<a name="ln1516">  if(gui) _set_hinter_message(gui, form);</a>
+<a name="ln1517"> </a>
+<a name="ln1518">  return ret;</a>
+<a name="ln1519">}</a>
+<a name="ln1520">void dt_masks_events_post_expose(struct dt_iop_module_t *module, cairo_t *cr, int32_t width, int32_t height,</a>
+<a name="ln1521">                                 int32_t pointerx, int32_t pointery)</a>
+<a name="ln1522">{</a>
+<a name="ln1523">  dt_develop_t *dev = darktable.develop;</a>
+<a name="ln1524">  dt_masks_form_t *form = dev-&gt;form_visible;</a>
+<a name="ln1525">  dt_masks_form_gui_t *gui = dev-&gt;form_gui;</a>
+<a name="ln1526">  if(!gui) return;</a>
+<a name="ln1527">  if(!form) return;</a>
+<a name="ln1528">  // if it's a spot in creation, nothing to draw</a>
+<a name="ln1529">  // add preview when creating a circle or ellipse</a>
+<a name="ln1530">  if((form-&gt;type &amp; DT_MASKS_GRADIENT) &amp;&amp; gui-&gt;creation)</a>
+<a name="ln1531">    return;</a>
+<a name="ln1532"> </a>
+<a name="ln1533">  float wd = dev-&gt;preview_pipe-&gt;backbuf_width;</a>
+<a name="ln1534">  float ht = dev-&gt;preview_pipe-&gt;backbuf_height;</a>
+<a name="ln1535">  if(wd &lt; 1.0 || ht &lt; 1.0) return;</a>
+<a name="ln1536">  float pzx, pzy;</a>
+<a name="ln1537">  dt_dev_get_pointer_zoom_pos(dev, pointerx, pointery, &amp;pzx, &amp;pzy);</a>
+<a name="ln1538">  pzx += 0.5f;</a>
+<a name="ln1539">  pzy += 0.5f;</a>
+<a name="ln1540">  float zoom_y = dt_control_get_dev_zoom_y();</a>
+<a name="ln1541">  float zoom_x = dt_control_get_dev_zoom_x();</a>
+<a name="ln1542">  dt_dev_zoom_t zoom = dt_control_get_dev_zoom();</a>
+<a name="ln1543">  int closeup = dt_control_get_dev_closeup();</a>
+<a name="ln1544">  float zoom_scale = dt_dev_get_zoom_scale(dev, zoom, 1&lt;&lt;closeup, 1);</a>
+<a name="ln1545"> </a>
+<a name="ln1546">  cairo_save(cr);</a>
+<a name="ln1547">  cairo_set_source_rgb(cr, .3, .3, .3);</a>
+<a name="ln1548"> </a>
+<a name="ln1549">  cairo_translate(cr, width / 2.0, height / 2.0f);</a>
+<a name="ln1550">  cairo_scale(cr, zoom_scale, zoom_scale);</a>
+<a name="ln1551">  cairo_translate(cr, -.5f * wd - zoom_x * wd, -.5f * ht - zoom_y * ht);</a>
+<a name="ln1552"> </a>
+<a name="ln1553">  cairo_set_line_cap(cr, CAIRO_LINE_CAP_ROUND);</a>
+<a name="ln1554"> </a>
+<a name="ln1555">  // we update the form if needed</a>
+<a name="ln1556">  // add preview when creating a circle or ellipse</a>
+<a name="ln1557">  if(!(((form-&gt;type &amp; DT_MASKS_CIRCLE) || (form-&gt;type &amp; DT_MASKS_ELLIPSE)) &amp;&amp; gui-&gt;creation))</a>
+<a name="ln1558">    dt_masks_gui_form_test_create(form, gui);</a>
+<a name="ln1559"> </a>
+<a name="ln1560">  // draw form</a>
+<a name="ln1561">  if(form-&gt;type &amp; DT_MASKS_CIRCLE)</a>
+<a name="ln1562">    dt_circle_events_post_expose(cr, zoom_scale, gui, 0);</a>
+<a name="ln1563">  else if(form-&gt;type &amp; DT_MASKS_PATH)</a>
+<a name="ln1564">    dt_path_events_post_expose(cr, zoom_scale, gui, 0, g_list_length(form-&gt;points));</a>
+<a name="ln1565">  else if(form-&gt;type &amp; DT_MASKS_GROUP)</a>
+<a name="ln1566">    dt_group_events_post_expose(cr, zoom_scale, form, gui);</a>
+<a name="ln1567">  else if(form-&gt;type &amp; DT_MASKS_GRADIENT)</a>
+<a name="ln1568">    dt_gradient_events_post_expose(cr, zoom_scale, gui, 0);</a>
+<a name="ln1569">  else if(form-&gt;type &amp; DT_MASKS_ELLIPSE)</a>
+<a name="ln1570">    dt_ellipse_events_post_expose(cr, zoom_scale, gui, 0);</a>
+<a name="ln1571">  else if(form-&gt;type &amp; DT_MASKS_BRUSH)</a>
+<a name="ln1572">    dt_brush_events_post_expose(cr, zoom_scale, gui, 0, g_list_length(form-&gt;points));</a>
+<a name="ln1573"> </a>
+<a name="ln1574">  cairo_restore(cr);</a>
+<a name="ln1575">}</a>
+<a name="ln1576"> </a>
+<a name="ln1577">void dt_masks_clear_form_gui(dt_develop_t *dev)</a>
+<a name="ln1578">{</a>
+<a name="ln1579">  if(!dev-&gt;form_gui) return;</a>
+<a name="ln1580">  g_list_free_full(dev-&gt;form_gui-&gt;points, dt_masks_form_gui_points_free);</a>
+<a name="ln1581">  dev-&gt;form_gui-&gt;points = NULL;</a>
+<a name="ln1582">  dt_masks_dynbuf_free(dev-&gt;form_gui-&gt;guipoints);</a>
+<a name="ln1583">  dev-&gt;form_gui-&gt;guipoints = NULL;</a>
+<a name="ln1584">  dt_masks_dynbuf_free(dev-&gt;form_gui-&gt;guipoints_payload);</a>
+<a name="ln1585">  dev-&gt;form_gui-&gt;guipoints_payload = NULL;</a>
+<a name="ln1586">  dev-&gt;form_gui-&gt;guipoints_count = 0;</a>
+<a name="ln1587">  dev-&gt;form_gui-&gt;pipe_hash = dev-&gt;form_gui-&gt;formid = 0;</a>
+<a name="ln1588">  dev-&gt;form_gui-&gt;dx = dev-&gt;form_gui-&gt;dy = 0.0f;</a>
+<a name="ln1589">  dev-&gt;form_gui-&gt;scrollx = dev-&gt;form_gui-&gt;scrolly = 0.0f;</a>
+<a name="ln1590">  dev-&gt;form_gui-&gt;form_selected = dev-&gt;form_gui-&gt;border_selected = dev-&gt;form_gui-&gt;form_dragging</a>
+<a name="ln1591">      = dev-&gt;form_gui-&gt;form_rotating = dev-&gt;form_gui-&gt;border_toggling = FALSE;</a>
+<a name="ln1592">  dev-&gt;form_gui-&gt;source_selected = dev-&gt;form_gui-&gt;source_dragging = FALSE;</a>
+<a name="ln1593">  dev-&gt;form_gui-&gt;pivot_selected = FALSE;</a>
+<a name="ln1594">  dev-&gt;form_gui-&gt;point_border_selected = dev-&gt;form_gui-&gt;seg_selected = dev-&gt;form_gui-&gt;point_selected</a>
+<a name="ln1595">      = dev-&gt;form_gui-&gt;feather_selected = -1;</a>
+<a name="ln1596">  dev-&gt;form_gui-&gt;point_border_dragging = dev-&gt;form_gui-&gt;seg_dragging = dev-&gt;form_gui-&gt;feather_dragging</a>
+<a name="ln1597">      = dev-&gt;form_gui-&gt;point_dragging = -1;</a>
+<a name="ln1598">  dev-&gt;form_gui-&gt;creation_closing_form = dev-&gt;form_gui-&gt;creation = FALSE;</a>
+<a name="ln1599">  dev-&gt;form_gui-&gt;pressure_sensitivity = DT_MASKS_PRESSURE_OFF;</a>
+<a name="ln1600">  dev-&gt;form_gui-&gt;creation_module = NULL;</a>
+<a name="ln1601">  dev-&gt;form_gui-&gt;point_edited = -1;</a>
+<a name="ln1602"> </a>
+<a name="ln1603">  dev-&gt;form_gui-&gt;group_edited = -1;</a>
+<a name="ln1604">  dev-&gt;form_gui-&gt;group_selected = -1;</a>
+<a name="ln1605">  dev-&gt;form_gui-&gt;edit_mode = DT_MASKS_EDIT_OFF;</a>
+<a name="ln1606">  // allow to select a shape inside an iop</a>
+<a name="ln1607">  dt_masks_select_form(NULL, NULL);</a>
+<a name="ln1608">}</a>
+<a name="ln1609"> </a>
+<a name="ln1610">void dt_masks_change_form_gui(dt_masks_form_t *newform)</a>
+<a name="ln1611">{</a>
+<a name="ln1612">  dt_masks_clear_form_gui(darktable.develop);</a>
+<a name="ln1613">  darktable.develop-&gt;form_visible = newform;</a>
+<a name="ln1614">}</a>
+<a name="ln1615"> </a>
+<a name="ln1616">void dt_masks_reset_form_gui(void)</a>
+<a name="ln1617">{</a>
+<a name="ln1618">  dt_masks_change_form_gui(NULL);</a>
+<a name="ln1619">  dt_iop_module_t *m = darktable.develop-&gt;gui_module;</a>
+<a name="ln1620">  if(m &amp;&amp; (m-&gt;flags() &amp; IOP_FLAGS_SUPPORTS_BLENDING) &amp;&amp; !(m-&gt;flags() &amp; IOP_FLAGS_NO_MASKS))</a>
+<a name="ln1621">  {</a>
+<a name="ln1622">    dt_iop_gui_blend_data_t *bd = (dt_iop_gui_blend_data_t *)m-&gt;blend_data;</a>
+<a name="ln1623">    bd-&gt;masks_shown = DT_MASKS_EDIT_OFF;</a>
+<a name="ln1624">    gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(bd-&gt;masks_edit), 0);</a>
+<a name="ln1625">  }</a>
+<a name="ln1626">}</a>
+<a name="ln1627"> </a>
+<a name="ln1628">void dt_masks_reset_show_masks_icons(void)</a>
+<a name="ln1629">{</a>
+<a name="ln1630">  if(darktable.develop-&gt;first_load) return;</a>
+<a name="ln1631">  GList *modules = g_list_first(darktable.develop-&gt;iop);</a>
+<a name="ln1632">  while(modules)</a>
+<a name="ln1633">  {</a>
+<a name="ln1634">    dt_iop_module_t *m = (dt_iop_module_t *)modules-&gt;data;</a>
+<a name="ln1635">    if((m-&gt;flags() &amp; IOP_FLAGS_SUPPORTS_BLENDING) &amp;&amp; !(m-&gt;flags() &amp; IOP_FLAGS_NO_MASKS))</a>
+<a name="ln1636">    {</a>
+<a name="ln1637">      dt_iop_gui_blend_data_t *bd = (dt_iop_gui_blend_data_t *)m-&gt;blend_data;</a>
+<a name="ln1638">      if(!bd) break;</a>
+<a name="ln1639">      bd-&gt;masks_shown = DT_MASKS_EDIT_OFF;</a>
+<a name="ln1640">      gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(bd-&gt;masks_edit), FALSE);</a>
+<a name="ln1641">      gtk_widget_queue_draw(bd-&gt;masks_edit);</a>
+<a name="ln1642">    }</a>
+<a name="ln1643">    modules = g_list_next(modules);</a>
+<a name="ln1644">  }</a>
+<a name="ln1645">}</a>
+<a name="ln1646"> </a>
+<a name="ln1647">void dt_masks_set_edit_mode(struct dt_iop_module_t *module, dt_masks_edit_mode_t value)</a>
+<a name="ln1648">{</a>
+<a name="ln1649">  if(!module) return;</a>
+<a name="ln1650">  dt_iop_gui_blend_data_t *bd = (dt_iop_gui_blend_data_t *)module-&gt;blend_data;</a>
+<a name="ln1651"> </a>
+<a name="ln1652">  dt_masks_form_t *grp = NULL;</a>
+<a name="ln1653">  dt_masks_form_t *form = dt_masks_get_from_id(module-&gt;dev, module-&gt;blend_params-&gt;mask_id);</a>
+<a name="ln1654">  if(value &amp;&amp; form)</a>
+<a name="ln1655">  {</a>
+<a name="ln1656">    grp = dt_masks_create(DT_MASKS_GROUP);</a>
+<a name="ln1657">    grp-&gt;formid = 0;</a>
+<a name="ln1658">    dt_masks_group_ungroup(grp, form);</a>
+<a name="ln1659">  }</a>
+<a name="ln1660"> </a>
+<a name="ln1661">  if (bd) bd-&gt;masks_shown = value;</a>
+<a name="ln1662"> </a>
+<a name="ln1663">  dt_masks_change_form_gui(grp);</a>
+<a name="ln1664">  darktable.develop-&gt;form_gui-&gt;edit_mode = value;</a>
+<a name="ln1665">  if(value &amp;&amp; form)</a>
+<a name="ln1666">    dt_dev_masks_selection_change(darktable.develop, form-&gt;formid, FALSE);</a>
+<a name="ln1667">  else</a>
+<a name="ln1668">    dt_dev_masks_selection_change(darktable.develop, 0, FALSE);</a>
+<a name="ln1669"> </a>
+<a name="ln1670">  dt_control_queue_redraw_center();</a>
+<a name="ln1671">}</a>
+<a name="ln1672"> </a>
+<a name="ln1673">void dt_masks_set_edit_mode_single_form(struct dt_iop_module_t *module, const int formid,</a>
+<a name="ln1674">                                        dt_masks_edit_mode_t value)</a>
+<a name="ln1675">{</a>
+<a name="ln1676">  if(!module) return;</a>
+<a name="ln1677"> </a>
+<a name="ln1678">  dt_masks_form_t *grp = dt_masks_create(DT_MASKS_GROUP);</a>
+<a name="ln1679"> </a>
+<a name="ln1680">  const int grid = module-&gt;blend_params-&gt;mask_id;</a>
+<a name="ln1681">  dt_masks_form_t *form = dt_masks_get_from_id(darktable.develop, formid);</a>
+<a name="ln1682">  if(form)</a>
+<a name="ln1683">  {</a>
+<a name="ln1684">    dt_masks_point_group_t *fpt = (dt_masks_point_group_t *)malloc(sizeof(dt_masks_point_group_t));</a>
+<a name="ln1685">    fpt-&gt;formid = formid;</a>
+<a name="ln1686">    fpt-&gt;parentid = grid;</a>
+<a name="ln1687">    fpt-&gt;state = DT_MASKS_STATE_USE;</a>
+<a name="ln1688">    fpt-&gt;opacity = 1.0f;</a>
+<a name="ln1689">    grp-&gt;points = g_list_append(grp-&gt;points, fpt);</a>
+<a name="ln1690">  }</a>
+<a name="ln1691"> </a>
+<a name="ln1692">  dt_masks_form_t *grp2 = dt_masks_create(DT_MASKS_GROUP);</a>
+<a name="ln1693">  grp2-&gt;formid = 0;</a>
+<a name="ln1694">  dt_masks_group_ungroup(grp2, grp);</a>
+<a name="ln1695">  dt_masks_change_form_gui(grp2);</a>
+<a name="ln1696">  darktable.develop-&gt;form_gui-&gt;edit_mode = value;</a>
+<a name="ln1697"> </a>
+<a name="ln1698">  if(value &amp;&amp; form)</a>
+<a name="ln1699">    dt_dev_masks_selection_change(darktable.develop, formid, FALSE);</a>
+<a name="ln1700">  else</a>
+<a name="ln1701">    dt_dev_masks_selection_change(darktable.develop, 0, FALSE);</a>
+<a name="ln1702"> </a>
+<a name="ln1703">  dt_control_queue_redraw_center();</a>
+<a name="ln1704">}</a>
+<a name="ln1705"> </a>
+<a name="ln1706">void dt_masks_iop_edit_toggle_callback(GtkToggleButton *togglebutton, dt_iop_module_t *module)</a>
+<a name="ln1707">{</a>
+<a name="ln1708">  if(!module) return;</a>
+<a name="ln1709">  dt_iop_gui_blend_data_t *bd = (dt_iop_gui_blend_data_t *)module-&gt;blend_data;</a>
+<a name="ln1710">  if(module-&gt;blend_params-&gt;mask_id == 0)</a>
+<a name="ln1711">  {</a>
+<a name="ln1712">    bd-&gt;masks_shown = DT_MASKS_EDIT_OFF;</a>
+<a name="ln1713">    return;</a>
+<a name="ln1714">  }</a>
+<a name="ln1715"> </a>
+<a name="ln1716">  // reset the gui</a>
+<a name="ln1717">  dt_masks_set_edit_mode(module,</a>
+<a name="ln1718">                         (bd-&gt;masks_shown == DT_MASKS_EDIT_OFF ? DT_MASKS_EDIT_FULL : DT_MASKS_EDIT_OFF));</a>
+<a name="ln1719">}</a>
+<a name="ln1720"> </a>
+<a name="ln1721">static void _menu_no_masks(struct dt_iop_module_t *module)</a>
+<a name="ln1722">{</a>
+<a name="ln1723">  // we drop all the forms in the iop</a>
+<a name="ln1724">  dt_masks_form_t *grp = dt_masks_get_from_id(darktable.develop, module-&gt;blend_params-&gt;mask_id);</a>
+<a name="ln1725">  if(grp) dt_masks_form_remove(module, NULL, grp);</a>
+<a name="ln1726">  module-&gt;blend_params-&gt;mask_id = 0;</a>
+<a name="ln1727"> </a>
+<a name="ln1728">  // and we update the iop</a>
+<a name="ln1729">  dt_masks_set_edit_mode(module, DT_MASKS_EDIT_OFF);</a>
+<a name="ln1730">  dt_masks_iop_update(module);</a>
+<a name="ln1731"> </a>
+<a name="ln1732">  dt_dev_add_history_item(darktable.develop, module, TRUE);</a>
+<a name="ln1733">  dt_dev_masks_list_change(darktable.develop);</a>
+<a name="ln1734">}</a>
+<a name="ln1735"> </a>
+<a name="ln1736">static void _menu_add_circle(struct dt_iop_module_t *module)</a>
+<a name="ln1737">{</a>
+<a name="ln1738">  // we want to be sure that the iop has focus</a>
+<a name="ln1739">  dt_iop_request_focus(module);</a>
+<a name="ln1740">  // we create the new form</a>
+<a name="ln1741">  dt_masks_form_t *spot = dt_masks_create(DT_MASKS_CIRCLE);</a>
+<a name="ln1742">  dt_masks_change_form_gui(spot);</a>
+<a name="ln1743"> </a>
+<a name="ln1744">  darktable.develop-&gt;form_gui-&gt;creation = TRUE;</a>
+<a name="ln1745">  darktable.develop-&gt;form_gui-&gt;creation_module = module;</a>
+<a name="ln1746">  dt_control_queue_redraw_center();</a>
+<a name="ln1747">}</a>
+<a name="ln1748"> </a>
+<a name="ln1749">static void _menu_add_path(struct dt_iop_module_t *module)</a>
+<a name="ln1750">{</a>
+<a name="ln1751">  // we want to be sure that the iop has focus</a>
+<a name="ln1752">  dt_iop_request_focus(module);</a>
+<a name="ln1753">  // we create the new form</a>
+<a name="ln1754">  dt_masks_form_t *form = dt_masks_create(DT_MASKS_PATH);</a>
+<a name="ln1755">  dt_masks_change_form_gui(form);</a>
+<a name="ln1756">  darktable.develop-&gt;form_gui-&gt;creation = TRUE;</a>
+<a name="ln1757">  darktable.develop-&gt;form_gui-&gt;creation_module = module;</a>
+<a name="ln1758">  dt_control_queue_redraw_center();</a>
+<a name="ln1759">}</a>
+<a name="ln1760"> </a>
+<a name="ln1761">static void _menu_add_gradient(struct dt_iop_module_t *module)</a>
+<a name="ln1762">{</a>
+<a name="ln1763">  // we want to be sure that the iop has focus</a>
+<a name="ln1764">  dt_iop_request_focus(module);</a>
+<a name="ln1765">  // we create the new form</a>
+<a name="ln1766">  dt_masks_form_t *spot = dt_masks_create(DT_MASKS_GRADIENT);</a>
+<a name="ln1767">  dt_masks_change_form_gui(spot);</a>
+<a name="ln1768"> </a>
+<a name="ln1769">  darktable.develop-&gt;form_gui-&gt;creation = TRUE;</a>
+<a name="ln1770">  darktable.develop-&gt;form_gui-&gt;creation_module = module;</a>
+<a name="ln1771">  dt_control_queue_redraw_center();</a>
+<a name="ln1772">}</a>
+<a name="ln1773"> </a>
+<a name="ln1774">static void _menu_add_ellipse(struct dt_iop_module_t *module)</a>
+<a name="ln1775">{</a>
+<a name="ln1776">  // we want to be sure that the iop has focus</a>
+<a name="ln1777">  dt_iop_request_focus(module);</a>
+<a name="ln1778">  // we create the new form</a>
+<a name="ln1779">  dt_masks_form_t *spot = dt_masks_create(DT_MASKS_ELLIPSE);</a>
+<a name="ln1780">  dt_masks_change_form_gui(spot);</a>
+<a name="ln1781"> </a>
+<a name="ln1782">  darktable.develop-&gt;form_gui-&gt;creation = TRUE;</a>
+<a name="ln1783">  darktable.develop-&gt;form_gui-&gt;creation_module = module;</a>
+<a name="ln1784">  dt_control_queue_redraw_center();</a>
+<a name="ln1785">}</a>
+<a name="ln1786"> </a>
+<a name="ln1787">static void _menu_add_brush(struct dt_iop_module_t *module)</a>
+<a name="ln1788">{</a>
+<a name="ln1789">  // we want to be sure that the iop has focus</a>
+<a name="ln1790">  dt_iop_request_focus(module);</a>
+<a name="ln1791">  // we create the new form</a>
+<a name="ln1792">  dt_masks_form_t *form = dt_masks_create(DT_MASKS_BRUSH);</a>
+<a name="ln1793">  dt_masks_change_form_gui(form);</a>
+<a name="ln1794">  darktable.develop-&gt;form_gui-&gt;creation = TRUE;</a>
+<a name="ln1795">  darktable.develop-&gt;form_gui-&gt;creation_module = module;</a>
+<a name="ln1796">  dt_control_queue_redraw_center();</a>
+<a name="ln1797">}</a>
+<a name="ln1798"> </a>
+<a name="ln1799">static void _menu_add_exist(dt_iop_module_t *module, int formid)</a>
+<a name="ln1800">{</a>
+<a name="ln1801">  if(!module) return;</a>
+<a name="ln1802">  dt_masks_form_t *form = dt_masks_get_from_id(darktable.develop, formid);</a>
+<a name="ln1803">  if(!form) return;</a>
+<a name="ln1804"> </a>
+<a name="ln1805">  // is there already a masks group for this module ?</a>
+<a name="ln1806">  int grpid = module-&gt;blend_params-&gt;mask_id;</a>
+<a name="ln1807">  dt_masks_form_t *grp = dt_masks_get_from_id(darktable.develop, grpid);</a>
+<a name="ln1808">  if(!grp)</a>
+<a name="ln1809">  {</a>
+<a name="ln1810">    // we create a new group</a>
+<a name="ln1811">    grp = dt_masks_create(DT_MASKS_GROUP);</a>
+<a name="ln1812">    gchar *module_label = dt_history_item_get_name(module);</a>
+<a name="ln1813">    snprintf(grp-&gt;name, sizeof(grp-&gt;name), &quot;grp %s&quot;, module_label);</a>
+<a name="ln1814">    g_free(module_label);</a>
+<a name="ln1815">    _check_id(grp);</a>
+<a name="ln1816">    darktable.develop-&gt;forms = g_list_append(darktable.develop-&gt;forms, grp);</a>
+<a name="ln1817">    module-&gt;blend_params-&gt;mask_id = grpid = grp-&gt;formid;</a>
+<a name="ln1818">  }</a>
+<a name="ln1819">  // we add the form in this group</a>
+<a name="ln1820">  dt_masks_group_add_form(grp, form);</a>
+<a name="ln1821">  // we save the group</a>
+<a name="ln1822">  dt_masks_write_form(grp, darktable.develop);</a>
+<a name="ln1823"> </a>
+<a name="ln1824">  // and we ensure that we are in edit mode</a>
+<a name="ln1825">  dt_dev_add_history_item(darktable.develop, module, TRUE);</a>
+<a name="ln1826">  dt_masks_iop_update(module);</a>
+<a name="ln1827">  dt_dev_masks_list_change(darktable.develop);</a>
+<a name="ln1828">  dt_masks_set_edit_mode(module, DT_MASKS_EDIT_FULL);</a>
+<a name="ln1829">}</a>
+<a name="ln1830"> </a>
+<a name="ln1831">void dt_masks_iop_use_same_as(dt_iop_module_t *module, dt_iop_module_t *src)</a>
+<a name="ln1832">{</a>
+<a name="ln1833">  if(!module || !src) return;</a>
+<a name="ln1834"> </a>
+<a name="ln1835">  // we get the source group</a>
+<a name="ln1836">  int srcid = src-&gt;blend_params-&gt;mask_id;</a>
+<a name="ln1837">  dt_masks_form_t *src_grp = dt_masks_get_from_id(darktable.develop, srcid);</a>
+<a name="ln1838">  if(!src_grp || src_grp-&gt;type != DT_MASKS_GROUP) return;</a>
+<a name="ln1839"> </a>
+<a name="ln1840">  // is there already a masks group for this module ?</a>
+<a name="ln1841">  int grpid = module-&gt;blend_params-&gt;mask_id;</a>
+<a name="ln1842">  dt_masks_form_t *grp = dt_masks_get_from_id(darktable.develop, grpid);</a>
+<a name="ln1843">  if(!grp)</a>
+<a name="ln1844">  {</a>
+<a name="ln1845">    // we create a new group</a>
+<a name="ln1846">    grp = dt_masks_create(DT_MASKS_GROUP);</a>
+<a name="ln1847">    gchar *module_label = dt_history_item_get_name(module);</a>
+<a name="ln1848">    snprintf(grp-&gt;name, sizeof(grp-&gt;name), &quot;grp %s&quot;, module_label);</a>
+<a name="ln1849">    g_free(module_label);</a>
+<a name="ln1850">    _check_id(grp);</a>
+<a name="ln1851">    darktable.develop-&gt;forms = g_list_append(darktable.develop-&gt;forms, grp);</a>
+<a name="ln1852">    module-&gt;blend_params-&gt;mask_id = grpid = grp-&gt;formid;</a>
+<a name="ln1853">  }</a>
+<a name="ln1854">  // we copy the src group in this group</a>
+<a name="ln1855">  GList *points = g_list_first(src_grp-&gt;points);</a>
+<a name="ln1856">  while(points)</a>
+<a name="ln1857">  {</a>
+<a name="ln1858">    dt_masks_point_group_t *pt = (dt_masks_point_group_t *)points-&gt;data;</a>
+<a name="ln1859">    dt_masks_form_t *form = dt_masks_get_from_id(darktable.develop, pt-&gt;formid);</a>
+<a name="ln1860">    if(form)</a>
+<a name="ln1861">    {</a>
+<a name="ln1862">      dt_masks_point_group_t *grpt = dt_masks_group_add_form(grp, form);</a>
+<a name="ln1863">      if(grpt)</a>
+<a name="ln1864">      {</a>
+<a name="ln1865">        grpt-&gt;state = pt-&gt;state;</a>
+<a name="ln1866">        grpt-&gt;opacity = pt-&gt;opacity;</a>
+<a name="ln1867">      }</a>
+<a name="ln1868">    }</a>
+<a name="ln1869">    points = g_list_next(points);</a>
+<a name="ln1870">  }</a>
+<a name="ln1871"> </a>
+<a name="ln1872">  // we save the group</a>
+<a name="ln1873">  dt_masks_write_form(grp, darktable.develop);</a>
+<a name="ln1874">}</a>
+<a name="ln1875"> </a>
+<a name="ln1876">void dt_masks_iop_combo_populate(GtkWidget *w, struct dt_iop_module_t **m)</a>
+<a name="ln1877">{</a>
+<a name="ln1878">  // we ensure that the module has focus</a>
+<a name="ln1879">  dt_iop_module_t *module = *m;</a>
+<a name="ln1880">  dt_iop_request_focus(module);</a>
+<a name="ln1881">  dt_iop_gui_blend_data_t *bd = (dt_iop_gui_blend_data_t *)module-&gt;blend_data;</a>
+<a name="ln1882"> </a>
+<a name="ln1883">  // we determine a higher approx of the entry number</a>
+<a name="ln1884">  guint nbe = 5 + g_list_length(darktable.develop-&gt;forms) + g_list_length(darktable.develop-&gt;iop);</a>
+<a name="ln1885">  free(bd-&gt;masks_combo_ids);</a>
+<a name="ln1886">  bd-&gt;masks_combo_ids = malloc(nbe * sizeof(int));</a>
+<a name="ln1887"> </a>
+<a name="ln1888">  int *cids = bd-&gt;masks_combo_ids;</a>
+<a name="ln1889">  GtkWidget *combo = bd-&gt;masks_combo;</a>
+<a name="ln1890"> </a>
+<a name="ln1891">  // we remove all the combo entries except the first one</a>
+<a name="ln1892">  while(dt_bauhaus_combobox_length(combo) &gt; 1)</a>
+<a name="ln1893">  {</a>
+<a name="ln1894">    dt_bauhaus_combobox_remove_at(combo, 1);</a>
+<a name="ln1895">  }</a>
+<a name="ln1896"> </a>
+<a name="ln1897">  int pos = 0;</a>
+<a name="ln1898">  cids[pos++] = 0; // nothing to do for the first entry (already here)</a>
+<a name="ln1899"> </a>
+<a name="ln1900"> </a>
+<a name="ln1901">  // add existing shapes</a>
+<a name="ln1902">  GList *forms = g_list_first(darktable.develop-&gt;forms);</a>
+<a name="ln1903">  int nb = 0;</a>
+<a name="ln1904">  while(forms)</a>
+<a name="ln1905">  {</a>
+<a name="ln1906">    dt_masks_form_t *form = (dt_masks_form_t *)forms-&gt;data;</a>
+<a name="ln1907">    if((form-&gt;type &amp; (DT_MASKS_CLONE|DT_MASKS_NON_CLONE)) || form-&gt;formid == module-&gt;blend_params-&gt;mask_id)</a>
+<a name="ln1908">    {</a>
+<a name="ln1909">      forms = g_list_next(forms);</a>
+<a name="ln1910">      continue;</a>
+<a name="ln1911">    }</a>
+<a name="ln1912"> </a>
+<a name="ln1913">    // we search were this form is used in the current module</a>
+<a name="ln1914">    int used = 0;</a>
+<a name="ln1915">    dt_masks_form_t *grp = dt_masks_get_from_id(darktable.develop, module-&gt;blend_params-&gt;mask_id);</a>
+<a name="ln1916">    if(grp &amp;&amp; (grp-&gt;type &amp; DT_MASKS_GROUP))</a>
+<a name="ln1917">    {</a>
+<a name="ln1918">      GList *pts = g_list_first(grp-&gt;points);</a>
+<a name="ln1919">      while(pts)</a>
+<a name="ln1920">      {</a>
+<a name="ln1921">        dt_masks_point_group_t *pt = (dt_masks_point_group_t *)pts-&gt;data;</a>
+<a name="ln1922">        if(pt-&gt;formid == form-&gt;formid)</a>
+<a name="ln1923">        {</a>
+<a name="ln1924">          used = 1;</a>
+<a name="ln1925">          break;</a>
+<a name="ln1926">        }</a>
+<a name="ln1927">        pts = g_list_next(pts);</a>
+<a name="ln1928">      }</a>
+<a name="ln1929">    }</a>
+<a name="ln1930">    if(!used)</a>
+<a name="ln1931">    {</a>
+<a name="ln1932">      if(nb == 0)</a>
+<a name="ln1933">      {</a>
+<a name="ln1934">        dt_bauhaus_combobox_add_aligned(combo, _(&quot;add existing shape&quot;), DT_BAUHAUS_COMBOBOX_ALIGN_LEFT);</a>
+<a name="ln1935">        cids[pos++] = 0; // nothing to do</a>
+<a name="ln1936">      }</a>
+<a name="ln1937">      dt_bauhaus_combobox_add(combo, form-&gt;name);</a>
+<a name="ln1938">      cids[pos++] = form-&gt;formid;</a>
+<a name="ln1939">      nb++;</a>
+<a name="ln1940">    }</a>
+<a name="ln1941"> </a>
+<a name="ln1942">    forms = g_list_next(forms);</a>
+<a name="ln1943">  }</a>
+<a name="ln1944"> </a>
+<a name="ln1945">  // masks from other iops</a>
+<a name="ln1946">  GList *modules = g_list_first(darktable.develop-&gt;iop);</a>
+<a name="ln1947">  nb = 0;</a>
+<a name="ln1948">  int pos2 = 1;</a>
+<a name="ln1949">  while(modules)</a>
+<a name="ln1950">  {</a>
+<a name="ln1951">    dt_iop_module_t *m = (dt_iop_module_t *)modules-&gt;data;</a>
+<a name="ln1952">    if((m != module) &amp;&amp; (m-&gt;flags() &amp; IOP_FLAGS_SUPPORTS_BLENDING) &amp;&amp; !(m-&gt;flags() &amp; IOP_FLAGS_NO_MASKS))</a>
+<a name="ln1953">    {</a>
+<a name="ln1954">      dt_masks_form_t *grp = dt_masks_get_from_id(darktable.develop, m-&gt;blend_params-&gt;mask_id);</a>
+<a name="ln1955">      if(grp)</a>
+<a name="ln1956">      {</a>
+<a name="ln1957">        if(nb == 0)</a>
+<a name="ln1958">        {</a>
+<a name="ln1959">          dt_bauhaus_combobox_add_aligned(combo, _(&quot;use same shapes as&quot;), DT_BAUHAUS_COMBOBOX_ALIGN_LEFT);</a>
+<a name="ln1960">          cids[pos++] = 0; // nothing to do</a>
+<a name="ln1961">        }</a>
+<a name="ln1962">        gchar *module_label = dt_history_item_get_name(m);</a>
+<a name="ln1963">        dt_bauhaus_combobox_add(combo, module_label);</a>
+<a name="ln1964">        g_free(module_label);</a>
+<a name="ln1965">        cids[pos++] = -1 * pos2;</a>
+<a name="ln1966">        nb++;</a>
+<a name="ln1967">      }</a>
+<a name="ln1968">    }</a>
+<a name="ln1969">    pos2++;</a>
+<a name="ln1970">    modules = g_list_next(modules);</a>
+<a name="ln1971">  }</a>
+<a name="ln1972">}</a>
+<a name="ln1973"> </a>
+<a name="ln1974">void dt_masks_iop_value_changed_callback(GtkWidget *widget, struct dt_iop_module_t *module)</a>
+<a name="ln1975">{</a>
+<a name="ln1976">  // we get the corresponding value</a>
+<a name="ln1977">  dt_iop_gui_blend_data_t *bd = (dt_iop_gui_blend_data_t *)module-&gt;blend_data;</a>
+<a name="ln1978"> </a>
+<a name="ln1979">  int sel = dt_bauhaus_combobox_get(bd-&gt;masks_combo);</a>
+<a name="ln1980">  if(sel == 0) return;</a>
+<a name="ln1981">  if(sel == 1)</a>
+<a name="ln1982">  {</a>
+<a name="ln1983">    darktable.gui-&gt;reset = 1;</a>
+<a name="ln1984">    dt_bauhaus_combobox_set(bd-&gt;masks_combo, 0);</a>
+<a name="ln1985">    darktable.gui-&gt;reset = 0;</a>
+<a name="ln1986">    return;</a>
+<a name="ln1987">  }</a>
+<a name="ln1988">  if(sel &gt; 0)</a>
+<a name="ln1989">  {</a>
+<a name="ln1990">    int val = bd-&gt;masks_combo_ids[sel];</a>
+<a name="ln1991">    if(val == -1000000)</a>
+<a name="ln1992">    {</a>
+<a name="ln1993">      // delete all masks</a>
+<a name="ln1994">      _menu_no_masks(module);</a>
+<a name="ln1995">    }</a>
+<a name="ln1996">    else if(val == -2000001)</a>
+<a name="ln1997">    {</a>
+<a name="ln1998">      // add a circle shape</a>
+<a name="ln1999">      _menu_add_circle(module);</a>
+<a name="ln2000">    }</a>
+<a name="ln2001">    else if(val == -2000002)</a>
+<a name="ln2002">    {</a>
+<a name="ln2003">      // add a path shape</a>
+<a name="ln2004">      _menu_add_path(module);</a>
+<a name="ln2005">    }</a>
+<a name="ln2006">    else if(val == -2000016)</a>
+<a name="ln2007">    {</a>
+<a name="ln2008">      // add a gradient shape</a>
+<a name="ln2009">      _menu_add_gradient(module);</a>
+<a name="ln2010">    }</a>
+<a name="ln2011">    else if(val == -2000032)</a>
+<a name="ln2012">    {</a>
+<a name="ln2013">      // add a gradient shape</a>
+<a name="ln2014">      _menu_add_ellipse(module);</a>
+<a name="ln2015">    }</a>
+<a name="ln2016">    else if(val == -2000064)</a>
+<a name="ln2017">    {</a>
+<a name="ln2018">      // add a brush shape</a>
+<a name="ln2019">      _menu_add_brush(module);</a>
+<a name="ln2020">    }</a>
+<a name="ln2021">    else if(val &lt; 0)</a>
+<a name="ln2022">    {</a>
+<a name="ln2023">      // use same shapes as another iop</a>
+<a name="ln2024">      val = -1 * val - 1;</a>
+<a name="ln2025">      if(val &lt; g_list_length(module-&gt;dev-&gt;iop))</a>
+<a name="ln2026">      {</a>
+<a name="ln2027">        dt_iop_module_t *m = (dt_iop_module_t *)g_list_nth_data(module-&gt;dev-&gt;iop, val);</a>
+<a name="ln2028">        dt_masks_iop_use_same_as(module, m);</a>
+<a name="ln2029">        // and we ensure that we are in edit mode</a>
+<a name="ln2030">        dt_dev_add_history_item(darktable.develop, module, TRUE);</a>
+<a name="ln2031">        dt_masks_iop_update(module);</a>
+<a name="ln2032">        dt_dev_masks_list_change(darktable.develop);</a>
+<a name="ln2033">        dt_masks_set_edit_mode(module, DT_MASKS_EDIT_FULL);</a>
+<a name="ln2034">      }</a>
+<a name="ln2035">    }</a>
+<a name="ln2036">    else if(val &gt; 0)</a>
+<a name="ln2037">    {</a>
+<a name="ln2038">      // add an existing shape</a>
+<a name="ln2039">      _menu_add_exist(module, val);</a>
+<a name="ln2040">    }</a>
+<a name="ln2041">    else</a>
+<a name="ln2042">      return;</a>
+<a name="ln2043">  }</a>
+<a name="ln2044">  // we update the combo line</a>
+<a name="ln2045">  dt_masks_iop_update(module);</a>
+<a name="ln2046">}</a>
+<a name="ln2047"> </a>
+<a name="ln2048">void dt_masks_iop_update(struct dt_iop_module_t *module)</a>
+<a name="ln2049">{</a>
+<a name="ln2050">  if(!module) return;</a>
+<a name="ln2051"> </a>
+<a name="ln2052">  dt_iop_gui_update(module);</a>
+<a name="ln2053">  dt_iop_gui_update_masks(module);</a>
+<a name="ln2054">}</a>
+<a name="ln2055"> </a>
+<a name="ln2056">void dt_masks_form_remove(struct dt_iop_module_t *module, dt_masks_form_t *grp, dt_masks_form_t *form)</a>
+<a name="ln2057">{</a>
+<a name="ln2058">  if(!form) return;</a>
+<a name="ln2059">  int id = form-&gt;formid;</a>
+<a name="ln2060">  if(grp &amp;&amp; !(grp-&gt;type &amp; DT_MASKS_GROUP)) return;</a>
+<a name="ln2061"> </a>
+<a name="ln2062">  if(!(form-&gt;type &amp; (DT_MASKS_CLONE|DT_MASKS_NON_CLONE)) &amp;&amp; grp)</a>
+<a name="ln2063">  {</a>
+<a name="ln2064">    // we try to remove the form from the masks group</a>
+<a name="ln2065">    int ok = 0;</a>
+<a name="ln2066">    GList *forms = g_list_first(grp-&gt;points);</a>
+<a name="ln2067">    while(forms)</a>
+<a name="ln2068">    {</a>
+<a name="ln2069">      dt_masks_point_group_t *grpt = (dt_masks_point_group_t *)forms-&gt;data;</a>
+<a name="ln2070">      if(grpt-&gt;formid == id)</a>
+<a name="ln2071">      {</a>
+<a name="ln2072">        ok = 1;</a>
+<a name="ln2073">        grp-&gt;points = g_list_remove(grp-&gt;points, grpt);</a>
+<a name="ln2074">        free(grpt);</a>
+<a name="ln2075">        break;</a>
+<a name="ln2076">      }</a>
+<a name="ln2077">      forms = g_list_next(forms);</a>
+<a name="ln2078">    }</a>
+<a name="ln2079">    if(ok) dt_masks_write_form(grp, darktable.develop);</a>
+<a name="ln2080">    if(ok &amp;&amp; module)</a>
+<a name="ln2081">    {</a>
+<a name="ln2082">      dt_masks_iop_update(module);</a>
+<a name="ln2083">      dt_masks_update_image(darktable.develop);</a>
+<a name="ln2084">    }</a>
+<a name="ln2085">    if(ok &amp;&amp; g_list_length(grp-&gt;points) == 0) dt_masks_form_remove(module, NULL, grp);</a>
+<a name="ln2086">    return;</a>
+<a name="ln2087">  }</a>
+<a name="ln2088"> </a>
+<a name="ln2089">  if(form-&gt;type &amp; DT_MASKS_GROUP &amp;&amp; form-&gt;type &amp; DT_MASKS_CLONE)</a>
+<a name="ln2090">  {</a>
+<a name="ln2091">    // when removing a cloning group the children have to be removed, too, as they won't be shown in the mask manager</a>
+<a name="ln2092">    // and are thus not accessible afterwards.</a>
+<a name="ln2093">    while(form-&gt;points)</a>
+<a name="ln2094">    {</a>
+<a name="ln2095">      dt_masks_point_group_t *group_child = (dt_masks_point_group_t *)form-&gt;points-&gt;data;</a>
+<a name="ln2096">      dt_masks_form_t *child = dt_masks_get_from_id(darktable.develop, group_child-&gt;formid);</a>
+<a name="ln2097">      dt_masks_form_remove(module, form, child);</a>
+<a name="ln2098">      // no need to do anything to form-&gt;points, the recursive call will have removed child from the list</a>
+<a name="ln2099">    }</a>
+<a name="ln2100">  }</a>
+<a name="ln2101"> </a>
+<a name="ln2102">  // if we are here that mean we have to permanently delete this form</a>
+<a name="ln2103">  // we drop the form from all modules</a>
+<a name="ln2104">  GList *iops = g_list_first(darktable.develop-&gt;iop);</a>
+<a name="ln2105">  while(iops)</a>
+<a name="ln2106">  {</a>
+<a name="ln2107">    dt_iop_module_t *m = (dt_iop_module_t *)iops-&gt;data;</a>
+<a name="ln2108">    if(m-&gt;flags() &amp; IOP_FLAGS_SUPPORTS_BLENDING)</a>
+<a name="ln2109">    {</a>
+<a name="ln2110">      int ok = 0;</a>
+<a name="ln2111">      // is the form the base group of the iop ?</a>
+<a name="ln2112">      if(id == m-&gt;blend_params-&gt;mask_id)</a>
+<a name="ln2113">      {</a>
+<a name="ln2114">        m-&gt;blend_params-&gt;mask_id = 0;</a>
+<a name="ln2115">        dt_masks_iop_update(m);</a>
+<a name="ln2116">        dt_dev_add_history_item(darktable.develop, m, TRUE);</a>
+<a name="ln2117">      }</a>
+<a name="ln2118">      else</a>
+<a name="ln2119">      {</a>
+<a name="ln2120">        dt_masks_form_t *iopgrp = dt_masks_get_from_id(darktable.develop, m-&gt;blend_params-&gt;mask_id);</a>
+<a name="ln2121">        if(iopgrp &amp;&amp; (iopgrp-&gt;type &amp; DT_MASKS_GROUP))</a>
+<a name="ln2122">        {</a>
+<a name="ln2123">          GList *forms = g_list_first(iopgrp-&gt;points);</a>
+<a name="ln2124">          while(forms)</a>
+<a name="ln2125">          {</a>
+<a name="ln2126">            dt_masks_point_group_t *grpt = (dt_masks_point_group_t *)forms-&gt;data;</a>
+<a name="ln2127">            if(grpt-&gt;formid == id)</a>
+<a name="ln2128">            {</a>
+<a name="ln2129">              ok = 1;</a>
+<a name="ln2130">              iopgrp-&gt;points = g_list_remove(iopgrp-&gt;points, grpt);</a>
+<a name="ln2131">              free(grpt);</a>
+<a name="ln2132">              forms = g_list_first(iopgrp-&gt;points);</a>
+<a name="ln2133">              continue;</a>
+<a name="ln2134">            }</a>
+<a name="ln2135">            forms = g_list_next(forms);</a>
+<a name="ln2136">          }</a>
+<a name="ln2137">          if(ok)</a>
+<a name="ln2138">          {</a>
+<a name="ln2139">            dt_masks_write_form(iopgrp, darktable.develop);</a>
+<a name="ln2140">            dt_masks_iop_update(m);</a>
+<a name="ln2141">            dt_masks_update_image(darktable.develop);</a>
+<a name="ln2142">            if(g_list_length(iopgrp-&gt;points) == 0) dt_masks_form_remove(m, NULL, iopgrp);</a>
+<a name="ln2143">          }</a>
+<a name="ln2144">        }</a>
+<a name="ln2145">      }</a>
+<a name="ln2146">    }</a>
+<a name="ln2147">    iops = g_list_next(iops);</a>
+<a name="ln2148">  }</a>
+<a name="ln2149">  // we drop the form from the general list</a>
+<a name="ln2150">  GList *forms = g_list_first(darktable.develop-&gt;forms);</a>
+<a name="ln2151">  while(forms)</a>
+<a name="ln2152">  {</a>
+<a name="ln2153">    dt_masks_form_t *f = (dt_masks_form_t *)forms-&gt;data;</a>
+<a name="ln2154">    if(f-&gt;formid == id)</a>
+<a name="ln2155">    {</a>
+<a name="ln2156">      darktable.develop-&gt;forms = g_list_remove(darktable.develop-&gt;forms, f);</a>
+<a name="ln2157">      dt_masks_write_forms(darktable.develop);</a>
+<a name="ln2158">      break;</a>
+<a name="ln2159">    }</a>
+<a name="ln2160">    forms = g_list_next(forms);</a>
+<a name="ln2161">  }</a>
+<a name="ln2162">}</a>
+<a name="ln2163"> </a>
+<a name="ln2164">void dt_masks_form_change_opacity(dt_masks_form_t *form, int parentid, int up)</a>
+<a name="ln2165">{</a>
+<a name="ln2166">  if(!form) return;</a>
+<a name="ln2167">  dt_masks_form_t *grp = dt_masks_get_from_id(darktable.develop, parentid);</a>
+<a name="ln2168">  if(!grp || !(grp-&gt;type &amp; DT_MASKS_GROUP)) return;</a>
+<a name="ln2169"> </a>
+<a name="ln2170">  // we first need to test if the opacity can be set to the form</a>
+<a name="ln2171">  if(form-&gt;type &amp; DT_MASKS_GROUP) return;</a>
+<a name="ln2172">  const int id = form-&gt;formid;</a>
+<a name="ln2173">  float amount = 0.05f;</a>
+<a name="ln2174">  if(!up) amount = -amount;</a>
+<a name="ln2175"> </a>
+<a name="ln2176">  // so we change the value inside the group</a>
+<a name="ln2177">  GList *fpts = g_list_first(grp-&gt;points);</a>
+<a name="ln2178">  while(fpts)</a>
+<a name="ln2179">  {</a>
+<a name="ln2180">    dt_masks_point_group_t *fpt = (dt_masks_point_group_t *)fpts-&gt;data;</a>
+<a name="ln2181">    if(fpt-&gt;formid == id)</a>
+<a name="ln2182">    {</a>
+<a name="ln2183">      const float nv = fpt-&gt;opacity + amount;</a>
+<a name="ln2184">      if(nv &lt;= 1.0f &amp;&amp; nv &gt;= 0.0f)</a>
+<a name="ln2185">      {</a>
+<a name="ln2186">        fpt-&gt;opacity = nv;</a>
+<a name="ln2187">        dt_masks_write_form(grp, darktable.develop);</a>
+<a name="ln2188">        dt_masks_update_image(darktable.develop);</a>
+<a name="ln2189">        dt_dev_masks_list_update(darktable.develop);</a>
+<a name="ln2190">      }</a>
+<a name="ln2191">      break;</a>
+<a name="ln2192">    }</a>
+<a name="ln2193">    fpts = g_list_next(fpts);</a>
+<a name="ln2194">  }</a>
+<a name="ln2195">}</a>
+<a name="ln2196"> </a>
+<a name="ln2197">void dt_masks_form_move(dt_masks_form_t *grp, int formid, int up)</a>
+<a name="ln2198">{</a>
+<a name="ln2199">  if(!grp || !(grp-&gt;type &amp; DT_MASKS_GROUP)) return;</a>
+<a name="ln2200"> </a>
+<a name="ln2201">  // we search the form in the group</a>
+<a name="ln2202">  dt_masks_point_group_t *grpt = NULL;</a>
+<a name="ln2203">  guint pos = 0;</a>
+<a name="ln2204">  GList *fpts = g_list_first(grp-&gt;points);</a>
+<a name="ln2205">  while(fpts)</a>
+<a name="ln2206">  {</a>
+<a name="ln2207">    dt_masks_point_group_t *fpt = (dt_masks_point_group_t *)fpts-&gt;data;</a>
+<a name="ln2208">    if(fpt-&gt;formid == formid)</a>
+<a name="ln2209">    {</a>
+<a name="ln2210">      grpt = fpt;</a>
+<a name="ln2211">      break;</a>
+<a name="ln2212">    }</a>
+<a name="ln2213">    pos++;</a>
+<a name="ln2214">    fpts = g_list_next(fpts);</a>
+<a name="ln2215">  }</a>
+<a name="ln2216"> </a>
+<a name="ln2217">  // we remove the form and readd it</a>
+<a name="ln2218">  if(grpt)</a>
+<a name="ln2219">  {</a>
+<a name="ln2220">    if(up &amp;&amp; pos == 0) return;</a>
+<a name="ln2221">    if(!up &amp;&amp; pos == g_list_length(grp-&gt;points) - 1) return;</a>
+<a name="ln2222"> </a>
+<a name="ln2223">    grp-&gt;points = g_list_remove(grp-&gt;points, grpt);</a>
+<a name="ln2224">    if(up)</a>
+<a name="ln2225">      pos -= 1;</a>
+<a name="ln2226">    else</a>
+<a name="ln2227">      pos += 1;</a>
+<a name="ln2228">    grp-&gt;points = g_list_insert(grp-&gt;points, grpt, pos);</a>
+<a name="ln2229">    dt_masks_write_form(grp, darktable.develop);</a>
+<a name="ln2230">  }</a>
+<a name="ln2231">}</a>
+<a name="ln2232"> </a>
+<a name="ln2233">static int _find_in_group(dt_masks_form_t *grp, int formid)</a>
+<a name="ln2234">{</a>
+<a name="ln2235">  if(!(grp-&gt;type &amp; DT_MASKS_GROUP)) return 0;</a>
+<a name="ln2236">  if(grp-&gt;formid == formid) return 1;</a>
+<a name="ln2237">  GList *forms = g_list_first(grp-&gt;points);</a>
+<a name="ln2238">  int nb = 0;</a>
+<a name="ln2239">  while(forms)</a>
+<a name="ln2240">  {</a>
+<a name="ln2241">    const dt_masks_point_group_t *grpt = (dt_masks_point_group_t *)forms-&gt;data;</a>
+<a name="ln2242">    dt_masks_form_t *form = dt_masks_get_from_id(darktable.develop, grpt-&gt;formid);</a>
+<a name="ln2243">    if(form)</a>
+<a name="ln2244">    {</a>
+<a name="ln2245">      if(form-&gt;type &amp; DT_MASKS_GROUP) nb += _find_in_group(form, formid);</a>
+<a name="ln2246">    }</a>
+<a name="ln2247">    forms = g_list_next(forms);</a>
+<a name="ln2248">  }</a>
+<a name="ln2249">  return nb;</a>
+<a name="ln2250">}</a>
+<a name="ln2251"> </a>
+<a name="ln2252">dt_masks_point_group_t *dt_masks_group_add_form(dt_masks_form_t *grp, dt_masks_form_t *form)</a>
+<a name="ln2253">{</a>
+<a name="ln2254">  // add a form to group and check for self inclusion</a>
+<a name="ln2255"> </a>
+<a name="ln2256">  if(!(grp-&gt;type &amp; DT_MASKS_GROUP)) return NULL;</a>
+<a name="ln2257">  // either the form to add is not a group, so no risk</a>
+<a name="ln2258">  // or we go through all points of form to see if we find a ref to grp-&gt;formid</a>
+<a name="ln2259">  if(!(form-&gt;type &amp; DT_MASKS_GROUP) || _find_in_group(form, grp-&gt;formid) == 0)</a>
+<a name="ln2260">  {</a>
+<a name="ln2261">    dt_masks_point_group_t *grpt = malloc(sizeof(dt_masks_point_group_t));</a>
+<a name="ln2262">    grpt-&gt;formid = form-&gt;formid;</a>
+<a name="ln2263">    grpt-&gt;parentid = grp-&gt;formid;</a>
+<a name="ln2264">    grpt-&gt;state = DT_MASKS_STATE_SHOW | DT_MASKS_STATE_USE;</a>
+<a name="ln2265">    if(g_list_length(grp-&gt;points) &gt; 0) grpt-&gt;state |= DT_MASKS_STATE_UNION;</a>
+<a name="ln2266">    grpt-&gt;opacity = 1.0f;</a>
+<a name="ln2267">    grp-&gt;points = g_list_append(grp-&gt;points, grpt);</a>
+<a name="ln2268">    return grpt;</a>
+<a name="ln2269">  }</a>
+<a name="ln2270"> </a>
+<a name="ln2271">  dt_control_log(_(&quot;masks can not contain themselves&quot;));</a>
+<a name="ln2272">  return NULL;</a>
+<a name="ln2273">}</a>
+<a name="ln2274"> </a>
+<a name="ln2275">void dt_masks_group_ungroup(dt_masks_form_t *dest_grp, dt_masks_form_t *grp)</a>
+<a name="ln2276">{</a>
+<a name="ln2277">  if(!grp || !dest_grp) return;</a>
+<a name="ln2278">  if(!(grp-&gt;type &amp; DT_MASKS_GROUP) || !(dest_grp-&gt;type &amp; DT_MASKS_GROUP)) return;</a>
+<a name="ln2279"> </a>
+<a name="ln2280">  GList *forms = g_list_first(grp-&gt;points);</a>
+<a name="ln2281">  while(forms)</a>
+<a name="ln2282">  {</a>
+<a name="ln2283">    dt_masks_point_group_t *grpt = (dt_masks_point_group_t *)forms-&gt;data;</a>
+<a name="ln2284">    dt_masks_form_t *form = dt_masks_get_from_id(darktable.develop, grpt-&gt;formid);</a>
+<a name="ln2285">    if(form)</a>
+<a name="ln2286">    {</a>
+<a name="ln2287">      if(form-&gt;type &amp; DT_MASKS_GROUP)</a>
+<a name="ln2288">      {</a>
+<a name="ln2289">        dt_masks_group_ungroup(dest_grp, form);</a>
+<a name="ln2290">      }</a>
+<a name="ln2291">      else</a>
+<a name="ln2292">      {</a>
+<a name="ln2293">        dt_masks_point_group_t *fpt = (dt_masks_point_group_t *)malloc(sizeof(dt_masks_point_group_t));</a>
+<a name="ln2294">        fpt-&gt;formid = grpt-&gt;formid;</a>
+<a name="ln2295">        fpt-&gt;parentid = grpt-&gt;parentid;</a>
+<a name="ln2296">        fpt-&gt;state = grpt-&gt;state;</a>
+<a name="ln2297">        fpt-&gt;opacity = grpt-&gt;opacity;</a>
+<a name="ln2298">        dest_grp-&gt;points = g_list_append(dest_grp-&gt;points, fpt);</a>
+<a name="ln2299">      }</a>
+<a name="ln2300">    }</a>
+<a name="ln2301">    forms = g_list_next(forms);</a>
+<a name="ln2302">  }</a>
+<a name="ln2303">}</a>
+<a name="ln2304"> </a>
+<a name="ln2305">int dt_masks_group_get_hash_buffer_length(dt_masks_form_t *form)</a>
+<a name="ln2306">{</a>
+<a name="ln2307">  if(!form) return 0;</a>
+<a name="ln2308">  int pos = 0;</a>
+<a name="ln2309">  // basic infos</a>
+<a name="ln2310">  pos += sizeof(dt_masks_type_t);</a>
+<a name="ln2311">  pos += sizeof(int);</a>
+<a name="ln2312">  pos += sizeof(int);</a>
+<a name="ln2313">  pos += 2 * sizeof(float);</a>
+<a name="ln2314"> </a>
+<a name="ln2315">  GList *forms = g_list_first(form-&gt;points);</a>
+<a name="ln2316">  while(forms)</a>
+<a name="ln2317">  {</a>
+<a name="ln2318">    if(form-&gt;type &amp; DT_MASKS_GROUP)</a>
+<a name="ln2319">    {</a>
+<a name="ln2320">      dt_masks_point_group_t *grpt = (dt_masks_point_group_t *)forms-&gt;data;</a>
+<a name="ln2321">      dt_masks_form_t *f = dt_masks_get_from_id(darktable.develop, grpt-&gt;formid);</a>
+<a name="ln2322">      if(f)</a>
+<a name="ln2323">      {</a>
+<a name="ln2324">        // state &amp; opacity</a>
+<a name="ln2325">        pos += sizeof(int);</a>
+<a name="ln2326">        pos += sizeof(float);</a>
+<a name="ln2327">        // the form itself</a>
+<a name="ln2328">        pos += dt_masks_group_get_hash_buffer_length(f);</a>
+<a name="ln2329">      }</a>
+<a name="ln2330">    }</a>
+<a name="ln2331">    else if(form-&gt;type &amp; DT_MASKS_CIRCLE)</a>
+<a name="ln2332">    {</a>
+<a name="ln2333">      pos += sizeof(dt_masks_point_circle_t);</a>
+<a name="ln2334">    }</a>
+<a name="ln2335">    else if(form-&gt;type &amp; DT_MASKS_PATH)</a>
+<a name="ln2336">    {</a>
+<a name="ln2337">      pos += sizeof(dt_masks_point_path_t);</a>
+<a name="ln2338">    }</a>
+<a name="ln2339">    else if(form-&gt;type &amp; DT_MASKS_GRADIENT)</a>
+<a name="ln2340">    {</a>
+<a name="ln2341">      pos += sizeof(dt_masks_point_gradient_t);</a>
+<a name="ln2342">    }</a>
+<a name="ln2343">    else if(form-&gt;type &amp; DT_MASKS_ELLIPSE)</a>
+<a name="ln2344">    {</a>
+<a name="ln2345">      pos += sizeof(dt_masks_point_ellipse_t);</a>
+<a name="ln2346">    }</a>
+<a name="ln2347">    else if(form-&gt;type &amp; DT_MASKS_BRUSH)</a>
+<a name="ln2348">    {</a>
+<a name="ln2349">      pos += sizeof(dt_masks_point_brush_t);</a>
+<a name="ln2350">    }</a>
+<a name="ln2351"> </a>
+<a name="ln2352">    forms = g_list_next(forms);</a>
+<a name="ln2353">  }</a>
+<a name="ln2354">  return pos;</a>
+<a name="ln2355">}</a>
+<a name="ln2356"> </a>
+<a name="ln2357">char *dt_masks_group_get_hash_buffer(dt_masks_form_t *form, char *str)</a>
+<a name="ln2358">{</a>
+<a name="ln2359">  if(!form) return str;</a>
+<a name="ln2360">  int pos = 0;</a>
+<a name="ln2361">  // basic infos</a>
+<a name="ln2362">  memcpy(str + pos, &amp;form-&gt;type, sizeof(dt_masks_type_t));</a>
+<a name="ln2363">  pos += sizeof(dt_masks_type_t);</a>
+<a name="ln2364">  memcpy(str + pos, &amp;form-&gt;formid, sizeof(int));</a>
+<a name="ln2365">  pos += sizeof(int);</a>
+<a name="ln2366">  memcpy(str + pos, &amp;form-&gt;version, sizeof(int));</a>
+<a name="ln2367">  pos += sizeof(int);</a>
+<a name="ln2368">  memcpy(str + pos, &amp;form-&gt;source, 2 * sizeof(float));</a>
+<a name="ln2369">  pos += 2 * sizeof(float);</a>
+<a name="ln2370"> </a>
+<a name="ln2371">  GList *forms = g_list_first(form-&gt;points);</a>
+<a name="ln2372">  while(forms)</a>
+<a name="ln2373">  {</a>
+<a name="ln2374">    if(form-&gt;type &amp; DT_MASKS_GROUP)</a>
+<a name="ln2375">    {</a>
+<a name="ln2376">      dt_masks_point_group_t *grpt = (dt_masks_point_group_t *)forms-&gt;data;</a>
+<a name="ln2377">      dt_masks_form_t *f = dt_masks_get_from_id(darktable.develop, grpt-&gt;formid);</a>
+<a name="ln2378">      if(f)</a>
+<a name="ln2379">      {</a>
+<a name="ln2380">        // state &amp; opacity</a>
+<a name="ln2381">        memcpy(str + pos, &amp;grpt-&gt;state, sizeof(int));</a>
+<a name="ln2382">        pos += sizeof(int);</a>
+<a name="ln2383">        memcpy(str + pos, &amp;grpt-&gt;opacity, sizeof(float));</a>
+<a name="ln2384">        pos += sizeof(float);</a>
+<a name="ln2385">        // the form itself</a>
+<a name="ln2386">        str = dt_masks_group_get_hash_buffer(f, str + pos) - pos;</a>
+<a name="ln2387">      }</a>
+<a name="ln2388">    }</a>
+<a name="ln2389">    else if(form-&gt;type &amp; DT_MASKS_CIRCLE)</a>
+<a name="ln2390">    {</a>
+<a name="ln2391">      memcpy(str + pos, forms-&gt;data, sizeof(dt_masks_point_circle_t));</a>
+<a name="ln2392">      pos += sizeof(dt_masks_point_circle_t);</a>
+<a name="ln2393">    }</a>
+<a name="ln2394">    else if(form-&gt;type &amp; DT_MASKS_PATH)</a>
+<a name="ln2395">    {</a>
+<a name="ln2396">      memcpy(str + pos, forms-&gt;data, sizeof(dt_masks_point_path_t));</a>
+<a name="ln2397">      pos += sizeof(dt_masks_point_path_t);</a>
+<a name="ln2398">    }</a>
+<a name="ln2399">    else if(form-&gt;type &amp; DT_MASKS_GRADIENT)</a>
+<a name="ln2400">    {</a>
+<a name="ln2401">      memcpy(str + pos, forms-&gt;data, sizeof(dt_masks_point_gradient_t));</a>
+<a name="ln2402">      pos += sizeof(dt_masks_point_gradient_t);</a>
+<a name="ln2403">    }</a>
+<a name="ln2404">    else if(form-&gt;type &amp; DT_MASKS_ELLIPSE)</a>
+<a name="ln2405">    {</a>
+<a name="ln2406">      memcpy(str + pos, forms-&gt;data, sizeof(dt_masks_point_ellipse_t));</a>
+<a name="ln2407">      pos += sizeof(dt_masks_point_ellipse_t);</a>
+<a name="ln2408">    }</a>
+<a name="ln2409">    else if(form-&gt;type &amp; DT_MASKS_BRUSH)</a>
+<a name="ln2410">    {</a>
+<a name="ln2411">      memcpy(str + pos, forms-&gt;data, sizeof(dt_masks_point_brush_t));</a>
+<a name="ln2412">      pos += sizeof(dt_masks_point_brush_t);</a>
+<a name="ln2413">    }</a>
+<a name="ln2414">    forms = g_list_next(forms);</a>
+<a name="ln2415">  }</a>
+<a name="ln2416">  return str + pos;</a>
+<a name="ln2417">}</a>
+<a name="ln2418"> </a>
+<a name="ln2419">void dt_masks_update_image(dt_develop_t *dev)</a>
+<a name="ln2420">{</a>
+<a name="ln2421">  /* invalidate image data*/</a>
+<a name="ln2422">  // dt_similarity_image_dirty(dev-&gt;image_storage.id);</a>
+<a name="ln2423"> </a>
+<a name="ln2424">  // invalidate buffers and force redraw of darkroom</a>
+<a name="ln2425">  dev-&gt;pipe-&gt;changed |= DT_DEV_PIPE_SYNCH;</a>
+<a name="ln2426">  dev-&gt;preview_pipe-&gt;changed |= DT_DEV_PIPE_SYNCH;</a>
+<a name="ln2427">  dt_dev_invalidate_all(dev);</a>
+<a name="ln2428">}</a>
+<a name="ln2429"> </a>
+<a name="ln2430">static void _cleanup_unused_recurs(dt_develop_t *dev, int formid, int *used, int nb)</a>
+<a name="ln2431">{</a>
+<a name="ln2432">  // first, we search for the formid in used table</a>
+<a name="ln2433">  for(int i = 0; i &lt; nb; i++)</a>
+<a name="ln2434">  {</a>
+<a name="ln2435">    if(used[i] == 0)</a>
+<a name="ln2436">    {</a>
+<a name="ln2437">      // we store the formid</a>
+<a name="ln2438">      used[i] = formid;</a>
+<a name="ln2439">      break;</a>
+<a name="ln2440">    }</a>
+<a name="ln2441">    if(used[i] == formid) break;</a>
+<a name="ln2442">  }</a>
+<a name="ln2443"> </a>
+<a name="ln2444">  // if the form is a group, we iterate through the sub-forms</a>
+<a name="ln2445">  dt_masks_form_t *form = dt_masks_get_from_id(dev, formid);</a>
+<a name="ln2446">  if(form &amp;&amp; (form-&gt;type &amp; DT_MASKS_GROUP))</a>
+<a name="ln2447">  {</a>
+<a name="ln2448">    GList *grpts = g_list_first(form-&gt;points);</a>
+<a name="ln2449">    while(grpts)</a>
+<a name="ln2450">    {</a>
+<a name="ln2451">      dt_masks_point_group_t *grpt = (dt_masks_point_group_t *)grpts-&gt;data;</a>
+<a name="ln2452">      _cleanup_unused_recurs(dev, grpt-&gt;formid, used, nb);</a>
+<a name="ln2453">      grpts = g_list_next(grpts);</a>
+<a name="ln2454">    }</a>
+<a name="ln2455">  }</a>
+<a name="ln2456">}</a>
+<a name="ln2457"> </a>
+<a name="ln2458">void dt_masks_cleanup_unused(dt_develop_t *dev)</a>
+<a name="ln2459">{</a>
+<a name="ln2460">  // we create a table to store the ids of used forms</a>
+<a name="ln2461">  guint nbf = g_list_length(dev-&gt;forms);</a>
+<a name="ln2462">  int *used = calloc(nbf, sizeof(int));</a>
+<a name="ln2463"> </a>
+<a name="ln2464">  // now we iterate through all iop to find used forms</a>
+<a name="ln2465">  GList *iops = g_list_first(dev-&gt;iop);</a>
+<a name="ln2466">  while(iops)</a>
+<a name="ln2467">  {</a>
+<a name="ln2468">    dt_iop_module_t *m = (dt_iop_module_t *)iops-&gt;data;</a>
+<a name="ln2469">    if(m-&gt;flags() &amp; IOP_FLAGS_SUPPORTS_BLENDING)</a>
+<a name="ln2470">    {</a>
+<a name="ln2471">      if(m-&gt;blend_params-&gt;mask_id &gt; 0) _cleanup_unused_recurs(dev, m-&gt;blend_params-&gt;mask_id, used, nbf);</a>
+<a name="ln2472">    }</a>
+<a name="ln2473">    iops = g_list_next(iops);</a>
+<a name="ln2474">  }</a>
+<a name="ln2475"> </a>
+<a name="ln2476">  // and we delete all unused forms</a>
+<a name="ln2477">  GList *shapes = g_list_first(dev-&gt;forms);</a>
+<a name="ln2478">  while(shapes)</a>
+<a name="ln2479">  {</a>
+<a name="ln2480">    dt_masks_form_t *f = (dt_masks_form_t *)shapes-&gt;data;</a>
+<a name="ln2481">    int u = 0;</a>
+<a name="ln2482">    for(int i = 0; i &lt; nbf; i++)</a>
+<a name="ln2483">    {</a>
+<a name="ln2484">      if(used[i] == f-&gt;formid)</a>
+<a name="ln2485">      {</a>
+<a name="ln2486">        u = 1;</a>
+<a name="ln2487">        break;</a>
+<a name="ln2488">      }</a>
+<a name="ln2489">      if(used[i] == 0) break;</a>
+<a name="ln2490">    }</a>
+<a name="ln2491"> </a>
+<a name="ln2492">    shapes = g_list_next(shapes);</a>
+<a name="ln2493"> </a>
+<a name="ln2494">    if(u == 0)</a>
+<a name="ln2495">    {</a>
+<a name="ln2496">      dev-&gt;forms = g_list_remove(dev-&gt;forms, f);</a>
+<a name="ln2497">    }</a>
+<a name="ln2498">  }</a>
+<a name="ln2499"> </a>
+<a name="ln2500">  // and we save all that</a>
+<a name="ln2501">  dt_masks_write_forms(dev);</a>
+<a name="ln2502">  free(used);</a>
+<a name="ln2503">}</a>
+<a name="ln2504"> </a>
+<a name="ln2505">int dt_masks_point_in_form_exact(float x, float y, float *points, int points_start, int points_count)</a>
+<a name="ln2506">{</a>
+<a name="ln2507">  // we use ray casting algorithm</a>
+<a name="ln2508">  // to avoid most problems with horizontal segments, y should be rounded as int</a>
+<a name="ln2509">  // so that there's very little chance than y==points...</a>
+<a name="ln2510"> </a>
+<a name="ln2511">  if(points_count &gt; 2 + points_start)</a>
+<a name="ln2512">  {</a>
+<a name="ln2513">    float last = isnan(points[points_count * 2 - 1]) ? -INFINITY : points[points_count * 2 - 1];</a>
+<a name="ln2514">    float yf = (float)y;</a>
+<a name="ln2515">    int nb = 0;</a>
+<a name="ln2516">    for(int i = points_start; i &lt; points_count; i++)</a>
+<a name="ln2517">    {</a>
+<a name="ln2518">      float yy = points[i * 2 + 1];</a>
+<a name="ln2519">      //if we need to skip points (in case of deleted point, because of self-intersection)</a>
+<a name="ln2520">      if(isnan(points[i * 2]))</a>
+<a name="ln2521">      {</a>
+<a name="ln2522">        if(isnan(yy)) break;</a>
+<a name="ln2523">        i = (int)yy - 1;</a>
+<a name="ln2524">        continue;</a>
+<a name="ln2525">      }</a>
+<a name="ln2526">      if (((yf&lt;=yy &amp;&amp; yf&gt;last) || (yf&gt;=yy &amp;&amp; yf&lt;last)) &amp;&amp; (points[i * 2] &gt; x)) nb++;</a>
+<a name="ln2527">      last = yy;</a>
+<a name="ln2528">    }</a>
+<a name="ln2529">    return (nb &amp; 1);</a>
+<a name="ln2530">  }</a>
+<a name="ln2531">  return 0;</a>
+<a name="ln2532">}</a>
+<a name="ln2533"> </a>
+<a name="ln2534">int dt_masks_point_in_form_near(float x, float y, float *points, int points_start, int points_count, float distance, int *near)</a>
+<a name="ln2535">{</a>
+<a name="ln2536">  // we use ray casting algorithm</a>
+<a name="ln2537">  // to avoid most problems with horizontal segments, y should be rounded as int</a>
+<a name="ln2538">  // so that there's very little chance than y==points...</a>
+<a name="ln2539"> </a>
+<a name="ln2540">  // TODO : distance is only evaluated in x, not y...</a>
+<a name="ln2541"> </a>
+<a name="ln2542">  if(points_count &gt; 2 + points_start)</a>
+<a name="ln2543">  {</a>
+<a name="ln2544">    float last = isnan(points[points_count * 2 - 1]) ? -INFINITY : points[points_count * 2 - 1];</a>
+<a name="ln2545">    float yf = (float)y;</a>
+<a name="ln2546">    int nb = 0;</a>
+<a name="ln2547">    for(int i = points_start; i &lt; points_count; i++)</a>
+<a name="ln2548">    {</a>
+<a name="ln2549">      float yy = points[i * 2 + 1];</a>
+<a name="ln2550">      //if we need to jump to skip points (in case of deleted point, because of self-intersection)</a>
+<a name="ln2551">      if(isnan(points[i * 2]))</a>
+<a name="ln2552">      {</a>
+<a name="ln2553">        if(isnan(yy)) break;</a>
+<a name="ln2554">        i = (int)yy - 1;</a>
+<a name="ln2555">        continue;</a>
+<a name="ln2556">      }</a>
+<a name="ln2557">      if ((yf&lt;=yy &amp;&amp; yf&gt;last) || (yf&gt;=yy &amp;&amp; yf&lt;last))</a>
+<a name="ln2558">      {</a>
+<a name="ln2559">        if(points[i * 2] &gt; x) nb++;</a>
+<a name="ln2560">        if(points[i * 2] - x &lt; distance &amp;&amp; points[i * 2] - x &gt; -distance) *near = 1;</a>
+<a name="ln2561">      }</a>
+<a name="ln2562">      last = yy;</a>
+<a name="ln2563">    }</a>
+<a name="ln2564">    return (nb &amp; 1);</a>
+<a name="ln2565">  }</a>
+<a name="ln2566">  return 0;</a>
+<a name="ln2567">}</a>
+<a name="ln2568"> </a>
+<a name="ln2569">// allow to select a shape inside an iop</a>
+<a name="ln2570">void dt_masks_select_form(struct dt_iop_module_t *module, dt_masks_form_t *sel)</a>
+<a name="ln2571">{</a>
+<a name="ln2572">  int selection_changed = 0;</a>
+<a name="ln2573"> </a>
+<a name="ln2574">  if(sel)</a>
+<a name="ln2575">  {</a>
+<a name="ln2576">    if(sel-&gt;formid != darktable.develop-&gt;mask_form_selected_id)</a>
+<a name="ln2577">    {</a>
+<a name="ln2578">      darktable.develop-&gt;mask_form_selected_id = sel-&gt;formid;</a>
+<a name="ln2579">      selection_changed = 1;</a>
+<a name="ln2580">    }</a>
+<a name="ln2581">  }</a>
+<a name="ln2582">  else</a>
+<a name="ln2583">  {</a>
+<a name="ln2584">    if(darktable.develop-&gt;mask_form_selected_id != 0)</a>
+<a name="ln2585">    {</a>
+<a name="ln2586">      darktable.develop-&gt;mask_form_selected_id = 0;</a>
+<a name="ln2587">      selection_changed = 1;</a>
+<a name="ln2588">    }</a>
+<a name="ln2589">  }</a>
+<a name="ln2590">  if(selection_changed)</a>
+<a name="ln2591">  {</a>
+<a name="ln2592">    if(!module &amp;&amp; darktable.develop-&gt;mask_form_selected_id == 0) module = darktable.develop-&gt;gui_module;</a>
+<a name="ln2593">    if(module)</a>
+<a name="ln2594">    {</a>
+<a name="ln2595">      if(module-&gt;masks_selection_changed)</a>
+<a name="ln2596">        module-&gt;masks_selection_changed(module, darktable.develop-&gt;mask_form_selected_id);</a>
+<a name="ln2597">    }</a>
+<a name="ln2598">  }</a>
+<a name="ln2599">}</a>
+<a name="ln2600"> </a>
+<a name="ln2601">// draw a cross where the source position of a clone mask will be created</a>
+<a name="ln2602">void dt_masks_draw_clone_source_pos(cairo_t *cr, const float zoom_scale, const float x, const float y)</a>
+<a name="ln2603">{</a>
+<a name="ln2604">  const float dx = 3.5f / zoom_scale;</a>
+<a name="ln2605">  const float dy = 3.5f / zoom_scale;</a>
+<a name="ln2606"> </a>
+<a name="ln2607">  double dashed[] = { 4.0, 4.0 };</a>
+<a name="ln2608">  dashed[0] /= zoom_scale;</a>
+<a name="ln2609">  dashed[1] /= zoom_scale;</a>
+<a name="ln2610"> </a>
+<a name="ln2611">  cairo_set_dash(cr, dashed, 0, 0);</a>
+<a name="ln2612">  cairo_set_line_width(cr, 3.0 / zoom_scale);</a>
+<a name="ln2613">  cairo_set_source_rgba(cr, .3, .3, .3, .8);</a>
+<a name="ln2614"> </a>
+<a name="ln2615">  cairo_move_to(cr, x + dx, y);</a>
+<a name="ln2616">  cairo_line_to(cr, x - dx, y);</a>
+<a name="ln2617">  cairo_move_to(cr, x, y + dy);</a>
+<a name="ln2618">  cairo_line_to(cr, x, y - dy);</a>
+<a name="ln2619">  cairo_stroke_preserve(cr);</a>
+<a name="ln2620"> </a>
+<a name="ln2621">  cairo_set_line_width(cr, 1.0 / zoom_scale);</a>
+<a name="ln2622">  cairo_set_source_rgba(cr, .8, .8, .8, .8);</a>
+<a name="ln2623">  cairo_stroke(cr);</a>
+<a name="ln2624">}</a>
+<a name="ln2625"> </a>
+<a name="ln2626">// sets if the initial source position for a clone mask will be absolute or relative,</a>
+<a name="ln2627">// based on mouse position and key state</a>
+<a name="ln2628">void dt_masks_set_source_pos_initial_state(dt_masks_form_gui_t *gui, const uint32_t state, const float pzx,</a>
+<a name="ln2629">                                           const float pzy)</a>
+<a name="ln2630">{</a>
+<a name="ln2631">  if((state &amp; (GDK_SHIFT_MASK | GDK_CONTROL_MASK)) == (GDK_SHIFT_MASK | GDK_CONTROL_MASK))</a>
+<a name="ln2632">    gui-&gt;source_pos_type = DT_MASKS_SOURCE_POS_ABSOLUTE;</a>
+<a name="ln2633">  else if((state &amp; GDK_SHIFT_MASK) == GDK_SHIFT_MASK)</a>
+<a name="ln2634">    gui-&gt;source_pos_type = DT_MASKS_SOURCE_POS_RELATIVE_TEMP;</a>
+<a name="ln2635">  else</a>
+<a name="ln2636">    fprintf(stderr, &quot;[dt_masks_set_source_pos_initial_state] unknown state for setting masks position type\n&quot;);</a>
+<a name="ln2637"> </a>
+<a name="ln2638">  // both source types record an absolute position,</a>
+<a name="ln2639">  // for the relative type, the first time is used the position is recorded,</a>
+<a name="ln2640">  // the second time a relative position is calculated based on that one</a>
+<a name="ln2641">  gui-&gt;posx_source = pzx * darktable.develop-&gt;preview_pipe-&gt;backbuf_width;</a>
+<a name="ln2642">  gui-&gt;posy_source = pzy * darktable.develop-&gt;preview_pipe-&gt;backbuf_height;</a>
+<a name="ln2643">}</a>
+<a name="ln2644"> </a>
+<a name="ln2645">// set the initial source position value for a clone mask</a>
+<a name="ln2646">void dt_masks_set_source_pos_initial_value(dt_masks_form_gui_t *gui, const int mask_type, dt_masks_form_t *form,</a>
+<a name="ln2647">                                                   const float pzx, const float pzy)</a>
+<a name="ln2648">{</a>
+<a name="ln2649">  const float wd = darktable.develop-&gt;preview_pipe-&gt;backbuf_width;</a>
+<a name="ln2650">  const float ht = darktable.develop-&gt;preview_pipe-&gt;backbuf_height;</a>
+<a name="ln2651">  const float iwd = darktable.develop-&gt;preview_pipe-&gt;iwidth;</a>
+<a name="ln2652">  const float iht = darktable.develop-&gt;preview_pipe-&gt;iheight;</a>
+<a name="ln2653"> </a>
+<a name="ln2654">  // if this is the first time the relative pos is used</a>
+<a name="ln2655">  if(gui-&gt;source_pos_type == DT_MASKS_SOURCE_POS_RELATIVE_TEMP)</a>
+<a name="ln2656">  {</a>
+<a name="ln2657">    // if is has not been defined by the user, set some default</a>
+<a name="ln2658">    if(gui-&gt;posx_source == -1.f &amp;&amp; gui-&gt;posy_source == -1.f)</a>
+<a name="ln2659">    {</a>
+<a name="ln2660">      if(mask_type &amp; DT_MASKS_CIRCLE)</a>
+<a name="ln2661">      {</a>
+<a name="ln2662">        const float radius = MIN(0.5f, dt_conf_get_float(&quot;plugins/darkroom/spots/circle_size&quot;));</a>
+<a name="ln2663"> </a>
+<a name="ln2664">        gui-&gt;posx_source = (radius * iwd);</a>
+<a name="ln2665">        gui-&gt;posy_source = -(radius * iht);</a>
+<a name="ln2666">      }</a>
+<a name="ln2667">      else if(mask_type &amp; DT_MASKS_ELLIPSE)</a>
+<a name="ln2668">      {</a>
+<a name="ln2669">        const float radius_a = dt_conf_get_float(&quot;plugins/darkroom/spots/ellipse_radius_a&quot;);</a>
+<a name="ln2670">        const float radius_b = dt_conf_get_float(&quot;plugins/darkroom/spots/ellipse_radius_b&quot;);</a>
+<a name="ln2671"> </a>
+<a name="ln2672">        gui-&gt;posx_source = (radius_a * iwd);</a>
+<a name="ln2673">        gui-&gt;posy_source = -(radius_b * iht);</a>
+<a name="ln2674">      }</a>
+<a name="ln2675">      else if(mask_type &amp; DT_MASKS_PATH)</a>
+<a name="ln2676">      {</a>
+<a name="ln2677">        gui-&gt;posx_source = (0.02f * iwd);</a>
+<a name="ln2678">        gui-&gt;posy_source = (0.02f * iht);</a>
+<a name="ln2679">      }</a>
+<a name="ln2680">      else if(mask_type &amp; DT_MASKS_BRUSH)</a>
+<a name="ln2681">      {</a>
+<a name="ln2682">        gui-&gt;posx_source = 0.01f * iwd;</a>
+<a name="ln2683">        gui-&gt;posy_source = 0.01f * iht;</a>
+<a name="ln2684">      }</a>
+<a name="ln2685">      else</a>
+<a name="ln2686">        fprintf(stderr, &quot;[dt_masks_set_source_pos_initial_value] unsuported masks type when calculating source position initial value\n&quot;);</a>
+<a name="ln2687"> </a>
+<a name="ln2688">      float pts[2] = { pzx * wd + gui-&gt;posx_source, pzy * ht + gui-&gt;posy_source };</a>
+<a name="ln2689">      dt_dev_distort_backtransform(darktable.develop, pts, 1);</a>
+<a name="ln2690"> </a>
+<a name="ln2691">      form-&gt;source[0] = pts[0] / iwd;</a>
+<a name="ln2692">      form-&gt;source[1] = pts[1] / iht;</a>
+<a name="ln2693">    }</a>
+<a name="ln2694">    else</a>
+<a name="ln2695">    {</a>
+<a name="ln2696">      // if a position was defined by the user, use the absolute value the first time</a>
+<a name="ln2697">      float pts[2] = { gui-&gt;posx_source, gui-&gt;posy_source };</a>
+<a name="ln2698">      dt_dev_distort_backtransform(darktable.develop, pts, 1);</a>
+<a name="ln2699"> </a>
+<a name="ln2700">      form-&gt;source[0] = pts[0] / iwd;</a>
+<a name="ln2701">      form-&gt;source[1] = pts[1] / iht;</a>
+<a name="ln2702"> </a>
+<a name="ln2703">      gui-&gt;posx_source = gui-&gt;posx_source - pzx * wd;</a>
+<a name="ln2704">      gui-&gt;posy_source = gui-&gt;posy_source - pzy * ht;</a>
+<a name="ln2705">    }</a>
+<a name="ln2706"> </a>
+<a name="ln2707">    gui-&gt;source_pos_type = DT_MASKS_SOURCE_POS_RELATIVE;</a>
+<a name="ln2708">  }</a>
+<a name="ln2709">  else if(gui-&gt;source_pos_type == DT_MASKS_SOURCE_POS_RELATIVE)</a>
+<a name="ln2710">  {</a>
+<a name="ln2711">    // original pos was already defined and relative value calculated, just use it</a>
+<a name="ln2712">    float pts[2] = { pzx * wd + gui-&gt;posx_source, pzy * ht + gui-&gt;posy_source };</a>
+<a name="ln2713">    dt_dev_distort_backtransform(darktable.develop, pts, 1);</a>
+<a name="ln2714"> </a>
+<a name="ln2715">    form-&gt;source[0] = pts[0] / iwd;</a>
+<a name="ln2716">    form-&gt;source[1] = pts[1] / iht;</a>
+<a name="ln2717">  }</a>
+<a name="ln2718">  else if(gui-&gt;source_pos_type == DT_MASKS_SOURCE_POS_ABSOLUTE)</a>
+<a name="ln2719">  {</a>
+<a name="ln2720">    // an absolute position was defined by the user</a>
+<a name="ln2721">    float pts_src[2] = { gui-&gt;posx_source, gui-&gt;posy_source };</a>
+<a name="ln2722">    dt_dev_distort_backtransform(darktable.develop, pts_src, 1);</a>
+<a name="ln2723"> </a>
+<a name="ln2724">    form-&gt;source[0] = pts_src[0] / iwd;</a>
+<a name="ln2725">    form-&gt;source[1] = pts_src[1] / iht;</a>
+<a name="ln2726">  }</a>
+<a name="ln2727">  else</a>
+<a name="ln2728">    fprintf(stderr, &quot;[dt_masks_set_source_pos_initial_value] unknown source position type\n&quot;);</a>
+<a name="ln2729">}</a>
+<a name="ln2730"> </a>
+<a name="ln2731">// calculates the source position value for preview drawing, on cairo coordinates</a>
+<a name="ln2732">void dt_masks_calculate_source_pos_value(dt_masks_form_gui_t *gui, const int mask_type, const float initial_xpos,</a>
+<a name="ln2733">                                         const float initial_ypos, const float xpos, const float ypos, float *px,</a>
+<a name="ln2734">                                         float *py, const int adding)</a>
+<a name="ln2735">{</a>
+<a name="ln2736">  float x = 0.f, y = 0.f;</a>
+<a name="ln2737"> </a>
+<a name="ln2738">  const float iwd = darktable.develop-&gt;preview_pipe-&gt;iwidth;</a>
+<a name="ln2739">  const float iht = darktable.develop-&gt;preview_pipe-&gt;iheight;</a>
+<a name="ln2740"> </a>
+<a name="ln2741">  if(gui-&gt;source_pos_type == DT_MASKS_SOURCE_POS_RELATIVE)</a>
+<a name="ln2742">  {</a>
+<a name="ln2743">    x = xpos + gui-&gt;posx_source;</a>
+<a name="ln2744">    y = ypos + gui-&gt;posy_source;</a>
+<a name="ln2745">  }</a>
+<a name="ln2746">  else if(gui-&gt;source_pos_type == DT_MASKS_SOURCE_POS_RELATIVE_TEMP)</a>
+<a name="ln2747">  {</a>
+<a name="ln2748">    if(gui-&gt;posx_source == -1.f &amp;&amp; gui-&gt;posy_source == -1.f)</a>
+<a name="ln2749">    {</a>
+<a name="ln2750">      if(mask_type &amp; DT_MASKS_CIRCLE)</a>
+<a name="ln2751">      {</a>
+<a name="ln2752">        const float radius = MIN(0.5f, dt_conf_get_float(&quot;plugins/darkroom/spots/circle_size&quot;));</a>
+<a name="ln2753">        x = xpos + radius * iwd;</a>
+<a name="ln2754">        y = ypos - radius * iht;</a>
+<a name="ln2755">      }</a>
+<a name="ln2756">      else if(mask_type &amp; DT_MASKS_ELLIPSE)</a>
+<a name="ln2757">      {</a>
+<a name="ln2758">        const float radius_a = dt_conf_get_float(&quot;plugins/darkroom/spots/ellipse_radius_a&quot;);</a>
+<a name="ln2759">        const float radius_b = dt_conf_get_float(&quot;plugins/darkroom/spots/ellipse_radius_b&quot;);</a>
+<a name="ln2760">        x = xpos + radius_a * iwd;</a>
+<a name="ln2761">        y = ypos - radius_b * iht;</a>
+<a name="ln2762">      }</a>
+<a name="ln2763">      else if(mask_type &amp; DT_MASKS_PATH)</a>
+<a name="ln2764">      {</a>
+<a name="ln2765">        x = xpos + 0.02f * iwd;</a>
+<a name="ln2766">        y = ypos + 0.02f * iht;</a>
+<a name="ln2767">      }</a>
+<a name="ln2768">      else if(mask_type &amp; DT_MASKS_BRUSH)</a>
+<a name="ln2769">      {</a>
+<a name="ln2770">        x = xpos + 0.01f * iwd;</a>
+<a name="ln2771">        y = ypos + 0.01f * iht;</a>
+<a name="ln2772">      }</a>
+<a name="ln2773">      else</a>
+<a name="ln2774">        fprintf(stderr, &quot;[dt_masks_calculate_source_pos_value] unsuported masks type when calculating source position value\n&quot;);</a>
+<a name="ln2775">    }</a>
+<a name="ln2776">    else</a>
+<a name="ln2777">    {</a>
+<a name="ln2778">      x = gui-&gt;posx_source;</a>
+<a name="ln2779">      y = gui-&gt;posy_source;</a>
+<a name="ln2780">    }</a>
+<a name="ln2781">  }</a>
+<a name="ln2782">  else if(gui-&gt;source_pos_type == DT_MASKS_SOURCE_POS_ABSOLUTE)</a>
+<a name="ln2783">  {</a>
+<a name="ln2784">    // if the user is actually adding the mask follow the cursor</a>
+<a name="ln2785">    if(adding)</a>
+<a name="ln2786">    {</a>
+<a name="ln2787">      x = xpos + gui-&gt;posx_source - initial_xpos;</a>
+<a name="ln2788">      y = ypos + gui-&gt;posy_source - initial_ypos;</a>
+<a name="ln2789">    }</a>
+<a name="ln2790">    else</a>
+<a name="ln2791">    {</a>
+<a name="ln2792">      // if not added yet set the start position</a>
+<a name="ln2793">      x = gui-&gt;posx_source;</a>
+<a name="ln2794">      y = gui-&gt;posy_source;</a>
+<a name="ln2795">    }</a>
+<a name="ln2796">  }</a>
+<a name="ln2797">  else</a>
+<a name="ln2798">    fprintf(stderr, &quot;[dt_masks_calculate_source_pos_value] unknown source position type for setting source position value\n&quot;);</a>
+<a name="ln2799"> </a>
+<a name="ln2800">  *px = x;</a>
+<a name="ln2801">  *py = y;</a>
+<a name="ln2802">}</a>
+<a name="ln2803"> </a>
+<a name="ln2804">// modelines: These editor modelines have been set for all relevant files by tools/update_modelines.sh</a>
+<a name="ln2805">// vim: shiftwidth=2 expandtab tabstop=2 cindent</a>
+<a name="ln2806">// kate: tab-indents: off; indent-width 2; replace-tabs on; indent-mode cstyle; remove-trailing-spaces modified;</a>
+
+</code></pre>
+<div class="balloon" rel="56"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v575/" target="_blank">V575</a> The potential null pointer is passed into 'memcpy' function. Inspect the first argument. Check lines: 56, 55.</p></div>
+<div class="balloon" rel="85"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v575/" target="_blank">V575</a> The potential null pointer is passed into 'memcpy' function. Inspect the first argument. Check lines: 85, 84.</p></div>
+<div class="balloon" rel="113"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v522/" target="_blank">V522</a> There might be dereferencing of a potential null pointer 'data'. Check lines: 113, 112.</p></div>
+<div class="balloon" rel="449"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v522/" target="_blank">V522</a> There might be dereferencing of a potential null pointer 'grpt'. Check lines: 449, 448.</p></div>
+<div class="balloon" rel="463"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v581/" target="_blank">V581</a> The conditional expressions of the 'if' statements situated alongside each other are identical. Check lines: 462, 463.</p></div>
+<div class="balloon" rel="491"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v522/" target="_blank">V522</a> There might be dereferencing of a potential null pointer 'npt'. Check lines: 491, 489.</p></div>
+<div class="balloon" rel="506"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v575/" target="_blank">V575</a> The potential null pointer is passed into 'memcpy' function. Inspect the first argument. Check lines: 506, 505.</p></div>
+<div class="balloon" rel="518"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v575/" target="_blank">V575</a> The potential null pointer is passed into 'memcpy' function. Inspect the first argument. Check lines: 518, 517.</p></div>
+<div class="balloon" rel="530"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v575/" target="_blank">V575</a> The potential null pointer is passed into 'memcpy' function. Inspect the first argument. Check lines: 530, 529.</p></div>
+<div class="balloon" rel="542"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v575/" target="_blank">V575</a> The potential null pointer is passed into 'memcpy' function. Inspect the first argument. Check lines: 542, 541.</p></div>
+<div class="balloon" rel="554"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v575/" target="_blank">V575</a> The potential null pointer is passed into 'memcpy' function. Inspect the first argument. Check lines: 554, 553.</p></div>
+<div class="balloon" rel="1108"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v575/" target="_blank">V575</a> The potential null pointer is passed into 'memcpy' function. Inspect the first argument. Check lines: 1108, 1107.</p></div>
+<div class="balloon" rel="1117"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v575/" target="_blank">V575</a> The potential null pointer is passed into 'memcpy' function. Inspect the first argument. Check lines: 1117, 1116.</p></div>
+<div class="balloon" rel="1127"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v575/" target="_blank">V575</a> The potential null pointer is passed into 'memcpy' function. Inspect the first argument. Check lines: 1127, 1126.</p></div>
+<div class="balloon" rel="1135"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v575/" target="_blank">V575</a> The potential null pointer is passed into 'memcpy' function. Inspect the first argument. Check lines: 1135, 1134.</p></div>
+<div class="balloon" rel="1142"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v575/" target="_blank">V575</a> The potential null pointer is passed into 'memcpy' function. Inspect the first argument. Check lines: 1142, 1141.</p></div>
+<div class="balloon" rel="1151"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v575/" target="_blank">V575</a> The potential null pointer is passed into 'memcpy' function. Inspect the first argument. Check lines: 1151, 1150.</p></div>
+<div class="balloon" rel="1250"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v522/" target="_blank">V522</a> There might be dereferencing of a potential null pointer 'ptbuf'. Check lines: 1250, 1244.</p></div>
+<div class="balloon" rel="1268"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v522/" target="_blank">V522</a> There might be dereferencing of a potential null pointer 'ptbuf'. Check lines: 1268, 1262.</p></div>
+<div class="balloon" rel="1302"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v522/" target="_blank">V522</a> There might be dereferencing of a potential null pointer 'ptbuf'. Check lines: 1302, 1296.</p></div>
+<div class="balloon" rel="1402"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v595/" target="_blank">V595</a> The 'gui' pointer was utilized before it was verified against nullptr. Check lines: 1402, 1406.</p></div>
+<div class="balloon" rel="1514"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v595/" target="_blank">V595</a> The 'gui' pointer was utilized before it was verified against nullptr. Check lines: 1514, 1516.</p></div>
+<div class="balloon" rel="1654"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v768/" target="_blank">V768</a> The variable 'value' is of enum type. It is odd that it is used as a variable of a Boolean-type.</p></div>
+<div class="balloon" rel="1665"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v768/" target="_blank">V768</a> The variable 'value' is of enum type. It is odd that it is used as a variable of a Boolean-type.</p></div>
+<div class="balloon" rel="1685"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v522/" target="_blank">V522</a> There might be dereferencing of a potential null pointer 'fpt'. Check lines: 1685, 1684.</p></div>
+<div class="balloon" rel="1698"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v768/" target="_blank">V768</a> The variable 'value' is of enum type. It is odd that it is used as a variable of a Boolean-type.</p></div>
+<div class="balloon" rel="1898"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v522/" target="_blank">V522</a> There might be dereferencing of a potential null pointer 'cids'. Check lines: 1898, 1886.</p></div>
+<div class="balloon" rel="2262"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v522/" target="_blank">V522</a> There might be dereferencing of a potential null pointer 'grpt'. Check lines: 2262, 2261.</p></div>
+<div class="balloon" rel="2294"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v522/" target="_blank">V522</a> There might be dereferencing of a potential null pointer 'fpt'. Check lines: 2294, 2293.</p></div>
+<div class="balloon" rel="2484"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v522/" target="_blank">V522</a> There might be dereferencing of a potential null pointer 'used'. Check lines: 2484, 2462.</p></div>
+
+<link rel="stylesheet" href="highlight.css">
+<script src="highlight.pack.js"></script>
+<script src="highlightjs-line-numbers.js"></script>
+<script>hljs.initHighlightingOnLoad();</script>
+<script>hljs.initLineNumbersOnLoad();</script>
+<script>
+  $(document).ready(function() {
+      $('.balloon').each(function () {
+          var bl = $(this);
+          var line = bl.attr('rel');
+          var text = $('a[name="ln'+line+'"]').text();
+
+          var space_count = 0;
+          for(var i = 0; i<text.length; i++){
+              var char = text[i];
+              if((char !== ' ')&&(char !== '\t'))break;
+              if(char === '\t')space_count++;
+              space_count++;
+          }
+
+          bl.css('margin-left', space_count*8);
+          $('a[name="ln'+line+'"]').after(bl);
+      });
+
+      window.location = window.location;
+  });
+</script>
+</body>
+</html>

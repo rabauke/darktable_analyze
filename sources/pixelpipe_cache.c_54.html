@@ -1,0 +1,285 @@
+
+<html>
+<head>
+  <link rel="stylesheet" href="../style.css"/>
+  <script src="../jquery-3.2.1.min.js"></script>
+</head>
+<body>
+<pre><code class = "cpp">
+<a name="ln1">/*</a>
+<a name="ln2">    This file is part of darktable,</a>
+<a name="ln3">    copyright (c) 2009--2010 johannes hanika.</a>
+<a name="ln4"> </a>
+<a name="ln5">    darktable is free software: you can redistribute it and/or modify</a>
+<a name="ln6">    it under the terms of the GNU General Public License as published by</a>
+<a name="ln7">    the Free Software Foundation, either version 3 of the License, or</a>
+<a name="ln8">    (at your option) any later version.</a>
+<a name="ln9"> </a>
+<a name="ln10">    darktable is distributed in the hope that it will be useful,</a>
+<a name="ln11">    but WITHOUT ANY WARRANTY; without even the implied warranty of</a>
+<a name="ln12">    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the</a>
+<a name="ln13">    GNU General Public License for more details.</a>
+<a name="ln14"> </a>
+<a name="ln15">    You should have received a copy of the GNU General Public License</a>
+<a name="ln16">    along with darktable.  If not, see &lt;http://www.gnu.org/licenses/&gt;.</a>
+<a name="ln17">*/</a>
+<a name="ln18"> </a>
+<a name="ln19">#include &quot;develop/pixelpipe_cache.h&quot;</a>
+<a name="ln20">#include &quot;develop/format.h&quot;</a>
+<a name="ln21">#include &quot;develop/pixelpipe_hb.h&quot;</a>
+<a name="ln22">#include &quot;libs/lib.h&quot;</a>
+<a name="ln23">#include &lt;stdlib.h&gt;</a>
+<a name="ln24"> </a>
+<a name="ln25"> </a>
+<a name="ln26">// TODO: make cache global (needs to be thread safe then)</a>
+<a name="ln27">// plan:</a>
+<a name="ln28">// - look at mipmap_cache.c, for the full buffer allocs</a>
+<a name="ln29">// - do that, but for `large' and `regular' buffers (full + export/dr mode), so 2 caches</a>
+<a name="ln30">//   (in fact, maybe 3, one for preview pipes?)</a>
+<a name="ln31">// - have at most 3 read locks all the time per pipe, get them at create time</a>
+<a name="ln32">//   ping, pong, and priority buffer (focused plugin)</a>
+<a name="ln33">// - drop read by the time another is requested (with priority, drop that, or alternating ping and pong?)</a>
+<a name="ln34"> </a>
+<a name="ln35">int dt_dev_pixelpipe_cache_init(dt_dev_pixelpipe_cache_t *cache, int entries, size_t size)</a>
+<a name="ln36">{</a>
+<a name="ln37">  cache-&gt;entries = entries;</a>
+<a name="ln38">  cache-&gt;data = (void **)calloc(entries, sizeof(void *));</a>
+<a name="ln39">  cache-&gt;size = (size_t *)calloc(entries, sizeof(size_t));</a>
+<a name="ln40">  cache-&gt;dsc = (dt_iop_buffer_dsc_t *)calloc(entries, sizeof(dt_iop_buffer_dsc_t));</a>
+<a name="ln41">#ifdef _DEBUG</a>
+<a name="ln42">  memset(cache-&gt;dsc, 0x2c, sizeof(dt_iop_buffer_dsc_t) * entries);</a>
+<a name="ln43">#endif</a>
+<a name="ln44">  cache-&gt;hash = (uint64_t *)calloc(entries, sizeof(uint64_t));</a>
+<a name="ln45">  cache-&gt;used = (int32_t *)calloc(entries, sizeof(int32_t));</a>
+<a name="ln46">  for(int k = 0; k &lt; entries; k++)</a>
+<a name="ln47">  {</a>
+<a name="ln48">    cache-&gt;size[k] = size;</a>
+<a name="ln49">    if(size)</a>
+<a name="ln50">    { // allow 0 initial buffer size (yet unknown dimensions)</a>
+<a name="ln51">      cache-&gt;data[k] = (void *)dt_alloc_align(16, size);</a>
+<a name="ln52">      if(!cache-&gt;data[k]) goto alloc_memory_fail;</a>
+<a name="ln53">#ifdef _DEBUG</a>
+<a name="ln54">      memset(cache-&gt;data[k], 0x5d, size);</a>
+<a name="ln55">#endif</a>
+<a name="ln56">      ASAN_POISON_MEMORY_REGION(cache-&gt;data[k], cache-&gt;size[k]);</a>
+<a name="ln57">    }</a>
+<a name="ln58">    else cache-&gt;data[k] = 0;</a>
+<a name="ln59">    cache-&gt;hash[k] = -1;</a>
+<a name="ln60">    cache-&gt;used[k] = 0;</a>
+<a name="ln61">  }</a>
+<a name="ln62">  cache-&gt;queries = cache-&gt;misses = 0;</a>
+<a name="ln63">  return 1;</a>
+<a name="ln64"> </a>
+<a name="ln65">alloc_memory_fail:</a>
+<a name="ln66">  dt_dev_pixelpipe_cache_cleanup(cache);</a>
+<a name="ln67">  return 0;</a>
+<a name="ln68">}</a>
+<a name="ln69"> </a>
+<a name="ln70">void dt_dev_pixelpipe_cache_cleanup(dt_dev_pixelpipe_cache_t *cache)</a>
+<a name="ln71">{</a>
+<a name="ln72">  for(int k = 0; k &lt; cache-&gt;entries; k++) dt_free_align(cache-&gt;data[k]);</a>
+<a name="ln73">  free(cache-&gt;data);</a>
+<a name="ln74">  free(cache-&gt;dsc);</a>
+<a name="ln75">  free(cache-&gt;hash);</a>
+<a name="ln76">  free(cache-&gt;used);</a>
+<a name="ln77">  free(cache-&gt;size);</a>
+<a name="ln78">}</a>
+<a name="ln79"> </a>
+<a name="ln80">uint64_t dt_dev_pixelpipe_cache_hash(int imgid, const dt_iop_roi_t *roi, dt_dev_pixelpipe_t *pipe, int module)</a>
+<a name="ln81">{</a>
+<a name="ln82">  // bernstein hash (djb2)</a>
+<a name="ln83">  uint64_t hash = 5381 + imgid;</a>
+<a name="ln84">  // go through all modules up to module and compute a weird hash using the operation and params.</a>
+<a name="ln85">  GList *pieces = pipe-&gt;nodes;</a>
+<a name="ln86">  for(int k = 0; k &lt; module &amp;&amp; pieces; k++)</a>
+<a name="ln87">  {</a>
+<a name="ln88">    dt_dev_pixelpipe_iop_t *piece = (dt_dev_pixelpipe_iop_t *)pieces-&gt;data;</a>
+<a name="ln89">    dt_develop_t *dev = piece-&gt;module-&gt;dev;</a>
+<a name="ln90">    if(!(dev-&gt;gui_module &amp;&amp; (dev-&gt;gui_module-&gt;operation_tags_filter() &amp; piece-&gt;module-&gt;operation_tags())))</a>
+<a name="ln91">    {</a>
+<a name="ln92">      hash = ((hash &lt;&lt; 5) + hash) ^ piece-&gt;hash;</a>
+<a name="ln93">      if(piece-&gt;module-&gt;request_color_pick != DT_REQUEST_COLORPICK_OFF)</a>
+<a name="ln94">      {</a>
+<a name="ln95">        if(darktable.lib-&gt;proxy.colorpicker.size)</a>
+<a name="ln96">        {</a>
+<a name="ln97">          const char *str = (const char *)piece-&gt;module-&gt;color_picker_box;</a>
+<a name="ln98">          for(size_t i = 0; i &lt; sizeof(float) * 4; i++) hash = ((hash &lt;&lt; 5) + hash) ^ str[i];</a>
+<a name="ln99">        }</a>
+<a name="ln100">        else</a>
+<a name="ln101">        {</a>
+<a name="ln102">          const char *str = (const char *)piece-&gt;module-&gt;color_picker_point;</a>
+<a name="ln103">          for(size_t i = 0; i &lt; sizeof(float) * 2; i++) hash = ((hash &lt;&lt; 5) + hash) ^ str[i];</a>
+<a name="ln104">        }</a>
+<a name="ln105">      }</a>
+<a name="ln106">    }</a>
+<a name="ln107">    pieces = g_list_next(pieces);</a>
+<a name="ln108">  }</a>
+<a name="ln109">  // also add scale, x and y:</a>
+<a name="ln110">  const char *str = (const char *)roi;</a>
+<a name="ln111">  for(size_t i = 0; i &lt; sizeof(dt_iop_roi_t); i++) hash = ((hash &lt;&lt; 5) + hash) ^ str[i];</a>
+<a name="ln112">  return hash;</a>
+<a name="ln113">}</a>
+<a name="ln114"> </a>
+<a name="ln115">int dt_dev_pixelpipe_cache_available(dt_dev_pixelpipe_cache_t *cache, const uint64_t hash)</a>
+<a name="ln116">{</a>
+<a name="ln117">  // search for hash in cache</a>
+<a name="ln118">  for(int32_t k = 0; k &lt; cache-&gt;entries; k++)</a>
+<a name="ln119">    if(cache-&gt;hash[k] == hash) return 1;</a>
+<a name="ln120">  return 0;</a>
+<a name="ln121">}</a>
+<a name="ln122"> </a>
+<a name="ln123">int dt_dev_pixelpipe_cache_get_important(dt_dev_pixelpipe_cache_t *cache, const uint64_t hash, const size_t size,</a>
+<a name="ln124">                                         void **data, dt_iop_buffer_dsc_t **dsc)</a>
+<a name="ln125">{</a>
+<a name="ln126">  return dt_dev_pixelpipe_cache_get_weighted(cache, hash, size, data, dsc, -cache-&gt;entries);</a>
+<a name="ln127">}</a>
+<a name="ln128"> </a>
+<a name="ln129">int dt_dev_pixelpipe_cache_get(dt_dev_pixelpipe_cache_t *cache, const uint64_t hash, const size_t size,</a>
+<a name="ln130">                               void **data, dt_iop_buffer_dsc_t **dsc)</a>
+<a name="ln131">{</a>
+<a name="ln132">  return dt_dev_pixelpipe_cache_get_weighted(cache, hash, size, data, dsc, 0);</a>
+<a name="ln133">}</a>
+<a name="ln134"> </a>
+<a name="ln135">int dt_dev_pixelpipe_cache_get_weighted(dt_dev_pixelpipe_cache_t *cache, const uint64_t hash, const size_t size,</a>
+<a name="ln136">                                        void **data, dt_iop_buffer_dsc_t **dsc, int weight)</a>
+<a name="ln137">{</a>
+<a name="ln138">  cache-&gt;queries++;</a>
+<a name="ln139">  *data = NULL;</a>
+<a name="ln140">  int max_used = -1, max = 0;</a>
+<a name="ln141">  size_t sz = 0;</a>
+<a name="ln142">  for(int k = 0; k &lt; cache-&gt;entries; k++)</a>
+<a name="ln143">  {</a>
+<a name="ln144">    // search for hash in cache</a>
+<a name="ln145">    if(cache-&gt;used[k] &gt; max_used)</a>
+<a name="ln146">    {</a>
+<a name="ln147">      max_used = cache-&gt;used[k];</a>
+<a name="ln148">      max = k;</a>
+<a name="ln149">    }</a>
+<a name="ln150">    cache-&gt;used[k]++; // age all entries</a>
+<a name="ln151">    if(cache-&gt;hash[k] == hash)</a>
+<a name="ln152">    {</a>
+<a name="ln153">      assert(cache-&gt;size[k] &gt;= size);</a>
+<a name="ln154"> </a>
+<a name="ln155">      *data = cache-&gt;data[k];</a>
+<a name="ln156">      *dsc = &amp;cache-&gt;dsc[k];</a>
+<a name="ln157">      sz = cache-&gt;size[k];</a>
+<a name="ln158">      cache-&gt;used[k] = weight; // this is the MRU entry</a>
+<a name="ln159"> </a>
+<a name="ln160">      ASAN_POISON_MEMORY_REGION(*data, sz);</a>
+<a name="ln161">      ASAN_UNPOISON_MEMORY_REGION(*data, size);</a>
+<a name="ln162">    }</a>
+<a name="ln163">  }</a>
+<a name="ln164"> </a>
+<a name="ln165">  if(!*data || sz &lt; size)</a>
+<a name="ln166">  {</a>
+<a name="ln167">    // kill LRU entry</a>
+<a name="ln168">    // printf(&quot;[pixelpipe_cache_get] hash not found, returning slot %d/%d age %d\n&quot;, max, cache-&gt;entries,</a>
+<a name="ln169">    // weight);</a>
+<a name="ln170">    if(cache-&gt;size[max] &lt; size)</a>
+<a name="ln171">    {</a>
+<a name="ln172">      dt_free_align(cache-&gt;data[max]);</a>
+<a name="ln173">      cache-&gt;data[max] = (void *)dt_alloc_align(16, size);</a>
+<a name="ln174">      cache-&gt;size[max] = size;</a>
+<a name="ln175">    }</a>
+<a name="ln176">    *data = cache-&gt;data[max];</a>
+<a name="ln177">    sz = cache-&gt;size[max];</a>
+<a name="ln178"> </a>
+<a name="ln179">    ASAN_POISON_MEMORY_REGION(*data, sz);</a>
+<a name="ln180">    ASAN_UNPOISON_MEMORY_REGION(*data, size);</a>
+<a name="ln181"> </a>
+<a name="ln182">    // first, update our copy, then update the pointer to point at our copy</a>
+<a name="ln183">    cache-&gt;dsc[max] = **dsc;</a>
+<a name="ln184">    *dsc = &amp;cache-&gt;dsc[max];</a>
+<a name="ln185"> </a>
+<a name="ln186">    cache-&gt;hash[max] = hash;</a>
+<a name="ln187">    cache-&gt;used[max] = weight;</a>
+<a name="ln188">    cache-&gt;misses++;</a>
+<a name="ln189">    return 1;</a>
+<a name="ln190">  }</a>
+<a name="ln191">  else</a>
+<a name="ln192">    return 0;</a>
+<a name="ln193">}</a>
+<a name="ln194"> </a>
+<a name="ln195">void dt_dev_pixelpipe_cache_flush(dt_dev_pixelpipe_cache_t *cache)</a>
+<a name="ln196">{</a>
+<a name="ln197">  for(int k = 0; k &lt; cache-&gt;entries; k++)</a>
+<a name="ln198">  {</a>
+<a name="ln199">    cache-&gt;hash[k] = -1;</a>
+<a name="ln200">    cache-&gt;used[k] = 0;</a>
+<a name="ln201">    ASAN_POISON_MEMORY_REGION(cache-&gt;data[k], cache-&gt;size[k]);</a>
+<a name="ln202">  }</a>
+<a name="ln203">}</a>
+<a name="ln204"> </a>
+<a name="ln205">void dt_dev_pixelpipe_cache_reweight(dt_dev_pixelpipe_cache_t *cache, void *data)</a>
+<a name="ln206">{</a>
+<a name="ln207">  for(int k = 0; k &lt; cache-&gt;entries; k++)</a>
+<a name="ln208">  {</a>
+<a name="ln209">    if(cache-&gt;data[k] == data)</a>
+<a name="ln210">    {</a>
+<a name="ln211">      cache-&gt;used[k] = -cache-&gt;entries;</a>
+<a name="ln212">    }</a>
+<a name="ln213">  }</a>
+<a name="ln214">}</a>
+<a name="ln215"> </a>
+<a name="ln216">void dt_dev_pixelpipe_cache_invalidate(dt_dev_pixelpipe_cache_t *cache, void *data)</a>
+<a name="ln217">{</a>
+<a name="ln218">  for(int k = 0; k &lt; cache-&gt;entries; k++)</a>
+<a name="ln219">  {</a>
+<a name="ln220">    if(cache-&gt;data[k] == data)</a>
+<a name="ln221">    {</a>
+<a name="ln222">      cache-&gt;hash[k] = -1;</a>
+<a name="ln223">      ASAN_POISON_MEMORY_REGION(cache-&gt;data[k], cache-&gt;size[k]);</a>
+<a name="ln224">    }</a>
+<a name="ln225">  }</a>
+<a name="ln226">}</a>
+<a name="ln227"> </a>
+<a name="ln228">void dt_dev_pixelpipe_cache_print(dt_dev_pixelpipe_cache_t *cache)</a>
+<a name="ln229">{</a>
+<a name="ln230">  for(int k = 0; k &lt; cache-&gt;entries; k++)</a>
+<a name="ln231">  {</a>
+<a name="ln232">    printf(&quot;pixelpipe cacheline %d &quot;, k);</a>
+<a name="ln233">    printf(&quot;used %d by %&quot; PRIu64 &quot;&quot;, cache-&gt;used[k], cache-&gt;hash[k]);</a>
+<a name="ln234">    printf(&quot;\n&quot;);</a>
+<a name="ln235">  }</a>
+<a name="ln236">  printf(&quot;cache hit rate so far: %.3f\n&quot;, (cache-&gt;queries - cache-&gt;misses) / (float)cache-&gt;queries);</a>
+<a name="ln237">}</a>
+<a name="ln238"> </a>
+<a name="ln239">// modelines: These editor modelines have been set for all relevant files by tools/update_modelines.sh</a>
+<a name="ln240">// vim: shiftwidth=2 expandtab tabstop=2 cindent</a>
+<a name="ln241">// kate: tab-indents: off; indent-width 2; replace-tabs on; indent-mode cstyle; remove-trailing-spaces modified;</a>
+
+</code></pre>
+<div class="balloon" rel="48"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v522/" target="_blank">V522</a> There might be dereferencing of a potential null pointer 'cache->size'. Check lines: 48, 39.</p></div>
+<div class="balloon" rel="51"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v522/" target="_blank">V522</a> There might be dereferencing of a potential null pointer 'cache->data'. Check lines: 51, 38.</p></div>
+<div class="balloon" rel="59"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v522/" target="_blank">V522</a> There might be dereferencing of a potential null pointer 'cache->hash'. Check lines: 59, 44.</p></div>
+<div class="balloon" rel="60"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v522/" target="_blank">V522</a> There might be dereferencing of a potential null pointer 'cache->used'. Check lines: 60, 45.</p></div>
+
+<link rel="stylesheet" href="highlight.css">
+<script src="highlight.pack.js"></script>
+<script src="highlightjs-line-numbers.js"></script>
+<script>hljs.initHighlightingOnLoad();</script>
+<script>hljs.initLineNumbersOnLoad();</script>
+<script>
+  $(document).ready(function() {
+      $('.balloon').each(function () {
+          var bl = $(this);
+          var line = bl.attr('rel');
+          var text = $('a[name="ln'+line+'"]').text();
+
+          var space_count = 0;
+          for(var i = 0; i<text.length; i++){
+              var char = text[i];
+              if((char !== ' ')&&(char !== '\t'))break;
+              if(char === '\t')space_count++;
+              space_count++;
+          }
+
+          bl.css('margin-left', space_count*8);
+          $('a[name="ln'+line+'"]').after(bl);
+      });
+
+      window.location = window.location;
+  });
+</script>
+</body>
+</html>

@@ -1,0 +1,241 @@
+
+<html>
+<head>
+  <link rel="stylesheet" href="../style.css"/>
+  <script src="../jquery-3.2.1.min.js"></script>
+</head>
+<body>
+<pre><code class = "cpp">
+<a name="ln1">/*</a>
+<a name="ln2">    RawSpeed - RAW file decoder.</a>
+<a name="ln3"> </a>
+<a name="ln4">    Copyright (C) 2009-2014 Klaus Post</a>
+<a name="ln5">    Copyright (C) 2014-2015 Pedro Côrte-Real</a>
+<a name="ln6">    Copyright (C) 2017 Roman Lebedev</a>
+<a name="ln7"> </a>
+<a name="ln8">    This library is free software; you can redistribute it and/or</a>
+<a name="ln9">    modify it under the terms of the GNU Lesser General Public</a>
+<a name="ln10">    License as published by the Free Software Foundation; either</a>
+<a name="ln11">    version 2 of the License, or (at your option) any later version.</a>
+<a name="ln12"> </a>
+<a name="ln13">    This library is distributed in the hope that it will be useful,</a>
+<a name="ln14">    but WITHOUT ANY WARRANTY; without even the implied warranty of</a>
+<a name="ln15">    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU</a>
+<a name="ln16">    Lesser General Public License for more details.</a>
+<a name="ln17"> </a>
+<a name="ln18">    You should have received a copy of the GNU Lesser General Public</a>
+<a name="ln19">    License along with this library; if not, write to the Free Software</a>
+<a name="ln20">    Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA</a>
+<a name="ln21">*/</a>
+<a name="ln22"> </a>
+<a name="ln23">#include &quot;decoders/MrwDecoder.h&quot;</a>
+<a name="ln24">#include &quot;common/Common.h&quot;                          // for uint32</a>
+<a name="ln25">#include &quot;common/Point.h&quot;                           // for iPoint2D</a>
+<a name="ln26">#include &quot;decoders/RawDecoderException.h&quot;           // for ThrowRDE</a>
+<a name="ln27">#include &quot;decompressors/UncompressedDecompressor.h&quot; // for UncompressedDeco...</a>
+<a name="ln28">#include &quot;io/Buffer.h&quot;                              // for DataBuffer, Buffer</a>
+<a name="ln29">#include &quot;io/ByteStream.h&quot;                          // for ByteStream</a>
+<a name="ln30">#include &quot;io/Endianness.h&quot;                          // for Endianness, Endi...</a>
+<a name="ln31">#include &quot;metadata/Camera.h&quot;                        // for Hints</a>
+<a name="ln32">#include &quot;parsers/TiffParser.h&quot;                     // for TiffParser</a>
+<a name="ln33">#include &quot;tiff/TiffIFD.h&quot;                           // for TiffRootIFDOwner</a>
+<a name="ln34">#include &lt;cassert&gt;                                  // for assert</a>
+<a name="ln35">#include &lt;cstring&gt;                                  // for memcmp, size_t</a>
+<a name="ln36">#include &lt;memory&gt;                                   // for unique_ptr</a>
+<a name="ln37"> </a>
+<a name="ln38">namespace rawspeed {</a>
+<a name="ln39"> </a>
+<a name="ln40">class CameraMetaData;</a>
+<a name="ln41"> </a>
+<a name="ln42">MrwDecoder::MrwDecoder(const Buffer* file) : RawDecoder(file) { parseHeader(); }</a>
+<a name="ln43"> </a>
+<a name="ln44">int MrwDecoder::isMRW(const Buffer* input) {</a>
+<a name="ln45">  static const std::array&lt;char, 4&gt; magic = {{0x00, 'M', 'R', 'M'}};</a>
+<a name="ln46">  const unsigned char* data = input-&gt;getData(0, magic.size());</a>
+<a name="ln47">  return 0 == memcmp(data, magic.data(), magic.size());</a>
+<a name="ln48">}</a>
+<a name="ln49"> </a>
+<a name="ln50">void MrwDecoder::parseHeader() {</a>
+<a name="ln51">  if (!isMRW(mFile))</a>
+<a name="ln52">    ThrowRDE(&quot;This isn't actually a MRW file, why are you calling me?&quot;);</a>
+<a name="ln53"> </a>
+<a name="ln54">  const DataBuffer db(*mFile, Endianness::big);</a>
+<a name="ln55">  ByteStream bs(db);</a>
+<a name="ln56"> </a>
+<a name="ln57">  // magic</a>
+<a name="ln58">  bs.skipBytes(4);</a>
+<a name="ln59"> </a>
+<a name="ln60">  // the size of the rest of the header, up to the image data</a>
+<a name="ln61">  const auto headerSize = bs.getU32();</a>
+<a name="ln62">  bs.check(headerSize);</a>
+<a name="ln63"> </a>
+<a name="ln64">  // ... and offset to the image data at the same time</a>
+<a name="ln65">  const auto dataOffset = bs.getPosition() + headerSize;</a>
+<a name="ln66">  assert(bs.getPosition() == 8);</a>
+<a name="ln67"> </a>
+<a name="ln68">  // now, let's parse rest of the header.</a>
+<a name="ln69">  bs = bs.getSubStream(0, dataOffset);</a>
+<a name="ln70">  bs.skipBytes(8);</a>
+<a name="ln71"> </a>
+<a name="ln72">  bool foundPRD = false;</a>
+<a name="ln73">  while (bs.getRemainSize() &gt; 0) {</a>
+<a name="ln74">    uint32 tag = bs.getU32();</a>
+<a name="ln75">    uint32 len = bs.getU32();</a>
+<a name="ln76">    bs.check(len);</a>
+<a name="ln77">    if (!len)</a>
+<a name="ln78">      ThrowRDE(&quot;Found entry of zero length, MRW is corrupt.&quot;);</a>
+<a name="ln79"> </a>
+<a name="ln80">    const auto origPos = bs.getPosition();</a>
+<a name="ln81"> </a>
+<a name="ln82">    switch (tag) {</a>
+<a name="ln83">    case 0x505244: {            // PRD</a>
+<a name="ln84">      foundPRD = true;</a>
+<a name="ln85">      bs.skipBytes(8);          // Version Number</a>
+<a name="ln86">      raw_height = bs.getU16(); // CCD Size Y</a>
+<a name="ln87">      raw_width = bs.getU16();  // CCD Size X</a>
+<a name="ln88"> </a>
+<a name="ln89">      if (!raw_width || !raw_height || raw_width &gt; 3280 || raw_height &gt; 2456) {</a>
+<a name="ln90">        ThrowRDE(&quot;Unexpected image dimensions found: (%u; %u)&quot;, raw_width,</a>
+<a name="ln91">                 raw_height);</a>
+<a name="ln92">      }</a>
+<a name="ln93"> </a>
+<a name="ln94">      bs.skipBytes(2);          // Image Size Y</a>
+<a name="ln95">      bs.skipBytes(2);          // Image Size X</a>
+<a name="ln96"> </a>
+<a name="ln97">      bpp = bs.getByte(); // DataSize</a>
+<a name="ln98">      if (12 != bpp &amp;&amp; 16 != bpp)</a>
+<a name="ln99">        ThrowRDE(&quot;Unknown data size&quot;);</a>
+<a name="ln100"> </a>
+<a name="ln101">      if ((raw_height * raw_width * bpp) % 8 != 0)</a>
+<a name="ln102">        ThrowRDE(&quot;Bad combination of image size and raw dimensions.&quot;);</a>
+<a name="ln103"> </a>
+<a name="ln104">      if (12 != bs.getByte()) // PixelSize</a>
+<a name="ln105">        ThrowRDE(&quot;Unexpected pixel size&quot;);</a>
+<a name="ln106"> </a>
+<a name="ln107">      const auto SM = bs.getByte(); // StorageMethod</a>
+<a name="ln108">      if (0x52 != SM &amp;&amp; 0x59 != SM)</a>
+<a name="ln109">        ThrowRDE(&quot;Unknown storage method&quot;);</a>
+<a name="ln110">      packed = (0x59 == SM);</a>
+<a name="ln111"> </a>
+<a name="ln112">      if ((12 == bpp) != packed)</a>
+<a name="ln113">        ThrowRDE(&quot;Packed/BPP sanity check failed!&quot;);</a>
+<a name="ln114"> </a>
+<a name="ln115">      bs.skipBytes(1); // Unknown1</a>
+<a name="ln116">      bs.skipBytes(2); // Unknown2</a>
+<a name="ln117">      bs.skipBytes(2); // BayerPattern</a>
+<a name="ln118">      break;</a>
+<a name="ln119">    }</a>
+<a name="ln120">    case 0x545457: // TTW</a>
+<a name="ln121">      // Base value for offsets needs to be at the beginning of the TIFF block,</a>
+<a name="ln122">      // not the file</a>
+<a name="ln123">      rootIFD = TiffParser::parse(nullptr, bs.getBuffer(len));</a>
+<a name="ln124">      break;</a>
+<a name="ln125">    case 0x574247:     // WBG</a>
+<a name="ln126">      bs.skipBytes(4); // 4 factors</a>
+<a name="ln127">      static_assert(4 == (sizeof(wb_coeffs) / sizeof(wb_coeffs[0])),</a>
+<a name="ln128">                    &quot;wrong coeff count&quot;);</a>
+<a name="ln129">      for (auto&amp; wb_coeff : wb_coeffs)</a>
+<a name="ln130">        wb_coeff = static_cast&lt;float&gt;(bs.getU16()); // gain</a>
+<a name="ln131"> </a>
+<a name="ln132">      // FIXME?</a>
+<a name="ln133">      // Gf = Gr / 2^(6+F)</a>
+<a name="ln134">      break;</a>
+<a name="ln135">    default:</a>
+<a name="ln136">      // unknown block, let's just ignore</a>
+<a name="ln137">      break;</a>
+<a name="ln138">    }</a>
+<a name="ln139"> </a>
+<a name="ln140">    bs.setPosition(origPos + len);</a>
+<a name="ln141">  }</a>
+<a name="ln142"> </a>
+<a name="ln143">  if (!foundPRD)</a>
+<a name="ln144">    ThrowRDE(&quot;Did not find PRD tag. Image corrupt.&quot;);</a>
+<a name="ln145"> </a>
+<a name="ln146">  // processed all of the header. the image data is directly next</a>
+<a name="ln147"> </a>
+<a name="ln148">  const auto imageBits = raw_height * raw_width * bpp;</a>
+<a name="ln149">  assert(imageBits &gt; 0);</a>
+<a name="ln150">  assert(imageBits % 8 == 0);</a>
+<a name="ln151"> </a>
+<a name="ln152">  imageData = db.getSubView(bs.getPosition(), imageBits / 8);</a>
+<a name="ln153">}</a>
+<a name="ln154"> </a>
+<a name="ln155">RawImage MrwDecoder::decodeRawInternal() {</a>
+<a name="ln156">  mRaw-&gt;dim = iPoint2D(raw_width, raw_height);</a>
+<a name="ln157">  mRaw-&gt;createData();</a>
+<a name="ln158"> </a>
+<a name="ln159">  DataBuffer db(imageData, Endianness::big);</a>
+<a name="ln160">  ByteStream bs(db);</a>
+<a name="ln161">  UncompressedDecompressor u(bs, mRaw);</a>
+<a name="ln162"> </a>
+<a name="ln163">  if (packed)</a>
+<a name="ln164">    u.decode12BitRaw&lt;Endianness::big&gt;(raw_width, raw_height);</a>
+<a name="ln165">  else</a>
+<a name="ln166">    u.decodeRawUnpacked&lt;12, Endianness::big&gt;(raw_width, raw_height);</a>
+<a name="ln167"> </a>
+<a name="ln168">  return mRaw;</a>
+<a name="ln169">}</a>
+<a name="ln170"> </a>
+<a name="ln171">void MrwDecoder::checkSupportInternal(const CameraMetaData* meta) {</a>
+<a name="ln172">  if (!rootIFD)</a>
+<a name="ln173">    ThrowRDE(&quot;Couldn't find make and model&quot;);</a>
+<a name="ln174"> </a>
+<a name="ln175">  auto id = rootIFD-&gt;getID();</a>
+<a name="ln176">  this-&gt;checkCameraSupported(meta, id.make, id.model, &quot;&quot;);</a>
+<a name="ln177">}</a>
+<a name="ln178"> </a>
+<a name="ln179">void MrwDecoder::decodeMetaDataInternal(const CameraMetaData* meta) {</a>
+<a name="ln180">  //Default</a>
+<a name="ln181">  int iso = 0;</a>
+<a name="ln182"> </a>
+<a name="ln183">  if (!rootIFD)</a>
+<a name="ln184">    ThrowRDE(&quot;Couldn't find make and model&quot;);</a>
+<a name="ln185"> </a>
+<a name="ln186">  auto id = rootIFD-&gt;getID();</a>
+<a name="ln187">  setMetaData(meta, id.make, id.model, &quot;&quot;, iso);</a>
+<a name="ln188"> </a>
+<a name="ln189">  if (hints.has(&quot;swapped_wb&quot;)) {</a>
+<a name="ln190">    mRaw-&gt;metadata.wbCoeffs[0] = wb_coeffs[2];</a>
+<a name="ln191">    mRaw-&gt;metadata.wbCoeffs[1] = wb_coeffs[0];</a>
+<a name="ln192">    mRaw-&gt;metadata.wbCoeffs[2] = wb_coeffs[1];</a>
+<a name="ln193">  } else {</a>
+<a name="ln194">    mRaw-&gt;metadata.wbCoeffs[0] = wb_coeffs[0];</a>
+<a name="ln195">    mRaw-&gt;metadata.wbCoeffs[1] = wb_coeffs[1];</a>
+<a name="ln196">    mRaw-&gt;metadata.wbCoeffs[2] = wb_coeffs[3];</a>
+<a name="ln197">  }</a>
+<a name="ln198">}</a>
+<a name="ln199"> </a>
+<a name="ln200">} // namespace rawspeed</a>
+
+</code></pre>
+<div class="balloon" rel="127"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v651/" target="_blank">V651</a> An odd operation of the 'sizeof(X)/sizeof(X[0])' kind is performed, where 'X' is of the 'class' type.</p></div>
+
+<link rel="stylesheet" href="highlight.css">
+<script src="highlight.pack.js"></script>
+<script src="highlightjs-line-numbers.js"></script>
+<script>hljs.initHighlightingOnLoad();</script>
+<script>hljs.initLineNumbersOnLoad();</script>
+<script>
+  $(document).ready(function() {
+      $('.balloon').each(function () {
+          var bl = $(this);
+          var line = bl.attr('rel');
+          var text = $('a[name="ln'+line+'"]').text();
+
+          var space_count = 0;
+          for(var i = 0; i<text.length; i++){
+              var char = text[i];
+              if((char !== ' ')&&(char !== '\t'))break;
+              if(char === '\t')space_count++;
+              space_count++;
+          }
+
+          bl.css('margin-left', space_count*8);
+          $('a[name="ln'+line+'"]').after(bl);
+      });
+
+      window.location = window.location;
+  });
+</script>
+</body>
+</html>

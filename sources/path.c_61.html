@@ -1,0 +1,2949 @@
+
+<html>
+<head>
+  <link rel="stylesheet" href="../style.css"/>
+  <script src="../jquery-3.2.1.min.js"></script>
+</head>
+<body>
+<pre><code class = "cpp">
+<a name="ln1">/*</a>
+<a name="ln2">    This file is part of darktable,</a>
+<a name="ln3">    copyright (c) 2011 henrik andersson.</a>
+<a name="ln4">    copyright (c) 2012 aldric renaudin.</a>
+<a name="ln5"> </a>
+<a name="ln6">    darktable is free software: you can redistribute it and/or modify</a>
+<a name="ln7">    it under the terms of the GNU General Public License as published by</a>
+<a name="ln8">    the Free Software Foundation, either version 3 of the License, or</a>
+<a name="ln9">    (at your option) any later version.</a>
+<a name="ln10"> </a>
+<a name="ln11">    darktable is distributed in the hope that it will be useful,</a>
+<a name="ln12">    but WITHOUT ANY WARRANTY; without even the implied warranty of</a>
+<a name="ln13">    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the</a>
+<a name="ln14">    GNU General Public License for more details.</a>
+<a name="ln15"> </a>
+<a name="ln16">    You should have received a copy of the GNU General Public License</a>
+<a name="ln17">    along with darktable.  If not, see &lt;http://www.gnu.org/licenses/&gt;.</a>
+<a name="ln18">*/</a>
+<a name="ln19">#include &quot;common/debug.h&quot;</a>
+<a name="ln20">#include &quot;control/conf.h&quot;</a>
+<a name="ln21">#include &quot;control/control.h&quot;</a>
+<a name="ln22">#include &quot;develop/blend.h&quot;</a>
+<a name="ln23">#include &quot;develop/imageop.h&quot;</a>
+<a name="ln24">#include &quot;develop/masks.h&quot;</a>
+<a name="ln25">#include &lt;assert.h&gt;</a>
+<a name="ln26"> </a>
+<a name="ln27"> </a>
+<a name="ln28">/** get the point of the path at pos t [0,1]  */</a>
+<a name="ln29">static void _path_get_XY(float p0x, float p0y, float p1x, float p1y, float p2x, float p2y, float p3x,</a>
+<a name="ln30">                         float p3y, float t, float *x, float *y)</a>
+<a name="ln31">{</a>
+<a name="ln32">  float a = (1 - t) * (1 - t) * (1 - t);</a>
+<a name="ln33">  float b = 3 * t * (1 - t) * (1 - t);</a>
+<a name="ln34">  float c = 3 * t * t * (1 - t);</a>
+<a name="ln35">  float d = t * t * t;</a>
+<a name="ln36">  *x = p0x * a + p1x * b + p2x * c + p3x * d;</a>
+<a name="ln37">  *y = p0y * a + p1y * b + p2y * c + p3y * d;</a>
+<a name="ln38">}</a>
+<a name="ln39"> </a>
+<a name="ln40">/** get the point of the path at pos t [0,1]  AND the corresponding border point */</a>
+<a name="ln41">static void _path_border_get_XY(float p0x, float p0y, float p1x, float p1y, float p2x, float p2y, float p3x,</a>
+<a name="ln42">                                float p3y, float t, float rad, float *xc, float *yc, float *xb, float *yb)</a>
+<a name="ln43">{</a>
+<a name="ln44">  // we get the point</a>
+<a name="ln45">  _path_get_XY(p0x, p0y, p1x, p1y, p2x, p2y, p3x, p3y, t, xc, yc);</a>
+<a name="ln46"> </a>
+<a name="ln47">  // now we get derivative points</a>
+<a name="ln48">  float a = 3 * (1 - t) * (1 - t);</a>
+<a name="ln49">  float b = 3 * ((1 - t) * (1 - t) - 2 * t * (1 - t));</a>
+<a name="ln50">  float c = 3 * (2 * t * (1 - t) - t * t);</a>
+<a name="ln51">  float d = 3 * t * t;</a>
+<a name="ln52"> </a>
+<a name="ln53">  float dx = -p0x * a + p1x * b + p2x * c + p3x * d;</a>
+<a name="ln54">  float dy = -p0y * a + p1y * b + p2y * c + p3y * d;</a>
+<a name="ln55"> </a>
+<a name="ln56">  // so we can have the resulting point</a>
+<a name="ln57">  if(dx == 0 &amp;&amp; dy == 0)</a>
+<a name="ln58">  {</a>
+<a name="ln59">    *xb = NAN;</a>
+<a name="ln60">    *yb = NAN;</a>
+<a name="ln61">    return;</a>
+<a name="ln62">  }</a>
+<a name="ln63">  float l = 1.0 / sqrtf(dx * dx + dy * dy);</a>
+<a name="ln64">  *xb = (*xc) + rad * dy * l;</a>
+<a name="ln65">  *yb = (*yc) - rad * dx * l;</a>
+<a name="ln66">}</a>
+<a name="ln67"> </a>
+<a name="ln68">/** get feather extremity from the control point n°2 */</a>
+<a name="ln69">/** the values should be in orthonormal space */</a>
+<a name="ln70">static void _path_ctrl2_to_feather(int ptx, int pty, int ctrlx, int ctrly, int *fx, int *fy,</a>
+<a name="ln71">                                   gboolean clockwise)</a>
+<a name="ln72">{</a>
+<a name="ln73">  if(clockwise)</a>
+<a name="ln74">  {</a>
+<a name="ln75">    *fx = ptx + ctrly - pty;</a>
+<a name="ln76">    *fy = pty + ptx - ctrlx;</a>
+<a name="ln77">  }</a>
+<a name="ln78">  else</a>
+<a name="ln79">  {</a>
+<a name="ln80">    *fx = ptx - ctrly + pty;</a>
+<a name="ln81">    *fy = pty - ptx + ctrlx;</a>
+<a name="ln82">  }</a>
+<a name="ln83">}</a>
+<a name="ln84"> </a>
+<a name="ln85">/** get bezier control points from feather extremity */</a>
+<a name="ln86">/** the values should be in orthonormal space */</a>
+<a name="ln87">static void _path_feather_to_ctrl(int ptx, int pty, int fx, int fy, int *ctrl1x, int *ctrl1y, int *ctrl2x,</a>
+<a name="ln88">                                  int *ctrl2y, gboolean clockwise)</a>
+<a name="ln89">{</a>
+<a name="ln90">  if(clockwise)</a>
+<a name="ln91">  {</a>
+<a name="ln92">    *ctrl2x = ptx + pty - fy;</a>
+<a name="ln93">    *ctrl2y = pty + fx - ptx;</a>
+<a name="ln94">    *ctrl1x = ptx - pty + fy;</a>
+<a name="ln95">    *ctrl1y = pty - fx + ptx;</a>
+<a name="ln96">  }</a>
+<a name="ln97">  else</a>
+<a name="ln98">  {</a>
+<a name="ln99">    *ctrl1x = ptx + pty - fy;</a>
+<a name="ln100">    *ctrl1y = pty + fx - ptx;</a>
+<a name="ln101">    *ctrl2x = ptx - pty + fy;</a>
+<a name="ln102">    *ctrl2y = pty - fx + ptx;</a>
+<a name="ln103">  }</a>
+<a name="ln104">}</a>
+<a name="ln105"> </a>
+<a name="ln106">/** Get the control points of a segment to match exactly a catmull-rom spline */</a>
+<a name="ln107">static void _path_catmull_to_bezier(float x1, float y1, float x2, float y2, float x3, float y3, float x4,</a>
+<a name="ln108">                                    float y4, float *bx1, float *by1, float *bx2, float *by2)</a>
+<a name="ln109">{</a>
+<a name="ln110">  *bx1 = (-x1 + 6 * x2 + x3) / 6;</a>
+<a name="ln111">  *by1 = (-y1 + 6 * y2 + y3) / 6;</a>
+<a name="ln112">  *bx2 = (x2 + 6 * x3 - x4) / 6;</a>
+<a name="ln113">  *by2 = (y2 + 6 * y3 - y4) / 6;</a>
+<a name="ln114">}</a>
+<a name="ln115"> </a>
+<a name="ln116">/** initialise all control points to eventually match a catmull-rom like spline */</a>
+<a name="ln117">static void _path_init_ctrl_points(dt_masks_form_t *form)</a>
+<a name="ln118">{</a>
+<a name="ln119">  // if we have less that 3 points, what to do ??</a>
+<a name="ln120">  if(g_list_length(form-&gt;points) &lt; 2) return;</a>
+<a name="ln121"> </a>
+<a name="ln122">  guint nb = g_list_length(form-&gt;points);</a>
+<a name="ln123">  for(int k = 0; k &lt; nb; k++)</a>
+<a name="ln124">  {</a>
+<a name="ln125">    dt_masks_point_path_t *point3 = (dt_masks_point_path_t *)g_list_nth_data(form-&gt;points, k);</a>
+<a name="ln126">    // if the point as not be set manually, we redfine it</a>
+<a name="ln127">    if(point3-&gt;state &amp; DT_MASKS_POINT_STATE_NORMAL)</a>
+<a name="ln128">    {</a>
+<a name="ln129">      // we want to get point-2, point-1, point+1, point+2</a>
+<a name="ln130">      int k1, k2, k4, k5;</a>
+<a name="ln131">      k1 = (k - 2) &lt; 0 ? nb + (k - 2) : k - 2;</a>
+<a name="ln132">      k2 = (k - 1) &lt; 0 ? nb - 1 : k - 1;</a>
+<a name="ln133">      k4 = (k + 1) % nb;</a>
+<a name="ln134">      k5 = (k + 2) % nb;</a>
+<a name="ln135">      dt_masks_point_path_t *point1 = (dt_masks_point_path_t *)g_list_nth_data(form-&gt;points, k1);</a>
+<a name="ln136">      dt_masks_point_path_t *point2 = (dt_masks_point_path_t *)g_list_nth_data(form-&gt;points, k2);</a>
+<a name="ln137">      dt_masks_point_path_t *point4 = (dt_masks_point_path_t *)g_list_nth_data(form-&gt;points, k4);</a>
+<a name="ln138">      dt_masks_point_path_t *point5 = (dt_masks_point_path_t *)g_list_nth_data(form-&gt;points, k5);</a>
+<a name="ln139"> </a>
+<a name="ln140">      float bx1, by1, bx2, by2;</a>
+<a name="ln141">      _path_catmull_to_bezier(point1-&gt;corner[0], point1-&gt;corner[1], point2-&gt;corner[0], point2-&gt;corner[1],</a>
+<a name="ln142">                              point3-&gt;corner[0], point3-&gt;corner[1], point4-&gt;corner[0], point4-&gt;corner[1],</a>
+<a name="ln143">                              &amp;bx1, &amp;by1, &amp;bx2, &amp;by2);</a>
+<a name="ln144">      if(point2-&gt;ctrl2[0] == -1.0) point2-&gt;ctrl2[0] = bx1;</a>
+<a name="ln145">      if(point2-&gt;ctrl2[1] == -1.0) point2-&gt;ctrl2[1] = by1;</a>
+<a name="ln146">      point3-&gt;ctrl1[0] = bx2;</a>
+<a name="ln147">      point3-&gt;ctrl1[1] = by2;</a>
+<a name="ln148">      _path_catmull_to_bezier(point2-&gt;corner[0], point2-&gt;corner[1], point3-&gt;corner[0], point3-&gt;corner[1],</a>
+<a name="ln149">                              point4-&gt;corner[0], point4-&gt;corner[1], point5-&gt;corner[0], point5-&gt;corner[1],</a>
+<a name="ln150">                              &amp;bx1, &amp;by1, &amp;bx2, &amp;by2);</a>
+<a name="ln151">      if(point4-&gt;ctrl1[0] == -1.0) point4-&gt;ctrl1[0] = bx2;</a>
+<a name="ln152">      if(point4-&gt;ctrl1[1] == -1.0) point4-&gt;ctrl1[1] = by2;</a>
+<a name="ln153">      point3-&gt;ctrl2[0] = bx1;</a>
+<a name="ln154">      point3-&gt;ctrl2[1] = by1;</a>
+<a name="ln155">    }</a>
+<a name="ln156">  }</a>
+<a name="ln157">}</a>
+<a name="ln158"> </a>
+<a name="ln159">static gboolean _path_is_clockwise(dt_masks_form_t *form)</a>
+<a name="ln160">{</a>
+<a name="ln161">  if(g_list_length(form-&gt;points) &gt; 2)</a>
+<a name="ln162">  {</a>
+<a name="ln163">    float sum = 0.0f;</a>
+<a name="ln164">    guint nb = g_list_length(form-&gt;points);</a>
+<a name="ln165">    for(int k = 0; k &lt; nb; k++)</a>
+<a name="ln166">    {</a>
+<a name="ln167">      int k2 = (k + 1) % nb;</a>
+<a name="ln168">      dt_masks_point_path_t *point1 = (dt_masks_point_path_t *)g_list_nth_data(form-&gt;points, k);</a>
+<a name="ln169">      dt_masks_point_path_t *point2 = (dt_masks_point_path_t *)g_list_nth_data(form-&gt;points, k2);</a>
+<a name="ln170">      // edge k</a>
+<a name="ln171">      sum += (point2-&gt;corner[0] - point1-&gt;corner[0]) * (point2-&gt;corner[1] + point1-&gt;corner[1]);</a>
+<a name="ln172">    }</a>
+<a name="ln173">    return (sum &lt; 0);</a>
+<a name="ln174">  }</a>
+<a name="ln175">  // return dummy answer</a>
+<a name="ln176">  return TRUE;</a>
+<a name="ln177">}</a>
+<a name="ln178"> </a>
+<a name="ln179">/** fill eventual gaps between 2 points with a line */</a>
+<a name="ln180">static int _path_fill_gaps(int lastx, int lasty, int x, int y, dt_masks_dynbuf_t *points)</a>
+<a name="ln181">{</a>
+<a name="ln182">  dt_masks_dynbuf_reset(points);</a>
+<a name="ln183">  dt_masks_dynbuf_add(points, x);</a>
+<a name="ln184">  dt_masks_dynbuf_add(points, y);</a>
+<a name="ln185"> </a>
+<a name="ln186">  // now we want to be sure everything is continuous</a>
+<a name="ln187">  if(x - lastx &gt; 1)</a>
+<a name="ln188">  {</a>
+<a name="ln189">    for(int j = x - 1; j &gt; lastx; j--)</a>
+<a name="ln190">    {</a>
+<a name="ln191">      int yyy = (j - lastx) * (y - lasty) / (float)(x - lastx) + lasty;</a>
+<a name="ln192">      int lasty2 = dt_masks_dynbuf_get(points, -1);</a>
+<a name="ln193">      if(lasty2 - yyy &gt; 1)</a>
+<a name="ln194">      {</a>
+<a name="ln195">        for(int jj = lasty2 + 1; jj &lt; yyy; jj++)</a>
+<a name="ln196">        {</a>
+<a name="ln197">          dt_masks_dynbuf_add(points, j);</a>
+<a name="ln198">          dt_masks_dynbuf_add(points, jj);</a>
+<a name="ln199">        }</a>
+<a name="ln200">      }</a>
+<a name="ln201">      else if(lasty2 - yyy &lt; -1)</a>
+<a name="ln202">      {</a>
+<a name="ln203">        for(int jj = lasty2 - 1; jj &gt; yyy; jj--)</a>
+<a name="ln204">        {</a>
+<a name="ln205">          dt_masks_dynbuf_add(points, j);</a>
+<a name="ln206">          dt_masks_dynbuf_add(points, jj);</a>
+<a name="ln207">        }</a>
+<a name="ln208">      }</a>
+<a name="ln209">      dt_masks_dynbuf_add(points, j);</a>
+<a name="ln210">      dt_masks_dynbuf_add(points, yyy);</a>
+<a name="ln211">    }</a>
+<a name="ln212">  }</a>
+<a name="ln213">  else if(x - lastx &lt; -1)</a>
+<a name="ln214">  {</a>
+<a name="ln215">    for(int j = x + 1; j &lt; lastx; j++)</a>
+<a name="ln216">    {</a>
+<a name="ln217">      int yyy = (j - lastx) * (y - lasty) / (float)(x - lastx) + lasty;</a>
+<a name="ln218">      int lasty2 = dt_masks_dynbuf_get(points, -1);</a>
+<a name="ln219">      if(lasty2 - yyy &gt; 1)</a>
+<a name="ln220">      {</a>
+<a name="ln221">        for(int jj = lasty2 + 1; jj &lt; yyy; jj++)</a>
+<a name="ln222">        {</a>
+<a name="ln223">          dt_masks_dynbuf_add(points, j);</a>
+<a name="ln224">          dt_masks_dynbuf_add(points, jj);</a>
+<a name="ln225">        }</a>
+<a name="ln226">      }</a>
+<a name="ln227">      else if(lasty2 - yyy &lt; -1)</a>
+<a name="ln228">      {</a>
+<a name="ln229">        for(int jj = lasty2 - 1; jj &gt; yyy; jj--)</a>
+<a name="ln230">        {</a>
+<a name="ln231">          dt_masks_dynbuf_add(points, j);</a>
+<a name="ln232">          dt_masks_dynbuf_add(points, jj);</a>
+<a name="ln233">        }</a>
+<a name="ln234">      }</a>
+<a name="ln235">      dt_masks_dynbuf_add(points, j);</a>
+<a name="ln236">      dt_masks_dynbuf_add(points, yyy);</a>
+<a name="ln237">    }</a>
+<a name="ln238">  }</a>
+<a name="ln239">  return 1;</a>
+<a name="ln240">}</a>
+<a name="ln241"> </a>
+<a name="ln242">/** fill the gap between 2 points with an arc of circle */</a>
+<a name="ln243">/** this function is here because we can have gap in border, esp. if the corner is very sharp */</a>
+<a name="ln244">static void _path_points_recurs_border_gaps(float *cmax, float *bmin, float *bmin2, float *bmax, dt_masks_dynbuf_t *dpoints,</a>
+<a name="ln245">                                            dt_masks_dynbuf_t *dborder, gboolean clockwise)</a>
+<a name="ln246">{</a>
+<a name="ln247">  // we want to find the start and end angles</a>
+<a name="ln248">  double a1 = atan2(bmin[1] - cmax[1], bmin[0] - cmax[0]);</a>
+<a name="ln249">  double a2 = atan2(bmax[1] - cmax[1], bmax[0] - cmax[0]);</a>
+<a name="ln250">  if(a1 == a2) return;</a>
+<a name="ln251"> </a>
+<a name="ln252">  // we have to be sure that we turn in the correct direction</a>
+<a name="ln253">  if(a2 &lt; a1 &amp;&amp; clockwise)</a>
+<a name="ln254">  {</a>
+<a name="ln255">    a2 += 2 * M_PI;</a>
+<a name="ln256">  }</a>
+<a name="ln257">  if(a2 &gt; a1 &amp;&amp; !clockwise)</a>
+<a name="ln258">  {</a>
+<a name="ln259">    a1 += 2 * M_PI;</a>
+<a name="ln260">  }</a>
+<a name="ln261"> </a>
+<a name="ln262">  // we determine start and end radius too</a>
+<a name="ln263">  float r1 = sqrtf((bmin[1] - cmax[1]) * (bmin[1] - cmax[1]) + (bmin[0] - cmax[0]) * (bmin[0] - cmax[0]));</a>
+<a name="ln264">  float r2 = sqrtf((bmax[1] - cmax[1]) * (bmax[1] - cmax[1]) + (bmax[0] - cmax[0]) * (bmax[0] - cmax[0]));</a>
+<a name="ln265"> </a>
+<a name="ln266">  // and the max length of the circle arc</a>
+<a name="ln267">  int l;</a>
+<a name="ln268">  if(a2 &gt; a1)</a>
+<a name="ln269">    l = (a2 - a1) * fmaxf(r1, r2);</a>
+<a name="ln270">  else</a>
+<a name="ln271">    l = (a1 - a2) * fmaxf(r1, r2);</a>
+<a name="ln272">  if(l &lt; 2) return;</a>
+<a name="ln273"> </a>
+<a name="ln274">  // and now we add the points</a>
+<a name="ln275">  float incra = (a2 - a1) / l;</a>
+<a name="ln276">  float incrr = (r2 - r1) / l;</a>
+<a name="ln277">  float rr = r1 + incrr;</a>
+<a name="ln278">  float aa = a1 + incra;</a>
+<a name="ln279">  for(int i = 1; i &lt; l; i++)</a>
+<a name="ln280">  {</a>
+<a name="ln281">    dt_masks_dynbuf_add(dpoints, cmax[0]);</a>
+<a name="ln282">    dt_masks_dynbuf_add(dpoints, cmax[1]);</a>
+<a name="ln283">    if(dborder) dt_masks_dynbuf_add(dborder, cmax[0] + rr * cosf(aa));</a>
+<a name="ln284">    if(dborder) dt_masks_dynbuf_add(dborder, cmax[1] + rr * sinf(aa));</a>
+<a name="ln285">    rr += incrr;</a>
+<a name="ln286">    aa += incra;</a>
+<a name="ln287">  }</a>
+<a name="ln288">}</a>
+<a name="ln289"> </a>
+<a name="ln290">/** recursive function to get all points of the path AND all point of the border */</a>
+<a name="ln291">/** the function take care to avoid big gaps between points */</a>
+<a name="ln292">static void _path_points_recurs(float *p1, float *p2, double tmin, double tmax, float *path_min,</a>
+<a name="ln293">                                float *path_max, float *border_min, float *border_max, float *rpath,</a>
+<a name="ln294">                                float *rborder, dt_masks_dynbuf_t *dpoints, dt_masks_dynbuf_t *dborder,</a>
+<a name="ln295">                                int withborder)</a>
+<a name="ln296">{</a>
+<a name="ln297">  // we calculate points if needed</a>
+<a name="ln298">  if(isnan(path_min[0]))</a>
+<a name="ln299">  {</a>
+<a name="ln300">    _path_border_get_XY(p1[0], p1[1], p1[2], p1[3], p2[2], p2[3], p2[0], p2[1], tmin,</a>
+<a name="ln301">                        p1[4] + (p2[4] - p1[4]) * tmin * tmin * (3.0 - 2.0 * tmin), path_min, path_min + 1,</a>
+<a name="ln302">                        border_min, border_min + 1);</a>
+<a name="ln303">  }</a>
+<a name="ln304">  if(isnan(path_max[0]))</a>
+<a name="ln305">  {</a>
+<a name="ln306">    _path_border_get_XY(p1[0], p1[1], p1[2], p1[3], p2[2], p2[3], p2[0], p2[1], tmax,</a>
+<a name="ln307">                        p1[4] + (p2[4] - p1[4]) * tmax * tmax * (3.0 - 2.0 * tmax), path_max, path_max + 1,</a>
+<a name="ln308">                        border_max, border_max + 1);</a>
+<a name="ln309">  }</a>
+<a name="ln310">  // are the points near ?</a>
+<a name="ln311">  if((tmax - tmin &lt; 0.0001)</a>
+<a name="ln312">     || ((int)path_min[0] - (int)path_max[0] &lt; 1 &amp;&amp; (int)path_min[0] - (int)path_max[0] &gt; -1</a>
+<a name="ln313">         &amp;&amp; (int)path_min[1] - (int)path_max[1] &lt; 1 &amp;&amp; (int)path_min[1] - (int)path_max[1] &gt; -1</a>
+<a name="ln314">         &amp;&amp; (!withborder</a>
+<a name="ln315">             || ((int)border_min[0] - (int)border_max[0] &lt; 1 &amp;&amp; (int)border_min[0] - (int)border_max[0] &gt; -1</a>
+<a name="ln316">                 &amp;&amp; (int)border_min[1] - (int)border_max[1] &lt; 1</a>
+<a name="ln317">                 &amp;&amp; (int)border_min[1] - (int)border_max[1] &gt; -1))))</a>
+<a name="ln318">  {</a>
+<a name="ln319">    dt_masks_dynbuf_add(dpoints, path_max[0]);</a>
+<a name="ln320">    dt_masks_dynbuf_add(dpoints, path_max[1]);</a>
+<a name="ln321">    rpath[0] = path_max[0];</a>
+<a name="ln322">    rpath[1] = path_max[1];</a>
+<a name="ln323"> </a>
+<a name="ln324">    if(withborder)</a>
+<a name="ln325">    {</a>
+<a name="ln326">      dt_masks_dynbuf_add(dborder, border_max[0]);</a>
+<a name="ln327">      dt_masks_dynbuf_add(dborder, border_max[1]);</a>
+<a name="ln328">      rborder[0] = border_max[0];</a>
+<a name="ln329">      rborder[1] = border_max[1];</a>
+<a name="ln330">    }</a>
+<a name="ln331">    return;</a>
+<a name="ln332">  }</a>
+<a name="ln333"> </a>
+<a name="ln334">  // we split in two part</a>
+<a name="ln335">  double tx = (tmin + tmax) / 2.0;</a>
+<a name="ln336">  float c[2] = { NAN, NAN }, b[2] = { NAN, NAN };</a>
+<a name="ln337">  float rc[2], rb[2];</a>
+<a name="ln338">  _path_points_recurs(p1, p2, tmin, tx, path_min, c, border_min, b, rc, rb, dpoints, dborder, withborder);</a>
+<a name="ln339">  _path_points_recurs(p1, p2, tx, tmax, rc, path_max, rb, border_max, rpath, rborder, dpoints, dborder, withborder);</a>
+<a name="ln340">}</a>
+<a name="ln341"> </a>
+<a name="ln342">/** find all self intersections in a path */</a>
+<a name="ln343">static int _path_find_self_intersection(dt_masks_dynbuf_t *inter, int nb_corners, float *border, int border_count)</a>
+<a name="ln344">{</a>
+<a name="ln345">  if(nb_corners == 0 || border_count == 0) return 0;</a>
+<a name="ln346"> </a>
+<a name="ln347">  int inter_count = 0;</a>
+<a name="ln348"> </a>
+<a name="ln349">  // we search extreme points in x and y</a>
+<a name="ln350">  int xmin, xmax, ymin, ymax;</a>
+<a name="ln351">  xmin = ymin = INT_MAX;</a>
+<a name="ln352">  xmax = ymax = INT_MIN;</a>
+<a name="ln353">  int posextr[4] = { -1 }; // xmin,xmax,ymin,ymax</a>
+<a name="ln354"> </a>
+<a name="ln355">  for(int i = nb_corners * 3; i &lt; border_count; i++)</a>
+<a name="ln356">  {</a>
+<a name="ln357">    if(isnan(border[i * 2]) || isnan(border[i * 2 + 1]))</a>
+<a name="ln358">    {</a>
+<a name="ln359">      border[i * 2] = border[i * 2 - 2];</a>
+<a name="ln360">      border[i * 2 + 1] = border[i * 2 - 1];</a>
+<a name="ln361">    }</a>
+<a name="ln362">    if(xmin &gt; border[i * 2])</a>
+<a name="ln363">    {</a>
+<a name="ln364">      xmin = border[i * 2];</a>
+<a name="ln365">      posextr[0] = i;</a>
+<a name="ln366">    }</a>
+<a name="ln367">    if(xmax &lt; border[i * 2])</a>
+<a name="ln368">    {</a>
+<a name="ln369">      xmax = border[i * 2];</a>
+<a name="ln370">      posextr[1] = i;</a>
+<a name="ln371">    }</a>
+<a name="ln372">    if(ymin &gt; border[i * 2 + 1])</a>
+<a name="ln373">    {</a>
+<a name="ln374">      ymin = border[i * 2 + 1];</a>
+<a name="ln375">      posextr[2] = i;</a>
+<a name="ln376">    }</a>
+<a name="ln377">    if(ymax &lt; border[i * 2 + 1])</a>
+<a name="ln378">    {</a>
+<a name="ln379">      ymax = border[i * 2 + 1];</a>
+<a name="ln380">      posextr[3] = i;</a>
+<a name="ln381">    }</a>
+<a name="ln382">  }</a>
+<a name="ln383">  xmin -= 1, ymin -= 1;</a>
+<a name="ln384">  xmax += 1, ymax += 1;</a>
+<a name="ln385">  const int hb = ymax - ymin;</a>
+<a name="ln386">  const int wb = xmax - xmin;</a>
+<a name="ln387"> </a>
+<a name="ln388">  // we allocate the buffer</a>
+<a name="ln389">  const size_t ss = (size_t)hb * wb;</a>
+<a name="ln390">  if(ss &lt; 10) return 0;</a>
+<a name="ln391"> </a>
+<a name="ln392">  int *binter = calloc(ss, sizeof(int));</a>
+<a name="ln393">  if(binter == NULL) return 0;</a>
+<a name="ln394"> </a>
+<a name="ln395">  dt_masks_dynbuf_t *extra = dt_masks_dynbuf_init(100000, &quot;path extra&quot;);</a>
+<a name="ln396">  if(extra == NULL)</a>
+<a name="ln397">  {</a>
+<a name="ln398">    free(binter);</a>
+<a name="ln399">    return 0;</a>
+<a name="ln400">  }</a>
+<a name="ln401"> </a>
+<a name="ln402">  // we'll iterate through all border points, but we can't start at point[0]</a>
+<a name="ln403">  // because it may be in a self-intersected section</a>
+<a name="ln404">  // so we choose a point where we are sure there's no intersection:</a>
+<a name="ln405">  // one from border shape extrema (here x_max)</a>
+<a name="ln406">  int lastx = border[(posextr[1] - 1) * 2];</a>
+<a name="ln407">  int lasty = border[(posextr[1] - 1) * 2 + 1];</a>
+<a name="ln408"> </a>
+<a name="ln409">  for(int ii = nb_corners * 3; ii &lt; border_count; ii++)</a>
+<a name="ln410">  {</a>
+<a name="ln411">    // we want to loop from one border extremity</a>
+<a name="ln412">    int i = ii - nb_corners * 3 + posextr[1];</a>
+<a name="ln413">    if(i &gt;= border_count) i = i - border_count + nb_corners * 3;</a>
+<a name="ln414"> </a>
+<a name="ln415">    if(inter_count &gt;= nb_corners * 4) break;</a>
+<a name="ln416"> </a>
+<a name="ln417">    // we want to be sure everything is continuous</a>
+<a name="ln418">    _path_fill_gaps(lastx, lasty, border[i * 2], border[i * 2 + 1], extra);</a>
+<a name="ln419"> </a>
+<a name="ln420">    // extra represent all the points between the last one and the current one</a>
+<a name="ln421">    // for all the points in extra, we'll check for self-intersection</a>
+<a name="ln422">    // and &quot;register&quot; them in binter</a>
+<a name="ln423">    for(int j = dt_masks_dynbuf_position(extra) / 2 - 1; j &gt;= 0; j--)</a>
+<a name="ln424">    {</a>
+<a name="ln425">      int xx = (dt_masks_dynbuf_buffer(extra))[j * 2];</a>
+<a name="ln426">      int yy = (dt_masks_dynbuf_buffer(extra))[j * 2 + 1];</a>
+<a name="ln427"> </a>
+<a name="ln428">      // we check also 2 points around to be sure catching intersection</a>
+<a name="ln429">      int v[3] = { 0 };</a>
+<a name="ln430">      v[0] = binter[(yy - ymin) * wb + (xx - xmin)];</a>
+<a name="ln431">      if(xx &gt; xmin) v[1] = binter[(yy - ymin) * wb + (xx - xmin - 1)];</a>
+<a name="ln432">      if(yy &gt; ymin) v[2] = binter[(yy - ymin - 1) * wb + (xx - xmin)];</a>
+<a name="ln433"> </a>
+<a name="ln434">      for(int k = 0; k &lt; 3; k++)</a>
+<a name="ln435">      {</a>
+<a name="ln436">        if(v[k] &gt; 0)</a>
+<a name="ln437">        {</a>
+<a name="ln438">          // there's already a border point &quot;registered&quot; at this coordinate.</a>
+<a name="ln439">          // so we've potentially found a self-intersection portion between v[k] and i</a>
+<a name="ln440">          if((xx == lastx &amp;&amp; yy == lasty) || v[k] == i - 1)</a>
+<a name="ln441">          {</a>
+<a name="ln442">            // we haven't move from last point.</a>
+<a name="ln443">            // this is not a real self-interesection, so we just update binter</a>
+<a name="ln444">            binter[(yy - ymin) * wb + (xx - xmin)] = i;</a>
+<a name="ln445">          }</a>
+<a name="ln446">          else if((i &gt; v[k]</a>
+<a name="ln447">                   &amp;&amp; ((posextr[0] &lt; v[k] || posextr[0] &gt; i) &amp;&amp; (posextr[1] &lt; v[k] || posextr[1] &gt; i)</a>
+<a name="ln448">                       &amp;&amp; (posextr[2] &lt; v[k] || posextr[2] &gt; i) &amp;&amp; (posextr[3] &lt; v[k] || posextr[3] &gt; i)))</a>
+<a name="ln449">                  || (i &lt; v[k] &amp;&amp; posextr[0] &lt; v[k] &amp;&amp; posextr[0] &gt; i &amp;&amp; posextr[1] &lt; v[k] &amp;&amp; posextr[1] &gt; i</a>
+<a name="ln450">                      &amp;&amp; posextr[2] &lt; v[k] &amp;&amp; posextr[2] &gt; i &amp;&amp; posextr[3] &lt; v[k] &amp;&amp; posextr[3] &gt; i))</a>
+<a name="ln451">          {</a>
+<a name="ln452">            // we have found a self-intersection portion, between v[k] and i</a>
+<a name="ln453">            // and we are sure that this portion doesn't include one of the shape extrema</a>
+<a name="ln454">            if(inter_count &gt; 0)</a>
+<a name="ln455">            {</a>
+<a name="ln456">              if((v[k] - i) * ((int)dt_masks_dynbuf_get(inter, -2) - (int)dt_masks_dynbuf_get(inter, -1)) &gt; 0</a>
+<a name="ln457">                 &amp;&amp; (int)dt_masks_dynbuf_get(inter, -2) &gt;= v[k] &amp;&amp; (int)dt_masks_dynbuf_get(inter, -1) &lt;= i)</a>
+<a name="ln458">              {</a>
+<a name="ln459">                // we find an self-intersection portion which include the last one</a>
+<a name="ln460">                // we just update it</a>
+<a name="ln461">                dt_masks_dynbuf_set(inter, -2, v[k]);</a>
+<a name="ln462">                dt_masks_dynbuf_set(inter, -1, i);</a>
+<a name="ln463">              }</a>
+<a name="ln464">              else</a>
+<a name="ln465">              {</a>
+<a name="ln466">                // we find a new self-intersection portion</a>
+<a name="ln467">                dt_masks_dynbuf_add(inter, v[k]);</a>
+<a name="ln468">                dt_masks_dynbuf_add(inter, i);</a>
+<a name="ln469">                inter_count++;</a>
+<a name="ln470">              }</a>
+<a name="ln471">            }</a>
+<a name="ln472">            else</a>
+<a name="ln473">            {</a>
+<a name="ln474">              // we find a new self-intersection portion</a>
+<a name="ln475">              dt_masks_dynbuf_add(inter, v[k]);</a>
+<a name="ln476">              dt_masks_dynbuf_add(inter, i);</a>
+<a name="ln477">              inter_count++;</a>
+<a name="ln478">            }</a>
+<a name="ln479">          }</a>
+<a name="ln480">        }</a>
+<a name="ln481">        else</a>
+<a name="ln482">        {</a>
+<a name="ln483">          // there wasn't anything &quot;registered&quot; at this place in binter</a>
+<a name="ln484">          // we do it now</a>
+<a name="ln485">          binter[(yy - ymin) * wb + (xx - xmin)] = i;</a>
+<a name="ln486">        }</a>
+<a name="ln487">      }</a>
+<a name="ln488">      lastx = xx;</a>
+<a name="ln489">      lasty = yy;</a>
+<a name="ln490">    }</a>
+<a name="ln491">  }</a>
+<a name="ln492"> </a>
+<a name="ln493">  dt_masks_dynbuf_free(extra);</a>
+<a name="ln494">  free(binter);</a>
+<a name="ln495"> </a>
+<a name="ln496">  // and we return the number of self-intersection found</a>
+<a name="ln497">  return inter_count;</a>
+<a name="ln498">}</a>
+<a name="ln499"> </a>
+<a name="ln500">/** get all points of the path and the border */</a>
+<a name="ln501">/** this take care of gaps and self-intersection and iop distortions */</a>
+<a name="ln502">static int _path_get_points_border(dt_develop_t *dev, dt_masks_form_t *form, int prio_max,</a>
+<a name="ln503">                                   dt_dev_pixelpipe_t *pipe, float **points, int *points_count,</a>
+<a name="ln504">                                   float **border, int *border_count, int source)</a>
+<a name="ln505">{</a>
+<a name="ln506">  double start2 = dt_get_wtime();</a>
+<a name="ln507"> </a>
+<a name="ln508">  float wd = pipe-&gt;iwidth, ht = pipe-&gt;iheight;</a>
+<a name="ln509">  guint nb = g_list_length(form-&gt;points);</a>
+<a name="ln510"> </a>
+<a name="ln511">  dt_masks_dynbuf_t *dpoints = NULL, *dborder = NULL, *intersections = NULL;</a>
+<a name="ln512"> </a>
+<a name="ln513">  *points = NULL;</a>
+<a name="ln514">  *points_count = 0;</a>
+<a name="ln515">  if(border) *border = NULL;</a>
+<a name="ln516">  if(border) *border_count = 0;</a>
+<a name="ln517"> </a>
+<a name="ln518">  dpoints = dt_masks_dynbuf_init(1000000, &quot;path dpoints&quot;);</a>
+<a name="ln519">  if(dpoints == NULL) return 0;</a>
+<a name="ln520"> </a>
+<a name="ln521">  if(border)</a>
+<a name="ln522">  {</a>
+<a name="ln523">    dborder = dt_masks_dynbuf_init(1000000, &quot;path dborder&quot;);</a>
+<a name="ln524">    if(dborder == NULL)</a>
+<a name="ln525">    {</a>
+<a name="ln526">      dt_masks_dynbuf_free(dpoints);</a>
+<a name="ln527">      return 0;</a>
+<a name="ln528">    }</a>
+<a name="ln529">  }</a>
+<a name="ln530"> </a>
+<a name="ln531">  intersections = dt_masks_dynbuf_init(10 * MAX(nb, 1), &quot;path intersections&quot;);</a>
+<a name="ln532">  if(intersections == NULL)</a>
+<a name="ln533">  {</a>
+<a name="ln534">    dt_masks_dynbuf_free(dpoints);</a>
+<a name="ln535">    dt_masks_dynbuf_free(dborder);</a>
+<a name="ln536">    return 0;</a>
+<a name="ln537">  }</a>
+<a name="ln538"> </a>
+<a name="ln539">  // we store all points</a>
+<a name="ln540">  float dx, dy;</a>
+<a name="ln541">  dx = dy = 0.0f;</a>
+<a name="ln542"> </a>
+<a name="ln543">  if(source &amp;&amp; nb &gt; 0)</a>
+<a name="ln544">  {</a>
+<a name="ln545">    dt_masks_point_path_t *pt = (dt_masks_point_path_t *)g_list_nth_data(form-&gt;points, 0);</a>
+<a name="ln546">    dx = (pt-&gt;corner[0] - form-&gt;source[0]) * wd;</a>
+<a name="ln547">    dy = (pt-&gt;corner[1] - form-&gt;source[1]) * ht;</a>
+<a name="ln548">  }</a>
+<a name="ln549">  for(int k = 0; k &lt; nb; k++)</a>
+<a name="ln550">  {</a>
+<a name="ln551">    dt_masks_point_path_t *pt = (dt_masks_point_path_t *)g_list_nth_data(form-&gt;points, k);</a>
+<a name="ln552">    dt_masks_dynbuf_add(dpoints, pt-&gt;ctrl1[0] * wd - dx);</a>
+<a name="ln553">    dt_masks_dynbuf_add(dpoints, pt-&gt;ctrl1[1] * ht - dy);</a>
+<a name="ln554">    dt_masks_dynbuf_add(dpoints, pt-&gt;corner[0] * wd - dx);</a>
+<a name="ln555">    dt_masks_dynbuf_add(dpoints, pt-&gt;corner[1] * ht - dy);</a>
+<a name="ln556">    dt_masks_dynbuf_add(dpoints, pt-&gt;ctrl2[0] * wd - dx);</a>
+<a name="ln557">    dt_masks_dynbuf_add(dpoints, pt-&gt;ctrl2[1] * ht - dy);</a>
+<a name="ln558">  }</a>
+<a name="ln559">  // for the border, we store value too</a>
+<a name="ln560">  if(dborder)</a>
+<a name="ln561">  {</a>
+<a name="ln562">    for(int k = 0; k &lt; nb; k++)</a>
+<a name="ln563">    {</a>
+<a name="ln564">      dt_masks_dynbuf_add(dborder, 0.0f);</a>
+<a name="ln565">      dt_masks_dynbuf_add(dborder, 0.0f);</a>
+<a name="ln566">      dt_masks_dynbuf_add(dborder, 0.0f);</a>
+<a name="ln567">      dt_masks_dynbuf_add(dborder, 0.0f);</a>
+<a name="ln568">      dt_masks_dynbuf_add(dborder, 0.0f);</a>
+<a name="ln569">      dt_masks_dynbuf_add(dborder, 0.0f);</a>
+<a name="ln570">    }</a>
+<a name="ln571">  }</a>
+<a name="ln572"> </a>
+<a name="ln573">  float *border_init = malloc((size_t)6 * nb * sizeof(float));</a>
+<a name="ln574">  int cw = _path_is_clockwise(form);</a>
+<a name="ln575">  if(cw == 0) cw = -1;</a>
+<a name="ln576"> </a>
+<a name="ln577">  if(darktable.unmuted &amp; DT_DEBUG_PERF)</a>
+<a name="ln578">    dt_print(DT_DEBUG_MASKS, &quot;[masks %s] path_points init took %0.04f sec\n&quot;, form-&gt;name,</a>
+<a name="ln579">             dt_get_wtime() - start2);</a>
+<a name="ln580">  start2 = dt_get_wtime();</a>
+<a name="ln581"> </a>
+<a name="ln582">  // we render all segments</a>
+<a name="ln583">  for(int k = 0; k &lt; nb; k++)</a>
+<a name="ln584">  {</a>
+<a name="ln585">    int pb = dborder ? dt_masks_dynbuf_position(dborder) : 0;</a>
+<a name="ln586">    border_init[k * 6 + 2] = -pb;</a>
+<a name="ln587">    int k2 = (k + 1) % nb;</a>
+<a name="ln588">    int k3 = (k + 2) % nb;</a>
+<a name="ln589">    dt_masks_point_path_t *point1 = (dt_masks_point_path_t *)g_list_nth_data(form-&gt;points, k);</a>
+<a name="ln590">    dt_masks_point_path_t *point2 = (dt_masks_point_path_t *)g_list_nth_data(form-&gt;points, k2);</a>
+<a name="ln591">    dt_masks_point_path_t *point3 = (dt_masks_point_path_t *)g_list_nth_data(form-&gt;points, k3);</a>
+<a name="ln592">    float p1[5] = { point1-&gt;corner[0] * wd - dx, point1-&gt;corner[1] * ht - dy, point1-&gt;ctrl2[0] * wd - dx,</a>
+<a name="ln593">                    point1-&gt;ctrl2[1] * ht - dy, cw * point1-&gt;border[1] * MIN(wd, ht) };</a>
+<a name="ln594">    float p2[5] = { point2-&gt;corner[0] * wd - dx, point2-&gt;corner[1] * ht - dy, point2-&gt;ctrl1[0] * wd - dx,</a>
+<a name="ln595">                    point2-&gt;ctrl1[1] * ht - dy, cw * point2-&gt;border[0] * MIN(wd, ht) };</a>
+<a name="ln596">    float p3[5] = { point2-&gt;corner[0] * wd - dx, point2-&gt;corner[1] * ht - dy, point2-&gt;ctrl2[0] * wd - dx,</a>
+<a name="ln597">                    point2-&gt;ctrl2[1] * ht - dy, cw * point2-&gt;border[1] * MIN(wd, ht) };</a>
+<a name="ln598">    float p4[5] = { point3-&gt;corner[0] * wd - dx, point3-&gt;corner[1] * ht - dy, point3-&gt;ctrl1[0] * wd - dx,</a>
+<a name="ln599">                    point3-&gt;ctrl1[1] * ht - dy, cw * point3-&gt;border[0] * MIN(wd, ht) };</a>
+<a name="ln600"> </a>
+<a name="ln601">    // and we determine all points by recursion (to be sure the distance between 2 points is &lt;=1)</a>
+<a name="ln602">    float rc[2], rb[2];</a>
+<a name="ln603">    float bmin[2] = { NAN, NAN };</a>
+<a name="ln604">    float bmax[2] = { NAN, NAN };</a>
+<a name="ln605">    float cmin[2] = { NAN, NAN };</a>
+<a name="ln606">    float cmax[2] = { NAN, NAN };</a>
+<a name="ln607"> </a>
+<a name="ln608">    _path_points_recurs(p1, p2, 0.0, 1.0, cmin, cmax, bmin, bmax, rc, rb, dpoints, dborder, border &amp;&amp; (nb &gt;= 3));</a>
+<a name="ln609"> </a>
+<a name="ln610">    // we check gaps in the border (sharp edges)</a>
+<a name="ln611">    if(dborder &amp;&amp; (fabs(dt_masks_dynbuf_get(dborder, -2) - rb[0]) &gt; 1.0f ||</a>
+<a name="ln612">                   fabs(dt_masks_dynbuf_get(dborder, -1) - rb[1]) &gt; 1.0f))</a>
+<a name="ln613">    {</a>
+<a name="ln614">      bmin[0] = dt_masks_dynbuf_get(dborder, -2);</a>
+<a name="ln615">      bmin[1] = dt_masks_dynbuf_get(dborder, -1);</a>
+<a name="ln616">    }</a>
+<a name="ln617"> </a>
+<a name="ln618">    dt_masks_dynbuf_add(dpoints, rc[0]);</a>
+<a name="ln619">    dt_masks_dynbuf_add(dpoints, rc[1]);</a>
+<a name="ln620">    </a>
+<a name="ln621">    border_init[k * 6 + 4] = dborder ? -dt_masks_dynbuf_position(dborder) : 0;</a>
+<a name="ln622"> </a>
+<a name="ln623">    if(dborder)</a>
+<a name="ln624">    {</a>
+<a name="ln625">      if(isnan(rb[0]))</a>
+<a name="ln626">      {</a>
+<a name="ln627">        if(isnan(dt_masks_dynbuf_get(dborder, - 2)))</a>
+<a name="ln628">        {</a>
+<a name="ln629">          dt_masks_dynbuf_set(dborder, -2, dt_masks_dynbuf_get(dborder, -4));</a>
+<a name="ln630">          dt_masks_dynbuf_set(dborder, -1, dt_masks_dynbuf_get(dborder, -3));</a>
+<a name="ln631">        }</a>
+<a name="ln632">        rb[0] = dt_masks_dynbuf_get(dborder, -2);</a>
+<a name="ln633">        rb[1] = dt_masks_dynbuf_get(dborder, -1);</a>
+<a name="ln634">      }</a>
+<a name="ln635">      dt_masks_dynbuf_add(dborder, rb[0]);</a>
+<a name="ln636">      dt_masks_dynbuf_add(dborder, rb[1]);</a>
+<a name="ln637"> </a>
+<a name="ln638">      (dt_masks_dynbuf_buffer(dborder))[k * 6] = border_init[k * 6] = (dt_masks_dynbuf_buffer(dborder))[pb];</a>
+<a name="ln639">      (dt_masks_dynbuf_buffer(dborder))[k * 6 + 1] = border_init[k * 6 + 1] = (dt_masks_dynbuf_buffer(dborder))[pb + 1];</a>
+<a name="ln640">    }</a>
+<a name="ln641"> </a>
+<a name="ln642">    // we first want to be sure that there are no gaps in border</a>
+<a name="ln643">    if(dborder &amp;&amp; nb &gt;= 3)</a>
+<a name="ln644">    {</a>
+<a name="ln645">      // we get the next point (start of the next segment)</a>
+<a name="ln646">      _path_border_get_XY(p3[0], p3[1], p3[2], p3[3], p4[2], p4[3], p4[0], p4[1], 0, p3[4], cmin, cmin + 1,</a>
+<a name="ln647">                          bmax, bmax + 1);</a>
+<a name="ln648">      if(isnan(bmax[0]))</a>
+<a name="ln649">      {</a>
+<a name="ln650">        _path_border_get_XY(p3[0], p3[1], p3[2], p3[3], p4[2], p4[3], p4[0], p4[1], 0.0001, p3[4], cmin,</a>
+<a name="ln651">                            cmin + 1, bmax, bmax + 1);</a>
+<a name="ln652">      }</a>
+<a name="ln653">      if(bmax[0] - rb[0] &gt; 1 || bmax[0] - rb[0] &lt; -1 || bmax[1] - rb[1] &gt; 1 || bmax[1] - rb[1] &lt; -1)</a>
+<a name="ln654">      {</a>
+<a name="ln655">        float bmin2[2] = { dt_masks_dynbuf_get(dborder, -22), dt_masks_dynbuf_get(dborder, -21) };</a>
+<a name="ln656">        _path_points_recurs_border_gaps(rc, rb, bmin2, bmax, dpoints, dborder, _path_is_clockwise(form));</a>
+<a name="ln657">      }</a>
+<a name="ln658">    }</a>
+<a name="ln659">  }</a>
+<a name="ln660"> </a>
+<a name="ln661">  *points_count = dt_masks_dynbuf_position(dpoints) / 2;</a>
+<a name="ln662">  *points = dt_masks_dynbuf_harvest(dpoints);</a>
+<a name="ln663">  dt_masks_dynbuf_free(dpoints);</a>
+<a name="ln664"> </a>
+<a name="ln665">  if(dborder)</a>
+<a name="ln666">  {</a>
+<a name="ln667">    *border_count = dt_masks_dynbuf_position(dborder) / 2;</a>
+<a name="ln668">    *border = dt_masks_dynbuf_harvest(dborder);</a>
+<a name="ln669">    dt_masks_dynbuf_free(dborder);</a>
+<a name="ln670">  }</a>
+<a name="ln671"> </a>
+<a name="ln672">  if(darktable.unmuted &amp; DT_DEBUG_PERF)</a>
+<a name="ln673">    dt_print(DT_DEBUG_MASKS, &quot;[masks %s] path_points point recurs %0.04f sec\n&quot;, form-&gt;name,</a>
+<a name="ln674">             dt_get_wtime() - start2);</a>
+<a name="ln675">  start2 = dt_get_wtime();</a>
+<a name="ln676"> </a>
+<a name="ln677">  // we don't want the border to self-intersect</a>
+<a name="ln678">  int inter_count = 0;</a>
+<a name="ln679">  if(border)</a>
+<a name="ln680">  {</a>
+<a name="ln681">    inter_count = _path_find_self_intersection(intersections, nb, *border, *border_count);</a>
+<a name="ln682"> </a>
+<a name="ln683">    if(darktable.unmuted &amp; DT_DEBUG_PERF)</a>
+<a name="ln684">      dt_print(DT_DEBUG_MASKS, &quot;[masks %s] path_points self-intersect took %0.04f sec\n&quot;, form-&gt;name,</a>
+<a name="ln685">               dt_get_wtime() - start2);</a>
+<a name="ln686">    start2 = dt_get_wtime();</a>
+<a name="ln687">  }</a>
+<a name="ln688"> </a>
+<a name="ln689">  // and we transform them with all distorted modules</a>
+<a name="ln690">  if(dt_dev_distort_transform_plus(dev, pipe, 0, prio_max, *points, *points_count))</a>
+<a name="ln691">  {</a>
+<a name="ln692">    if(!border || dt_dev_distort_transform_plus(dev, pipe, 0, prio_max, *border, *border_count))</a>
+<a name="ln693">    {</a>
+<a name="ln694">      if(darktable.unmuted &amp; DT_DEBUG_PERF)</a>
+<a name="ln695">        dt_print(DT_DEBUG_MASKS, &quot;[masks %s] path_points transform took %0.04f sec\n&quot;, form-&gt;name,</a>
+<a name="ln696">                 dt_get_wtime() - start2);</a>
+<a name="ln697">      start2 = dt_get_wtime();</a>
+<a name="ln698"> </a>
+<a name="ln699">      if(border)</a>
+<a name="ln700">      {</a>
+<a name="ln701">        // we don't want to copy the falloff points</a>
+<a name="ln702">        for(int k = 0; k &lt; nb; k++)</a>
+<a name="ln703">          for(int i = 2; i &lt; 6; i++) (*border)[k * 6 + i] = border_init[k * 6 + i];</a>
+<a name="ln704"> </a>
+<a name="ln705">        // now we want to write the skipping zones</a>
+<a name="ln706">        for(int i = 0; i &lt; inter_count; i++)</a>
+<a name="ln707">        {</a>
+<a name="ln708">          int v = (dt_masks_dynbuf_buffer(intersections))[i * 2];</a>
+<a name="ln709">          int w = (dt_masks_dynbuf_buffer(intersections))[ i * 2 + 1];</a>
+<a name="ln710">          if(v &lt;= w)</a>
+<a name="ln711">          {</a>
+<a name="ln712">            (*border)[v * 2] = NAN;</a>
+<a name="ln713">            (*border)[v * 2 + 1] = w;</a>
+<a name="ln714">          }</a>
+<a name="ln715">          else</a>
+<a name="ln716">          {</a>
+<a name="ln717">            if(w &gt; nb * 3)</a>
+<a name="ln718">            {</a>
+<a name="ln719">              if(isnan((*border)[nb * 6]) &amp;&amp; isnan((*border)[nb * 6 + 1]))</a>
+<a name="ln720">                (*border)[nb * 6 + 1] = w;</a>
+<a name="ln721">              else if(isnan((*border)[nb * 6]))</a>
+<a name="ln722">                (*border)[nb * 6 + 1] = MAX((*border)[nb * 6 + 1], w);</a>
+<a name="ln723">              else</a>
+<a name="ln724">                (*border)[nb * 6 + 1] = w;</a>
+<a name="ln725">              (*border)[nb * 6] = NAN;</a>
+<a name="ln726">            }</a>
+<a name="ln727">            (*border)[v * 2] = NAN;</a>
+<a name="ln728">            (*border)[v * 2 + 1] = NAN;</a>
+<a name="ln729">          }</a>
+<a name="ln730">        }</a>
+<a name="ln731">      }</a>
+<a name="ln732"> </a>
+<a name="ln733">      if(darktable.unmuted &amp; DT_DEBUG_PERF)</a>
+<a name="ln734">        dt_print(DT_DEBUG_MASKS, &quot;[masks %s] path_points end took %0.04f sec\n&quot;, form-&gt;name,</a>
+<a name="ln735">                 dt_get_wtime() - start2);</a>
+<a name="ln736">//       start2 = dt_get_wtime();</a>
+<a name="ln737">      dt_masks_dynbuf_free(intersections);</a>
+<a name="ln738">      free(border_init);</a>
+<a name="ln739">      return 1;</a>
+<a name="ln740">    }</a>
+<a name="ln741">  }</a>
+<a name="ln742"> </a>
+<a name="ln743">  // if we failed, then free all and return</a>
+<a name="ln744">  dt_masks_dynbuf_free(intersections);</a>
+<a name="ln745">  free(border_init);</a>
+<a name="ln746">  free(*points);</a>
+<a name="ln747">  *points = NULL;</a>
+<a name="ln748">  *points_count = 0;</a>
+<a name="ln749">  if(border) free(*border);</a>
+<a name="ln750">  if(border) *border = NULL;</a>
+<a name="ln751">  if(border) *border_count = 0;</a>
+<a name="ln752">  return 0;</a>
+<a name="ln753">}</a>
+<a name="ln754"> </a>
+<a name="ln755">/** get the distance between point (x,y) and the path */</a>
+<a name="ln756">static void dt_path_get_distance(float x, int y, float as, dt_masks_form_gui_t *gui, int index,</a>
+<a name="ln757">                                 int corner_count, int *inside, int *inside_border, int *near,</a>
+<a name="ln758">                                 int *inside_source)</a>
+<a name="ln759">{</a>
+<a name="ln760">  // initialise returned values</a>
+<a name="ln761">  *inside_source = 0;</a>
+<a name="ln762">  *inside = 0;</a>
+<a name="ln763">  *inside_border = 0;</a>
+<a name="ln764">  *near = -1;</a>
+<a name="ln765"> </a>
+<a name="ln766">  if(!gui) return;</a>
+<a name="ln767"> </a>
+<a name="ln768">  float yf = (float)y;</a>
+<a name="ln769">  dt_masks_form_gui_points_t *gpt = (dt_masks_form_gui_points_t *)g_list_nth_data(gui-&gt;points, index);</a>
+<a name="ln770">  if(!gpt) return;</a>
+<a name="ln771"> </a>
+<a name="ln772">  // we first check if we are inside the source form</a>
+<a name="ln773">  if(dt_masks_point_in_form_exact(x,yf,gpt-&gt;source,corner_count * 6,gpt-&gt;source_count))</a>
+<a name="ln774">  {</a>
+<a name="ln775">    *inside_source = 1;</a>
+<a name="ln776">    *inside = 1;</a>
+<a name="ln777">    return;</a>
+<a name="ln778">  }</a>
+<a name="ln779"> </a>
+<a name="ln780">  // we check if it's inside borders</a>
+<a name="ln781">  if(!dt_masks_point_in_form_exact(x,yf,gpt-&gt;border,corner_count * 3,gpt-&gt;border_count)) return;</a>
+<a name="ln782"> </a>
+<a name="ln783">  *inside = 1;</a>
+<a name="ln784"> </a>
+<a name="ln785">  // and we check if it's inside form</a>
+<a name="ln786">  if(gpt-&gt;points_count &gt; 2 + corner_count * 3)</a>
+<a name="ln787">  {</a>
+<a name="ln788">    float as2 = as * as;</a>
+<a name="ln789">    //float as2 = 1600.0 * as1;</a>
+<a name="ln790">    float last = gpt-&gt;points[gpt-&gt;points_count * 2 - 1];</a>
+<a name="ln791">    int nb = 0;</a>
+<a name="ln792">    int near_form = 0;</a>
+<a name="ln793">    int current_seg = 1;</a>
+<a name="ln794">    for(int i = corner_count * 3; i &lt; gpt-&gt;points_count; i++)</a>
+<a name="ln795">    {</a>
+<a name="ln796">      //if we need to jump to skip points (in case of deleted point, because of self-intersection)</a>
+<a name="ln797">      if(isnan(gpt-&gt;points[i * 2]))</a>
+<a name="ln798">      {</a>
+<a name="ln799">        if(isnan(gpt-&gt;points[i * 2 + 1])) break;</a>
+<a name="ln800">        i = (int)gpt-&gt;points[i * 2 + 1] - 1;</a>
+<a name="ln801">        continue;</a>
+<a name="ln802">      }</a>
+<a name="ln803">      // do we change of path segment ?</a>
+<a name="ln804">      if(gpt-&gt;points[i * 2 + 1] == gpt-&gt;points[current_seg * 6 + 3] &amp;&amp; gpt-&gt;points[i * 2] == gpt-&gt;points[current_seg * 6 + 2])</a>
+<a name="ln805">      {</a>
+<a name="ln806">        current_seg = (current_seg + 1) % corner_count;</a>
+<a name="ln807">      }</a>
+<a name="ln808">      //distance from tested point to current form point</a>
+<a name="ln809">      float yy = gpt-&gt;points[i * 2 + 1];</a>
+<a name="ln810">      float dd = (gpt-&gt;points[i * 2] - x) * (gpt-&gt;points[i * 2] - x)</a>
+<a name="ln811">                  + (yy - yf) * (yy - yf);</a>
+<a name="ln812"> </a>
+<a name="ln813">      if(dd &lt; as2)</a>
+<a name="ln814">      {</a>
+<a name="ln815">        near_form = 1;</a>
+<a name="ln816">        if(current_seg == 0)</a>
+<a name="ln817">          *near = corner_count - 1;</a>
+<a name="ln818">        else</a>
+<a name="ln819">          *near = current_seg - 1;</a>
+<a name="ln820">      }</a>
+<a name="ln821"> </a>
+<a name="ln822">      if (((yf&lt;=yy &amp;&amp; yf&gt;last) || (yf&gt;=yy &amp;&amp; yf&lt;last)) &amp;&amp; (gpt-&gt;points[i * 2] &gt; x)) nb++;</a>
+<a name="ln823"> </a>
+<a name="ln824">      last = yy;</a>
+<a name="ln825">    }</a>
+<a name="ln826">    *inside_border = !((nb &amp; 1) || (near_form));</a>
+<a name="ln827">  }</a>
+<a name="ln828">  else *inside_border = 1;</a>
+<a name="ln829">}</a>
+<a name="ln830"> </a>
+<a name="ln831">static int dt_path_get_points_border(dt_develop_t *dev, dt_masks_form_t *form, float **points,</a>
+<a name="ln832">                                     int *points_count, float **border, int *border_count, int source)</a>
+<a name="ln833">{</a>
+<a name="ln834">  return _path_get_points_border(dev, form, 999999, dev-&gt;preview_pipe, points, points_count, border,</a>
+<a name="ln835">                                 border_count, source);</a>
+<a name="ln836">}</a>
+<a name="ln837"> </a>
+<a name="ln838">static int dt_path_events_mouse_scrolled(struct dt_iop_module_t *module, float pzx, float pzy, int up,</a>
+<a name="ln839">                                         uint32_t state, dt_masks_form_t *form, int parentid,</a>
+<a name="ln840">                                         dt_masks_form_gui_t *gui, int index)</a>
+<a name="ln841">{</a>
+<a name="ln842">  // resize a shape even if on a node or segment</a>
+<a name="ln843">  if(gui-&gt;form_selected || gui-&gt;point_selected &gt;= 0 || gui-&gt;feather_selected &gt;= 0 || gui-&gt;seg_selected &gt;= 0</a>
+<a name="ln844">     || gui-&gt;point_border_selected &gt;= 0)</a>
+<a name="ln845">  {</a>
+<a name="ln846">    // we register the current position</a>
+<a name="ln847">    if(gui-&gt;scrollx == 0.0f &amp;&amp; gui-&gt;scrolly == 0.0f)</a>
+<a name="ln848">    {</a>
+<a name="ln849">      gui-&gt;scrollx = pzx;</a>
+<a name="ln850">      gui-&gt;scrolly = pzy;</a>
+<a name="ln851">    }</a>
+<a name="ln852">    if((state &amp; GDK_CONTROL_MASK) == GDK_CONTROL_MASK)</a>
+<a name="ln853">    {</a>
+<a name="ln854">      // we try to change the opacity</a>
+<a name="ln855">      dt_masks_form_change_opacity(form, parentid, up);</a>
+<a name="ln856">    }</a>
+<a name="ln857">    else</a>
+<a name="ln858">    {</a>
+<a name="ln859">      float amount = 1.03f;</a>
+<a name="ln860">      if(up) amount = 0.97f;</a>
+<a name="ln861">      guint nb = g_list_length(form-&gt;points);</a>
+<a name="ln862">      // resize don't care where the mouse is inside a shape</a>
+<a name="ln863">      if((state &amp; GDK_SHIFT_MASK) == GDK_SHIFT_MASK)</a>
+<a name="ln864">      {</a>
+<a name="ln865">        // do not exceed upper limit of 1.0</a>
+<a name="ln866">        for(int k = 0; k &lt; nb; k++)</a>
+<a name="ln867">        {</a>
+<a name="ln868">          dt_masks_point_path_t *point = (dt_masks_point_path_t *)g_list_nth_data(form-&gt;points, k);</a>
+<a name="ln869">          if(amount &gt; 1.0f &amp;&amp; (point-&gt;border[0] &gt; 1.0f || point-&gt;border[1] &gt; 1.0f)) return 1;</a>
+<a name="ln870">        }</a>
+<a name="ln871">        for(int k = 0; k &lt; nb; k++)</a>
+<a name="ln872">        {</a>
+<a name="ln873">          dt_masks_point_path_t *point = (dt_masks_point_path_t *)g_list_nth_data(form-&gt;points, k);</a>
+<a name="ln874">          point-&gt;border[0] *= amount;</a>
+<a name="ln875">          point-&gt;border[1] *= amount;</a>
+<a name="ln876">        }</a>
+<a name="ln877">        if(form-&gt;type &amp; (DT_MASKS_CLONE|DT_MASKS_NON_CLONE))</a>
+<a name="ln878">        {</a>
+<a name="ln879">          float masks_border = dt_conf_get_float(&quot;plugins/darkroom/spots/path_border&quot;);</a>
+<a name="ln880">          masks_border = MAX(0.0005f, MIN(masks_border * amount, 0.5f));</a>
+<a name="ln881">          dt_conf_set_float(&quot;plugins/darkroom/spots/path_border&quot;, masks_border);</a>
+<a name="ln882">        }</a>
+<a name="ln883">        else</a>
+<a name="ln884">        {</a>
+<a name="ln885">          float masks_border = dt_conf_get_float(&quot;plugins/darkroom/masks/path/border&quot;);</a>
+<a name="ln886">          masks_border = MAX(0.0005f, MIN(masks_border * amount, 0.5f));</a>
+<a name="ln887">          dt_conf_set_float(&quot;plugins/darkroom/masks/path/border&quot;, masks_border);</a>
+<a name="ln888">        }</a>
+<a name="ln889">      }</a>
+<a name="ln890">      else if(gui-&gt;edit_mode == DT_MASKS_EDIT_FULL)</a>
+<a name="ln891">      {</a>
+<a name="ln892">        // get the center of gravity of the form (like if it was a simple polygon)</a>
+<a name="ln893">        float bx = 0.0f;</a>
+<a name="ln894">        float by = 0.0f;</a>
+<a name="ln895">        float surf = 0.0f;</a>
+<a name="ln896"> </a>
+<a name="ln897">        for(int k = 0; k &lt; nb; k++)</a>
+<a name="ln898">        {</a>
+<a name="ln899">          int k2 = (k + 1) % nb;</a>
+<a name="ln900">          dt_masks_point_path_t *point1 = (dt_masks_point_path_t *)g_list_nth_data(form-&gt;points, k);</a>
+<a name="ln901">          dt_masks_point_path_t *point2 = (dt_masks_point_path_t *)g_list_nth_data(form-&gt;points, k2);</a>
+<a name="ln902">          surf += point1-&gt;corner[0] * point2-&gt;corner[1] - point2-&gt;corner[0] * point1-&gt;corner[1];</a>
+<a name="ln903"> </a>
+<a name="ln904">          bx += (point1-&gt;corner[0] + point2-&gt;corner[0])</a>
+<a name="ln905">                * (point1-&gt;corner[0] * point2-&gt;corner[1] - point2-&gt;corner[0] * point1-&gt;corner[1]);</a>
+<a name="ln906">          by += (point1-&gt;corner[1] + point2-&gt;corner[1])</a>
+<a name="ln907">                * (point1-&gt;corner[0] * point2-&gt;corner[1] - point2-&gt;corner[0] * point1-&gt;corner[1]);</a>
+<a name="ln908">        }</a>
+<a name="ln909">        bx /= 3.0f * surf;</a>
+<a name="ln910">        by /= 3.0f * surf;</a>
+<a name="ln911"> </a>
+<a name="ln912">        if(amount &lt; 1.0f &amp;&amp; surf &lt; 0.00001f &amp;&amp; surf &gt; -0.00001f) return 1;</a>
+<a name="ln913">        if(amount &gt; 1.0f &amp;&amp; surf &gt; 4.0f) return 1;</a>
+<a name="ln914"> </a>
+<a name="ln915">        // now we move each point</a>
+<a name="ln916">        for(int k = 0; k &lt; nb; k++)</a>
+<a name="ln917">        {</a>
+<a name="ln918">          dt_masks_point_path_t *point = (dt_masks_point_path_t *)g_list_nth_data(form-&gt;points, k);</a>
+<a name="ln919">          float x = (point-&gt;corner[0] - bx) * amount;</a>
+<a name="ln920">          float y = (point-&gt;corner[1] - by) * amount;</a>
+<a name="ln921"> </a>
+<a name="ln922">          // we stretch ctrl points</a>
+<a name="ln923">          float ct1x = (point-&gt;ctrl1[0] - point-&gt;corner[0]) * amount;</a>
+<a name="ln924">          float ct1y = (point-&gt;ctrl1[1] - point-&gt;corner[1]) * amount;</a>
+<a name="ln925">          float ct2x = (point-&gt;ctrl2[0] - point-&gt;corner[0]) * amount;</a>
+<a name="ln926">          float ct2y = (point-&gt;ctrl2[1] - point-&gt;corner[1]) * amount;</a>
+<a name="ln927"> </a>
+<a name="ln928">          // and we set the new points</a>
+<a name="ln929">          point-&gt;corner[0] = bx + x;</a>
+<a name="ln930">          point-&gt;corner[1] = by + y;</a>
+<a name="ln931">          point-&gt;ctrl1[0] = point-&gt;corner[0] + ct1x;</a>
+<a name="ln932">          point-&gt;ctrl1[1] = point-&gt;corner[1] + ct1y;</a>
+<a name="ln933">          point-&gt;ctrl2[0] = point-&gt;corner[0] + ct2x;</a>
+<a name="ln934">          point-&gt;ctrl2[1] = point-&gt;corner[1] + ct2y;</a>
+<a name="ln935">        }</a>
+<a name="ln936"> </a>
+<a name="ln937">        // now the redraw/save stuff</a>
+<a name="ln938">        _path_init_ctrl_points(form);</a>
+<a name="ln939">      }</a>
+<a name="ln940">      else</a>
+<a name="ln941">      {</a>
+<a name="ln942">        return 0;</a>
+<a name="ln943">      }</a>
+<a name="ln944"> </a>
+<a name="ln945">      dt_masks_write_form(form, darktable.develop);</a>
+<a name="ln946"> </a>
+<a name="ln947">      // we recreate the form points</a>
+<a name="ln948">      dt_masks_gui_form_remove(form, gui, index);</a>
+<a name="ln949">      dt_masks_gui_form_create(form, gui, index);</a>
+<a name="ln950"> </a>
+<a name="ln951">      // we save the move</a>
+<a name="ln952">      dt_masks_update_image(darktable.develop);</a>
+<a name="ln953">    }</a>
+<a name="ln954">    return 1;</a>
+<a name="ln955">  }</a>
+<a name="ln956">  return 0;</a>
+<a name="ln957">}</a>
+<a name="ln958"> </a>
+<a name="ln959">static int dt_path_events_button_pressed(struct dt_iop_module_t *module, float pzx, float pzy,</a>
+<a name="ln960">                                         double pressure, int which, int type, uint32_t state,</a>
+<a name="ln961">                                         dt_masks_form_t *form, int parentid, dt_masks_form_gui_t *gui,</a>
+<a name="ln962">                                         int index)</a>
+<a name="ln963">{</a>
+<a name="ln964">  if(type == GDK_2BUTTON_PRESS || type == GDK_3BUTTON_PRESS) return 1;</a>
+<a name="ln965">  if(!gui) return 0;</a>
+<a name="ln966">  dt_masks_form_gui_points_t *gpt = (dt_masks_form_gui_points_t *)g_list_nth_data(gui-&gt;points, index);</a>
+<a name="ln967">  if(!gpt) return 0;</a>
+<a name="ln968"> </a>
+<a name="ln969">  float masks_border;</a>
+<a name="ln970">  if(form-&gt;type &amp; (DT_MASKS_CLONE|DT_MASKS_NON_CLONE))</a>
+<a name="ln971">    masks_border = MIN(dt_conf_get_float(&quot;plugins/darkroom/spots/path_border&quot;), 0.5f);</a>
+<a name="ln972">  else</a>
+<a name="ln973">    masks_border = MIN(dt_conf_get_float(&quot;plugins/darkroom/masks/path/border&quot;), 0.5f);</a>
+<a name="ln974"> </a>
+<a name="ln975">  if(gui-&gt;creation &amp;&amp; which == 1 &amp;&amp; g_list_length(form-&gt;points) == 0</a>
+<a name="ln976">     &amp;&amp; (((state &amp; (GDK_CONTROL_MASK | GDK_SHIFT_MASK)) == (GDK_CONTROL_MASK | GDK_SHIFT_MASK))</a>
+<a name="ln977">         || ((state &amp; GDK_SHIFT_MASK) == GDK_SHIFT_MASK)))</a>
+<a name="ln978">  {</a>
+<a name="ln979">    // set some absolute or relative position for the source of the clone mask</a>
+<a name="ln980">    if(form-&gt;type &amp; DT_MASKS_CLONE) dt_masks_set_source_pos_initial_state(gui, state, pzx, pzy);</a>
+<a name="ln981"> </a>
+<a name="ln982">    return 1;</a>
+<a name="ln983">  }</a>
+<a name="ln984">  else if(gui-&gt;creation &amp;&amp; (which == 3 || gui-&gt;creation_closing_form))</a>
+<a name="ln985">  {</a>
+<a name="ln986">    // we don't want a form with less than 3 points</a>
+<a name="ln987">    if(g_list_length(form-&gt;points) &lt; 4)</a>
+<a name="ln988">    {</a>
+<a name="ln989">      // we don't really have a way to know if the user wants to cancel the continuous add here</a>
+<a name="ln990">      // or just cancelling this mask, let's assume that this is not a mistake and cancel</a>
+<a name="ln991">      // the continuous add</a>
+<a name="ln992">      gui-&gt;creation_continuous = FALSE;</a>
+<a name="ln993">      gui-&gt;creation_continuous_module = NULL;</a>
+<a name="ln994">      dt_masks_set_edit_mode(module, DT_MASKS_EDIT_FULL);</a>
+<a name="ln995">      dt_masks_iop_update(module);</a>
+<a name="ln996">      dt_control_queue_redraw_center();</a>
+<a name="ln997">      return 1;</a>
+<a name="ln998">    }</a>
+<a name="ln999">    else</a>
+<a name="ln1000">    {</a>
+<a name="ln1001">      dt_iop_module_t *crea_module = gui-&gt;creation_module;</a>
+<a name="ln1002">      // we delete last point (the one we are currently dragging)</a>
+<a name="ln1003">      dt_masks_point_path_t *point = (dt_masks_point_path_t *)g_list_last(form-&gt;points)-&gt;data;</a>
+<a name="ln1004">      form-&gt;points = g_list_remove(form-&gt;points, point);</a>
+<a name="ln1005">      free(point);</a>
+<a name="ln1006">      point = NULL;</a>
+<a name="ln1007"> </a>
+<a name="ln1008">      gui-&gt;point_dragging = -1;</a>
+<a name="ln1009">      _path_init_ctrl_points(form);</a>
+<a name="ln1010"> </a>
+<a name="ln1011">      // we save the form and quit creation mode</a>
+<a name="ln1012">      dt_masks_gui_form_save_creation(darktable.develop, crea_module, form, gui);</a>
+<a name="ln1013">      if(crea_module)</a>
+<a name="ln1014">      {</a>
+<a name="ln1015">        dt_dev_add_history_item(darktable.develop, crea_module, TRUE);</a>
+<a name="ln1016">        // and we switch in edit mode to show all the forms</a>
+<a name="ln1017">        if(gui-&gt;creation_continuous)</a>
+<a name="ln1018">          dt_masks_set_edit_mode_single_form(crea_module, form-&gt;formid, DT_MASKS_EDIT_FULL);</a>
+<a name="ln1019">        else</a>
+<a name="ln1020">          dt_masks_set_edit_mode(crea_module, DT_MASKS_EDIT_FULL);</a>
+<a name="ln1021">        dt_masks_iop_update(crea_module);</a>
+<a name="ln1022">        gui-&gt;creation_module = NULL;</a>
+<a name="ln1023">      }</a>
+<a name="ln1024">      else</a>
+<a name="ln1025">      {</a>
+<a name="ln1026">        dt_dev_masks_selection_change(darktable.develop, form-&gt;formid, TRUE);</a>
+<a name="ln1027">      }</a>
+<a name="ln1028"> </a>
+<a name="ln1029">      if(gui-&gt;creation_continuous)</a>
+<a name="ln1030">      {</a>
+<a name="ln1031">        dt_masks_form_t *form_new = dt_masks_create(form-&gt;type);</a>
+<a name="ln1032">        dt_masks_change_form_gui(form_new);</a>
+<a name="ln1033"> </a>
+<a name="ln1034">        darktable.develop-&gt;form_gui-&gt;creation = TRUE;</a>
+<a name="ln1035">        darktable.develop-&gt;form_gui-&gt;creation_module = gui-&gt;creation_continuous_module;</a>
+<a name="ln1036">      }</a>
+<a name="ln1037">      else if(form-&gt;type &amp; (DT_MASKS_CLONE | DT_MASKS_NON_CLONE))</a>
+<a name="ln1038">      {</a>
+<a name="ln1039">        dt_masks_form_t *grp = darktable.develop-&gt;form_visible;</a>
+<a name="ln1040">        if(!grp || !(grp-&gt;type &amp; DT_MASKS_GROUP)) return 1;</a>
+<a name="ln1041">        int pos3 = 0, pos2 = -1;</a>
+<a name="ln1042">        GList *fs = g_list_first(grp-&gt;points);</a>
+<a name="ln1043">        while(fs)</a>
+<a name="ln1044">        {</a>
+<a name="ln1045">          dt_masks_point_group_t *pt = (dt_masks_point_group_t *)fs-&gt;data;</a>
+<a name="ln1046">          if(pt-&gt;formid == form-&gt;formid)</a>
+<a name="ln1047">          {</a>
+<a name="ln1048">            pos2 = pos3;</a>
+<a name="ln1049">            break;</a>
+<a name="ln1050">          }</a>
+<a name="ln1051">          pos3++;</a>
+<a name="ln1052">          fs = g_list_next(fs);</a>
+<a name="ln1053">        }</a>
+<a name="ln1054">        if(pos2 &lt; 0) return 1;</a>
+<a name="ln1055">        dt_masks_form_gui_t *gui2 = darktable.develop-&gt;form_gui;</a>
+<a name="ln1056">        if(!gui2) return 1;</a>
+<a name="ln1057">        gui2-&gt;group_selected = pos2;</a>
+<a name="ln1058">        </a>
+<a name="ln1059">        dt_masks_select_form(crea_module, dt_masks_get_from_id(darktable.develop, form-&gt;formid));</a>
+<a name="ln1060">      }</a>
+<a name="ln1061">      </a>
+<a name="ln1062">      dt_control_queue_redraw_center();</a>
+<a name="ln1063">    }</a>
+<a name="ln1064">  }</a>
+<a name="ln1065">  else if(which == 1)</a>
+<a name="ln1066">  {</a>
+<a name="ln1067">    if(gui-&gt;creation)</a>
+<a name="ln1068">    {</a>
+<a name="ln1069">      dt_masks_point_path_t *bzpt = (dt_masks_point_path_t *)(malloc(sizeof(dt_masks_point_path_t)));</a>
+<a name="ln1070">      int nb = g_list_length(form-&gt;points);</a>
+<a name="ln1071">      // change the values</a>
+<a name="ln1072">      float wd = darktable.develop-&gt;preview_pipe-&gt;backbuf_width;</a>
+<a name="ln1073">      float ht = darktable.develop-&gt;preview_pipe-&gt;backbuf_height;</a>
+<a name="ln1074">      float pts[2] = { pzx * wd, pzy * ht };</a>
+<a name="ln1075">      dt_dev_distort_backtransform(darktable.develop, pts, 1);</a>
+<a name="ln1076"> </a>
+<a name="ln1077">      bzpt-&gt;corner[0] = pts[0] / darktable.develop-&gt;preview_pipe-&gt;iwidth;</a>
+<a name="ln1078">      bzpt-&gt;corner[1] = pts[1] / darktable.develop-&gt;preview_pipe-&gt;iheight;</a>
+<a name="ln1079">      bzpt-&gt;ctrl1[0] = bzpt-&gt;ctrl1[1] = bzpt-&gt;ctrl2[0] = bzpt-&gt;ctrl2[1] = -1.0;</a>
+<a name="ln1080">      bzpt-&gt;state = DT_MASKS_POINT_STATE_NORMAL;</a>
+<a name="ln1081"> </a>
+<a name="ln1082">      bzpt-&gt;border[0] = bzpt-&gt;border[1] = MAX(0.0005f, masks_border);</a>
+<a name="ln1083"> </a>
+<a name="ln1084">      // if that's the first point we should had another one as base point</a>
+<a name="ln1085">      if(nb == 0)</a>
+<a name="ln1086">      {</a>
+<a name="ln1087">        dt_masks_point_path_t *bzpt2 = (dt_masks_point_path_t *)(malloc(sizeof(dt_masks_point_path_t)));</a>
+<a name="ln1088">        bzpt2-&gt;corner[0] = pts[0] / darktable.develop-&gt;preview_pipe-&gt;iwidth;</a>
+<a name="ln1089">        bzpt2-&gt;corner[1] = pts[1] / darktable.develop-&gt;preview_pipe-&gt;iheight;</a>
+<a name="ln1090">        bzpt2-&gt;ctrl1[0] = bzpt2-&gt;ctrl1[1] = bzpt2-&gt;ctrl2[0] = bzpt2-&gt;ctrl2[1] = -1.0;</a>
+<a name="ln1091">        bzpt2-&gt;border[0] = bzpt2-&gt;border[1] = MAX(0.0005f, masks_border);</a>
+<a name="ln1092">        bzpt2-&gt;state = DT_MASKS_POINT_STATE_NORMAL;</a>
+<a name="ln1093">        form-&gt;points = g_list_append(form-&gt;points, bzpt2);</a>
+<a name="ln1094"> </a>
+<a name="ln1095">        if(form-&gt;type &amp; DT_MASKS_CLONE)</a>
+<a name="ln1096">        {</a>
+<a name="ln1097">          dt_masks_set_source_pos_initial_value(gui, DT_MASKS_PATH, form, pzx, pzy);</a>
+<a name="ln1098">        }</a>
+<a name="ln1099">        else</a>
+<a name="ln1100">        {</a>
+<a name="ln1101">          // not used by regular masks</a>
+<a name="ln1102">          form-&gt;source[0] = form-&gt;source[1] = 0.0f;</a>
+<a name="ln1103">        }</a>
+<a name="ln1104">        nb++;</a>
+<a name="ln1105">      }</a>
+<a name="ln1106">      form-&gt;points = g_list_append(form-&gt;points, bzpt);</a>
+<a name="ln1107"> </a>
+<a name="ln1108">      // if this is a ctrl click, the last created point is a sharp one</a>
+<a name="ln1109">      if((state &amp; GDK_CONTROL_MASK) == GDK_CONTROL_MASK)</a>
+<a name="ln1110">      {</a>
+<a name="ln1111">        dt_masks_point_path_t *bzpt3 = g_list_nth_data(form-&gt;points, nb - 1);</a>
+<a name="ln1112">        bzpt3-&gt;ctrl1[0] = bzpt3-&gt;ctrl2[0] = bzpt3-&gt;corner[0];</a>
+<a name="ln1113">        bzpt3-&gt;ctrl1[1] = bzpt3-&gt;ctrl2[1] = bzpt3-&gt;corner[1];</a>
+<a name="ln1114">        bzpt3-&gt;state = DT_MASKS_POINT_STATE_USER;</a>
+<a name="ln1115">      }</a>
+<a name="ln1116"> </a>
+<a name="ln1117">      gui-&gt;point_dragging = nb;</a>
+<a name="ln1118"> </a>
+<a name="ln1119">      _path_init_ctrl_points(form);</a>
+<a name="ln1120"> </a>
+<a name="ln1121">      // we recreate the form points</a>
+<a name="ln1122">      dt_masks_gui_form_remove(form, gui, index);</a>
+<a name="ln1123">      dt_masks_gui_form_create(form, gui, index);</a>
+<a name="ln1124"> </a>
+<a name="ln1125">      dt_control_queue_redraw_center();</a>
+<a name="ln1126">      return 1;</a>
+<a name="ln1127">    }</a>
+<a name="ln1128">    else if(gui-&gt;source_selected &amp;&amp; gui-&gt;edit_mode == DT_MASKS_EDIT_FULL)</a>
+<a name="ln1129">    {</a>
+<a name="ln1130">      dt_masks_form_gui_points_t *gpt = (dt_masks_form_gui_points_t *)g_list_nth_data(gui-&gt;points, index);</a>
+<a name="ln1131">      if(!gpt) return 0;</a>
+<a name="ln1132">      // we start the form dragging</a>
+<a name="ln1133">      gui-&gt;source_dragging = TRUE;</a>
+<a name="ln1134">      gui-&gt;dx = gpt-&gt;source[2] - gui-&gt;posx;</a>
+<a name="ln1135">      gui-&gt;dy = gpt-&gt;source[3] - gui-&gt;posy;</a>
+<a name="ln1136">      return 1;</a>
+<a name="ln1137">    }</a>
+<a name="ln1138">    else if(gui-&gt;form_selected &amp;&amp; gui-&gt;edit_mode == DT_MASKS_EDIT_FULL)</a>
+<a name="ln1139">    {</a>
+<a name="ln1140">      gui-&gt;form_dragging = TRUE;</a>
+<a name="ln1141">      gui-&gt;point_edited = -1;</a>
+<a name="ln1142">      gui-&gt;dx = gpt-&gt;points[2] - gui-&gt;posx;</a>
+<a name="ln1143">      gui-&gt;dy = gpt-&gt;points[3] - gui-&gt;posy;</a>
+<a name="ln1144">      return 1;</a>
+<a name="ln1145">    }</a>
+<a name="ln1146">    else if(gui-&gt;point_selected &gt;= 0)</a>
+<a name="ln1147">    {</a>
+<a name="ln1148">      // if ctrl is pressed, we change the type of point</a>
+<a name="ln1149">      if(gui-&gt;point_edited == gui-&gt;point_selected &amp;&amp; ((state &amp; GDK_CONTROL_MASK) == GDK_CONTROL_MASK))</a>
+<a name="ln1150">      {</a>
+<a name="ln1151">        dt_masks_point_path_t *point</a>
+<a name="ln1152">            = (dt_masks_point_path_t *)g_list_nth_data(form-&gt;points, gui-&gt;point_edited);</a>
+<a name="ln1153">        if(point-&gt;state != DT_MASKS_POINT_STATE_NORMAL)</a>
+<a name="ln1154">        {</a>
+<a name="ln1155">          point-&gt;state = DT_MASKS_POINT_STATE_NORMAL;</a>
+<a name="ln1156">          _path_init_ctrl_points(form);</a>
+<a name="ln1157">        }</a>
+<a name="ln1158">        else</a>
+<a name="ln1159">        {</a>
+<a name="ln1160">          point-&gt;ctrl1[0] = point-&gt;ctrl2[0] = point-&gt;corner[0];</a>
+<a name="ln1161">          point-&gt;ctrl1[1] = point-&gt;ctrl2[1] = point-&gt;corner[1];</a>
+<a name="ln1162">          point-&gt;state = DT_MASKS_POINT_STATE_USER;</a>
+<a name="ln1163">        }</a>
+<a name="ln1164">        dt_masks_write_form(form, darktable.develop);</a>
+<a name="ln1165"> </a>
+<a name="ln1166">        // we recreate the form points</a>
+<a name="ln1167">        dt_masks_gui_form_remove(form, gui, index);</a>
+<a name="ln1168">        dt_masks_gui_form_create(form, gui, index);</a>
+<a name="ln1169">        gpt-&gt;clockwise = _path_is_clockwise(form);</a>
+<a name="ln1170">        // we save the move</a>
+<a name="ln1171">        dt_masks_update_image(darktable.develop);</a>
+<a name="ln1172">        return 1;</a>
+<a name="ln1173">      }</a>
+<a name="ln1174">      // we register the current position to avoid accidental move</a>
+<a name="ln1175">      if(gui-&gt;point_edited &lt; 0 &amp;&amp; gui-&gt;scrollx == 0.0f &amp;&amp; gui-&gt;scrolly == 0.0f)</a>
+<a name="ln1176">      {</a>
+<a name="ln1177">        gui-&gt;scrollx = pzx;</a>
+<a name="ln1178">        gui-&gt;scrolly = pzy;</a>
+<a name="ln1179">      }</a>
+<a name="ln1180">      gui-&gt;point_edited = gui-&gt;point_dragging = gui-&gt;point_selected;</a>
+<a name="ln1181">      gpt-&gt;clockwise = _path_is_clockwise(form);</a>
+<a name="ln1182">      dt_control_queue_redraw_center();</a>
+<a name="ln1183">      return 1;</a>
+<a name="ln1184">    }</a>
+<a name="ln1185">    else if(gui-&gt;feather_selected &gt;= 0)</a>
+<a name="ln1186">    {</a>
+<a name="ln1187">      gui-&gt;feather_dragging = gui-&gt;feather_selected;</a>
+<a name="ln1188">      dt_control_queue_redraw_center();</a>
+<a name="ln1189">      return 1;</a>
+<a name="ln1190">    }</a>
+<a name="ln1191">    else if(gui-&gt;point_border_selected &gt;= 0)</a>
+<a name="ln1192">    {</a>
+<a name="ln1193">      gui-&gt;point_edited = -1;</a>
+<a name="ln1194">      gui-&gt;point_border_dragging = gui-&gt;point_border_selected;</a>
+<a name="ln1195">      dt_control_queue_redraw_center();</a>
+<a name="ln1196">      return 1;</a>
+<a name="ln1197">    }</a>
+<a name="ln1198">    else if(gui-&gt;seg_selected &gt;= 0)</a>
+<a name="ln1199">    {</a>
+<a name="ln1200">      gui-&gt;point_edited = -1;</a>
+<a name="ln1201">      if((state &amp; GDK_CONTROL_MASK) == GDK_CONTROL_MASK)</a>
+<a name="ln1202">      {</a>
+<a name="ln1203">        // we add a new point to the path</a>
+<a name="ln1204">        dt_masks_point_path_t *bzpt = (dt_masks_point_path_t *)(malloc(sizeof(dt_masks_point_path_t)));</a>
+<a name="ln1205">        // change the values</a>
+<a name="ln1206">        float wd = darktable.develop-&gt;preview_pipe-&gt;backbuf_width;</a>
+<a name="ln1207">        float ht = darktable.develop-&gt;preview_pipe-&gt;backbuf_height;</a>
+<a name="ln1208">        float pts[2] = { pzx * wd, pzy * ht };</a>
+<a name="ln1209">        dt_dev_distort_backtransform(darktable.develop, pts, 1);</a>
+<a name="ln1210"> </a>
+<a name="ln1211">        bzpt-&gt;corner[0] = pts[0] / darktable.develop-&gt;preview_pipe-&gt;iwidth;</a>
+<a name="ln1212">        bzpt-&gt;corner[1] = pts[1] / darktable.develop-&gt;preview_pipe-&gt;iheight;</a>
+<a name="ln1213">        bzpt-&gt;ctrl1[0] = bzpt-&gt;ctrl1[1] = bzpt-&gt;ctrl2[0] = bzpt-&gt;ctrl2[1] = -1.0;</a>
+<a name="ln1214">        bzpt-&gt;state = DT_MASKS_POINT_STATE_NORMAL;</a>
+<a name="ln1215"> </a>
+<a name="ln1216">        // interpolate the border width of the two neighbour points'</a>
+<a name="ln1217">        int max_index = g_list_length(form-&gt;points) - 1;</a>
+<a name="ln1218">        int left_index = gui-&gt;seg_selected;</a>
+<a name="ln1219">        int right_index = gui-&gt;seg_selected == max_index ? 0 : gui-&gt;seg_selected + 1;</a>
+<a name="ln1220">        dt_masks_point_path_t *left = (dt_masks_point_path_t *)g_list_nth_data(form-&gt;points, left_index);</a>
+<a name="ln1221">        dt_masks_point_path_t *right = (dt_masks_point_path_t *)g_list_nth_data(form-&gt;points, right_index);</a>
+<a name="ln1222">        bzpt-&gt;border[0] = MAX(0.0005f, (left-&gt;border[0] + right-&gt;border[0]) * 0.5);</a>
+<a name="ln1223">        bzpt-&gt;border[1] = MAX(0.0005f, (left-&gt;border[1] + right-&gt;border[1]) * 0.5);</a>
+<a name="ln1224"> </a>
+<a name="ln1225">        form-&gt;points = g_list_insert(form-&gt;points, bzpt, gui-&gt;seg_selected + 1);</a>
+<a name="ln1226">        _path_init_ctrl_points(form);</a>
+<a name="ln1227">        dt_masks_gui_form_remove(form, gui, index);</a>
+<a name="ln1228">        dt_masks_gui_form_create(form, gui, index);</a>
+<a name="ln1229">        gui-&gt;point_edited = gui-&gt;point_dragging = gui-&gt;point_selected = gui-&gt;seg_selected + 1;</a>
+<a name="ln1230">        gui-&gt;seg_selected = -1;</a>
+<a name="ln1231">        dt_control_queue_redraw_center();</a>
+<a name="ln1232">      }</a>
+<a name="ln1233">      else</a>
+<a name="ln1234">      {</a>
+<a name="ln1235">        // we move the entire segment</a>
+<a name="ln1236">        gui-&gt;seg_dragging = gui-&gt;seg_selected;</a>
+<a name="ln1237">        gui-&gt;dx = gpt-&gt;points[gui-&gt;seg_selected * 6 + 2] - gui-&gt;posx;</a>
+<a name="ln1238">        gui-&gt;dy = gpt-&gt;points[gui-&gt;seg_selected * 6 + 3] - gui-&gt;posy;</a>
+<a name="ln1239">      }</a>
+<a name="ln1240">      return 1;</a>
+<a name="ln1241">    }</a>
+<a name="ln1242">    gui-&gt;point_edited = -1;</a>
+<a name="ln1243">  }</a>
+<a name="ln1244">  else if(which == 3 &amp;&amp; gui-&gt;point_selected &gt;= 0)</a>
+<a name="ln1245">  {</a>
+<a name="ln1246">    // we remove the point (and the entire form if there is too few points)</a>
+<a name="ln1247">    if(g_list_length(form-&gt;points) &lt; 4)</a>
+<a name="ln1248">    {</a>
+<a name="ln1249">      // if the form doesn't belong to a group, we don't delete it</a>
+<a name="ln1250">      if(parentid &lt;= 0) return 1;</a>
+<a name="ln1251"> </a>
+<a name="ln1252">      // we hide the form</a>
+<a name="ln1253">      if(!(darktable.develop-&gt;form_visible-&gt;type &amp; DT_MASKS_GROUP))</a>
+<a name="ln1254">        dt_masks_change_form_gui(NULL);</a>
+<a name="ln1255">      else if(g_list_length(darktable.develop-&gt;form_visible-&gt;points) &lt; 2)</a>
+<a name="ln1256">        dt_masks_change_form_gui(NULL);</a>
+<a name="ln1257">      else</a>
+<a name="ln1258">      {</a>
+<a name="ln1259">        int emode = gui-&gt;edit_mode;</a>
+<a name="ln1260">        dt_masks_clear_form_gui(darktable.develop);</a>
+<a name="ln1261">        GList *forms = g_list_first(darktable.develop-&gt;form_visible-&gt;points);</a>
+<a name="ln1262">        while(forms)</a>
+<a name="ln1263">        {</a>
+<a name="ln1264">          dt_masks_point_group_t *gpt = (dt_masks_point_group_t *)forms-&gt;data;</a>
+<a name="ln1265">          if(gpt-&gt;formid == form-&gt;formid)</a>
+<a name="ln1266">          {</a>
+<a name="ln1267">            darktable.develop-&gt;form_visible-&gt;points</a>
+<a name="ln1268">                = g_list_remove(darktable.develop-&gt;form_visible-&gt;points, gpt);</a>
+<a name="ln1269">            free(gpt);</a>
+<a name="ln1270">            break;</a>
+<a name="ln1271">          }</a>
+<a name="ln1272">          forms = g_list_next(forms);</a>
+<a name="ln1273">        }</a>
+<a name="ln1274">        gui-&gt;edit_mode = emode;</a>
+<a name="ln1275">      }</a>
+<a name="ln1276"> </a>
+<a name="ln1277">      // we delete or remove the shape</a>
+<a name="ln1278">      dt_masks_form_remove(module, NULL, form);</a>
+<a name="ln1279">      dt_dev_masks_list_change(darktable.develop);</a>
+<a name="ln1280">      dt_control_queue_redraw_center();</a>
+<a name="ln1281">      return 1;</a>
+<a name="ln1282">    }</a>
+<a name="ln1283">    dt_masks_point_path_t *point</a>
+<a name="ln1284">        = (dt_masks_point_path_t *)g_list_nth_data(form-&gt;points, gui-&gt;point_selected);</a>
+<a name="ln1285">    form-&gt;points = g_list_remove(form-&gt;points, point);</a>
+<a name="ln1286">    free(point);</a>
+<a name="ln1287">    // form-&gt;points = g_list_delete_link(form-&gt;points, g_list_nth(form-&gt;points, gui-&gt;point_selected));</a>
+<a name="ln1288">    gui-&gt;point_selected = -1;</a>
+<a name="ln1289">    _path_init_ctrl_points(form);</a>
+<a name="ln1290"> </a>
+<a name="ln1291">    dt_masks_write_form(form, darktable.develop);</a>
+<a name="ln1292"> </a>
+<a name="ln1293">    // we recreate the form points</a>
+<a name="ln1294">    dt_masks_gui_form_remove(form, gui, index);</a>
+<a name="ln1295">    dt_masks_gui_form_create(form, gui, index);</a>
+<a name="ln1296">    gpt-&gt;clockwise = _path_is_clockwise(form);</a>
+<a name="ln1297">    // we save the move</a>
+<a name="ln1298">    dt_masks_update_image(darktable.develop);</a>
+<a name="ln1299"> </a>
+<a name="ln1300">    return 1;</a>
+<a name="ln1301">  }</a>
+<a name="ln1302">  else if(which == 3 &amp;&amp; gui-&gt;feather_selected &gt;= 0)</a>
+<a name="ln1303">  {</a>
+<a name="ln1304">    dt_masks_point_path_t *point</a>
+<a name="ln1305">        = (dt_masks_point_path_t *)g_list_nth_data(form-&gt;points, gui-&gt;feather_selected);</a>
+<a name="ln1306">    if(point-&gt;state != DT_MASKS_POINT_STATE_NORMAL)</a>
+<a name="ln1307">    {</a>
+<a name="ln1308">      point-&gt;state = DT_MASKS_POINT_STATE_NORMAL;</a>
+<a name="ln1309">      _path_init_ctrl_points(form);</a>
+<a name="ln1310"> </a>
+<a name="ln1311">      dt_masks_write_form(form, darktable.develop);</a>
+<a name="ln1312"> </a>
+<a name="ln1313">      // we recreate the form points</a>
+<a name="ln1314">      dt_masks_gui_form_remove(form, gui, index);</a>
+<a name="ln1315">      dt_masks_gui_form_create(form, gui, index);</a>
+<a name="ln1316">      gpt-&gt;clockwise = _path_is_clockwise(form);</a>
+<a name="ln1317">      // we save the move</a>
+<a name="ln1318">      dt_masks_update_image(darktable.develop);</a>
+<a name="ln1319">    }</a>
+<a name="ln1320">    return 1;</a>
+<a name="ln1321">  }</a>
+<a name="ln1322">  else if(which == 3 &amp;&amp; parentid &gt; 0 &amp;&amp; gui-&gt;edit_mode == DT_MASKS_EDIT_FULL)</a>
+<a name="ln1323">  {</a>
+<a name="ln1324">    // we hide the form</a>
+<a name="ln1325">    if(!(darktable.develop-&gt;form_visible-&gt;type &amp; DT_MASKS_GROUP))</a>
+<a name="ln1326">      dt_masks_change_form_gui(NULL);</a>
+<a name="ln1327">    else if(g_list_length(darktable.develop-&gt;form_visible-&gt;points) &lt; 2)</a>
+<a name="ln1328">      dt_masks_change_form_gui(NULL);</a>
+<a name="ln1329">    else</a>
+<a name="ln1330">    {</a>
+<a name="ln1331">      dt_masks_clear_form_gui(darktable.develop);</a>
+<a name="ln1332">      GList *forms = g_list_first(darktable.develop-&gt;form_visible-&gt;points);</a>
+<a name="ln1333">      while(forms)</a>
+<a name="ln1334">      {</a>
+<a name="ln1335">        dt_masks_point_group_t *gpt = (dt_masks_point_group_t *)forms-&gt;data;</a>
+<a name="ln1336">        if(gpt-&gt;formid == form-&gt;formid)</a>
+<a name="ln1337">        {</a>
+<a name="ln1338">          darktable.develop-&gt;form_visible-&gt;points</a>
+<a name="ln1339">              = g_list_remove(darktable.develop-&gt;form_visible-&gt;points, gpt);</a>
+<a name="ln1340">          free(gpt);</a>
+<a name="ln1341">          break;</a>
+<a name="ln1342">        }</a>
+<a name="ln1343">        forms = g_list_next(forms);</a>
+<a name="ln1344">      }</a>
+<a name="ln1345">      gui-&gt;edit_mode = DT_MASKS_EDIT_FULL;</a>
+<a name="ln1346">    }</a>
+<a name="ln1347"> </a>
+<a name="ln1348">    // we remove the shape</a>
+<a name="ln1349">    dt_dev_masks_list_remove(darktable.develop, form-&gt;formid, parentid);</a>
+<a name="ln1350">    dt_masks_form_remove(module, dt_masks_get_from_id(darktable.develop, parentid), form);</a>
+<a name="ln1351">    return 1;</a>
+<a name="ln1352">  }</a>
+<a name="ln1353"> </a>
+<a name="ln1354">  return 0;</a>
+<a name="ln1355">}</a>
+<a name="ln1356"> </a>
+<a name="ln1357">static int dt_path_events_button_released(struct dt_iop_module_t *module, float pzx, float pzy, int which,</a>
+<a name="ln1358">                                          uint32_t state, dt_masks_form_t *form, int parentid,</a>
+<a name="ln1359">                                          dt_masks_form_gui_t *gui, int index)</a>
+<a name="ln1360">{</a>
+<a name="ln1361">  if(!gui) return 0;</a>
+<a name="ln1362">  if(gui-&gt;creation) return 1;</a>
+<a name="ln1363">  dt_masks_form_gui_points_t *gpt = (dt_masks_form_gui_points_t *)g_list_nth_data(gui-&gt;points, index);</a>
+<a name="ln1364">  if(!gpt) return 0;</a>
+<a name="ln1365">  if(gui-&gt;form_dragging)</a>
+<a name="ln1366">  {</a>
+<a name="ln1367">    // we end the form dragging</a>
+<a name="ln1368">    gui-&gt;form_dragging = FALSE;</a>
+<a name="ln1369"> </a>
+<a name="ln1370">    // we get point0 new values</a>
+<a name="ln1371">    dt_masks_point_path_t *point = (dt_masks_point_path_t *)g_list_first(form-&gt;points)-&gt;data;</a>
+<a name="ln1372">    float wd = darktable.develop-&gt;preview_pipe-&gt;backbuf_width;</a>
+<a name="ln1373">    float ht = darktable.develop-&gt;preview_pipe-&gt;backbuf_height;</a>
+<a name="ln1374">    float pts[2] = { pzx * wd + gui-&gt;dx, pzy * ht + gui-&gt;dy };</a>
+<a name="ln1375">    dt_dev_distort_backtransform(darktable.develop, pts, 1);</a>
+<a name="ln1376">    float dx = pts[0] / darktable.develop-&gt;preview_pipe-&gt;iwidth - point-&gt;corner[0];</a>
+<a name="ln1377">    float dy = pts[1] / darktable.develop-&gt;preview_pipe-&gt;iheight - point-&gt;corner[1];</a>
+<a name="ln1378"> </a>
+<a name="ln1379">    // we move all points</a>
+<a name="ln1380">    GList *points = g_list_first(form-&gt;points);</a>
+<a name="ln1381">    while(points)</a>
+<a name="ln1382">    {</a>
+<a name="ln1383">      point = (dt_masks_point_path_t *)points-&gt;data;</a>
+<a name="ln1384">      point-&gt;corner[0] += dx;</a>
+<a name="ln1385">      point-&gt;corner[1] += dy;</a>
+<a name="ln1386">      point-&gt;ctrl1[0] += dx;</a>
+<a name="ln1387">      point-&gt;ctrl1[1] += dy;</a>
+<a name="ln1388">      point-&gt;ctrl2[0] += dx;</a>
+<a name="ln1389">      point-&gt;ctrl2[1] += dy;</a>
+<a name="ln1390">      points = g_list_next(points);</a>
+<a name="ln1391">    }</a>
+<a name="ln1392"> </a>
+<a name="ln1393">    dt_masks_write_form(form, darktable.develop);</a>
+<a name="ln1394"> </a>
+<a name="ln1395">    // we recreate the form points</a>
+<a name="ln1396">    dt_masks_gui_form_remove(form, gui, index);</a>
+<a name="ln1397">    dt_masks_gui_form_create(form, gui, index);</a>
+<a name="ln1398"> </a>
+<a name="ln1399">    // we save the move</a>
+<a name="ln1400">    dt_masks_update_image(darktable.develop);</a>
+<a name="ln1401"> </a>
+<a name="ln1402">    return 1;</a>
+<a name="ln1403">  }</a>
+<a name="ln1404">  else if(gui-&gt;source_dragging)</a>
+<a name="ln1405">  {</a>
+<a name="ln1406">    // we end the form dragging</a>
+<a name="ln1407">    gui-&gt;source_dragging = FALSE;</a>
+<a name="ln1408"> </a>
+<a name="ln1409">    // we change the source value</a>
+<a name="ln1410">    float wd = darktable.develop-&gt;preview_pipe-&gt;backbuf_width;</a>
+<a name="ln1411">    float ht = darktable.develop-&gt;preview_pipe-&gt;backbuf_height;</a>
+<a name="ln1412">    float pts[2] = { pzx * wd + gui-&gt;dx, pzy * ht + gui-&gt;dy };</a>
+<a name="ln1413">    dt_dev_distort_backtransform(darktable.develop, pts, 1);</a>
+<a name="ln1414">    form-&gt;source[0] = pts[0] / darktable.develop-&gt;preview_pipe-&gt;iwidth;</a>
+<a name="ln1415">    form-&gt;source[1] = pts[1] / darktable.develop-&gt;preview_pipe-&gt;iheight;</a>
+<a name="ln1416">    dt_masks_write_form(form, darktable.develop);</a>
+<a name="ln1417"> </a>
+<a name="ln1418">    // we recreate the form points</a>
+<a name="ln1419">    dt_masks_gui_form_remove(form, gui, index);</a>
+<a name="ln1420">    dt_masks_gui_form_create(form, gui, index);</a>
+<a name="ln1421"> </a>
+<a name="ln1422">    // we save the move</a>
+<a name="ln1423">    dt_masks_update_image(darktable.develop);</a>
+<a name="ln1424"> </a>
+<a name="ln1425">    return 1;</a>
+<a name="ln1426">  }</a>
+<a name="ln1427">  else if(gui-&gt;seg_dragging &gt;= 0)</a>
+<a name="ln1428">  {</a>
+<a name="ln1429">    gui-&gt;seg_dragging = -1;</a>
+<a name="ln1430">    gpt-&gt;clockwise = _path_is_clockwise(form);</a>
+<a name="ln1431">    dt_masks_write_form(form, darktable.develop);</a>
+<a name="ln1432">    dt_masks_update_image(darktable.develop);</a>
+<a name="ln1433">    return 1;</a>
+<a name="ln1434">  }</a>
+<a name="ln1435">  else if(gui-&gt;point_dragging &gt;= 0)</a>
+<a name="ln1436">  {</a>
+<a name="ln1437">    dt_masks_point_path_t *point</a>
+<a name="ln1438">        = (dt_masks_point_path_t *)g_list_nth_data(form-&gt;points, gui-&gt;point_dragging);</a>
+<a name="ln1439">    gui-&gt;point_dragging = -1;</a>
+<a name="ln1440">    if(gui-&gt;scrollx != 0.0f || gui-&gt;scrolly != 0.0f)</a>
+<a name="ln1441">    {</a>
+<a name="ln1442">      gui-&gt;scrollx = gui-&gt;scrolly = 0;</a>
+<a name="ln1443">      return 1;</a>
+<a name="ln1444">    }</a>
+<a name="ln1445">    gui-&gt;scrollx = gui-&gt;scrolly = 0;</a>
+<a name="ln1446">    float wd = darktable.develop-&gt;preview_pipe-&gt;backbuf_width;</a>
+<a name="ln1447">    float ht = darktable.develop-&gt;preview_pipe-&gt;backbuf_height;</a>
+<a name="ln1448">    float pts[2] = { pzx * wd, pzy * ht };</a>
+<a name="ln1449">    dt_dev_distort_backtransform(darktable.develop, pts, 1);</a>
+<a name="ln1450">    float dx = pts[0] / darktable.develop-&gt;preview_pipe-&gt;iwidth - point-&gt;corner[0];</a>
+<a name="ln1451">    float dy = pts[1] / darktable.develop-&gt;preview_pipe-&gt;iheight - point-&gt;corner[1];</a>
+<a name="ln1452"> </a>
+<a name="ln1453">    point-&gt;corner[0] += dx;</a>
+<a name="ln1454">    point-&gt;corner[1] += dy;</a>
+<a name="ln1455">    point-&gt;ctrl1[0] += dx;</a>
+<a name="ln1456">    point-&gt;ctrl1[1] += dy;</a>
+<a name="ln1457">    point-&gt;ctrl2[0] += dx;</a>
+<a name="ln1458">    point-&gt;ctrl2[1] += dy;</a>
+<a name="ln1459"> </a>
+<a name="ln1460">    _path_init_ctrl_points(form);</a>
+<a name="ln1461"> </a>
+<a name="ln1462">    dt_masks_write_form(form, darktable.develop);</a>
+<a name="ln1463"> </a>
+<a name="ln1464">    // we recreate the form points</a>
+<a name="ln1465">    dt_masks_gui_form_remove(form, gui, index);</a>
+<a name="ln1466">    dt_masks_gui_form_create(form, gui, index);</a>
+<a name="ln1467">    gpt-&gt;clockwise = _path_is_clockwise(form);</a>
+<a name="ln1468">    // we save the move</a>
+<a name="ln1469">    dt_masks_update_image(darktable.develop);</a>
+<a name="ln1470"> </a>
+<a name="ln1471">    return 1;</a>
+<a name="ln1472">  }</a>
+<a name="ln1473">  else if(gui-&gt;feather_dragging &gt;= 0)</a>
+<a name="ln1474">  {</a>
+<a name="ln1475">    dt_masks_point_path_t *point</a>
+<a name="ln1476">        = (dt_masks_point_path_t *)g_list_nth_data(form-&gt;points, gui-&gt;feather_dragging);</a>
+<a name="ln1477">    gui-&gt;feather_dragging = -1;</a>
+<a name="ln1478">    float wd = darktable.develop-&gt;preview_pipe-&gt;backbuf_width;</a>
+<a name="ln1479">    float ht = darktable.develop-&gt;preview_pipe-&gt;backbuf_height;</a>
+<a name="ln1480">    float pts[2] = { pzx * wd, pzy * ht };</a>
+<a name="ln1481">    dt_dev_distort_backtransform(darktable.develop, pts, 1);</a>
+<a name="ln1482"> </a>
+<a name="ln1483">    int p1x, p1y, p2x, p2y;</a>
+<a name="ln1484">    _path_feather_to_ctrl(point-&gt;corner[0] * darktable.develop-&gt;preview_pipe-&gt;iwidth,</a>
+<a name="ln1485">                          point-&gt;corner[1] * darktable.develop-&gt;preview_pipe-&gt;iheight, pts[0], pts[1], &amp;p1x,</a>
+<a name="ln1486">                          &amp;p1y, &amp;p2x, &amp;p2y, gpt-&gt;clockwise);</a>
+<a name="ln1487">    point-&gt;ctrl1[0] = (float)p1x / darktable.develop-&gt;preview_pipe-&gt;iwidth;</a>
+<a name="ln1488">    point-&gt;ctrl1[1] = (float)p1y / darktable.develop-&gt;preview_pipe-&gt;iheight;</a>
+<a name="ln1489">    point-&gt;ctrl2[0] = (float)p2x / darktable.develop-&gt;preview_pipe-&gt;iwidth;</a>
+<a name="ln1490">    point-&gt;ctrl2[1] = (float)p2y / darktable.develop-&gt;preview_pipe-&gt;iheight;</a>
+<a name="ln1491"> </a>
+<a name="ln1492">    point-&gt;state = DT_MASKS_POINT_STATE_USER;</a>
+<a name="ln1493"> </a>
+<a name="ln1494">    _path_init_ctrl_points(form);</a>
+<a name="ln1495"> </a>
+<a name="ln1496">    dt_masks_write_form(form, darktable.develop);</a>
+<a name="ln1497"> </a>
+<a name="ln1498">    // we recreate the form points</a>
+<a name="ln1499">    dt_masks_gui_form_remove(form, gui, index);</a>
+<a name="ln1500">    dt_masks_gui_form_create(form, gui, index);</a>
+<a name="ln1501">    gpt-&gt;clockwise = _path_is_clockwise(form);</a>
+<a name="ln1502">    // we save the move</a>
+<a name="ln1503">    dt_masks_update_image(darktable.develop);</a>
+<a name="ln1504"> </a>
+<a name="ln1505">    return 1;</a>
+<a name="ln1506">  }</a>
+<a name="ln1507">  else if(gui-&gt;point_border_dragging &gt;= 0)</a>
+<a name="ln1508">  {</a>
+<a name="ln1509">    gui-&gt;point_border_dragging = -1;</a>
+<a name="ln1510"> </a>
+<a name="ln1511">    // we save the move</a>
+<a name="ln1512">    dt_masks_write_form(form, darktable.develop);</a>
+<a name="ln1513">    dt_masks_update_image(darktable.develop);</a>
+<a name="ln1514">    dt_control_queue_redraw_center();</a>
+<a name="ln1515">    return 1;</a>
+<a name="ln1516">  }</a>
+<a name="ln1517"> </a>
+<a name="ln1518">  return 0;</a>
+<a name="ln1519">}</a>
+<a name="ln1520"> </a>
+<a name="ln1521">static int dt_path_events_mouse_moved(struct dt_iop_module_t *module, float pzx, float pzy, double pressure,</a>
+<a name="ln1522">                                      int which, dt_masks_form_t *form, int parentid,</a>
+<a name="ln1523">                                      dt_masks_form_gui_t *gui, int index)</a>
+<a name="ln1524">{</a>
+<a name="ln1525">  dt_dev_zoom_t zoom = dt_control_get_dev_zoom();</a>
+<a name="ln1526">  int closeup = dt_control_get_dev_closeup();</a>
+<a name="ln1527">  float zoom_scale = dt_dev_get_zoom_scale(darktable.develop, zoom, 1&lt;&lt;closeup, 1);</a>
+<a name="ln1528">  // centre view will have zoom_scale * backbuf_width pixels, we want the handle offset to scale with DPI:</a>
+<a name="ln1529">  const float as = DT_PIXEL_APPLY_DPI(5) / zoom_scale;  // transformed to backbuf dimensions</a>
+<a name="ln1530">  if(!gui) return 0;</a>
+<a name="ln1531">  dt_masks_form_gui_points_t *gpt = (dt_masks_form_gui_points_t *)g_list_nth_data(gui-&gt;points, index);</a>
+<a name="ln1532">  if(!gpt) return 0;</a>
+<a name="ln1533"> </a>
+<a name="ln1534">  if(gui-&gt;point_dragging &gt;= 0)</a>
+<a name="ln1535">  {</a>
+<a name="ln1536">    float wd = darktable.develop-&gt;preview_pipe-&gt;backbuf_width;</a>
+<a name="ln1537">    float ht = darktable.develop-&gt;preview_pipe-&gt;backbuf_height;</a>
+<a name="ln1538">    float pts[2] = { pzx * wd, pzy * ht };</a>
+<a name="ln1539">    if(gui-&gt;creation &amp;&amp; g_list_length(form-&gt;points) &gt; 3)</a>
+<a name="ln1540">    {</a>
+<a name="ln1541">      // if we are near the first point, we have to say that the form should be closed</a>
+<a name="ln1542">      if(pts[0] - gpt-&gt;points[2] &lt; as &amp;&amp; pts[0] - gpt-&gt;points[2] &gt; -as &amp;&amp; pts[1] - gpt-&gt;points[3] &lt; as</a>
+<a name="ln1543">         &amp;&amp; pts[1] - gpt-&gt;points[3] &gt; -as)</a>
+<a name="ln1544">      {</a>
+<a name="ln1545">        gui-&gt;creation_closing_form = TRUE;</a>
+<a name="ln1546">      }</a>
+<a name="ln1547">      else</a>
+<a name="ln1548">      {</a>
+<a name="ln1549">        gui-&gt;creation_closing_form = FALSE;</a>
+<a name="ln1550">      }</a>
+<a name="ln1551">    }</a>
+<a name="ln1552"> </a>
+<a name="ln1553">    dt_dev_distort_backtransform(darktable.develop, pts, 1);</a>
+<a name="ln1554">    dt_masks_point_path_t *bzpt = (dt_masks_point_path_t *)g_list_nth_data(form-&gt;points, gui-&gt;point_dragging);</a>
+<a name="ln1555">    pzx = pts[0] / darktable.develop-&gt;preview_pipe-&gt;iwidth;</a>
+<a name="ln1556">    pzy = pts[1] / darktable.develop-&gt;preview_pipe-&gt;iheight;</a>
+<a name="ln1557">    bzpt-&gt;ctrl1[0] += pzx - bzpt-&gt;corner[0];</a>
+<a name="ln1558">    bzpt-&gt;ctrl2[0] += pzx - bzpt-&gt;corner[0];</a>
+<a name="ln1559">    bzpt-&gt;ctrl1[1] += pzy - bzpt-&gt;corner[1];</a>
+<a name="ln1560">    bzpt-&gt;ctrl2[1] += pzy - bzpt-&gt;corner[1];</a>
+<a name="ln1561">    bzpt-&gt;corner[0] = pzx;</a>
+<a name="ln1562">    bzpt-&gt;corner[1] = pzy;</a>
+<a name="ln1563">    _path_init_ctrl_points(form);</a>
+<a name="ln1564">    // we recreate the form points</a>
+<a name="ln1565">    dt_masks_gui_form_remove(form, gui, index);</a>
+<a name="ln1566">    dt_masks_gui_form_create(form, gui, index);</a>
+<a name="ln1567">    dt_control_queue_redraw_center();</a>
+<a name="ln1568">    return 1;</a>
+<a name="ln1569">  }</a>
+<a name="ln1570">  else if(gui-&gt;seg_dragging &gt;= 0)</a>
+<a name="ln1571">  {</a>
+<a name="ln1572">    // we get point0 new values</a>
+<a name="ln1573">    int pos2 = (gui-&gt;seg_dragging + 1) % g_list_length(form-&gt;points);</a>
+<a name="ln1574">    dt_masks_point_path_t *point = (dt_masks_point_path_t *)g_list_nth_data(form-&gt;points, gui-&gt;seg_dragging);</a>
+<a name="ln1575">    dt_masks_point_path_t *point2 = (dt_masks_point_path_t *)g_list_nth_data(form-&gt;points, pos2);</a>
+<a name="ln1576">    float wd = darktable.develop-&gt;preview_pipe-&gt;backbuf_width;</a>
+<a name="ln1577">    float ht = darktable.develop-&gt;preview_pipe-&gt;backbuf_height;</a>
+<a name="ln1578">    float pts[2] = { pzx * wd + gui-&gt;dx, pzy * ht + gui-&gt;dy };</a>
+<a name="ln1579">    dt_dev_distort_backtransform(darktable.develop, pts, 1);</a>
+<a name="ln1580">    float dx = pts[0] / darktable.develop-&gt;preview_pipe-&gt;iwidth - point-&gt;corner[0];</a>
+<a name="ln1581">    float dy = pts[1] / darktable.develop-&gt;preview_pipe-&gt;iheight - point-&gt;corner[1];</a>
+<a name="ln1582"> </a>
+<a name="ln1583">    // we move all points</a>
+<a name="ln1584">    point-&gt;corner[0] += dx;</a>
+<a name="ln1585">    point-&gt;corner[1] += dy;</a>
+<a name="ln1586">    point-&gt;ctrl1[0] += dx;</a>
+<a name="ln1587">    point-&gt;ctrl1[1] += dy;</a>
+<a name="ln1588">    point-&gt;ctrl2[0] += dx;</a>
+<a name="ln1589">    point-&gt;ctrl2[1] += dy;</a>
+<a name="ln1590">    point2-&gt;corner[0] += dx;</a>
+<a name="ln1591">    point2-&gt;corner[1] += dy;</a>
+<a name="ln1592">    point2-&gt;ctrl1[0] += dx;</a>
+<a name="ln1593">    point2-&gt;ctrl1[1] += dy;</a>
+<a name="ln1594">    point2-&gt;ctrl2[0] += dx;</a>
+<a name="ln1595">    point2-&gt;ctrl2[1] += dy;</a>
+<a name="ln1596"> </a>
+<a name="ln1597">    _path_init_ctrl_points(form);</a>
+<a name="ln1598"> </a>
+<a name="ln1599">    dt_masks_write_form(form, darktable.develop);</a>
+<a name="ln1600"> </a>
+<a name="ln1601">    // we recreate the form points</a>
+<a name="ln1602">    dt_masks_gui_form_remove(form, gui, index);</a>
+<a name="ln1603">    dt_masks_gui_form_create(form, gui, index);</a>
+<a name="ln1604"> </a>
+<a name="ln1605">    dt_control_queue_redraw_center();</a>
+<a name="ln1606">    return 1;</a>
+<a name="ln1607">  }</a>
+<a name="ln1608">  else if(gui-&gt;feather_dragging &gt;= 0)</a>
+<a name="ln1609">  {</a>
+<a name="ln1610">    float wd = darktable.develop-&gt;preview_pipe-&gt;backbuf_width;</a>
+<a name="ln1611">    float ht = darktable.develop-&gt;preview_pipe-&gt;backbuf_height;</a>
+<a name="ln1612">    float pts[2] = { pzx * wd, pzy * ht };</a>
+<a name="ln1613">    dt_dev_distort_backtransform(darktable.develop, pts, 1);</a>
+<a name="ln1614">    dt_masks_point_path_t *point</a>
+<a name="ln1615">        = (dt_masks_point_path_t *)g_list_nth_data(form-&gt;points, gui-&gt;feather_dragging);</a>
+<a name="ln1616"> </a>
+<a name="ln1617">    int p1x, p1y, p2x, p2y;</a>
+<a name="ln1618">    _path_feather_to_ctrl(point-&gt;corner[0] * darktable.develop-&gt;preview_pipe-&gt;iwidth,</a>
+<a name="ln1619">                          point-&gt;corner[1] * darktable.develop-&gt;preview_pipe-&gt;iheight, pts[0], pts[1], &amp;p1x,</a>
+<a name="ln1620">                          &amp;p1y, &amp;p2x, &amp;p2y, gpt-&gt;clockwise);</a>
+<a name="ln1621">    point-&gt;ctrl1[0] = (float)p1x / darktable.develop-&gt;preview_pipe-&gt;iwidth;</a>
+<a name="ln1622">    point-&gt;ctrl1[1] = (float)p1y / darktable.develop-&gt;preview_pipe-&gt;iheight;</a>
+<a name="ln1623">    point-&gt;ctrl2[0] = (float)p2x / darktable.develop-&gt;preview_pipe-&gt;iwidth;</a>
+<a name="ln1624">    point-&gt;ctrl2[1] = (float)p2y / darktable.develop-&gt;preview_pipe-&gt;iheight;</a>
+<a name="ln1625">    point-&gt;state = DT_MASKS_POINT_STATE_USER;</a>
+<a name="ln1626"> </a>
+<a name="ln1627">    _path_init_ctrl_points(form);</a>
+<a name="ln1628">    // we recreate the form points</a>
+<a name="ln1629">    dt_masks_gui_form_remove(form, gui, index);</a>
+<a name="ln1630">    dt_masks_gui_form_create(form, gui, index);</a>
+<a name="ln1631">    dt_control_queue_redraw_center();</a>
+<a name="ln1632">    return 1;</a>
+<a name="ln1633">  }</a>
+<a name="ln1634">  else if(gui-&gt;point_border_dragging &gt;= 0)</a>
+<a name="ln1635">  {</a>
+<a name="ln1636">    float wd = darktable.develop-&gt;preview_pipe-&gt;backbuf_width;</a>
+<a name="ln1637">    float ht = darktable.develop-&gt;preview_pipe-&gt;backbuf_height;</a>
+<a name="ln1638"> </a>
+<a name="ln1639">    int k = gui-&gt;point_border_dragging;</a>
+<a name="ln1640"> </a>
+<a name="ln1641">    // now we want to know the position reflected on actual corner/border segment</a>
+<a name="ln1642">    float a = (gpt-&gt;border[k * 6 + 1] - gpt-&gt;points[k * 6 + 3])</a>
+<a name="ln1643">              / (float)(gpt-&gt;border[k * 6] - gpt-&gt;points[k * 6 + 2]);</a>
+<a name="ln1644">    float b = gpt-&gt;points[k * 6 + 3] - a * gpt-&gt;points[k * 6 + 2];</a>
+<a name="ln1645"> </a>
+<a name="ln1646">    float pts[2];</a>
+<a name="ln1647">    pts[0] = (a * pzy * ht + pzx * wd - b * a) / (a * a + 1.0);</a>
+<a name="ln1648">    pts[1] = a * pts[0] + b;</a>
+<a name="ln1649"> </a>
+<a name="ln1650">    dt_dev_distort_backtransform(darktable.develop, pts, 1);</a>
+<a name="ln1651"> </a>
+<a name="ln1652">    dt_masks_point_path_t *point = (dt_masks_point_path_t *)g_list_nth_data(form-&gt;points, k);</a>
+<a name="ln1653">    float nx = point-&gt;corner[0] * darktable.develop-&gt;preview_pipe-&gt;iwidth;</a>
+<a name="ln1654">    float ny = point-&gt;corner[1] * darktable.develop-&gt;preview_pipe-&gt;iheight;</a>
+<a name="ln1655">    float nr = sqrtf((pts[0] - nx) * (pts[0] - nx) + (pts[1] - ny) * (pts[1] - ny));</a>
+<a name="ln1656">    float bdr = nr / fminf(darktable.develop-&gt;preview_pipe-&gt;iwidth, darktable.develop-&gt;preview_pipe-&gt;iheight);</a>
+<a name="ln1657"> </a>
+<a name="ln1658">    point-&gt;border[0] = point-&gt;border[1] = bdr;</a>
+<a name="ln1659"> </a>
+<a name="ln1660">    // we recreate the form points</a>
+<a name="ln1661">    dt_masks_gui_form_remove(form, gui, index);</a>
+<a name="ln1662">    dt_masks_gui_form_create(form, gui, index);</a>
+<a name="ln1663">    dt_control_queue_redraw_center();</a>
+<a name="ln1664">    return 1;</a>
+<a name="ln1665">  }</a>
+<a name="ln1666">  else if(gui-&gt;form_dragging || gui-&gt;source_dragging)</a>
+<a name="ln1667">  {</a>
+<a name="ln1668">    dt_control_queue_redraw_center();</a>
+<a name="ln1669">    return 1;</a>
+<a name="ln1670">  }</a>
+<a name="ln1671"> </a>
+<a name="ln1672">  gui-&gt;form_selected = FALSE;</a>
+<a name="ln1673">  gui-&gt;border_selected = FALSE;</a>
+<a name="ln1674">  gui-&gt;source_selected = FALSE;</a>
+<a name="ln1675">  gui-&gt;feather_selected = -1;</a>
+<a name="ln1676">  gui-&gt;point_selected = -1;</a>
+<a name="ln1677">  gui-&gt;seg_selected = -1;</a>
+<a name="ln1678">  gui-&gt;point_border_selected = -1;</a>
+<a name="ln1679">  // are we near a point or feather ?</a>
+<a name="ln1680">  guint nb = g_list_length(form-&gt;points);</a>
+<a name="ln1681"> </a>
+<a name="ln1682">  pzx *= darktable.develop-&gt;preview_pipe-&gt;backbuf_width,</a>
+<a name="ln1683">      pzy *= darktable.develop-&gt;preview_pipe-&gt;backbuf_height;</a>
+<a name="ln1684"> </a>
+<a name="ln1685">  if((gui-&gt;group_selected == index) &amp;&amp; gui-&gt;point_edited &gt;= 0)</a>
+<a name="ln1686">  {</a>
+<a name="ln1687">    int k = gui-&gt;point_edited;</a>
+<a name="ln1688">    // we only select feather if the point is not &quot;sharp&quot;</a>
+<a name="ln1689">    if(gpt-&gt;points[k * 6 + 2] != gpt-&gt;points[k * 6 + 4] &amp;&amp; gpt-&gt;points[k * 6 + 3] != gpt-&gt;points[k * 6 + 5])</a>
+<a name="ln1690">    {</a>
+<a name="ln1691">      int ffx, ffy;</a>
+<a name="ln1692">      _path_ctrl2_to_feather(gpt-&gt;points[k * 6 + 2], gpt-&gt;points[k * 6 + 3], gpt-&gt;points[k * 6 + 4],</a>
+<a name="ln1693">                             gpt-&gt;points[k * 6 + 5], &amp;ffx, &amp;ffy, gpt-&gt;clockwise);</a>
+<a name="ln1694">      if(pzx - ffx &gt; -as &amp;&amp; pzx - ffx &lt; as &amp;&amp; pzy - ffy &gt; -as &amp;&amp; pzy - ffy &lt; as)</a>
+<a name="ln1695">      {</a>
+<a name="ln1696">        gui-&gt;feather_selected = k;</a>
+<a name="ln1697">        dt_control_queue_redraw_center();</a>
+<a name="ln1698">        return 1;</a>
+<a name="ln1699">      }</a>
+<a name="ln1700">    }</a>
+<a name="ln1701">    // corner ??</a>
+<a name="ln1702">    if(pzx - gpt-&gt;points[k * 6 + 2] &gt; -as &amp;&amp; pzx - gpt-&gt;points[k * 6 + 2] &lt; as</a>
+<a name="ln1703">       &amp;&amp; pzy - gpt-&gt;points[k * 6 + 3] &gt; -as &amp;&amp; pzy - gpt-&gt;points[k * 6 + 3] &lt; as)</a>
+<a name="ln1704">    {</a>
+<a name="ln1705">      gui-&gt;point_selected = k;</a>
+<a name="ln1706">      dt_control_queue_redraw_center();</a>
+<a name="ln1707">      return 1;</a>
+<a name="ln1708">    }</a>
+<a name="ln1709">  }</a>
+<a name="ln1710"> </a>
+<a name="ln1711">  for(int k = 0; k &lt; nb; k++)</a>
+<a name="ln1712">  {</a>
+<a name="ln1713">    // corner ??</a>
+<a name="ln1714">    if(pzx - gpt-&gt;points[k * 6 + 2] &gt; -as &amp;&amp; pzx - gpt-&gt;points[k * 6 + 2] &lt; as</a>
+<a name="ln1715">       &amp;&amp; pzy - gpt-&gt;points[k * 6 + 3] &gt; -as &amp;&amp; pzy - gpt-&gt;points[k * 6 + 3] &lt; as)</a>
+<a name="ln1716">    {</a>
+<a name="ln1717">      gui-&gt;point_selected = k;</a>
+<a name="ln1718">      dt_control_queue_redraw_center();</a>
+<a name="ln1719">      return 1;</a>
+<a name="ln1720">    }</a>
+<a name="ln1721"> </a>
+<a name="ln1722">    // border corner ??</a>
+<a name="ln1723">    if(pzx - gpt-&gt;border[k * 6] &gt; -as &amp;&amp; pzx - gpt-&gt;border[k * 6] &lt; as &amp;&amp; pzy - gpt-&gt;border[k * 6 + 1] &gt; -as</a>
+<a name="ln1724">       &amp;&amp; pzy - gpt-&gt;border[k * 6 + 1] &lt; as)</a>
+<a name="ln1725">    {</a>
+<a name="ln1726">      gui-&gt;point_border_selected = k;</a>
+<a name="ln1727">      dt_control_queue_redraw_center();</a>
+<a name="ln1728">      return 1;</a>
+<a name="ln1729">    }</a>
+<a name="ln1730">  }</a>
+<a name="ln1731"> </a>
+<a name="ln1732">  // are we inside the form or the borders or near a segment ???</a>
+<a name="ln1733">  int in, inb, near, ins;</a>
+<a name="ln1734">  dt_path_get_distance(pzx, (int)pzy, as, gui, index, nb, &amp;in, &amp;inb, &amp;near, &amp;ins);</a>
+<a name="ln1735">  gui-&gt;seg_selected = near;</a>
+<a name="ln1736">  if(near &lt; 0)</a>
+<a name="ln1737">  {</a>
+<a name="ln1738">    if(ins)</a>
+<a name="ln1739">    {</a>
+<a name="ln1740">      gui-&gt;form_selected = TRUE;</a>
+<a name="ln1741">      gui-&gt;source_selected = TRUE;</a>
+<a name="ln1742">    }</a>
+<a name="ln1743">    else if(inb)</a>
+<a name="ln1744">    {</a>
+<a name="ln1745">      gui-&gt;form_selected = TRUE;</a>
+<a name="ln1746">      gui-&gt;border_selected = TRUE;</a>
+<a name="ln1747">    }</a>
+<a name="ln1748">    else if(in)</a>
+<a name="ln1749">    {</a>
+<a name="ln1750">      gui-&gt;form_selected = TRUE;</a>
+<a name="ln1751">    }</a>
+<a name="ln1752">  }</a>
+<a name="ln1753">  dt_control_queue_redraw_center();</a>
+<a name="ln1754">  if(!gui-&gt;form_selected &amp;&amp; !gui-&gt;border_selected &amp;&amp; gui-&gt;seg_selected &lt; 0) return 0;</a>
+<a name="ln1755">  if(gui-&gt;edit_mode != DT_MASKS_EDIT_FULL) return 0;</a>
+<a name="ln1756">  return 1;</a>
+<a name="ln1757">}</a>
+<a name="ln1758"> </a>
+<a name="ln1759">static void dt_path_events_post_expose(cairo_t *cr, float zoom_scale, dt_masks_form_gui_t *gui, int index,</a>
+<a name="ln1760">                                       int nb)</a>
+<a name="ln1761">{</a>
+<a name="ln1762">  double dashed[] = { 4.0, 4.0 };</a>
+<a name="ln1763">  dashed[0] /= zoom_scale;</a>
+<a name="ln1764">  dashed[1] /= zoom_scale;</a>
+<a name="ln1765">  int len = sizeof(dashed) / sizeof(dashed[0]);</a>
+<a name="ln1766">  if(!gui) return;</a>
+<a name="ln1767">  dt_masks_form_gui_points_t *gpt = (dt_masks_form_gui_points_t *)g_list_nth_data(gui-&gt;points, index);</a>
+<a name="ln1768">  if(!gpt) return;</a>
+<a name="ln1769">  float dx = 0, dy = 0, dxs = 0, dys = 0;</a>
+<a name="ln1770">  if((gui-&gt;group_selected == index) &amp;&amp; gui-&gt;form_dragging)</a>
+<a name="ln1771">  {</a>
+<a name="ln1772">    dx = gui-&gt;posx + gui-&gt;dx - gpt-&gt;points[2];</a>
+<a name="ln1773">    dy = gui-&gt;posy + gui-&gt;dy - gpt-&gt;points[3];</a>
+<a name="ln1774">  }</a>
+<a name="ln1775">  if((gui-&gt;group_selected == index) &amp;&amp; gui-&gt;source_dragging)</a>
+<a name="ln1776">  {</a>
+<a name="ln1777">    dxs = gui-&gt;posx + gui-&gt;dx - gpt-&gt;source[2];</a>
+<a name="ln1778">    dys = gui-&gt;posy + gui-&gt;dy - gpt-&gt;source[3];</a>
+<a name="ln1779">  }</a>
+<a name="ln1780"> </a>
+<a name="ln1781">  // draw path</a>
+<a name="ln1782">  if(gpt-&gt;points_count &gt; nb * 3 + 6)</a>
+<a name="ln1783">  {</a>
+<a name="ln1784">    cairo_set_dash(cr, dashed, 0, 0);</a>
+<a name="ln1785"> </a>
+<a name="ln1786">    cairo_move_to(cr, gpt-&gt;points[nb * 6] + dx, gpt-&gt;points[nb * 6 + 1] + dy);</a>
+<a name="ln1787">    int seg = 1, seg2 = 0;</a>
+<a name="ln1788">    for(int i = nb * 3; i &lt; gpt-&gt;points_count; i++)</a>
+<a name="ln1789">    {</a>
+<a name="ln1790">      cairo_line_to(cr, gpt-&gt;points[i * 2] + dx, gpt-&gt;points[i * 2 + 1] + dy);</a>
+<a name="ln1791">      // we decide to highlight the form segment by segment</a>
+<a name="ln1792">      if(gpt-&gt;points[i * 2 + 1] == gpt-&gt;points[seg * 6 + 3] &amp;&amp; gpt-&gt;points[i * 2] == gpt-&gt;points[seg * 6 + 2])</a>
+<a name="ln1793">      {</a>
+<a name="ln1794">        // this is the end of the last segment, so we have to draw it</a>
+<a name="ln1795">        if((gui-&gt;group_selected == index)</a>
+<a name="ln1796">           &amp;&amp; (gui-&gt;form_selected || gui-&gt;form_dragging || gui-&gt;seg_selected == seg2))</a>
+<a name="ln1797">          cairo_set_line_width(cr, 5.0 / zoom_scale);</a>
+<a name="ln1798">        else</a>
+<a name="ln1799">          cairo_set_line_width(cr, 3.0 / zoom_scale);</a>
+<a name="ln1800">        cairo_set_source_rgba(cr, .3, .3, .3, .8);</a>
+<a name="ln1801">        cairo_stroke_preserve(cr);</a>
+<a name="ln1802">        if((gui-&gt;group_selected == index)</a>
+<a name="ln1803">           &amp;&amp; (gui-&gt;form_selected || gui-&gt;form_dragging || gui-&gt;seg_selected == seg2))</a>
+<a name="ln1804">          cairo_set_line_width(cr, 2.0 / zoom_scale);</a>
+<a name="ln1805">        else</a>
+<a name="ln1806">          cairo_set_line_width(cr, 1.0 / zoom_scale);</a>
+<a name="ln1807">        cairo_set_source_rgba(cr, .8, .8, .8, .8);</a>
+<a name="ln1808">        cairo_stroke(cr);</a>
+<a name="ln1809">        // and we update the segment number</a>
+<a name="ln1810">        seg = (seg + 1) % nb;</a>
+<a name="ln1811">        seg2++;</a>
+<a name="ln1812">        cairo_move_to(cr, gpt-&gt;points[i * 2] + dx, gpt-&gt;points[i * 2 + 1] + dy);</a>
+<a name="ln1813">      }</a>
+<a name="ln1814">    }</a>
+<a name="ln1815">  }</a>
+<a name="ln1816"> </a>
+<a name="ln1817">  // draw corners</a>
+<a name="ln1818">  float anchor_size;</a>
+<a name="ln1819">  if(gui-&gt;group_selected == index &amp;&amp; gpt-&gt;points_count &gt; nb * 3 + 6)</a>
+<a name="ln1820">  {</a>
+<a name="ln1821">    for(int k = 0; k &lt; nb; k++)</a>
+<a name="ln1822">    {</a>
+<a name="ln1823">      if(k == gui-&gt;point_dragging || k == gui-&gt;point_selected)</a>
+<a name="ln1824">      {</a>
+<a name="ln1825">        anchor_size = 7.0f / zoom_scale;</a>
+<a name="ln1826">      }</a>
+<a name="ln1827">      else</a>
+<a name="ln1828">      {</a>
+<a name="ln1829">        anchor_size = 5.0f / zoom_scale;</a>
+<a name="ln1830">      }</a>
+<a name="ln1831">      cairo_set_source_rgba(cr, .8, .8, .8, .8);</a>
+<a name="ln1832">      cairo_rectangle(cr, gpt-&gt;points[k * 6 + 2] - (anchor_size * 0.5) + dx,</a>
+<a name="ln1833">                      gpt-&gt;points[k * 6 + 3] - (anchor_size * 0.5) + dy, anchor_size, anchor_size);</a>
+<a name="ln1834">      cairo_fill_preserve(cr);</a>
+<a name="ln1835"> </a>
+<a name="ln1836">      if((gui-&gt;group_selected == index) &amp;&amp; (k == gui-&gt;point_dragging || k == gui-&gt;point_selected))</a>
+<a name="ln1837">        cairo_set_line_width(cr, 2.0 / zoom_scale);</a>
+<a name="ln1838">      else if((gui-&gt;group_selected == index)</a>
+<a name="ln1839">              &amp;&amp; ((k == 0 || k == nb) &amp;&amp; gui-&gt;creation &amp;&amp; gui-&gt;creation_closing_form))</a>
+<a name="ln1840">        cairo_set_line_width(cr, 2.0 / zoom_scale);</a>
+<a name="ln1841">      else</a>
+<a name="ln1842">        cairo_set_line_width(cr, 1.0 / zoom_scale);</a>
+<a name="ln1843">      cairo_set_source_rgba(cr, .3, .3, .3, .8);</a>
+<a name="ln1844">      cairo_stroke(cr);</a>
+<a name="ln1845">    }</a>
+<a name="ln1846">  }</a>
+<a name="ln1847"> </a>
+<a name="ln1848">  // draw feathers</a>
+<a name="ln1849">  if((gui-&gt;group_selected == index) &amp;&amp; gui-&gt;point_edited &gt;= 0)</a>
+<a name="ln1850">  {</a>
+<a name="ln1851">    int k = gui-&gt;point_edited;</a>
+<a name="ln1852">    // uncomment this part if you want to see &quot;real&quot; control points</a>
+<a name="ln1853">    /*cairo_move_to(cr, gui-&gt;points[k*6+2]+dx,gui-&gt;points[k*6+3]+dy);</a>
+<a name="ln1854">    cairo_line_to(cr, gui-&gt;points[k*6]+dx,gui-&gt;points[k*6+1]+dy);</a>
+<a name="ln1855">    cairo_stroke(cr);</a>
+<a name="ln1856">    cairo_move_to(cr, gui-&gt;points[k*6+2]+dx,gui-&gt;points[k*6+3]+dy);</a>
+<a name="ln1857">    cairo_line_to(cr, gui-&gt;points[k*6+4]+dx,gui-&gt;points[k*6+5]+dy);</a>
+<a name="ln1858">    cairo_stroke(cr);*/</a>
+<a name="ln1859">    int ffx, ffy;</a>
+<a name="ln1860">    _path_ctrl2_to_feather(gpt-&gt;points[k * 6 + 2] + dx, gpt-&gt;points[k * 6 + 3] + dy,</a>
+<a name="ln1861">                           gpt-&gt;points[k * 6 + 4] + dx, gpt-&gt;points[k * 6 + 5] + dy, &amp;ffx, &amp;ffy,</a>
+<a name="ln1862">                           gpt-&gt;clockwise);</a>
+<a name="ln1863">    cairo_move_to(cr, gpt-&gt;points[k * 6 + 2] + dx, gpt-&gt;points[k * 6 + 3] + dy);</a>
+<a name="ln1864">    cairo_line_to(cr, ffx, ffy);</a>
+<a name="ln1865">    cairo_set_line_width(cr, 1.5 / zoom_scale);</a>
+<a name="ln1866">    cairo_set_source_rgba(cr, .3, .3, .3, .8);</a>
+<a name="ln1867">    cairo_stroke_preserve(cr);</a>
+<a name="ln1868">    cairo_set_line_width(cr, 0.75 / zoom_scale);</a>
+<a name="ln1869">    cairo_set_source_rgba(cr, .8, .8, .8, .8);</a>
+<a name="ln1870">    cairo_stroke(cr);</a>
+<a name="ln1871"> </a>
+<a name="ln1872">    if((gui-&gt;group_selected == index) &amp;&amp; (k == gui-&gt;feather_dragging || k == gui-&gt;feather_selected))</a>
+<a name="ln1873">      cairo_arc(cr, ffx, ffy, 3.0f / zoom_scale, 0, 2.0 * M_PI);</a>
+<a name="ln1874">    else</a>
+<a name="ln1875">      cairo_arc(cr, ffx, ffy, 1.5f / zoom_scale, 0, 2.0 * M_PI);</a>
+<a name="ln1876">    cairo_set_source_rgba(cr, .8, .8, .8, .8);</a>
+<a name="ln1877">    cairo_fill_preserve(cr);</a>
+<a name="ln1878"> </a>
+<a name="ln1879">    cairo_set_line_width(cr, 1.0 / zoom_scale);</a>
+<a name="ln1880">    cairo_set_source_rgba(cr, .3, .3, .3, .8);</a>
+<a name="ln1881">    cairo_stroke(cr);</a>
+<a name="ln1882">  }</a>
+<a name="ln1883"> </a>
+<a name="ln1884">  // draw border and corners</a>
+<a name="ln1885">  if((gui-&gt;group_selected == index) &amp;&amp; gpt-&gt;border_count &gt; nb * 3 + 6)</a>
+<a name="ln1886">  {</a>
+<a name="ln1887">    int dep = 1;</a>
+<a name="ln1888">    for(int i = nb * 3; i &lt; gpt-&gt;border_count; i++)</a>
+<a name="ln1889">    {</a>
+<a name="ln1890">      if(isnan(gpt-&gt;border[i * 2]))</a>
+<a name="ln1891">      {</a>
+<a name="ln1892">        if(isnan(gpt-&gt;border[i * 2 + 1])) break;</a>
+<a name="ln1893">        i = gpt-&gt;border[i * 2 + 1] - 1;</a>
+<a name="ln1894">        continue;</a>
+<a name="ln1895">      }</a>
+<a name="ln1896">      if(dep)</a>
+<a name="ln1897">      {</a>
+<a name="ln1898">        cairo_move_to(cr, gpt-&gt;border[i * 2] + dx, gpt-&gt;border[i * 2 + 1] + dy);</a>
+<a name="ln1899">        dep = 0;</a>
+<a name="ln1900">      }</a>
+<a name="ln1901">      else</a>
+<a name="ln1902">        cairo_line_to(cr, gpt-&gt;border[i * 2] + dx, gpt-&gt;border[i * 2 + 1] + dy);</a>
+<a name="ln1903">    }</a>
+<a name="ln1904">    // we execute the drawing</a>
+<a name="ln1905">    if(gui-&gt;border_selected)</a>
+<a name="ln1906">      cairo_set_line_width(cr, 2.0 / zoom_scale);</a>
+<a name="ln1907">    else</a>
+<a name="ln1908">      cairo_set_line_width(cr, 1.0 / zoom_scale);</a>
+<a name="ln1909">    cairo_set_source_rgba(cr, .3, .3, .3, .8);</a>
+<a name="ln1910">    cairo_set_dash(cr, dashed, len, 0);</a>
+<a name="ln1911">    cairo_stroke_preserve(cr);</a>
+<a name="ln1912">    if(gui-&gt;border_selected)</a>
+<a name="ln1913">      cairo_set_line_width(cr, 2.0 / zoom_scale);</a>
+<a name="ln1914">    else</a>
+<a name="ln1915">      cairo_set_line_width(cr, 1.0 / zoom_scale);</a>
+<a name="ln1916">    cairo_set_source_rgba(cr, .8, .8, .8, .8);</a>
+<a name="ln1917">    cairo_set_dash(cr, dashed, len, 4);</a>
+<a name="ln1918">    cairo_stroke(cr);</a>
+<a name="ln1919"> </a>
+<a name="ln1920">    // we draw the path segment by segment</a>
+<a name="ln1921">    for(int k = 0; k &lt; nb; k++)</a>
+<a name="ln1922">    {</a>
+<a name="ln1923">      // draw the point</a>
+<a name="ln1924">      if(gui-&gt;point_border_selected == k)</a>
+<a name="ln1925">      {</a>
+<a name="ln1926">        anchor_size = 7.0f / zoom_scale;</a>
+<a name="ln1927">      }</a>
+<a name="ln1928">      else</a>
+<a name="ln1929">      {</a>
+<a name="ln1930">        anchor_size = 5.0f / zoom_scale;</a>
+<a name="ln1931">      }</a>
+<a name="ln1932">      cairo_set_source_rgba(cr, .8, .8, .8, .8);</a>
+<a name="ln1933">      cairo_rectangle(cr, gpt-&gt;border[k * 6] - (anchor_size * 0.5) + dx,</a>
+<a name="ln1934">                      gpt-&gt;border[k * 6 + 1] - (anchor_size * 0.5) + dy, anchor_size, anchor_size);</a>
+<a name="ln1935">      cairo_fill_preserve(cr);</a>
+<a name="ln1936"> </a>
+<a name="ln1937">      if(gui-&gt;point_border_selected == k)</a>
+<a name="ln1938">        cairo_set_line_width(cr, 2.0 / zoom_scale);</a>
+<a name="ln1939">      else</a>
+<a name="ln1940">        cairo_set_line_width(cr, 1.0 / zoom_scale);</a>
+<a name="ln1941">      cairo_set_source_rgba(cr, .3, .3, .3, .8);</a>
+<a name="ln1942">      cairo_set_dash(cr, dashed, 0, 0);</a>
+<a name="ln1943">      cairo_stroke(cr);</a>
+<a name="ln1944">    }</a>
+<a name="ln1945">  }</a>
+<a name="ln1946"> </a>
+<a name="ln1947">  // draw a cross where the source will be created</a>
+<a name="ln1948">  if(gui-&gt;creation &amp;&amp; darktable.develop-&gt;form_visible &amp;&amp; (darktable.develop-&gt;form_visible-&gt;type &amp; DT_MASKS_CLONE))</a>
+<a name="ln1949">  {</a>
+<a name="ln1950">    const int k = nb - 1;</a>
+<a name="ln1951">    if((k * 6 + 2) &gt;= 0)</a>
+<a name="ln1952">    {</a>
+<a name="ln1953">      float x = 0.f, y = 0.f;</a>
+<a name="ln1954">      dt_masks_calculate_source_pos_value(gui, DT_MASKS_PATH, gpt-&gt;points[2] + dx, gpt-&gt;points[3] + dy,</a>
+<a name="ln1955">                                          gpt-&gt;points[k * 6 + 2] + dx, gpt-&gt;points[k * 6 + 3] + dy, &amp;x, &amp;y, TRUE);</a>
+<a name="ln1956">      dt_masks_draw_clone_source_pos(cr, zoom_scale, x, y);</a>
+<a name="ln1957">    }</a>
+<a name="ln1958">    else</a>
+<a name="ln1959">    {</a>
+<a name="ln1960">      float xpos, ypos;</a>
+<a name="ln1961">      if((gui-&gt;posx == -1.f &amp;&amp; gui-&gt;posy == -1.f) || gui-&gt;mouse_leaved_center)</a>
+<a name="ln1962">      {</a>
+<a name="ln1963">        xpos = (.5f + dt_control_get_dev_zoom_x()) * darktable.develop-&gt;preview_pipe-&gt;backbuf_width;</a>
+<a name="ln1964">        ypos = (.5f + dt_control_get_dev_zoom_y()) * darktable.develop-&gt;preview_pipe-&gt;backbuf_height;</a>
+<a name="ln1965">      }</a>
+<a name="ln1966">      else</a>
+<a name="ln1967">      {</a>
+<a name="ln1968">        xpos = gui-&gt;posx;</a>
+<a name="ln1969">        ypos = gui-&gt;posy;</a>
+<a name="ln1970">      }</a>
+<a name="ln1971"> </a>
+<a name="ln1972">      float x = 0.f, y = 0.f;</a>
+<a name="ln1973">      dt_masks_calculate_source_pos_value(gui, DT_MASKS_PATH, xpos, ypos, xpos, ypos, &amp;x, &amp;y, FALSE);</a>
+<a name="ln1974">      dt_masks_draw_clone_source_pos(cr, zoom_scale, x, y);</a>
+<a name="ln1975">    }</a>
+<a name="ln1976">  }</a>
+<a name="ln1977"> </a>
+<a name="ln1978">  // draw the source if needed</a>
+<a name="ln1979">  if(!gui-&gt;creation &amp;&amp; gpt-&gt;source_count &gt; nb * 3 + 6)</a>
+<a name="ln1980">  {</a>
+<a name="ln1981">    // we draw the line between source and dest</a>
+<a name="ln1982">    cairo_move_to(cr, gpt-&gt;source[2] + dxs, gpt-&gt;source[3] + dys);</a>
+<a name="ln1983">    cairo_line_to(cr, gpt-&gt;points[2] + dx, gpt-&gt;points[3] + dy);</a>
+<a name="ln1984">    cairo_set_dash(cr, dashed, 0, 0);</a>
+<a name="ln1985">    if((gui-&gt;group_selected == index) &amp;&amp; (gui-&gt;form_selected || gui-&gt;form_dragging))</a>
+<a name="ln1986">      cairo_set_line_width(cr, 2.5 / zoom_scale);</a>
+<a name="ln1987">    else</a>
+<a name="ln1988">      cairo_set_line_width(cr, 1.5 / zoom_scale);</a>
+<a name="ln1989">    cairo_set_source_rgba(cr, .3, .3, .3, .8);</a>
+<a name="ln1990">    cairo_stroke_preserve(cr);</a>
+<a name="ln1991">    if((gui-&gt;group_selected == index) &amp;&amp; (gui-&gt;form_selected || gui-&gt;form_dragging))</a>
+<a name="ln1992">      cairo_set_line_width(cr, 1.0 / zoom_scale);</a>
+<a name="ln1993">    else</a>
+<a name="ln1994">      cairo_set_line_width(cr, 0.5 / zoom_scale);</a>
+<a name="ln1995">    cairo_set_source_rgba(cr, .8, .8, .8, .8);</a>
+<a name="ln1996">    cairo_stroke(cr);</a>
+<a name="ln1997"> </a>
+<a name="ln1998">    // we draw the source</a>
+<a name="ln1999">    cairo_set_dash(cr, dashed, 0, 0);</a>
+<a name="ln2000">    if((gui-&gt;group_selected == index) &amp;&amp; (gui-&gt;form_selected || gui-&gt;form_dragging))</a>
+<a name="ln2001">      cairo_set_line_width(cr, 2.5 / zoom_scale);</a>
+<a name="ln2002">    else</a>
+<a name="ln2003">      cairo_set_line_width(cr, 1.5 / zoom_scale);</a>
+<a name="ln2004">    cairo_set_source_rgba(cr, .3, .3, .3, .8);</a>
+<a name="ln2005">    cairo_move_to(cr, gpt-&gt;source[nb * 6] + dxs, gpt-&gt;source[nb * 6 + 1] + dys);</a>
+<a name="ln2006">    for(int i = nb * 3; i &lt; gpt-&gt;source_count; i++)</a>
+<a name="ln2007">      cairo_line_to(cr, gpt-&gt;source[i * 2] + dxs, gpt-&gt;source[i * 2 + 1] + dys);</a>
+<a name="ln2008">    cairo_line_to(cr, gpt-&gt;source[nb * 6] + dxs, gpt-&gt;source[nb * 6 + 1] + dys);</a>
+<a name="ln2009">    cairo_stroke_preserve(cr);</a>
+<a name="ln2010">    if((gui-&gt;group_selected == index) &amp;&amp; (gui-&gt;form_selected || gui-&gt;form_dragging))</a>
+<a name="ln2011">      cairo_set_line_width(cr, 1.0 / zoom_scale);</a>
+<a name="ln2012">    else</a>
+<a name="ln2013">      cairo_set_line_width(cr, 0.5 / zoom_scale);</a>
+<a name="ln2014">    cairo_set_source_rgba(cr, .8, .8, .8, .8);</a>
+<a name="ln2015">    cairo_stroke(cr);</a>
+<a name="ln2016">  }</a>
+<a name="ln2017">}</a>
+<a name="ln2018"> </a>
+<a name="ln2019">static int dt_path_get_source_area(dt_iop_module_t *module, dt_dev_pixelpipe_iop_t *piece,</a>
+<a name="ln2020">                                   dt_masks_form_t *form, int *width, int *height, int *posx, int *posy)</a>
+<a name="ln2021">{</a>
+<a name="ln2022">  if(!module) return 0;</a>
+<a name="ln2023">  // we get buffers for all points</a>
+<a name="ln2024">  float *points = NULL, *border = NULL;</a>
+<a name="ln2025">  int points_count, border_count;</a>
+<a name="ln2026">  if(!_path_get_points_border(module-&gt;dev, form, module-&gt;priority, piece-&gt;pipe, &amp;points, &amp;points_count,</a>
+<a name="ln2027">                              &amp;border, &amp;border_count, 1))</a>
+<a name="ln2028">  {</a>
+<a name="ln2029">    free(points);</a>
+<a name="ln2030">    free(border);</a>
+<a name="ln2031">    return 0;</a>
+<a name="ln2032">  }</a>
+<a name="ln2033"> </a>
+<a name="ln2034">  // now we want to find the area, so we search min/max points</a>
+<a name="ln2035">  float xmin, xmax, ymin, ymax;</a>
+<a name="ln2036">  xmin = ymin = FLT_MAX;</a>
+<a name="ln2037">  xmax = ymax = FLT_MIN;</a>
+<a name="ln2038">  guint nb_corner = g_list_length(form-&gt;points);</a>
+<a name="ln2039">  for(int i = nb_corner * 3; i &lt; border_count; i++)</a>
+<a name="ln2040">  {</a>
+<a name="ln2041">    // we look at the borders</a>
+<a name="ln2042">    float xx = border[i * 2];</a>
+<a name="ln2043">    float yy = border[i * 2 + 1];</a>
+<a name="ln2044">    if(isnan(xx))</a>
+<a name="ln2045">    {</a>
+<a name="ln2046">      if(isnan(yy)) break; // that means we have to skip the end of the border path</a>
+<a name="ln2047">      i = yy - 1;</a>
+<a name="ln2048">      continue;</a>
+<a name="ln2049">    }</a>
+<a name="ln2050">    xmin = fminf(xx, xmin);</a>
+<a name="ln2051">    xmax = fmaxf(xx, xmax);</a>
+<a name="ln2052">    ymin = fminf(yy, ymin);</a>
+<a name="ln2053">    ymax = fmaxf(yy, ymax);</a>
+<a name="ln2054">  }</a>
+<a name="ln2055">  for(int i = nb_corner * 3; i &lt; points_count; i++)</a>
+<a name="ln2056">  {</a>
+<a name="ln2057">    // we look at the path too</a>
+<a name="ln2058">    float xx = points[i * 2];</a>
+<a name="ln2059">    float yy = points[i * 2 + 1];</a>
+<a name="ln2060">    xmin = fminf(xx, xmin);</a>
+<a name="ln2061">    xmax = fmaxf(xx, xmax);</a>
+<a name="ln2062">    ymin = fminf(yy, ymin);</a>
+<a name="ln2063">    ymax = fmaxf(yy, ymax);</a>
+<a name="ln2064">  }</a>
+<a name="ln2065"> </a>
+<a name="ln2066">  free(points);</a>
+<a name="ln2067">  free(border);</a>
+<a name="ln2068">  *height = ymax - ymin + 4;</a>
+<a name="ln2069">  *width = xmax - xmin + 4;</a>
+<a name="ln2070">  *posx = xmin - 2;</a>
+<a name="ln2071">  *posy = ymin - 2;</a>
+<a name="ln2072">  return 1;</a>
+<a name="ln2073">}</a>
+<a name="ln2074"> </a>
+<a name="ln2075">static int dt_path_get_area(dt_iop_module_t *module, dt_dev_pixelpipe_iop_t *piece, dt_masks_form_t *form,</a>
+<a name="ln2076">                            int *width, int *height, int *posx, int *posy)</a>
+<a name="ln2077">{</a>
+<a name="ln2078">  if(!module) return 0;</a>
+<a name="ln2079">  // we get buffers for all points</a>
+<a name="ln2080">  float *points = NULL, *border = NULL;</a>
+<a name="ln2081">  int points_count, border_count;</a>
+<a name="ln2082">  if(!_path_get_points_border(module-&gt;dev, form, module-&gt;priority, piece-&gt;pipe, &amp;points, &amp;points_count,</a>
+<a name="ln2083">                              &amp;border, &amp;border_count, 0))</a>
+<a name="ln2084">  {</a>
+<a name="ln2085">    free(points);</a>
+<a name="ln2086">    free(border);</a>
+<a name="ln2087">    return 0;</a>
+<a name="ln2088">  }</a>
+<a name="ln2089"> </a>
+<a name="ln2090">  // now we want to find the area, so we search min/max points</a>
+<a name="ln2091">  float xmin, xmax, ymin, ymax;</a>
+<a name="ln2092">  xmin = ymin = FLT_MAX;</a>
+<a name="ln2093">  xmax = ymax = FLT_MIN;</a>
+<a name="ln2094">  guint nb_corner = g_list_length(form-&gt;points);</a>
+<a name="ln2095">  for(int i = nb_corner * 3; i &lt; border_count; i++)</a>
+<a name="ln2096">  {</a>
+<a name="ln2097">    // we look at the borders</a>
+<a name="ln2098">    float xx = border[i * 2];</a>
+<a name="ln2099">    float yy = border[i * 2 + 1];</a>
+<a name="ln2100">    if(isnan(xx))</a>
+<a name="ln2101">    {</a>
+<a name="ln2102">      if(isnan(yy)) break; // that means we have to skip the end of the border path</a>
+<a name="ln2103">      i = yy - 1;</a>
+<a name="ln2104">      continue;</a>
+<a name="ln2105">    }</a>
+<a name="ln2106">    xmin = fminf(xx, xmin);</a>
+<a name="ln2107">    xmax = fmaxf(xx, xmax);</a>
+<a name="ln2108">    ymin = fminf(yy, ymin);</a>
+<a name="ln2109">    ymax = fmaxf(yy, ymax);</a>
+<a name="ln2110">  }</a>
+<a name="ln2111">  for(int i = nb_corner * 3; i &lt; points_count; i++)</a>
+<a name="ln2112">  {</a>
+<a name="ln2113">    // we look at the path too</a>
+<a name="ln2114">    float xx = points[i * 2];</a>
+<a name="ln2115">    float yy = points[i * 2 + 1];</a>
+<a name="ln2116">    xmin = fminf(xx, xmin);</a>
+<a name="ln2117">    xmax = fmaxf(xx, xmax);</a>
+<a name="ln2118">    ymin = fminf(yy, ymin);</a>
+<a name="ln2119">    ymax = fmaxf(yy, ymax);</a>
+<a name="ln2120">  }</a>
+<a name="ln2121"> </a>
+<a name="ln2122">  free(points);</a>
+<a name="ln2123">  free(border);</a>
+<a name="ln2124"> </a>
+<a name="ln2125">  *height = ymax - ymin + 4;</a>
+<a name="ln2126">  *width = xmax - xmin + 4;</a>
+<a name="ln2127">  *posx = xmin - 2;</a>
+<a name="ln2128">  *posy = ymin - 2;</a>
+<a name="ln2129">  return 1;</a>
+<a name="ln2130">}</a>
+<a name="ln2131"> </a>
+<a name="ln2132">/** we write a falloff segment */</a>
+<a name="ln2133">static void _path_falloff(float **buffer, int *p0, int *p1, int posx, int posy, int bw)</a>
+<a name="ln2134">{</a>
+<a name="ln2135">  // segment length</a>
+<a name="ln2136">  int l = sqrt((p1[0] - p0[0]) * (p1[0] - p0[0]) + (p1[1] - p0[1]) * (p1[1] - p0[1])) + 1;</a>
+<a name="ln2137"> </a>
+<a name="ln2138">  float lx = p1[0] - p0[0];</a>
+<a name="ln2139">  float ly = p1[1] - p0[1];</a>
+<a name="ln2140"> </a>
+<a name="ln2141">  for(int i = 0; i &lt; l; i++)</a>
+<a name="ln2142">  {</a>
+<a name="ln2143">    // position</a>
+<a name="ln2144">    int x = (int)((float)i * lx / (float)l) + p0[0] - posx;</a>
+<a name="ln2145">    int y = (int)((float)i * ly / (float)l) + p0[1] - posy;</a>
+<a name="ln2146">    float op = 1.0 - (float)i / (float)l;</a>
+<a name="ln2147">    (*buffer)[y * bw + x] = fmaxf((*buffer)[y * bw + x], op);</a>
+<a name="ln2148">    if(x &gt; 0)</a>
+<a name="ln2149">      (*buffer)[y * bw + x - 1]</a>
+<a name="ln2150">          = fmaxf((*buffer)[y * bw + x - 1], op); // this one is to avoid gap due to int rounding</a>
+<a name="ln2151">    if(y &gt; 0)</a>
+<a name="ln2152">      (*buffer)[(y - 1) * bw + x]</a>
+<a name="ln2153">          = fmaxf((*buffer)[(y - 1) * bw + x], op); // this one is to avoid gap due to int rounding</a>
+<a name="ln2154">  }</a>
+<a name="ln2155">}</a>
+<a name="ln2156"> </a>
+<a name="ln2157">static int dt_path_get_mask(dt_iop_module_t *module, dt_dev_pixelpipe_iop_t *piece, dt_masks_form_t *form,</a>
+<a name="ln2158">                            float **buffer, int *width, int *height, int *posx, int *posy)</a>
+<a name="ln2159">{</a>
+<a name="ln2160">  if(!module) return 0;</a>
+<a name="ln2161">  double start = dt_get_wtime();</a>
+<a name="ln2162">  double start2;</a>
+<a name="ln2163"> </a>
+<a name="ln2164">  // we get buffers for all points</a>
+<a name="ln2165">  float *points = NULL, *border = NULL;</a>
+<a name="ln2166">  int points_count, border_count;</a>
+<a name="ln2167">  if(!_path_get_points_border(module-&gt;dev, form, module-&gt;priority, piece-&gt;pipe, &amp;points, &amp;points_count,</a>
+<a name="ln2168">                              &amp;border, &amp;border_count, 0))</a>
+<a name="ln2169">  {</a>
+<a name="ln2170">    free(points);</a>
+<a name="ln2171">    free(border);</a>
+<a name="ln2172">    return 0;</a>
+<a name="ln2173">  }</a>
+<a name="ln2174"> </a>
+<a name="ln2175">  if(darktable.unmuted &amp; DT_DEBUG_PERF)</a>
+<a name="ln2176">    dt_print(DT_DEBUG_MASKS, &quot;[masks %s] path points took %0.04f sec\n&quot;, form-&gt;name, dt_get_wtime() - start);</a>
+<a name="ln2177">  start = start2 = dt_get_wtime();</a>
+<a name="ln2178"> </a>
+<a name="ln2179">  // now we want to find the area, so we search min/max points</a>
+<a name="ln2180">  float xmin, xmax, ymin, ymax;</a>
+<a name="ln2181">  xmin = ymin = FLT_MAX;</a>
+<a name="ln2182">  xmax = ymax = FLT_MIN;</a>
+<a name="ln2183">  guint nb_corner = g_list_length(form-&gt;points);</a>
+<a name="ln2184">  for(int i = nb_corner * 3; i &lt; border_count; i++)</a>
+<a name="ln2185">  {</a>
+<a name="ln2186">    // we look at the borders</a>
+<a name="ln2187">    float xx = border[i * 2];</a>
+<a name="ln2188">    float yy = border[i * 2 + 1];</a>
+<a name="ln2189">    if(isnan(xx))</a>
+<a name="ln2190">    {</a>
+<a name="ln2191">      if(isnan(yy)) break; // that means we have to skip the end of the border path</a>
+<a name="ln2192">      i = yy - 1;</a>
+<a name="ln2193">      continue;</a>
+<a name="ln2194">    }</a>
+<a name="ln2195">    xmin = fminf(xx, xmin);</a>
+<a name="ln2196">    xmax = fmaxf(xx, xmax);</a>
+<a name="ln2197">    ymin = fminf(yy, ymin);</a>
+<a name="ln2198">    ymax = fmaxf(yy, ymax);</a>
+<a name="ln2199">  }</a>
+<a name="ln2200"> </a>
+<a name="ln2201">  for(int i = nb_corner * 3; i &lt; points_count; i++)</a>
+<a name="ln2202">  {</a>
+<a name="ln2203">    // we look at the path too</a>
+<a name="ln2204">    float xx = points[i * 2];</a>
+<a name="ln2205">    float yy = points[i * 2 + 1];</a>
+<a name="ln2206">    xmin = fminf(xx, xmin);</a>
+<a name="ln2207">    xmax = fmaxf(xx, xmax);</a>
+<a name="ln2208">    ymin = fminf(yy, ymin);</a>
+<a name="ln2209">    ymax = fmaxf(yy, ymax);</a>
+<a name="ln2210">  }</a>
+<a name="ln2211"> </a>
+<a name="ln2212">  const int hb = *height = ymax - ymin + 4;</a>
+<a name="ln2213">  const int wb = *width = xmax - xmin + 4;</a>
+<a name="ln2214">  *posx = xmin - 2;</a>
+<a name="ln2215">  *posy = ymin - 2;</a>
+<a name="ln2216"> </a>
+<a name="ln2217">  if(darktable.unmuted &amp; DT_DEBUG_PERF)</a>
+<a name="ln2218">    dt_print(DT_DEBUG_MASKS, &quot;[masks %s] path_fill min max took %0.04f sec\n&quot;, form-&gt;name,</a>
+<a name="ln2219">             dt_get_wtime() - start2);</a>
+<a name="ln2220">  start2 = dt_get_wtime();</a>
+<a name="ln2221"> </a>
+<a name="ln2222">  // we allocate the buffer</a>
+<a name="ln2223">  const size_t bufsize = (size_t)(*width) * (*height);</a>
+<a name="ln2224">  *buffer = calloc(bufsize, sizeof(float));</a>
+<a name="ln2225"> </a>
+<a name="ln2226">  // we write all the point around the path into the buffer</a>
+<a name="ln2227">  int nbp = border_count;</a>
+<a name="ln2228">  int lastx, lasty, lasty2;</a>
+<a name="ln2229">  if(nbp &gt; 2)</a>
+<a name="ln2230">  {</a>
+<a name="ln2231">    lastx = (int)points[(nbp - 1) * 2];</a>
+<a name="ln2232">    lasty = (int)points[(nbp - 1) * 2 + 1];</a>
+<a name="ln2233">    lasty2 = (int)points[(nbp - 2) * 2 + 1];</a>
+<a name="ln2234"> </a>
+<a name="ln2235">    int just_change_dir = 0;</a>
+<a name="ln2236">    for(int ii = nb_corner * 3; ii &lt; 2 * nbp - nb_corner * 3; ii++)</a>
+<a name="ln2237">    {</a>
+<a name="ln2238">      // we are writing more than 1 loop in the case the dir in y change</a>
+<a name="ln2239">      // exactly at start/end point</a>
+<a name="ln2240">      int i = ii;</a>
+<a name="ln2241">      if(ii &gt;= nbp) i = (ii - nb_corner * 3) % (nbp - nb_corner * 3) + nb_corner * 3;</a>
+<a name="ln2242">      int xx = (int)points[i * 2];</a>
+<a name="ln2243">      int yy = (int)points[i * 2 + 1];</a>
+<a name="ln2244"> </a>
+<a name="ln2245">      // we don't store the point if it has the same y value as the last one</a>
+<a name="ln2246">      if(yy == lasty) continue;</a>
+<a name="ln2247"> </a>
+<a name="ln2248">      // we want to be sure that there is no y jump</a>
+<a name="ln2249">      if(yy - lasty &gt; 1 || yy - lasty &lt; -1)</a>
+<a name="ln2250">      {</a>
+<a name="ln2251">        if(yy &lt; lasty)</a>
+<a name="ln2252">        {</a>
+<a name="ln2253">          for(int j = yy + 1; j &lt; lasty; j++)</a>
+<a name="ln2254">          {</a>
+<a name="ln2255">            const int nx = (j - yy) * (lastx - xx) / (float)(lasty - yy) + xx;</a>
+<a name="ln2256">            const size_t idx = (size_t)(j - (*posy)) * (*width) + nx - (*posx);</a>
+<a name="ln2257">            assert(idx &lt; bufsize);</a>
+<a name="ln2258">            (*buffer)[idx] = 1.0f;</a>
+<a name="ln2259">          }</a>
+<a name="ln2260">          lasty2 = yy + 2;</a>
+<a name="ln2261">          lasty = yy + 1;</a>
+<a name="ln2262">        }</a>
+<a name="ln2263">        else</a>
+<a name="ln2264">        {</a>
+<a name="ln2265">          for(int j = lasty + 1; j &lt; yy; j++)</a>
+<a name="ln2266">          {</a>
+<a name="ln2267">            const int nx = (j - lasty) * (xx - lastx) / (float)(yy - lasty) + lastx;</a>
+<a name="ln2268">            const size_t idx = (size_t)(j - (*posy)) * (*width) + nx - (*posx);</a>
+<a name="ln2269">            assert(idx &lt; bufsize);</a>
+<a name="ln2270">            (*buffer)[idx] = 1.0f;</a>
+<a name="ln2271">          }</a>
+<a name="ln2272">          lasty2 = yy - 2;</a>
+<a name="ln2273">          lasty = yy - 1;</a>
+<a name="ln2274">        }</a>
+<a name="ln2275">      }</a>
+<a name="ln2276">      // if we change the direction of the path (in y), then we add a extra point</a>
+<a name="ln2277">      if((lasty - lasty2) * (lasty - yy) &gt; 0)</a>
+<a name="ln2278">      {</a>
+<a name="ln2279">        const size_t idx = (size_t)(lasty - (*posy)) * (*width) + lastx + 1 - (*posx);</a>
+<a name="ln2280">        assert(idx &lt; bufsize);</a>
+<a name="ln2281">        (*buffer)[idx] = 1.0f;</a>
+<a name="ln2282">        just_change_dir = 1;</a>
+<a name="ln2283">      }</a>
+<a name="ln2284">      // we add the point</a>
+<a name="ln2285">      if(just_change_dir &amp;&amp; ii == i)</a>
+<a name="ln2286">      {</a>
+<a name="ln2287">        // if we have changed the direction, we have to be careful that point can be at the same place</a>
+<a name="ln2288">        // as the previous one, especially on sharp edges</a>
+<a name="ln2289">        const size_t idx = (size_t)(yy - (*posy)) * (*width) + xx - (*posx);</a>
+<a name="ln2290">        assert(idx &lt; bufsize);</a>
+<a name="ln2291">        float v = (*buffer)[idx];</a>
+<a name="ln2292">        if(v &gt; 0.0)</a>
+<a name="ln2293">        {</a>
+<a name="ln2294">          if(xx - (*posx) &gt; 0)</a>
+<a name="ln2295">          {</a>
+<a name="ln2296">            const size_t idx = (size_t)(yy - (*posy)) * (*width) + xx - 1 - (*posx);</a>
+<a name="ln2297">            assert(idx &lt; bufsize);</a>
+<a name="ln2298">            (*buffer)[idx] = 1.0f;</a>
+<a name="ln2299">          }</a>
+<a name="ln2300">          else if(xx - (*posx) &lt; (*width) - 1)</a>
+<a name="ln2301">          {</a>
+<a name="ln2302">            const size_t idx = (size_t)(yy - (*posy)) * (*width) + xx + 1 - (*posx);</a>
+<a name="ln2303">            assert(idx &lt; bufsize);</a>
+<a name="ln2304">            (*buffer)[idx] = 1.0f;</a>
+<a name="ln2305">          }</a>
+<a name="ln2306">        }</a>
+<a name="ln2307">        else</a>
+<a name="ln2308">        {</a>
+<a name="ln2309">          const size_t idx = (size_t)(yy - (*posy)) * (*width) + xx - (*posx);</a>
+<a name="ln2310">          assert(idx &lt; bufsize);</a>
+<a name="ln2311">          (*buffer)[idx] = 1.0f;</a>
+<a name="ln2312">          just_change_dir = 0;</a>
+<a name="ln2313">        }</a>
+<a name="ln2314">      }</a>
+<a name="ln2315">      else</a>
+<a name="ln2316">      {</a>
+<a name="ln2317">        const size_t idx = (size_t)(yy - (*posy)) * (*width) + xx - (*posx);</a>
+<a name="ln2318">        assert(idx &lt; bufsize);</a>
+<a name="ln2319">        (*buffer)[idx] = 1.0f;</a>
+<a name="ln2320">      }</a>
+<a name="ln2321">      // we change last values</a>
+<a name="ln2322">      lasty2 = lasty;</a>
+<a name="ln2323">      lasty = yy;</a>
+<a name="ln2324">      lastx = xx;</a>
+<a name="ln2325">      if(ii != i) break;</a>
+<a name="ln2326">    }</a>
+<a name="ln2327">  }</a>
+<a name="ln2328">  if(darktable.unmuted &amp; DT_DEBUG_PERF)</a>
+<a name="ln2329">    dt_print(DT_DEBUG_MASKS, &quot;[masks %s] path_fill draw path took %0.04f sec\n&quot;, form-&gt;name,</a>
+<a name="ln2330">             dt_get_wtime() - start2);</a>
+<a name="ln2331">  start2 = dt_get_wtime();</a>
+<a name="ln2332"> </a>
+<a name="ln2333">  for(int yy = 0; yy &lt; hb; yy++)</a>
+<a name="ln2334">  {</a>
+<a name="ln2335">    int state = 0;</a>
+<a name="ln2336">    for(int xx = 0; xx &lt; wb; xx++)</a>
+<a name="ln2337">    {</a>
+<a name="ln2338">      float v = (*buffer)[yy * wb + xx];</a>
+<a name="ln2339">      if(v == 1.0f) state = !state;</a>
+<a name="ln2340">      if(state) (*buffer)[yy * wb + xx] = 1.0f;</a>
+<a name="ln2341">    }</a>
+<a name="ln2342">  }</a>
+<a name="ln2343"> </a>
+<a name="ln2344">  if(darktable.unmuted &amp; DT_DEBUG_PERF)</a>
+<a name="ln2345">    dt_print(DT_DEBUG_MASKS, &quot;[masks %s] path_fill fill plain took %0.04f sec\n&quot;, form-&gt;name,</a>
+<a name="ln2346">             dt_get_wtime() - start2);</a>
+<a name="ln2347">  start2 = dt_get_wtime();</a>
+<a name="ln2348"> </a>
+<a name="ln2349">  // now we fill the falloff</a>
+<a name="ln2350">  int p0[2], p1[2];</a>
+<a name="ln2351">  float pf1[2];</a>
+<a name="ln2352">  int last0[2] = { -100, -100 }, last1[2] = { -100, -100 };</a>
+<a name="ln2353">  nbp = 0;</a>
+<a name="ln2354">  int next = 0;</a>
+<a name="ln2355">  for(int i = nb_corner * 3; i &lt; border_count; i++)</a>
+<a name="ln2356">  {</a>
+<a name="ln2357">    p0[0] = points[i * 2], p0[1] = points[i * 2 + 1];</a>
+<a name="ln2358">    if(next &gt; 0)</a>
+<a name="ln2359">      p1[0] = pf1[0] = border[next * 2], p1[1] = pf1[1] = border[next * 2 + 1];</a>
+<a name="ln2360">    else</a>
+<a name="ln2361">      p1[0] = pf1[0] = border[i * 2], p1[1] = pf1[1] = border[i * 2 + 1];</a>
+<a name="ln2362"> </a>
+<a name="ln2363">    // now we check p1 value to know if we have to skip a part</a>
+<a name="ln2364">    if(next == i) next = 0;</a>
+<a name="ln2365">    while(isnan(pf1[0]))</a>
+<a name="ln2366">    {</a>
+<a name="ln2367">      if(isnan(pf1[1]))</a>
+<a name="ln2368">        next = i - 1;</a>
+<a name="ln2369">      else</a>
+<a name="ln2370">        next = p1[1];</a>
+<a name="ln2371">      p1[0] = pf1[0] = border[next * 2], p1[1] = pf1[1] = border[next * 2 + 1];</a>
+<a name="ln2372">    }</a>
+<a name="ln2373"> </a>
+<a name="ln2374">    // and we draw the falloff</a>
+<a name="ln2375">    if(last0[0] != p0[0] || last0[1] != p0[1] || last1[0] != p1[0] || last1[1] != p1[1])</a>
+<a name="ln2376">    {</a>
+<a name="ln2377">      _path_falloff(buffer, p0, p1, *posx, *posy, *width);</a>
+<a name="ln2378">      last0[0] = p0[0], last0[1] = p0[1];</a>
+<a name="ln2379">      last1[0] = p1[0], last1[1] = p1[1];</a>
+<a name="ln2380">    }</a>
+<a name="ln2381">  }</a>
+<a name="ln2382"> </a>
+<a name="ln2383">  if(darktable.unmuted &amp; DT_DEBUG_PERF)</a>
+<a name="ln2384">    dt_print(DT_DEBUG_MASKS, &quot;[masks %s] path_fill fill falloff took %0.04f sec\n&quot;, form-&gt;name,</a>
+<a name="ln2385">             dt_get_wtime() - start2);</a>
+<a name="ln2386"> </a>
+<a name="ln2387">  free(points);</a>
+<a name="ln2388">  free(border);</a>
+<a name="ln2389"> </a>
+<a name="ln2390">  if(darktable.unmuted &amp; DT_DEBUG_PERF)</a>
+<a name="ln2391">    dt_print(DT_DEBUG_MASKS, &quot;[masks %s] path fill buffer took %0.04f sec\n&quot;, form-&gt;name,</a>
+<a name="ln2392">             dt_get_wtime() - start);</a>
+<a name="ln2393"> </a>
+<a name="ln2394">  return 1;</a>
+<a name="ln2395">}</a>
+<a name="ln2396"> </a>
+<a name="ln2397"> </a>
+<a name="ln2398">/** crop path to roi given by xmin, xmax, ymin, ymax. path segments outside of roi are replaced by</a>
+<a name="ln2399">    nodes lying on roi borders. */</a>
+<a name="ln2400">static int _path_crop_to_roi(float *path, const int point_count, float xmin, float xmax, float ymin,</a>
+<a name="ln2401">                             float ymax)</a>
+<a name="ln2402">{</a>
+<a name="ln2403">  int point_start = -1;</a>
+<a name="ln2404">  int l = -1, r = -1;</a>
+<a name="ln2405"> </a>
+<a name="ln2406"> </a>
+<a name="ln2407">  // first try to find a node clearly inside roi</a>
+<a name="ln2408">  for(int k = 0; k &lt; point_count; k++)</a>
+<a name="ln2409">  {</a>
+<a name="ln2410">    float x = path[2 * k];</a>
+<a name="ln2411">    float y = path[2 * k + 1];</a>
+<a name="ln2412"> </a>
+<a name="ln2413">    if(x &gt;= xmin + 1 &amp;&amp; y &gt;= ymin + 1 &amp;&amp; x &lt;= xmax - 1 &amp;&amp; y &lt;= ymax - 1)</a>
+<a name="ln2414">    {</a>
+<a name="ln2415">      point_start = k;</a>
+<a name="ln2416">      break;</a>
+<a name="ln2417">    }</a>
+<a name="ln2418">  }</a>
+<a name="ln2419"> </a>
+<a name="ln2420">  // printf(&quot;crop to xmin %f, xmax %f, ymin %f, ymax %f - start %d (%f, %f)\n&quot;, xmin, xmax, ymin, ymax,</a>
+<a name="ln2421">  // point_start, path[2*point_start], path[2*point_start+1]);</a>
+<a name="ln2422"> </a>
+<a name="ln2423">  if(point_start &lt; 0) return 0; // no point means roi lies completely within path</a>
+<a name="ln2424"> </a>
+<a name="ln2425">  // find the crossing points with xmin and replace segment by nodes on border</a>
+<a name="ln2426">  for(int k = 0; k &lt; point_count; k++)</a>
+<a name="ln2427">  {</a>
+<a name="ln2428">    int kk = (k + point_start) % point_count;</a>
+<a name="ln2429"> </a>
+<a name="ln2430">    if(l &lt; 0 &amp;&amp; path[2 * kk] &lt; xmin) l = k;       // where we leave roi</a>
+<a name="ln2431">    if(l &gt;= 0 &amp;&amp; path[2 * kk] &gt;= xmin) r = k - 1; // where we re-enter roi</a>
+<a name="ln2432"> </a>
+<a name="ln2433">    // replace that segment</a>
+<a name="ln2434">    if(l &gt;= 0 &amp;&amp; r &gt;= 0)</a>
+<a name="ln2435">    {</a>
+<a name="ln2436">      int count = r - l + 1;</a>
+<a name="ln2437">      int ll = (l - 1 + point_start) % point_count;</a>
+<a name="ln2438">      int rr = (r + 1 + point_start) % point_count;</a>
+<a name="ln2439">      float delta_y = (count == 1) ? 0 : (path[2 * rr + 1] - path[2 * ll + 1]) / (count - 1);</a>
+<a name="ln2440">      float start_y = path[2 * ll + 1];</a>
+<a name="ln2441"> </a>
+<a name="ln2442">      for(int n = 0; n &lt; count; n++)</a>
+<a name="ln2443">      {</a>
+<a name="ln2444">        int nn = (n + l + point_start) % point_count;</a>
+<a name="ln2445">        path[2 * nn] = xmin;</a>
+<a name="ln2446">        path[2 * nn + 1] = start_y + n * delta_y;</a>
+<a name="ln2447">      }</a>
+<a name="ln2448"> </a>
+<a name="ln2449">      l = r = -1;</a>
+<a name="ln2450">    }</a>
+<a name="ln2451">  }</a>
+<a name="ln2452"> </a>
+<a name="ln2453">  // find the crossing points with xmax and replace segment by nodes on border</a>
+<a name="ln2454">  for(int k = 0; k &lt; point_count; k++)</a>
+<a name="ln2455">  {</a>
+<a name="ln2456">    int kk = (k + point_start) % point_count;</a>
+<a name="ln2457"> </a>
+<a name="ln2458">    if(l &lt; 0 &amp;&amp; path[2 * kk] &gt; xmax) l = k;       // where we leave roi</a>
+<a name="ln2459">    if(l &gt;= 0 &amp;&amp; path[2 * kk] &lt;= xmax) r = k - 1; // where we re-enter roi</a>
+<a name="ln2460"> </a>
+<a name="ln2461">    // replace that segment</a>
+<a name="ln2462">    if(l &gt;= 0 &amp;&amp; r &gt;= 0)</a>
+<a name="ln2463">    {</a>
+<a name="ln2464">      int count = r - l + 1;</a>
+<a name="ln2465">      int ll = (l - 1 + point_start) % point_count;</a>
+<a name="ln2466">      int rr = (r + 1 + point_start) % point_count;</a>
+<a name="ln2467">      float delta_y = (count == 1) ? 0 : (path[2 * rr + 1] - path[2 * ll + 1]) / (count - 1);</a>
+<a name="ln2468">      float start_y = path[2 * ll + 1];</a>
+<a name="ln2469"> </a>
+<a name="ln2470">      for(int n = 0; n &lt; count; n++)</a>
+<a name="ln2471">      {</a>
+<a name="ln2472">        int nn = (n + l + point_start) % point_count;</a>
+<a name="ln2473">        path[2 * nn] = xmax;</a>
+<a name="ln2474">        path[2 * nn + 1] = start_y + n * delta_y;</a>
+<a name="ln2475">      }</a>
+<a name="ln2476"> </a>
+<a name="ln2477">      l = r = -1;</a>
+<a name="ln2478">    }</a>
+<a name="ln2479">  }</a>
+<a name="ln2480"> </a>
+<a name="ln2481">  // find the crossing points with ymin and replace segment by nodes on border</a>
+<a name="ln2482">  for(int k = 0; k &lt; point_count; k++)</a>
+<a name="ln2483">  {</a>
+<a name="ln2484">    int kk = (k + point_start) % point_count;</a>
+<a name="ln2485"> </a>
+<a name="ln2486">    if(l &lt; 0 &amp;&amp; path[2 * kk + 1] &lt; ymin) l = k;       // where we leave roi</a>
+<a name="ln2487">    if(l &gt;= 0 &amp;&amp; path[2 * kk + 1] &gt;= ymin) r = k - 1; // where we re-enter roi</a>
+<a name="ln2488"> </a>
+<a name="ln2489">    // replace that segment</a>
+<a name="ln2490">    if(l &gt;= 0 &amp;&amp; r &gt;= 0)</a>
+<a name="ln2491">    {</a>
+<a name="ln2492">      int count = r - l + 1;</a>
+<a name="ln2493">      int ll = (l - 1 + point_start) % point_count;</a>
+<a name="ln2494">      int rr = (r + 1 + point_start) % point_count;</a>
+<a name="ln2495">      float delta_x = (count == 1) ? 0 : (path[2 * rr] - path[2 * ll]) / (count - 1);</a>
+<a name="ln2496">      float start_x = path[2 * ll];</a>
+<a name="ln2497"> </a>
+<a name="ln2498">      for(int n = 0; n &lt; count; n++)</a>
+<a name="ln2499">      {</a>
+<a name="ln2500">        int nn = (n + l + point_start) % point_count;</a>
+<a name="ln2501">        path[2 * nn] = start_x + n * delta_x;</a>
+<a name="ln2502">        path[2 * nn + 1] = ymin;</a>
+<a name="ln2503">      }</a>
+<a name="ln2504"> </a>
+<a name="ln2505">      l = r = -1;</a>
+<a name="ln2506">    }</a>
+<a name="ln2507">  }</a>
+<a name="ln2508"> </a>
+<a name="ln2509">  // find the crossing points with ymax and replace segment by nodes on border</a>
+<a name="ln2510">  for(int k = 0; k &lt; point_count; k++)</a>
+<a name="ln2511">  {</a>
+<a name="ln2512">    int kk = (k + point_start) % point_count;</a>
+<a name="ln2513"> </a>
+<a name="ln2514">    if(l &lt; 0 &amp;&amp; path[2 * kk + 1] &gt; ymax) l = k;       // where we leave roi</a>
+<a name="ln2515">    if(l &gt;= 0 &amp;&amp; path[2 * kk + 1] &lt;= ymax) r = k - 1; // where we re-enter roi</a>
+<a name="ln2516"> </a>
+<a name="ln2517">    // replace that segment</a>
+<a name="ln2518">    if(l &gt;= 0 &amp;&amp; r &gt;= 0)</a>
+<a name="ln2519">    {</a>
+<a name="ln2520">      int count = r - l + 1;</a>
+<a name="ln2521">      int ll = (l - 1 + point_start) % point_count;</a>
+<a name="ln2522">      int rr = (r + 1 + point_start) % point_count;</a>
+<a name="ln2523">      float delta_x = (count == 1) ? 0 : (path[2 * rr] - path[2 * ll]) / (count - 1);</a>
+<a name="ln2524">      float start_x = path[2 * ll];</a>
+<a name="ln2525"> </a>
+<a name="ln2526">      for(int n = 0; n &lt; count; n++)</a>
+<a name="ln2527">      {</a>
+<a name="ln2528">        int nn = (n + l + point_start) % point_count;</a>
+<a name="ln2529">        path[2 * nn] = start_x + n * delta_x;</a>
+<a name="ln2530">        path[2 * nn + 1] = ymax;</a>
+<a name="ln2531">      }</a>
+<a name="ln2532"> </a>
+<a name="ln2533">      l = r = -1;</a>
+<a name="ln2534">    }</a>
+<a name="ln2535">  }</a>
+<a name="ln2536">  return 1;</a>
+<a name="ln2537">}</a>
+<a name="ln2538"> </a>
+<a name="ln2539">/** we write a falloff segment respecting limits of buffer */</a>
+<a name="ln2540">static void _path_falloff_roi(float *buffer, int *p0, int *p1, int bw, int bh)</a>
+<a name="ln2541">{</a>
+<a name="ln2542">  // segment length</a>
+<a name="ln2543">  const int l = sqrt((p1[0] - p0[0]) * (p1[0] - p0[0]) + (p1[1] - p0[1]) * (p1[1] - p0[1])) + 1;</a>
+<a name="ln2544"> </a>
+<a name="ln2545">  const float lx = p1[0] - p0[0];</a>
+<a name="ln2546">  const float ly = p1[1] - p0[1];</a>
+<a name="ln2547"> </a>
+<a name="ln2548">  const int dx = lx &lt; 0 ? -1 : 1;</a>
+<a name="ln2549">  const int dy = ly &lt; 0 ? -1 : 1;</a>
+<a name="ln2550">  const int dpy = dy * bw;</a>
+<a name="ln2551"> </a>
+<a name="ln2552">  for(int i = 0; i &lt; l; i++)</a>
+<a name="ln2553">  {</a>
+<a name="ln2554">    // position</a>
+<a name="ln2555">    const int x = (int)((float)i * lx / (float)l) + p0[0];</a>
+<a name="ln2556">    const int y = (int)((float)i * ly / (float)l) + p0[1];</a>
+<a name="ln2557">    const float op = 1.0 - (float)i / (float)l;</a>
+<a name="ln2558">    float *buf = buffer + (size_t)y * bw + x;</a>
+<a name="ln2559">    if(x &gt;= 0 &amp;&amp; x &lt; bw &amp;&amp; y &gt;= 0 &amp;&amp; y &lt; bh) buf[0] = fmaxf(buf[0], op);</a>
+<a name="ln2560">    if(x + dx &gt;= 0 &amp;&amp; x + dx &lt; bw &amp;&amp; y &gt;= 0 &amp;&amp; y &lt; bh)</a>
+<a name="ln2561">      buf[dx] = fmaxf(buf[dx], op); // this one is to avoid gap due to int rounding</a>
+<a name="ln2562">    if(x &gt;= 0 &amp;&amp; x &lt; bw &amp;&amp; y + dy &gt;= 0 &amp;&amp; y + dy &lt; bh)</a>
+<a name="ln2563">      buf[dpy] = fmaxf(buf[dpy], op); // this one is to avoid gap due to int rounding</a>
+<a name="ln2564">  }</a>
+<a name="ln2565">}</a>
+<a name="ln2566"> </a>
+<a name="ln2567">static int dt_path_get_mask_roi(dt_iop_module_t *module, dt_dev_pixelpipe_iop_t *piece, dt_masks_form_t *form,</a>
+<a name="ln2568">                                const dt_iop_roi_t *roi, float *buffer)</a>
+<a name="ln2569">{</a>
+<a name="ln2570">  if(!module) return 0;</a>
+<a name="ln2571">  double start = dt_get_wtime();</a>
+<a name="ln2572">  double start2;</a>
+<a name="ln2573"> </a>
+<a name="ln2574">  const int px = roi-&gt;x;</a>
+<a name="ln2575">  const int py = roi-&gt;y;</a>
+<a name="ln2576">  const int width = roi-&gt;width;</a>
+<a name="ln2577">  const int height = roi-&gt;height;</a>
+<a name="ln2578">  const float scale = roi-&gt;scale;</a>
+<a name="ln2579"> </a>
+<a name="ln2580">  // we need to take care of four different cases:</a>
+<a name="ln2581">  // 1) path and feather are outside of roi</a>
+<a name="ln2582">  // 2) path is outside of roi, feather reaches into roi</a>
+<a name="ln2583">  // 3) roi lies completely within path</a>
+<a name="ln2584">  // 4) all other situations :)</a>
+<a name="ln2585">  int path_in_roi = 0;</a>
+<a name="ln2586">  int feather_in_roi = 0;</a>
+<a name="ln2587">  int path_encircles_roi = 0;</a>
+<a name="ln2588"> </a>
+<a name="ln2589">  // we get buffers for all points</a>
+<a name="ln2590">  float *points = NULL, *border = NULL, *cpoints = NULL;</a>
+<a name="ln2591">  int points_count, border_count;</a>
+<a name="ln2592">  if(!_path_get_points_border(module-&gt;dev, form, module-&gt;priority, piece-&gt;pipe, &amp;points, &amp;points_count,</a>
+<a name="ln2593">                              &amp;border, &amp;border_count, 0) || (points_count &lt;= 2))</a>
+<a name="ln2594">  {</a>
+<a name="ln2595">    free(points);</a>
+<a name="ln2596">    free(border);</a>
+<a name="ln2597">    return 0;</a>
+<a name="ln2598">  }</a>
+<a name="ln2599"> </a>
+<a name="ln2600">  if(darktable.unmuted &amp; DT_DEBUG_PERF)</a>
+<a name="ln2601">    dt_print(DT_DEBUG_MASKS, &quot;[masks %s] path points took %0.04f sec\n&quot;, form-&gt;name, dt_get_wtime() - start);</a>
+<a name="ln2602">  start = start2 = dt_get_wtime();</a>
+<a name="ln2603"> </a>
+<a name="ln2604">  // empty the output buffer</a>
+<a name="ln2605">  memset(buffer, 0, (size_t)width * height * sizeof(float));</a>
+<a name="ln2606"> </a>
+<a name="ln2607">  guint nb_corner = g_list_length(form-&gt;points);</a>
+<a name="ln2608"> </a>
+<a name="ln2609">  // we shift and scale down path and border</a>
+<a name="ln2610">  for(int i = nb_corner * 3; i &lt; border_count; i++)</a>
+<a name="ln2611">  {</a>
+<a name="ln2612">    float xx = border[2 * i];</a>
+<a name="ln2613">    float yy = border[2 * i + 1];</a>
+<a name="ln2614">    if(isnan(xx))</a>
+<a name="ln2615">    {</a>
+<a name="ln2616">      if(isnan(yy)) break; // that means we have to skip the end of the border path</a>
+<a name="ln2617">      i = yy - 1;</a>
+<a name="ln2618">      continue;</a>
+<a name="ln2619">    }</a>
+<a name="ln2620">    border[2 * i] = xx * scale - px;</a>
+<a name="ln2621">    border[2 * i + 1] = yy * scale - py;</a>
+<a name="ln2622">  }</a>
+<a name="ln2623">  for(int i = nb_corner * 3; i &lt; points_count; i++)</a>
+<a name="ln2624">  {</a>
+<a name="ln2625">    float xx = points[2 * i];</a>
+<a name="ln2626">    float yy = points[2 * i + 1];</a>
+<a name="ln2627">    points[2 * i] = xx * scale - px;</a>
+<a name="ln2628">    points[2 * i + 1] = yy * scale - py;</a>
+<a name="ln2629">  }</a>
+<a name="ln2630"> </a>
+<a name="ln2631">  // now check if path is at least partially within roi</a>
+<a name="ln2632">  for(int i = nb_corner * 3; i &lt; points_count; i++)</a>
+<a name="ln2633">  {</a>
+<a name="ln2634">    int xx = points[i * 2];</a>
+<a name="ln2635">    int yy = points[i * 2 + 1];</a>
+<a name="ln2636"> </a>
+<a name="ln2637">    if(xx &gt; 1 &amp;&amp; yy &gt; 1 &amp;&amp; xx &lt; width - 2 &amp;&amp; yy &lt; height - 2)</a>
+<a name="ln2638">    {</a>
+<a name="ln2639">      path_in_roi = 1;</a>
+<a name="ln2640">      break;</a>
+<a name="ln2641">    }</a>
+<a name="ln2642">  }</a>
+<a name="ln2643"> </a>
+<a name="ln2644">  // if not this still might mean that path fully encircles roi -&gt; we need to check that</a>
+<a name="ln2645">  if(!path_in_roi)</a>
+<a name="ln2646">  {</a>
+<a name="ln2647">    int nb = 0;</a>
+<a name="ln2648">    int last = -9999;</a>
+<a name="ln2649">    int x = width / 2;</a>
+<a name="ln2650">    int y = height / 2;</a>
+<a name="ln2651"> </a>
+<a name="ln2652">    for(int i = nb_corner * 3; i &lt; points_count; i++)</a>
+<a name="ln2653">    {</a>
+<a name="ln2654">      int yy = (int)points[2 * i + 1];</a>
+<a name="ln2655">      if(yy != last &amp;&amp; yy == y)</a>
+<a name="ln2656">      {</a>
+<a name="ln2657">        if(points[2 * i] &gt; x) nb++;</a>
+<a name="ln2658">      }</a>
+<a name="ln2659">      last = yy;</a>
+<a name="ln2660">    }</a>
+<a name="ln2661">    // if there is an uneven number of intersection points roi lies within path</a>
+<a name="ln2662">    if(nb &amp; 1)</a>
+<a name="ln2663">    {</a>
+<a name="ln2664">      path_in_roi = 1;</a>
+<a name="ln2665">      path_encircles_roi = 1;</a>
+<a name="ln2666">    }</a>
+<a name="ln2667">  }</a>
+<a name="ln2668"> </a>
+<a name="ln2669">  // now check if feather is at least partially within roi</a>
+<a name="ln2670">  for(int i = nb_corner * 3; i &lt; border_count; i++)</a>
+<a name="ln2671">  {</a>
+<a name="ln2672">    float xx = border[i * 2];</a>
+<a name="ln2673">    float yy = border[i * 2 + 1];</a>
+<a name="ln2674">    if(isnan(xx))</a>
+<a name="ln2675">    {</a>
+<a name="ln2676">      if(isnan(yy)) break; // that means we have to skip the end of the border path</a>
+<a name="ln2677">      i = yy - 1;</a>
+<a name="ln2678">      continue;</a>
+<a name="ln2679">    }</a>
+<a name="ln2680">    if(xx &gt; 1 &amp;&amp; yy &gt; 1 &amp;&amp; xx &lt; width - 2 &amp;&amp; yy &lt; height - 2)</a>
+<a name="ln2681">    {</a>
+<a name="ln2682">      feather_in_roi = 1;</a>
+<a name="ln2683">      break;</a>
+<a name="ln2684">    }</a>
+<a name="ln2685">  }</a>
+<a name="ln2686"> </a>
+<a name="ln2687">  // if path and feather completely lie outside of roi -&gt; we're done/mask remains empty</a>
+<a name="ln2688">  if(!path_in_roi &amp;&amp; !feather_in_roi)</a>
+<a name="ln2689">  {</a>
+<a name="ln2690">    free(points);</a>
+<a name="ln2691">    free(border);</a>
+<a name="ln2692">    return 1;</a>
+<a name="ln2693">  }</a>
+<a name="ln2694"> </a>
+<a name="ln2695">  // now get min/max values</a>
+<a name="ln2696">  float xmin, xmax, ymin, ymax;</a>
+<a name="ln2697">  xmin = ymin = FLT_MAX;</a>
+<a name="ln2698">  xmax = ymax = FLT_MIN;</a>
+<a name="ln2699">  for(int i = nb_corner * 3; i &lt; points_count; i++)</a>
+<a name="ln2700">  {</a>
+<a name="ln2701">    float xx = points[i * 2];</a>
+<a name="ln2702">    float yy = points[i * 2 + 1];</a>
+<a name="ln2703">    xmin = fminf(xx, xmin);</a>
+<a name="ln2704">    xmax = fmaxf(xx, xmax);</a>
+<a name="ln2705">    ymin = fminf(yy, ymin);</a>
+<a name="ln2706">    ymax = fmaxf(yy, ymax);</a>
+<a name="ln2707">  }</a>
+<a name="ln2708">  for(int i = nb_corner * 3; i &lt; border_count; i++)</a>
+<a name="ln2709">  {</a>
+<a name="ln2710">    float xx = border[i * 2];</a>
+<a name="ln2711">    float yy = border[i * 2 + 1];</a>
+<a name="ln2712">    if(isnan(xx))</a>
+<a name="ln2713">    {</a>
+<a name="ln2714">      if(isnan(yy)) break; // that means we have to skip the end of the border path</a>
+<a name="ln2715">      i = yy - 1;</a>
+<a name="ln2716">      continue;</a>
+<a name="ln2717">    }</a>
+<a name="ln2718">    xmin = fminf(xx, xmin);</a>
+<a name="ln2719">    xmax = fmaxf(xx, xmax);</a>
+<a name="ln2720">    ymin = fminf(yy, ymin);</a>
+<a name="ln2721">    ymax = fmaxf(yy, ymax);</a>
+<a name="ln2722">  }</a>
+<a name="ln2723"> </a>
+<a name="ln2724">  if(darktable.unmuted &amp; DT_DEBUG_PERF)</a>
+<a name="ln2725">    dt_print(DT_DEBUG_MASKS, &quot;[masks %s] path_fill min max took %0.04f sec\n&quot;, form-&gt;name,</a>
+<a name="ln2726">             dt_get_wtime() - start2);</a>
+<a name="ln2727">  start2 = dt_get_wtime();</a>
+<a name="ln2728"> </a>
+<a name="ln2729">  // deal with path if it does not lie outside of roi</a>
+<a name="ln2730">  if(path_in_roi)</a>
+<a name="ln2731">  {</a>
+<a name="ln2732">    // second copy of path which we can modify when cropping to roi</a>
+<a name="ln2733">    cpoints = malloc(2 * points_count * sizeof(float));</a>
+<a name="ln2734">    if(cpoints == NULL)</a>
+<a name="ln2735">    {</a>
+<a name="ln2736">      free(points);</a>
+<a name="ln2737">      free(border);</a>
+<a name="ln2738">      return 0;</a>
+<a name="ln2739">    }</a>
+<a name="ln2740">    memcpy(cpoints, points, 2 * points_count * sizeof(float));</a>
+<a name="ln2741"> </a>
+<a name="ln2742">    // now we clip cpoints to roi -&gt; catch special case when roi lies completely within path.</a>
+<a name="ln2743">    // dirty trick: we allow path to extend one pixel beyond height-1. this avoids need of special handling</a>
+<a name="ln2744">    // of the last roi line in the following edge-flag polygon fill algorithm.</a>
+<a name="ln2745">    int crop_success = _path_crop_to_roi(cpoints + 2 * (nb_corner * 3), points_count - nb_corner * 3, 0,</a>
+<a name="ln2746">                                         width - 1, 0, height);</a>
+<a name="ln2747">    path_encircles_roi = path_encircles_roi || !crop_success;</a>
+<a name="ln2748"> </a>
+<a name="ln2749">    if(darktable.unmuted &amp; DT_DEBUG_PERF)</a>
+<a name="ln2750">      dt_print(DT_DEBUG_MASKS, &quot;[masks %s] path_fill crop to roi took %0.04f sec\n&quot;, form-&gt;name,</a>
+<a name="ln2751">               dt_get_wtime() - start2);</a>
+<a name="ln2752">    start2 = dt_get_wtime();</a>
+<a name="ln2753"> </a>
+<a name="ln2754">    if(path_encircles_roi)</a>
+<a name="ln2755">    {</a>
+<a name="ln2756">      // roi lies completely within path</a>
+<a name="ln2757">      for(size_t k = 0; k &lt; (size_t)width * height; k++) buffer[k] = 1.0f;</a>
+<a name="ln2758">    }</a>
+<a name="ln2759">    else</a>
+<a name="ln2760">    {</a>
+<a name="ln2761">      // all other cases</a>
+<a name="ln2762"> </a>
+<a name="ln2763">      // edge-flag polygon fill: we write all the point around the path into the buffer</a>
+<a name="ln2764">      float xlast = cpoints[(points_count - 1) * 2];</a>
+<a name="ln2765">      float ylast = cpoints[(points_count - 1) * 2 + 1];</a>
+<a name="ln2766"> </a>
+<a name="ln2767">      for(int i = nb_corner * 3; i &lt; points_count; i++)</a>
+<a name="ln2768">      {</a>
+<a name="ln2769">        float xstart = xlast;</a>
+<a name="ln2770">        float ystart = ylast;</a>
+<a name="ln2771"> </a>
+<a name="ln2772">        float xend = xlast = cpoints[i * 2];</a>
+<a name="ln2773">        float yend = ylast = cpoints[i * 2 + 1];</a>
+<a name="ln2774"> </a>
+<a name="ln2775">        if(ystart &gt; yend)</a>
+<a name="ln2776">        {</a>
+<a name="ln2777">          float tmp;</a>
+<a name="ln2778">          tmp = ystart, ystart = yend, yend = tmp;</a>
+<a name="ln2779">          tmp = xstart, xstart = xend, xend = tmp;</a>
+<a name="ln2780">        }</a>
+<a name="ln2781"> </a>
+<a name="ln2782">        const float m = (xstart - xend) / (ystart - yend); // we don't need special handling of ystart==yend</a>
+<a name="ln2783">                                                           // as following loop will take care</a>
+<a name="ln2784"> </a>
+<a name="ln2785">        for(int yy = (int)ceilf(ystart); (float)yy &lt; yend;</a>
+<a name="ln2786">            yy++) // this would normally never touch the last roi line =&gt; see comment further above</a>
+<a name="ln2787">        {</a>
+<a name="ln2788">          const float xcross = xstart + m * (yy - ystart);</a>
+<a name="ln2789"> </a>
+<a name="ln2790">          int xx = floorf(xcross);</a>
+<a name="ln2791">          if((float)xx + 0.5f &lt;= xcross) xx++;</a>
+<a name="ln2792"> </a>
+<a name="ln2793">          if(xx &lt; 0 || xx &gt;= width || yy &lt; 0 || yy &gt;= height)</a>
+<a name="ln2794">            continue; // sanity check just to be on the safe side</a>
+<a name="ln2795"> </a>
+<a name="ln2796">          size_t index = (size_t)yy * width + xx;</a>
+<a name="ln2797"> </a>
+<a name="ln2798">          buffer[index] = 1.0f - buffer[index];</a>
+<a name="ln2799">        }</a>
+<a name="ln2800">      }</a>
+<a name="ln2801"> </a>
+<a name="ln2802">      if(darktable.unmuted &amp; DT_DEBUG_PERF)</a>
+<a name="ln2803">        dt_print(DT_DEBUG_MASKS, &quot;[masks %s] path_fill draw path took %0.04f sec\n&quot;, form-&gt;name,</a>
+<a name="ln2804">                 dt_get_wtime() - start2);</a>
+<a name="ln2805">      start2 = dt_get_wtime();</a>
+<a name="ln2806"> </a>
+<a name="ln2807">      // we fill the inside plain</a>
+<a name="ln2808">      // we don't need to deal with parts of shape outside of roi</a>
+<a name="ln2809">      xmin = fmaxf(xmin, 0);</a>
+<a name="ln2810">      xmax = fminf(xmax, width - 1);</a>
+<a name="ln2811">      ymin = fmaxf(ymin, 0);</a>
+<a name="ln2812">      ymax = fminf(ymax, height - 1);</a>
+<a name="ln2813"> </a>
+<a name="ln2814">      for(int yy = ymin; yy &lt;= ymax; yy++)</a>
+<a name="ln2815">      {</a>
+<a name="ln2816">        int state = 0;</a>
+<a name="ln2817">        for(int xx = xmin; xx &lt;= xmax; xx++)</a>
+<a name="ln2818">        {</a>
+<a name="ln2819">          size_t index = (size_t)yy * width + xx;</a>
+<a name="ln2820">          float v = buffer[index];</a>
+<a name="ln2821">          if(v &gt; 0.5f) state = !state;</a>
+<a name="ln2822">          if(state) buffer[index] = 1.0f;</a>
+<a name="ln2823">        }</a>
+<a name="ln2824">      }</a>
+<a name="ln2825"> </a>
+<a name="ln2826">      if(darktable.unmuted &amp; DT_DEBUG_PERF)</a>
+<a name="ln2827">        dt_print(DT_DEBUG_MASKS, &quot;[masks %s] path_fill fill plain took %0.04f sec\n&quot;, form-&gt;name,</a>
+<a name="ln2828">                 dt_get_wtime() - start2);</a>
+<a name="ln2829">      start2 = dt_get_wtime();</a>
+<a name="ln2830">    }</a>
+<a name="ln2831">    free(cpoints);</a>
+<a name="ln2832">  }</a>
+<a name="ln2833"> </a>
+<a name="ln2834">  // deal with feather if it does not lie outside of roi</a>
+<a name="ln2835">  if(!path_encircles_roi)</a>
+<a name="ln2836">  {</a>
+<a name="ln2837">    int p0[2], p1[2];</a>
+<a name="ln2838">    float pf1[2];</a>
+<a name="ln2839">    int last0[2] = { -100, -100 };</a>
+<a name="ln2840">    int last1[2] = { -100, -100 };</a>
+<a name="ln2841">    int next = 0;</a>
+<a name="ln2842">    for(int i = nb_corner * 3; i &lt; border_count; i++)</a>
+<a name="ln2843">    {</a>
+<a name="ln2844">      p0[0] = floorf(points[i * 2] + 0.5f);</a>
+<a name="ln2845">      p0[1] = ceilf(points[i * 2 + 1]);</a>
+<a name="ln2846">      if(next &gt; 0)</a>
+<a name="ln2847">      {</a>
+<a name="ln2848">        p1[0] = pf1[0] = border[next * 2];</a>
+<a name="ln2849">        p1[1] = pf1[1] = border[next * 2 + 1];</a>
+<a name="ln2850">      }</a>
+<a name="ln2851">      else</a>
+<a name="ln2852">      {</a>
+<a name="ln2853">        p1[0] = pf1[0] = border[i * 2];</a>
+<a name="ln2854">        p1[1] = pf1[1] = border[i * 2 + 1];</a>
+<a name="ln2855">      }</a>
+<a name="ln2856"> </a>
+<a name="ln2857">      // now we check p1 value to know if we have to skip a part</a>
+<a name="ln2858">      if(next == i) next = 0;</a>
+<a name="ln2859">      while(isnan(pf1[0]))</a>
+<a name="ln2860">      {</a>
+<a name="ln2861">        if(isnan(pf1[1]))</a>
+<a name="ln2862">          next = i - 1;</a>
+<a name="ln2863">        else</a>
+<a name="ln2864">          next = p1[1];</a>
+<a name="ln2865">        p1[0] = pf1[0] = border[next * 2];</a>
+<a name="ln2866">        p1[1] = pf1[1] = border[next * 2 + 1];</a>
+<a name="ln2867">      }</a>
+<a name="ln2868"> </a>
+<a name="ln2869">      // and we draw the falloff</a>
+<a name="ln2870">      if(last0[0] != p0[0] || last0[1] != p0[1] || last1[0] != p1[0] || last1[1] != p1[1])</a>
+<a name="ln2871">      {</a>
+<a name="ln2872">        _path_falloff_roi(buffer, p0, p1, width, height);</a>
+<a name="ln2873">        last0[0] = p0[0];</a>
+<a name="ln2874">        last0[1] = p0[1];</a>
+<a name="ln2875">        last1[0] = p1[0];</a>
+<a name="ln2876">        last1[1] = p1[1];</a>
+<a name="ln2877">      }</a>
+<a name="ln2878">    }</a>
+<a name="ln2879"> </a>
+<a name="ln2880">    if(darktable.unmuted &amp; DT_DEBUG_PERF)</a>
+<a name="ln2881">      dt_print(DT_DEBUG_MASKS, &quot;[masks %s] path_fill fill falloff took %0.04f sec\n&quot;, form-&gt;name,</a>
+<a name="ln2882">               dt_get_wtime() - start2);</a>
+<a name="ln2883">  }</a>
+<a name="ln2884"> </a>
+<a name="ln2885">  free(points);</a>
+<a name="ln2886">  free(border);</a>
+<a name="ln2887"> </a>
+<a name="ln2888">  if(darktable.unmuted &amp; DT_DEBUG_PERF)</a>
+<a name="ln2889">    dt_print(DT_DEBUG_MASKS, &quot;[masks %s] path fill buffer took %0.04f sec\n&quot;, form-&gt;name,</a>
+<a name="ln2890">             dt_get_wtime() - start);</a>
+<a name="ln2891"> </a>
+<a name="ln2892">  return 1;</a>
+<a name="ln2893">}</a>
+<a name="ln2894"> </a>
+<a name="ln2895">// modelines: These editor modelines have been set for all relevant files by tools/update_modelines.sh</a>
+<a name="ln2896">// vim: shiftwidth=2 expandtab tabstop=2 cindent</a>
+<a name="ln2897">// kate: tab-indents: off; indent-width 2; replace-tabs on; indent-mode cstyle; remove-trailing-spaces modified;</a>
+
+</code></pre>
+<div class="balloon" rel="284"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v581/" target="_blank">V581</a> The conditional expressions of the 'if' statements situated alongside each other are identical. Check lines: 283, 284.</p></div>
+<div class="balloon" rel="353"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v1009/" target="_blank">V1009</a> Check the array initialization. Only the first element is initialized explicitly. The rest elements are initialized with zeros.</p></div>
+<div class="balloon" rel="586"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v522/" target="_blank">V522</a> There might be dereferencing of a potential null pointer 'border_init'. Check lines: 586, 573.</p></div>
+<div class="balloon" rel="516"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v581/" target="_blank">V581</a> The conditional expressions of the 'if' statements situated alongside each other are identical. Check lines: 515, 516.</p></div>
+<div class="balloon" rel="750"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v581/" target="_blank">V581</a> The conditional expressions of the 'if' statements situated alongside each other are identical. Check lines: 749, 750.</p></div>
+<div class="balloon" rel="751"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v581/" target="_blank">V581</a> The conditional expressions of the 'if' statements situated alongside each other are identical. Check lines: 750, 751.</p></div>
+<div class="balloon" rel="668"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v595/" target="_blank">V595</a> The 'border' pointer was utilized before it was verified against nullptr. Check lines: 668, 679.</p></div>
+<div class="balloon" rel="1077"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v522/" target="_blank">V522</a> There might be dereferencing of a potential null pointer 'bzpt'. Check lines: 1077, 1069.</p></div>
+<div class="balloon" rel="1088"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v522/" target="_blank">V522</a> There might be dereferencing of a potential null pointer 'bzpt2'. Check lines: 1088, 1087.</p></div>
+<div class="balloon" rel="1211"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v522/" target="_blank">V522</a> There might be dereferencing of a potential null pointer 'bzpt'. Check lines: 1211, 1204.</p></div>
+<div class="balloon" rel="1839"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v560/" target="_blank">V560</a> A part of conditional expression is always false: k == nb.</p></div>
+<div class="balloon" rel="1872"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v560/" target="_blank">V560</a> A part of conditional expression is always true: (gui->group_selected == index).</p></div>
+
+<link rel="stylesheet" href="highlight.css">
+<script src="highlight.pack.js"></script>
+<script src="highlightjs-line-numbers.js"></script>
+<script>hljs.initHighlightingOnLoad();</script>
+<script>hljs.initLineNumbersOnLoad();</script>
+<script>
+  $(document).ready(function() {
+      $('.balloon').each(function () {
+          var bl = $(this);
+          var line = bl.attr('rel');
+          var text = $('a[name="ln'+line+'"]').text();
+
+          var space_count = 0;
+          for(var i = 0; i<text.length; i++){
+              var char = text[i];
+              if((char !== ' ')&&(char !== '\t'))break;
+              if(char === '\t')space_count++;
+              space_count++;
+          }
+
+          bl.css('margin-left', space_count*8);
+          $('a[name="ln'+line+'"]').after(bl);
+      });
+
+      window.location = window.location;
+  });
+</script>
+</body>
+</html>

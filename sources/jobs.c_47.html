@@ -1,0 +1,692 @@
+
+<html>
+<head>
+  <link rel="stylesheet" href="../style.css"/>
+  <script src="../jquery-3.2.1.min.js"></script>
+</head>
+<body>
+<pre><code class = "cpp">
+<a name="ln1">/*</a>
+<a name="ln2">    This file is part of darktable,</a>
+<a name="ln3">    copyright (c) 2009--2010 johannes hanika.</a>
+<a name="ln4">    copyright (c) 2010--2013 henrik andersson.</a>
+<a name="ln5">    Copyright (c) 2012 James C. McPherson</a>
+<a name="ln6">    copyright (c) 2014 tobias ellinghaus.</a>
+<a name="ln7">    copyright (c) 2015 LebedevRI.</a>
+<a name="ln8"> </a>
+<a name="ln9">    darktable is free software: you can redistribute it and/or modify</a>
+<a name="ln10">    it under the terms of the GNU General Public License as published by</a>
+<a name="ln11">    the Free Software Foundation, either version 3 of the License, or</a>
+<a name="ln12">    (at your option) any later version.</a>
+<a name="ln13"> </a>
+<a name="ln14">    darktable is distributed in the hope that it will be useful,</a>
+<a name="ln15">    but WITHOUT ANY WARRANTY; without even the implied warranty of</a>
+<a name="ln16">    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the</a>
+<a name="ln17">    GNU General Public License for more details.</a>
+<a name="ln18"> </a>
+<a name="ln19">    You should have received a copy of the GNU General Public License</a>
+<a name="ln20">    along with darktable.  If not, see &lt;http://www.gnu.org/licenses/&gt;.</a>
+<a name="ln21">*/</a>
+<a name="ln22"> </a>
+<a name="ln23">#include &quot;control/jobs.h&quot;</a>
+<a name="ln24">#include &quot;control/control.h&quot;</a>
+<a name="ln25"> </a>
+<a name="ln26">#define DT_CONTROL_FG_PRIORITY 4</a>
+<a name="ln27">#define DT_CONTROL_MAX_JOBS 30</a>
+<a name="ln28"> </a>
+<a name="ln29">/* the queue can have scheduled jobs but all</a>
+<a name="ln30">    the workers are sleeping, so this kicks the workers</a>
+<a name="ln31">    on timed interval.</a>
+<a name="ln32">*/</a>
+<a name="ln33">typedef struct worker_thread_parameters_t</a>
+<a name="ln34">{</a>
+<a name="ln35">  dt_control_t *self;</a>
+<a name="ln36">  int32_t threadid;</a>
+<a name="ln37">} worker_thread_parameters_t;</a>
+<a name="ln38"> </a>
+<a name="ln39">typedef struct _dt_job_t</a>
+<a name="ln40">{</a>
+<a name="ln41">  dt_job_execute_callback execute;</a>
+<a name="ln42">  void *params;</a>
+<a name="ln43">  size_t params_size;</a>
+<a name="ln44">  dt_job_destroy_callback params_destroy;</a>
+<a name="ln45">  int32_t result;</a>
+<a name="ln46"> </a>
+<a name="ln47">  dt_pthread_mutex_t state_mutex;</a>
+<a name="ln48">  dt_pthread_mutex_t wait_mutex;</a>
+<a name="ln49"> </a>
+<a name="ln50">  dt_job_state_t state;</a>
+<a name="ln51">  unsigned char priority;</a>
+<a name="ln52">  dt_job_queue_t queue;</a>
+<a name="ln53"> </a>
+<a name="ln54">  dt_job_state_change_callback state_changed_cb;</a>
+<a name="ln55"> </a>
+<a name="ln56">  dt_progress_t *progress;</a>
+<a name="ln57"> </a>
+<a name="ln58">  char description[DT_CONTROL_DESCRIPTION_LEN];</a>
+<a name="ln59">} _dt_job_t;</a>
+<a name="ln60"> </a>
+<a name="ln61">/** check if two jobs are to be considered equal. a simple memcmp won't work since the mutexes probably won't</a>
+<a name="ln62">   match</a>
+<a name="ln63">    we don't want to compare result, priority or state since these will change during the course of</a>
+<a name="ln64">   processing.</a>
+<a name="ln65">    NOTE: maybe allow to pass a comparator for params.</a>
+<a name="ln66"> */</a>
+<a name="ln67">static inline int dt_control_job_equal(_dt_job_t *j1, _dt_job_t *j2)</a>
+<a name="ln68">{</a>
+<a name="ln69">  if(!j1 || !j2) return 0;</a>
+<a name="ln70">  if(j1-&gt;params_size != 0 &amp;&amp; j1-&gt;params_size == j2-&gt;params_size)</a>
+<a name="ln71">    return (j1-&gt;execute == j2-&gt;execute &amp;&amp; j1-&gt;state_changed_cb == j2-&gt;state_changed_cb</a>
+<a name="ln72">            &amp;&amp; j1-&gt;queue == j2-&gt;queue &amp;&amp; (memcmp(j1-&gt;params, j2-&gt;params, j1-&gt;params_size) == 0));</a>
+<a name="ln73">  return (j1-&gt;execute == j2-&gt;execute &amp;&amp; j1-&gt;state_changed_cb == j2-&gt;state_changed_cb &amp;&amp; j1-&gt;queue == j2-&gt;queue</a>
+<a name="ln74">          &amp;&amp; (g_strcmp0(j1-&gt;description, j2-&gt;description) == 0));</a>
+<a name="ln75">}</a>
+<a name="ln76"> </a>
+<a name="ln77">static void dt_control_job_set_state(_dt_job_t *job, dt_job_state_t state)</a>
+<a name="ln78">{</a>
+<a name="ln79">  if(!job) return;</a>
+<a name="ln80">  dt_pthread_mutex_lock(&amp;job-&gt;state_mutex);</a>
+<a name="ln81">  if(state &gt;= DT_JOB_STATE_FINISHED  &amp;&amp; job-&gt;state != DT_JOB_STATE_RUNNING &amp;&amp; job-&gt;progress)</a>
+<a name="ln82">  {</a>
+<a name="ln83">    dt_control_progress_destroy(darktable.control, job-&gt;progress);</a>
+<a name="ln84">    job-&gt;progress = NULL;</a>
+<a name="ln85">  }</a>
+<a name="ln86">  job-&gt;state = state;</a>
+<a name="ln87">  /* pass state change to callback */</a>
+<a name="ln88">  if(job-&gt;state_changed_cb) job-&gt;state_changed_cb(job, state);</a>
+<a name="ln89">  dt_pthread_mutex_unlock(&amp;job-&gt;state_mutex);</a>
+<a name="ln90">}</a>
+<a name="ln91"> </a>
+<a name="ln92">dt_job_state_t dt_control_job_get_state(_dt_job_t *job)</a>
+<a name="ln93">{</a>
+<a name="ln94">  if(!job) return DT_JOB_STATE_DISPOSED;</a>
+<a name="ln95">  dt_pthread_mutex_lock(&amp;job-&gt;state_mutex);</a>
+<a name="ln96">  dt_job_state_t state = job-&gt;state;</a>
+<a name="ln97">  dt_pthread_mutex_unlock(&amp;job-&gt;state_mutex);</a>
+<a name="ln98">  return state;</a>
+<a name="ln99">}</a>
+<a name="ln100"> </a>
+<a name="ln101">void dt_control_job_set_params(_dt_job_t *job, void *params, dt_job_destroy_callback callback)</a>
+<a name="ln102">{</a>
+<a name="ln103">  if(!job || dt_control_job_get_state(job) != DT_JOB_STATE_INITIALIZED) return;</a>
+<a name="ln104">  job-&gt;params = params;</a>
+<a name="ln105">  job-&gt;params_size = 0;</a>
+<a name="ln106">  job-&gt;params_destroy = callback;</a>
+<a name="ln107">}</a>
+<a name="ln108"> </a>
+<a name="ln109">void dt_control_job_set_params_with_size(dt_job_t *job, void *params, size_t params_size,</a>
+<a name="ln110">                                         dt_job_destroy_callback callback)</a>
+<a name="ln111">{</a>
+<a name="ln112">  if(!job || dt_control_job_get_state(job) != DT_JOB_STATE_INITIALIZED) return;</a>
+<a name="ln113">  job-&gt;params = params;</a>
+<a name="ln114">  job-&gt;params_size = params_size;</a>
+<a name="ln115">  job-&gt;params_destroy = callback;</a>
+<a name="ln116">}</a>
+<a name="ln117"> </a>
+<a name="ln118">void *dt_control_job_get_params(const _dt_job_t *job)</a>
+<a name="ln119">{</a>
+<a name="ln120">  if(!job) return NULL;</a>
+<a name="ln121">  return job-&gt;params;</a>
+<a name="ln122">}</a>
+<a name="ln123"> </a>
+<a name="ln124">dt_job_t *dt_control_job_create(dt_job_execute_callback execute, const char *msg, ...)</a>
+<a name="ln125">{</a>
+<a name="ln126">  _dt_job_t *job = (_dt_job_t *)calloc(1, sizeof(_dt_job_t));</a>
+<a name="ln127">  if(!job) return NULL;</a>
+<a name="ln128"> </a>
+<a name="ln129">  va_list ap;</a>
+<a name="ln130">  va_start(ap, msg);</a>
+<a name="ln131">  vsnprintf(job-&gt;description, DT_CONTROL_DESCRIPTION_LEN, msg, ap);</a>
+<a name="ln132">  va_end(ap);</a>
+<a name="ln133"> </a>
+<a name="ln134">  job-&gt;execute = execute;</a>
+<a name="ln135">  job-&gt;state = DT_JOB_STATE_INITIALIZED;</a>
+<a name="ln136"> </a>
+<a name="ln137">  dt_pthread_mutex_init(&amp;job-&gt;state_mutex, NULL);</a>
+<a name="ln138">  dt_pthread_mutex_init(&amp;job-&gt;wait_mutex, NULL);</a>
+<a name="ln139">  return job;</a>
+<a name="ln140">}</a>
+<a name="ln141"> </a>
+<a name="ln142">void dt_control_job_dispose(_dt_job_t *job)</a>
+<a name="ln143">{</a>
+<a name="ln144">  if(!job) return;</a>
+<a name="ln145">  if(job-&gt;progress) dt_control_progress_destroy(darktable.control, job-&gt;progress);</a>
+<a name="ln146">  job-&gt;progress = NULL;</a>
+<a name="ln147">  dt_control_job_set_state(job, DT_JOB_STATE_DISPOSED);</a>
+<a name="ln148">  if(job-&gt;params_destroy) job-&gt;params_destroy(job-&gt;params);</a>
+<a name="ln149">  dt_pthread_mutex_destroy(&amp;job-&gt;state_mutex);</a>
+<a name="ln150">  dt_pthread_mutex_destroy(&amp;job-&gt;wait_mutex);</a>
+<a name="ln151">  free(job);</a>
+<a name="ln152">}</a>
+<a name="ln153"> </a>
+<a name="ln154">void dt_control_job_set_state_callback(_dt_job_t *job, dt_job_state_change_callback cb)</a>
+<a name="ln155">{</a>
+<a name="ln156">  // once the job got added to the queue it may not be changed from the outside</a>
+<a name="ln157">  if(dt_control_job_get_state(job) != DT_JOB_STATE_INITIALIZED)</a>
+<a name="ln158">    return; // get_state returns DISPOSED when job == NULL</a>
+<a name="ln159">  job-&gt;state_changed_cb = cb;</a>
+<a name="ln160">}</a>
+<a name="ln161"> </a>
+<a name="ln162"> </a>
+<a name="ln163">static void dt_control_job_print(_dt_job_t *job)</a>
+<a name="ln164">{</a>
+<a name="ln165">  if(!job) return;</a>
+<a name="ln166">  dt_print(DT_DEBUG_CONTROL, &quot;%s | queue: %d | priority: %d&quot;, job-&gt;description, job-&gt;queue, job-&gt;priority);</a>
+<a name="ln167">}</a>
+<a name="ln168"> </a>
+<a name="ln169">void dt_control_job_cancel(_dt_job_t *job)</a>
+<a name="ln170">{</a>
+<a name="ln171">  dt_control_job_set_state(job, DT_JOB_STATE_CANCELLED);</a>
+<a name="ln172">}</a>
+<a name="ln173"> </a>
+<a name="ln174">void dt_control_job_wait(_dt_job_t *job)</a>
+<a name="ln175">{</a>
+<a name="ln176">  if(!job) return;</a>
+<a name="ln177">  dt_job_state_t state = dt_control_job_get_state(job);</a>
+<a name="ln178"> </a>
+<a name="ln179">  // NOTE: could also use signals.</a>
+<a name="ln180"> </a>
+<a name="ln181">  /* if job execution is not finished let's wait for it */</a>
+<a name="ln182">  if(state == DT_JOB_STATE_RUNNING || state == DT_JOB_STATE_CANCELLED)</a>
+<a name="ln183">  {</a>
+<a name="ln184">    // once the job finishes, it unlocks the mutex</a>
+<a name="ln185">    // so by locking the mutex here, we will only get the lock once the job</a>
+<a name="ln186">    // has finished and unlocked it.</a>
+<a name="ln187">    dt_pthread_mutex_lock(&amp;job-&gt;wait_mutex);</a>
+<a name="ln188">    // yay, the job finished, we got the lock. nothing more to do.</a>
+<a name="ln189">    dt_pthread_mutex_unlock(&amp;job-&gt;wait_mutex);</a>
+<a name="ln190">  }</a>
+<a name="ln191">}</a>
+<a name="ln192"> </a>
+<a name="ln193">static int32_t dt_control_run_job_res(dt_control_t *control, int32_t res)</a>
+<a name="ln194">{</a>
+<a name="ln195">  if(((unsigned int)res) &gt;= DT_CTL_WORKER_RESERVED) return -1;</a>
+<a name="ln196"> </a>
+<a name="ln197">  _dt_job_t *job = NULL;</a>
+<a name="ln198">  dt_pthread_mutex_lock(&amp;control-&gt;res_mutex);</a>
+<a name="ln199">  if(control-&gt;new_res[res])</a>
+<a name="ln200">  {</a>
+<a name="ln201">    job = control-&gt;job_res[res];</a>
+<a name="ln202">    control-&gt;job_res[res] = NULL; // this job belongs to us now, the queue may not touch it any longer</a>
+<a name="ln203">  }</a>
+<a name="ln204">  control-&gt;new_res[res] = 0;</a>
+<a name="ln205">  dt_pthread_mutex_unlock(&amp;control-&gt;res_mutex);</a>
+<a name="ln206">  if(!job) return -1;</a>
+<a name="ln207"> </a>
+<a name="ln208">  /* change state to running */</a>
+<a name="ln209">  dt_pthread_mutex_lock(&amp;job-&gt;wait_mutex);</a>
+<a name="ln210">  if(dt_control_job_get_state(job) == DT_JOB_STATE_QUEUED)</a>
+<a name="ln211">  {</a>
+<a name="ln212">    dt_print(DT_DEBUG_CONTROL, &quot;[run_job+] %02d %f &quot;, res, dt_get_wtime());</a>
+<a name="ln213">    dt_control_job_print(job);</a>
+<a name="ln214">    dt_print(DT_DEBUG_CONTROL, &quot;\n&quot;);</a>
+<a name="ln215"> </a>
+<a name="ln216">    dt_control_job_set_state(job, DT_JOB_STATE_RUNNING);</a>
+<a name="ln217"> </a>
+<a name="ln218">    /* execute job */</a>
+<a name="ln219">    job-&gt;result = job-&gt;execute(job);</a>
+<a name="ln220"> </a>
+<a name="ln221">    dt_control_job_set_state(job, DT_JOB_STATE_FINISHED);</a>
+<a name="ln222">    dt_print(DT_DEBUG_CONTROL, &quot;[run_job-] %02d %f &quot;, res, dt_get_wtime());</a>
+<a name="ln223">    dt_control_job_print(job);</a>
+<a name="ln224">    dt_print(DT_DEBUG_CONTROL, &quot;\n&quot;);</a>
+<a name="ln225">  }</a>
+<a name="ln226">  dt_pthread_mutex_unlock(&amp;job-&gt;wait_mutex);</a>
+<a name="ln227">  dt_control_job_dispose(job);</a>
+<a name="ln228">  return 0;</a>
+<a name="ln229">}</a>
+<a name="ln230"> </a>
+<a name="ln231">static _dt_job_t *dt_control_schedule_job(dt_control_t *control)</a>
+<a name="ln232">{</a>
+<a name="ln233">  /*</a>
+<a name="ln234">   * job scheduling works like this:</a>
+<a name="ln235">   * - when there is a single job in the queue head with a maximal priority -&gt; pick it</a>
+<a name="ln236">   * - otherwise pick among the ones with the maximal priority in the following order:</a>
+<a name="ln237">   *   * user foreground</a>
+<a name="ln238">   *   * system foreground</a>
+<a name="ln239">   *   * user background</a>
+<a name="ln240">   *   * system background</a>
+<a name="ln241">   * - the jobs that didn't get picked this round get their priority incremented</a>
+<a name="ln242">   */</a>
+<a name="ln243"> </a>
+<a name="ln244">  dt_pthread_mutex_lock(&amp;control-&gt;queue_mutex);</a>
+<a name="ln245"> </a>
+<a name="ln246">  // find the job</a>
+<a name="ln247">  _dt_job_t *job = NULL;</a>
+<a name="ln248">  int winner_queue = DT_JOB_QUEUE_MAX;</a>
+<a name="ln249">  int max_priority = -1;</a>
+<a name="ln250">  for(int i = 0; i &lt; DT_JOB_QUEUE_MAX; i++)</a>
+<a name="ln251">  {</a>
+<a name="ln252">    if(control-&gt;queues[i] == NULL) continue;</a>
+<a name="ln253">    if(control-&gt;export_scheduled &amp;&amp; i == DT_JOB_QUEUE_USER_EXPORT) continue;</a>
+<a name="ln254">    _dt_job_t *_job = (_dt_job_t *)control-&gt;queues[i]-&gt;data;</a>
+<a name="ln255">    if(_job-&gt;priority &gt; max_priority)</a>
+<a name="ln256">    {</a>
+<a name="ln257">      max_priority = _job-&gt;priority;</a>
+<a name="ln258">      job = _job;</a>
+<a name="ln259">      winner_queue = i;</a>
+<a name="ln260">    }</a>
+<a name="ln261">  }</a>
+<a name="ln262"> </a>
+<a name="ln263">  if(!job)</a>
+<a name="ln264">  {</a>
+<a name="ln265">    dt_pthread_mutex_unlock(&amp;control-&gt;queue_mutex);</a>
+<a name="ln266">    return NULL;</a>
+<a name="ln267">  }</a>
+<a name="ln268"> </a>
+<a name="ln269">  // the order of the queues in control-&gt;queues matches our priority, and we only update job when the priority</a>
+<a name="ln270">  // is strictly bigger</a>
+<a name="ln271">  // invariant -&gt; job is the one we are looking for</a>
+<a name="ln272"> </a>
+<a name="ln273">  // remove the to be scheduled job from its queue</a>
+<a name="ln274">  GList **queue = &amp;control-&gt;queues[winner_queue];</a>
+<a name="ln275">  *queue = g_list_delete_link(*queue, *queue);</a>
+<a name="ln276">  control-&gt;queue_length[winner_queue]--;</a>
+<a name="ln277">  if(winner_queue == DT_JOB_QUEUE_USER_EXPORT) control-&gt;export_scheduled = TRUE;</a>
+<a name="ln278"> </a>
+<a name="ln279">  // and place it in scheduled job array (for job deduping)</a>
+<a name="ln280">  control-&gt;job[dt_control_get_threadid()] = job;</a>
+<a name="ln281"> </a>
+<a name="ln282">  // increment the priorities of the others</a>
+<a name="ln283">  for(int i = 0; i &lt; DT_JOB_QUEUE_MAX; i++)</a>
+<a name="ln284">  {</a>
+<a name="ln285">    if(i == winner_queue || control-&gt;queues[i] == NULL) continue;</a>
+<a name="ln286">    ((_dt_job_t *)control-&gt;queues[i]-&gt;data)-&gt;priority++;</a>
+<a name="ln287">  }</a>
+<a name="ln288"> </a>
+<a name="ln289">  dt_pthread_mutex_unlock(&amp;control-&gt;queue_mutex);</a>
+<a name="ln290"> </a>
+<a name="ln291">  return job;</a>
+<a name="ln292">}</a>
+<a name="ln293"> </a>
+<a name="ln294">static void dt_control_job_execute(_dt_job_t *job)</a>
+<a name="ln295">{</a>
+<a name="ln296">  dt_print(DT_DEBUG_CONTROL, &quot;[run_job+] %02d %f &quot;, DT_CTL_WORKER_RESERVED + dt_control_get_threadid(),</a>
+<a name="ln297">           dt_get_wtime());</a>
+<a name="ln298">  dt_control_job_print(job);</a>
+<a name="ln299">  dt_print(DT_DEBUG_CONTROL, &quot;\n&quot;);</a>
+<a name="ln300"> </a>
+<a name="ln301">  dt_control_job_set_state(job, DT_JOB_STATE_RUNNING);</a>
+<a name="ln302"> </a>
+<a name="ln303">  /* execute job */</a>
+<a name="ln304">  job-&gt;result = job-&gt;execute(job);</a>
+<a name="ln305"> </a>
+<a name="ln306">  dt_control_job_set_state(job, DT_JOB_STATE_FINISHED);</a>
+<a name="ln307"> </a>
+<a name="ln308">  dt_print(DT_DEBUG_CONTROL, &quot;[run_job-] %02d %f &quot;, DT_CTL_WORKER_RESERVED + dt_control_get_threadid(),</a>
+<a name="ln309">           dt_get_wtime());</a>
+<a name="ln310">  dt_control_job_print(job);</a>
+<a name="ln311">  dt_print(DT_DEBUG_CONTROL, &quot;\n&quot;);</a>
+<a name="ln312">}</a>
+<a name="ln313"> </a>
+<a name="ln314">static int32_t dt_control_run_job(dt_control_t *control)</a>
+<a name="ln315">{</a>
+<a name="ln316">  _dt_job_t *job = dt_control_schedule_job(control);</a>
+<a name="ln317"> </a>
+<a name="ln318">  if(!job) return -1;</a>
+<a name="ln319"> </a>
+<a name="ln320">  /* change state to running */</a>
+<a name="ln321">  dt_pthread_mutex_lock(&amp;job-&gt;wait_mutex);</a>
+<a name="ln322">  if(dt_control_job_get_state(job) == DT_JOB_STATE_QUEUED)</a>
+<a name="ln323">    dt_control_job_execute(job);</a>
+<a name="ln324"> </a>
+<a name="ln325">  dt_pthread_mutex_unlock(&amp;job-&gt;wait_mutex);</a>
+<a name="ln326"> </a>
+<a name="ln327">  // remove the job from scheduled job array (for job deduping)</a>
+<a name="ln328">  dt_pthread_mutex_lock(&amp;control-&gt;queue_mutex);</a>
+<a name="ln329">  control-&gt;job[dt_control_get_threadid()] = NULL;</a>
+<a name="ln330">  if(job-&gt;queue == DT_JOB_QUEUE_USER_EXPORT) control-&gt;export_scheduled = FALSE;</a>
+<a name="ln331">  dt_pthread_mutex_unlock(&amp;control-&gt;queue_mutex);</a>
+<a name="ln332"> </a>
+<a name="ln333">  // and free it</a>
+<a name="ln334">  dt_control_job_dispose(job);</a>
+<a name="ln335"> </a>
+<a name="ln336">  return 0;</a>
+<a name="ln337">}</a>
+<a name="ln338"> </a>
+<a name="ln339">int32_t dt_control_add_job_res(dt_control_t *control, _dt_job_t *job, int32_t res)</a>
+<a name="ln340">{</a>
+<a name="ln341">  if(((unsigned int)res) &gt;= DT_CTL_WORKER_RESERVED || !job)</a>
+<a name="ln342">  {</a>
+<a name="ln343">    dt_control_job_dispose(job);</a>
+<a name="ln344">    return 1;</a>
+<a name="ln345">  }</a>
+<a name="ln346"> </a>
+<a name="ln347">  // TODO: pthread cancel and restart in tough cases?</a>
+<a name="ln348">  dt_pthread_mutex_lock(&amp;control-&gt;res_mutex);</a>
+<a name="ln349"> </a>
+<a name="ln350">  // if there is a job in the queue we have to discard that first</a>
+<a name="ln351">  if(control-&gt;job_res[res])</a>
+<a name="ln352">  {</a>
+<a name="ln353">    dt_control_job_set_state(control-&gt;job_res[res], DT_JOB_STATE_DISCARDED);</a>
+<a name="ln354">    dt_control_job_dispose(control-&gt;job_res[res]);</a>
+<a name="ln355">  }</a>
+<a name="ln356"> </a>
+<a name="ln357">  dt_print(DT_DEBUG_CONTROL, &quot;[add_job_res] %d | &quot;, res);</a>
+<a name="ln358">  dt_control_job_print(job);</a>
+<a name="ln359">  dt_print(DT_DEBUG_CONTROL, &quot;\n&quot;);</a>
+<a name="ln360"> </a>
+<a name="ln361">  dt_control_job_set_state(job, DT_JOB_STATE_QUEUED);</a>
+<a name="ln362">  control-&gt;job_res[res] = job;</a>
+<a name="ln363">  control-&gt;new_res[res] = 1;</a>
+<a name="ln364"> </a>
+<a name="ln365">  dt_pthread_mutex_unlock(&amp;control-&gt;res_mutex);</a>
+<a name="ln366"> </a>
+<a name="ln367">  dt_pthread_mutex_lock(&amp;control-&gt;cond_mutex);</a>
+<a name="ln368">  pthread_cond_broadcast(&amp;control-&gt;cond);</a>
+<a name="ln369">  dt_pthread_mutex_unlock(&amp;control-&gt;cond_mutex);</a>
+<a name="ln370"> </a>
+<a name="ln371">  return 0;</a>
+<a name="ln372">}</a>
+<a name="ln373"> </a>
+<a name="ln374">int dt_control_add_job(dt_control_t *control, dt_job_queue_t queue_id, _dt_job_t *job)</a>
+<a name="ln375">{</a>
+<a name="ln376">  if(((unsigned int)queue_id) &gt;= DT_JOB_QUEUE_MAX || !job)</a>
+<a name="ln377">  {</a>
+<a name="ln378">    dt_control_job_dispose(job);</a>
+<a name="ln379">    return 1;</a>
+<a name="ln380">  }</a>
+<a name="ln381"> </a>
+<a name="ln382">  if(!control-&gt;running)</a>
+<a name="ln383">  {</a>
+<a name="ln384">    // whatever we are adding here won't be scheduled as the system isn't running. execute it synchronous instead.</a>
+<a name="ln385">    dt_pthread_mutex_lock(&amp;job-&gt;wait_mutex); // is that even needed?</a>
+<a name="ln386">    dt_control_job_execute(job);</a>
+<a name="ln387">    dt_pthread_mutex_unlock(&amp;job-&gt;wait_mutex);</a>
+<a name="ln388"> </a>
+<a name="ln389">    dt_control_job_dispose(job);</a>
+<a name="ln390">    return 0;</a>
+<a name="ln391">  }</a>
+<a name="ln392"> </a>
+<a name="ln393">  job-&gt;queue = queue_id;</a>
+<a name="ln394"> </a>
+<a name="ln395">  _dt_job_t *job_for_disposal = NULL;</a>
+<a name="ln396"> </a>
+<a name="ln397">  dt_pthread_mutex_lock(&amp;control-&gt;queue_mutex);</a>
+<a name="ln398"> </a>
+<a name="ln399">  GList **queue = &amp;control-&gt;queues[queue_id];</a>
+<a name="ln400">  size_t length = control-&gt;queue_length[queue_id];</a>
+<a name="ln401"> </a>
+<a name="ln402">  dt_print(DT_DEBUG_CONTROL, &quot;[add_job] %zu | &quot;, length);</a>
+<a name="ln403">  dt_control_job_print(job);</a>
+<a name="ln404">  dt_print(DT_DEBUG_CONTROL, &quot;\n&quot;);</a>
+<a name="ln405"> </a>
+<a name="ln406">  if(queue_id == DT_JOB_QUEUE_SYSTEM_FG)</a>
+<a name="ln407">  {</a>
+<a name="ln408">    // this is a stack with limited size and bubble up and all that stuff</a>
+<a name="ln409">    job-&gt;priority = DT_CONTROL_FG_PRIORITY;</a>
+<a name="ln410"> </a>
+<a name="ln411">    // check if we have already scheduled the job</a>
+<a name="ln412">    for(int k = 0; k &lt; control-&gt;num_threads; k++)</a>
+<a name="ln413">    {</a>
+<a name="ln414">      _dt_job_t *other_job = (_dt_job_t *)control-&gt;job[k];</a>
+<a name="ln415">      if(dt_control_job_equal(job, other_job))</a>
+<a name="ln416">      {</a>
+<a name="ln417">        dt_print(DT_DEBUG_CONTROL, &quot;[add_job] found job already in scheduled: &quot;);</a>
+<a name="ln418">        dt_control_job_print(other_job);</a>
+<a name="ln419">        dt_print(DT_DEBUG_CONTROL, &quot;\n&quot;);</a>
+<a name="ln420"> </a>
+<a name="ln421">        dt_pthread_mutex_unlock(&amp;control-&gt;queue_mutex);</a>
+<a name="ln422"> </a>
+<a name="ln423">        dt_control_job_set_state(job, DT_JOB_STATE_DISCARDED);</a>
+<a name="ln424">        dt_control_job_dispose(job);</a>
+<a name="ln425"> </a>
+<a name="ln426">        return 0; // there can't be any further copy</a>
+<a name="ln427">      }</a>
+<a name="ln428">    }</a>
+<a name="ln429"> </a>
+<a name="ln430">    // if the job is already in the queue -&gt; move it to the top</a>
+<a name="ln431">    for(GList *iter = *queue; iter; iter = g_list_next(iter))</a>
+<a name="ln432">    {</a>
+<a name="ln433">      _dt_job_t *other_job = (_dt_job_t *)iter-&gt;data;</a>
+<a name="ln434">      if(dt_control_job_equal(job, other_job))</a>
+<a name="ln435">      {</a>
+<a name="ln436">        dt_print(DT_DEBUG_CONTROL, &quot;[add_job] found job already in queue: &quot;);</a>
+<a name="ln437">        dt_control_job_print(other_job);</a>
+<a name="ln438">        dt_print(DT_DEBUG_CONTROL, &quot;\n&quot;);</a>
+<a name="ln439"> </a>
+<a name="ln440">        *queue = g_list_delete_link(*queue, iter);</a>
+<a name="ln441">        length--;</a>
+<a name="ln442"> </a>
+<a name="ln443">        job_for_disposal = job;</a>
+<a name="ln444"> </a>
+<a name="ln445">        job = other_job;</a>
+<a name="ln446">        break; // there can't be any further copy in the list</a>
+<a name="ln447">      }</a>
+<a name="ln448">    }</a>
+<a name="ln449"> </a>
+<a name="ln450">    // now we can add the new job to the list</a>
+<a name="ln451">    *queue = g_list_prepend(*queue, job);</a>
+<a name="ln452">    length++;</a>
+<a name="ln453"> </a>
+<a name="ln454">    // and take care of the maximal queue size</a>
+<a name="ln455">    if(length &gt; DT_CONTROL_MAX_JOBS)</a>
+<a name="ln456">    {</a>
+<a name="ln457">      GList *last = g_list_last(*queue);</a>
+<a name="ln458">      dt_control_job_set_state((_dt_job_t *)last-&gt;data, DT_JOB_STATE_DISCARDED);</a>
+<a name="ln459">      dt_control_job_dispose((_dt_job_t *)last-&gt;data);</a>
+<a name="ln460">      *queue = g_list_delete_link(*queue, last);</a>
+<a name="ln461">      length--;</a>
+<a name="ln462">    }</a>
+<a name="ln463"> </a>
+<a name="ln464">    control-&gt;queue_length[queue_id] = length;</a>
+<a name="ln465">  }</a>
+<a name="ln466">  else</a>
+<a name="ln467">  {</a>
+<a name="ln468">    // the rest are FIFOs</a>
+<a name="ln469">    if(queue_id == DT_JOB_QUEUE_USER_BG ||</a>
+<a name="ln470">       queue_id == DT_JOB_QUEUE_USER_EXPORT ||</a>
+<a name="ln471">       queue_id == DT_JOB_QUEUE_SYSTEM_BG)</a>
+<a name="ln472">      job-&gt;priority = 0;</a>
+<a name="ln473">    else</a>
+<a name="ln474">      job-&gt;priority = DT_CONTROL_FG_PRIORITY;</a>
+<a name="ln475">    *queue = g_list_append(*queue, job);</a>
+<a name="ln476">    control-&gt;queue_length[queue_id]++;</a>
+<a name="ln477">  }</a>
+<a name="ln478">  dt_control_job_set_state(job, DT_JOB_STATE_QUEUED);</a>
+<a name="ln479">  dt_pthread_mutex_unlock(&amp;control-&gt;queue_mutex);</a>
+<a name="ln480"> </a>
+<a name="ln481">  // notify workers</a>
+<a name="ln482">  dt_pthread_mutex_lock(&amp;control-&gt;cond_mutex);</a>
+<a name="ln483">  pthread_cond_broadcast(&amp;control-&gt;cond);</a>
+<a name="ln484">  dt_pthread_mutex_unlock(&amp;control-&gt;cond_mutex);</a>
+<a name="ln485"> </a>
+<a name="ln486">  // dispose of dropped job, if any</a>
+<a name="ln487">  dt_control_job_set_state(job_for_disposal, DT_JOB_STATE_DISCARDED);</a>
+<a name="ln488">  dt_control_job_dispose(job_for_disposal);</a>
+<a name="ln489"> </a>
+<a name="ln490">  return 0;</a>
+<a name="ln491">}</a>
+<a name="ln492"> </a>
+<a name="ln493">static __thread int threadid = -1;</a>
+<a name="ln494"> </a>
+<a name="ln495">int32_t dt_control_get_threadid()</a>
+<a name="ln496">{</a>
+<a name="ln497">  if(threadid &gt; -1) return threadid;</a>
+<a name="ln498">  return darktable.control-&gt;num_threads;</a>
+<a name="ln499">}</a>
+<a name="ln500"> </a>
+<a name="ln501">static int32_t dt_control_get_threadid_res()</a>
+<a name="ln502">{</a>
+<a name="ln503">  if(threadid &gt; -1) return threadid;</a>
+<a name="ln504">  return DT_CTL_WORKER_RESERVED;</a>
+<a name="ln505">}</a>
+<a name="ln506"> </a>
+<a name="ln507">static void *dt_control_work_res(void *ptr)</a>
+<a name="ln508">{</a>
+<a name="ln509">#ifdef _OPENMP // need to do this in every thread</a>
+<a name="ln510">  omp_set_num_threads(darktable.num_openmp_threads);</a>
+<a name="ln511">#endif</a>
+<a name="ln512">  worker_thread_parameters_t *params = (worker_thread_parameters_t *)ptr;</a>
+<a name="ln513">  dt_control_t *s = params-&gt;self;</a>
+<a name="ln514">  threadid = params-&gt;threadid;</a>
+<a name="ln515">  char name[16] = {0};</a>
+<a name="ln516">  snprintf(name, sizeof(name), &quot;worker res %d&quot;, threadid);</a>
+<a name="ln517">  dt_pthread_setname(name);</a>
+<a name="ln518">  free(params);</a>
+<a name="ln519">  int32_t threadid_res = dt_control_get_threadid_res();</a>
+<a name="ln520">  while(dt_control_running())</a>
+<a name="ln521">  {</a>
+<a name="ln522">    // dt_print(DT_DEBUG_CONTROL, &quot;[control_work] %d\n&quot;, threadid_res);</a>
+<a name="ln523">    if(dt_control_run_job_res(s, threadid_res) &lt; 0)</a>
+<a name="ln524">    {</a>
+<a name="ln525">      // wait for a new job.</a>
+<a name="ln526">      int old;</a>
+<a name="ln527">      pthread_setcancelstate(PTHREAD_CANCEL_DISABLE, &amp;old);</a>
+<a name="ln528">      dt_pthread_mutex_lock(&amp;s-&gt;cond_mutex);</a>
+<a name="ln529">      dt_pthread_cond_wait(&amp;s-&gt;cond, &amp;s-&gt;cond_mutex);</a>
+<a name="ln530">      dt_pthread_mutex_unlock(&amp;s-&gt;cond_mutex);</a>
+<a name="ln531">      int tmp;</a>
+<a name="ln532">      pthread_setcancelstate(old, &amp;tmp);</a>
+<a name="ln533">    }</a>
+<a name="ln534">  }</a>
+<a name="ln535">  return NULL;</a>
+<a name="ln536">}</a>
+<a name="ln537"> </a>
+<a name="ln538">static void *dt_control_worker_kicker(void *ptr)</a>
+<a name="ln539">{</a>
+<a name="ln540">  dt_control_t *control = (dt_control_t *)ptr;</a>
+<a name="ln541">  dt_pthread_setname(&quot;kicker&quot;);</a>
+<a name="ln542">  while(dt_control_running())</a>
+<a name="ln543">  {</a>
+<a name="ln544">    sleep(2);</a>
+<a name="ln545">    dt_pthread_mutex_lock(&amp;control-&gt;cond_mutex);</a>
+<a name="ln546">    pthread_cond_broadcast(&amp;control-&gt;cond);</a>
+<a name="ln547">    dt_pthread_mutex_unlock(&amp;control-&gt;cond_mutex);</a>
+<a name="ln548">  }</a>
+<a name="ln549">  return NULL;</a>
+<a name="ln550">}</a>
+<a name="ln551"> </a>
+<a name="ln552">static void *dt_control_work(void *ptr)</a>
+<a name="ln553">{</a>
+<a name="ln554">#ifdef _OPENMP // need to do this in every thread</a>
+<a name="ln555">  omp_set_num_threads(darktable.num_openmp_threads);</a>
+<a name="ln556">#endif</a>
+<a name="ln557">  worker_thread_parameters_t *params = (worker_thread_parameters_t *)ptr;</a>
+<a name="ln558">  dt_control_t *control = params-&gt;self;</a>
+<a name="ln559">  threadid = params-&gt;threadid;</a>
+<a name="ln560">  char name[16] = {0};</a>
+<a name="ln561">  snprintf(name, sizeof(name), &quot;worker %d&quot;, threadid);</a>
+<a name="ln562">  dt_pthread_setname(name);</a>
+<a name="ln563">  free(params);</a>
+<a name="ln564">  // int32_t threadid = dt_control_get_threadid();</a>
+<a name="ln565">  while(dt_control_running())</a>
+<a name="ln566">  {</a>
+<a name="ln567">    // dt_print(DT_DEBUG_CONTROL, &quot;[control_work] %d\n&quot;, threadid);</a>
+<a name="ln568">    if(dt_control_run_job(control) &lt; 0)</a>
+<a name="ln569">    {</a>
+<a name="ln570">      // wait for a new job.</a>
+<a name="ln571">      dt_pthread_mutex_lock(&amp;control-&gt;cond_mutex);</a>
+<a name="ln572">      dt_pthread_cond_wait(&amp;control-&gt;cond, &amp;control-&gt;cond_mutex);</a>
+<a name="ln573">      dt_pthread_mutex_unlock(&amp;control-&gt;cond_mutex);</a>
+<a name="ln574">    }</a>
+<a name="ln575">  }</a>
+<a name="ln576">  return NULL;</a>
+<a name="ln577">}</a>
+<a name="ln578"> </a>
+<a name="ln579">// convenience functions to have a progress bar for the job.</a>
+<a name="ln580">// this allows to show the gui indicator of the job even before it got scheduled</a>
+<a name="ln581">void dt_control_job_add_progress(dt_job_t *job, const char *message, gboolean cancellable)</a>
+<a name="ln582">{</a>
+<a name="ln583">  if(!job) return;</a>
+<a name="ln584">  job-&gt;progress = dt_control_progress_create(darktable.control, TRUE, message);</a>
+<a name="ln585">  if(cancellable)</a>
+<a name="ln586">    dt_control_progress_attach_job(darktable.control, job-&gt;progress, job);</a>
+<a name="ln587">}</a>
+<a name="ln588"> </a>
+<a name="ln589">void dt_control_job_set_progress_message(dt_job_t *job, const char *message)</a>
+<a name="ln590">{</a>
+<a name="ln591">  if(!job || !job-&gt;progress) return;</a>
+<a name="ln592">  dt_control_progress_set_message(darktable.control, job-&gt;progress, message);</a>
+<a name="ln593">}</a>
+<a name="ln594"> </a>
+<a name="ln595">void dt_control_job_set_progress(dt_job_t *job, double value)</a>
+<a name="ln596">{</a>
+<a name="ln597">  if(!job || !job-&gt;progress) return;</a>
+<a name="ln598">  dt_control_progress_set_progress(darktable.control, job-&gt;progress, value);</a>
+<a name="ln599">}</a>
+<a name="ln600"> </a>
+<a name="ln601">double dt_control_job_get_progress(dt_job_t *job)</a>
+<a name="ln602">{</a>
+<a name="ln603">  if(!job || !job-&gt;progress) return -1.0;</a>
+<a name="ln604">  return dt_control_progress_get_progress(job-&gt;progress);</a>
+<a name="ln605">}</a>
+<a name="ln606"> </a>
+<a name="ln607"> </a>
+<a name="ln608">// moved out of control.c to be able to make some helper functions static</a>
+<a name="ln609">void dt_control_jobs_init(dt_control_t *control)</a>
+<a name="ln610">{</a>
+<a name="ln611">  // start threads</a>
+<a name="ln612">  control-&gt;num_threads = CLAMP(dt_conf_get_int(&quot;worker_threads&quot;), 1, 8);</a>
+<a name="ln613">  control-&gt;thread = (pthread_t *)calloc(control-&gt;num_threads, sizeof(pthread_t));</a>
+<a name="ln614">  control-&gt;job = (dt_job_t **)calloc(control-&gt;num_threads, sizeof(dt_job_t *));</a>
+<a name="ln615">  dt_pthread_mutex_lock(&amp;control-&gt;run_mutex);</a>
+<a name="ln616">  control-&gt;running = 1;</a>
+<a name="ln617">  dt_pthread_mutex_unlock(&amp;control-&gt;run_mutex);</a>
+<a name="ln618">  for(int k = 0; k &lt; control-&gt;num_threads; k++)</a>
+<a name="ln619">  {</a>
+<a name="ln620">    worker_thread_parameters_t *params</a>
+<a name="ln621">        = (worker_thread_parameters_t *)calloc(1, sizeof(worker_thread_parameters_t));</a>
+<a name="ln622">    params-&gt;self = control;</a>
+<a name="ln623">    params-&gt;threadid = k;</a>
+<a name="ln624">    dt_pthread_create(&amp;control-&gt;thread[k], dt_control_work, params);</a>
+<a name="ln625">  }</a>
+<a name="ln626"> </a>
+<a name="ln627">  /* create queue kicker thread */</a>
+<a name="ln628">  dt_pthread_create(&amp;control-&gt;kick_on_workers_thread, dt_control_worker_kicker, control);</a>
+<a name="ln629"> </a>
+<a name="ln630">  for(int k = 0; k &lt; DT_CTL_WORKER_RESERVED; k++)</a>
+<a name="ln631">  {</a>
+<a name="ln632">    control-&gt;job_res[k] = NULL;</a>
+<a name="ln633">    control-&gt;new_res[k] = 0;</a>
+<a name="ln634">    worker_thread_parameters_t *params</a>
+<a name="ln635">        = (worker_thread_parameters_t *)calloc(1, sizeof(worker_thread_parameters_t));</a>
+<a name="ln636">    params-&gt;self = control;</a>
+<a name="ln637">    params-&gt;threadid = k;</a>
+<a name="ln638">    dt_pthread_create(&amp;control-&gt;thread_res[k], dt_control_work_res, params);</a>
+<a name="ln639">  }</a>
+<a name="ln640">}</a>
+<a name="ln641"> </a>
+<a name="ln642">void dt_control_jobs_cleanup(dt_control_t *control)</a>
+<a name="ln643">{</a>
+<a name="ln644">  free(control-&gt;job);</a>
+<a name="ln645">  free(control-&gt;thread);</a>
+<a name="ln646">}</a>
+<a name="ln647"> </a>
+<a name="ln648">// modelines: These editor modelines have been set for all relevant files by tools/update_modelines.sh</a>
+<a name="ln649">// vim: shiftwidth=2 expandtab tabstop=2 cindent</a>
+<a name="ln650">// kate: tab-indents: off; indent-width 2; replace-tabs on; indent-mode cstyle; remove-trailing-spaces modified;</a>
+
+</code></pre>
+<div class="balloon" rel="622"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v522/" target="_blank">V522</a> There might be dereferencing of a potential null pointer 'params'. Check lines: 622, 621.</p></div>
+<div class="balloon" rel="636"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v522/" target="_blank">V522</a> There might be dereferencing of a potential null pointer 'params'. Check lines: 636, 635.</p></div>
+
+<link rel="stylesheet" href="highlight.css">
+<script src="highlight.pack.js"></script>
+<script src="highlightjs-line-numbers.js"></script>
+<script>hljs.initHighlightingOnLoad();</script>
+<script>hljs.initLineNumbersOnLoad();</script>
+<script>
+  $(document).ready(function() {
+      $('.balloon').each(function () {
+          var bl = $(this);
+          var line = bl.attr('rel');
+          var text = $('a[name="ln'+line+'"]').text();
+
+          var space_count = 0;
+          for(var i = 0; i<text.length; i++){
+              var char = text[i];
+              if((char !== ' ')&&(char !== '\t'))break;
+              if(char === '\t')space_count++;
+              space_count++;
+          }
+
+          bl.css('margin-left', space_count*8);
+          $('a[name="ln'+line+'"]').after(bl);
+      });
+
+      window.location = window.location;
+  });
+</script>
+</body>
+</html>

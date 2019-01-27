@@ -1,0 +1,751 @@
+
+<html>
+<head>
+  <link rel="stylesheet" href="../style.css"/>
+  <script src="../jquery-3.2.1.min.js"></script>
+</head>
+<body>
+<pre><code class = "cpp">
+<a name="ln1">/*</a>
+<a name="ln2">    This file is part of darktable,</a>
+<a name="ln3">    copyright (c) 2011 henrik andersson.</a>
+<a name="ln4">    copyright (c) 2016 tobias ellinghaus.</a>
+<a name="ln5"> </a>
+<a name="ln6">    darktable is free software: you can redistribute it and/or modify</a>
+<a name="ln7">    it under the terms of the GNU General Public License as published by</a>
+<a name="ln8">    the Free Software Foundation, either version 3 of the License, or</a>
+<a name="ln9">    (at your option) any later version.</a>
+<a name="ln10"> </a>
+<a name="ln11">    darktable is distributed in the hope that it will be useful,</a>
+<a name="ln12">    but WITHOUT ANY WARRANTY; without even the implied warranty of</a>
+<a name="ln13">    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the</a>
+<a name="ln14">    GNU General Public License for more details.</a>
+<a name="ln15"> </a>
+<a name="ln16">    You should have received a copy of the GNU General Public License</a>
+<a name="ln17">    along with darktable.  If not, see &lt;http://www.gnu.org/licenses/&gt;.</a>
+<a name="ln18">*/</a>
+<a name="ln19"> </a>
+<a name="ln20">#include &quot;common/darktable.h&quot;</a>
+<a name="ln21">#include &quot;common/geo.h&quot;</a>
+<a name="ln22">#include &quot;control/conf.h&quot;</a>
+<a name="ln23">#include &quot;control/control.h&quot;</a>
+<a name="ln24">#include &quot;control/jobs.h&quot;</a>
+<a name="ln25">#include &quot;dtgtk/icon.h&quot;</a>
+<a name="ln26">#include &quot;gui/gtk.h&quot;</a>
+<a name="ln27">#include &quot;libs/lib.h&quot;</a>
+<a name="ln28">#include &quot;libs/lib_api.h&quot;</a>
+<a name="ln29">#include &lt;curl/curl.h&gt;</a>
+<a name="ln30">#include &lt;gdk/gdkkeysyms.h&gt;</a>
+<a name="ln31"> </a>
+<a name="ln32">DT_MODULE(1)</a>
+<a name="ln33"> </a>
+<a name="ln34">typedef enum _lib_location_type_t</a>
+<a name="ln35">{</a>
+<a name="ln36">  LOCATION_TYPE_VILLAGE,</a>
+<a name="ln37">  LOCATION_TYPE_HAMLET,</a>
+<a name="ln38">  LOCATION_TYPE_CITY,</a>
+<a name="ln39">  LOCATION_TYPE_ADMINISTRATIVE,</a>
+<a name="ln40">  LOCATION_TYPE_RESIDENTAL,</a>
+<a name="ln41">  LOCATION_TYPE_UNKNOWN</a>
+<a name="ln42">} _lib_location_type_t;</a>
+<a name="ln43"> </a>
+<a name="ln44">typedef struct _lib_location_result_t</a>
+<a name="ln45">{</a>
+<a name="ln46">  int32_t relevance;</a>
+<a name="ln47">  _lib_location_type_t type;</a>
+<a name="ln48">  float lon;</a>
+<a name="ln49">  float lat;</a>
+<a name="ln50">  float bbox_lon1, bbox_lat1, bbox_lon2, bbox_lat2;</a>
+<a name="ln51">  dt_geo_map_display_t marker_type;</a>
+<a name="ln52">  GList *marker_points;</a>
+<a name="ln53">  gchar *name;</a>
+<a name="ln54">} _lib_location_result_t;</a>
+<a name="ln55"> </a>
+<a name="ln56">typedef struct dt_lib_location_t</a>
+<a name="ln57">{</a>
+<a name="ln58">  GtkEntry *search;</a>
+<a name="ln59">  GtkWidget *result;</a>
+<a name="ln60">  GList *callback_params;</a>
+<a name="ln61"> </a>
+<a name="ln62">  GList *places;</a>
+<a name="ln63"> </a>
+<a name="ln64">  /* result buffer written to by */</a>
+<a name="ln65">  gchar *response;</a>
+<a name="ln66">  size_t response_size;</a>
+<a name="ln67"> </a>
+<a name="ln68">  /* pin, track or polygon currently shown on the map */</a>
+<a name="ln69">  GObject *marker;</a>
+<a name="ln70">  dt_geo_map_display_t marker_type;</a>
+<a name="ln71"> </a>
+<a name="ln72">  /* remember the currently selected search result so we can put it into a preset */</a>
+<a name="ln73">  _lib_location_result_t *selected_location;</a>
+<a name="ln74">} dt_lib_location_t;</a>
+<a name="ln75"> </a>
+<a name="ln76">typedef struct _callback_param_t</a>
+<a name="ln77">{</a>
+<a name="ln78">  dt_lib_location_t *lib;</a>
+<a name="ln79">  _lib_location_result_t *result;</a>
+<a name="ln80">} _callback_param_t;</a>
+<a name="ln81"> </a>
+<a name="ln82">#define LIMIT_RESULT 5</a>
+<a name="ln83"> </a>
+<a name="ln84">/* entry value committed, perform a search */</a>
+<a name="ln85">static void _lib_location_entry_activated(GtkButton *button, gpointer user_data);</a>
+<a name="ln86"> </a>
+<a name="ln87">static gboolean _lib_location_result_item_activated(GtkButton *button, GdkEventButton *ev, gpointer user_data);</a>
+<a name="ln88"> </a>
+<a name="ln89">static void _lib_location_parser_start_element(GMarkupParseContext *cxt, const char *element_name,</a>
+<a name="ln90">                                               const char **attribute_names, const gchar **attribute_values,</a>
+<a name="ln91">                                               gpointer user_data, GError **error);</a>
+<a name="ln92"> </a>
+<a name="ln93">static void clear_search(dt_lib_location_t *lib);</a>
+<a name="ln94"> </a>
+<a name="ln95">const char *name(dt_lib_module_t *self)</a>
+<a name="ln96">{</a>
+<a name="ln97">  return _(&quot;find location&quot;);</a>
+<a name="ln98">}</a>
+<a name="ln99"> </a>
+<a name="ln100">const char **views(dt_lib_module_t *self)</a>
+<a name="ln101">{</a>
+<a name="ln102">  static const char *v[] = {&quot;map&quot;, NULL};</a>
+<a name="ln103">  return v;</a>
+<a name="ln104">}</a>
+<a name="ln105"> </a>
+<a name="ln106">uint32_t container(dt_lib_module_t *self)</a>
+<a name="ln107">{</a>
+<a name="ln108">  return DT_UI_CONTAINER_PANEL_RIGHT_CENTER;</a>
+<a name="ln109">}</a>
+<a name="ln110"> </a>
+<a name="ln111"> </a>
+<a name="ln112">void gui_reset(dt_lib_module_t *self)</a>
+<a name="ln113">{</a>
+<a name="ln114">  dt_lib_location_t *lib = (dt_lib_location_t *)self-&gt;data;</a>
+<a name="ln115">  gtk_entry_set_text(lib-&gt;search, &quot;&quot;);</a>
+<a name="ln116">  clear_search(lib);</a>
+<a name="ln117">}</a>
+<a name="ln118"> </a>
+<a name="ln119">int position()</a>
+<a name="ln120">{</a>
+<a name="ln121">  return 999;</a>
+<a name="ln122">}</a>
+<a name="ln123"> </a>
+<a name="ln124">/*</a>
+<a name="ln125">  https://nominatim.openstreetmap.org/search/norrköping?format=xml&amp;limit=5</a>
+<a name="ln126"> */</a>
+<a name="ln127">void gui_init(dt_lib_module_t *self)</a>
+<a name="ln128">{</a>
+<a name="ln129">  self-&gt;data = calloc(1, sizeof(dt_lib_location_t));</a>
+<a name="ln130">  dt_lib_location_t *lib = self-&gt;data;</a>
+<a name="ln131"> </a>
+<a name="ln132">  self-&gt;widget = gtk_box_new(GTK_ORIENTATION_VERTICAL, DT_PIXEL_APPLY_DPI(5));</a>
+<a name="ln133">  dt_gui_add_help_link(self-&gt;widget, dt_get_help_url(self-&gt;plugin_name));</a>
+<a name="ln134"> </a>
+<a name="ln135">  /* add search box */</a>
+<a name="ln136">  lib-&gt;search = GTK_ENTRY(gtk_entry_new());</a>
+<a name="ln137">  dt_gui_key_accel_block_on_focus_connect(GTK_WIDGET(lib-&gt;search));</a>
+<a name="ln138">  gtk_box_pack_start(GTK_BOX(self-&gt;widget), GTK_WIDGET(lib-&gt;search), FALSE, FALSE, 0);</a>
+<a name="ln139"> </a>
+<a name="ln140">  g_signal_connect(G_OBJECT(lib-&gt;search), &quot;activate&quot;, G_CALLBACK(_lib_location_entry_activated),</a>
+<a name="ln141">                   (gpointer)self);</a>
+<a name="ln142"> </a>
+<a name="ln143">  /* add result vbox */</a>
+<a name="ln144">  lib-&gt;result = gtk_box_new(GTK_ORIENTATION_VERTICAL, DT_PIXEL_APPLY_DPI(10));</a>
+<a name="ln145">  gtk_box_pack_start(GTK_BOX(self-&gt;widget), GTK_WIDGET(lib-&gt;result), TRUE, FALSE, DT_PIXEL_APPLY_DPI(2));</a>
+<a name="ln146">}</a>
+<a name="ln147"> </a>
+<a name="ln148">void gui_cleanup(dt_lib_module_t *self)</a>
+<a name="ln149">{</a>
+<a name="ln150">  dt_lib_location_t *lib = self-&gt;data;</a>
+<a name="ln151">  dt_gui_key_accel_block_on_focus_disconnect(GTK_WIDGET(lib-&gt;search));</a>
+<a name="ln152">  free(self-&gt;data);</a>
+<a name="ln153">  self-&gt;data = NULL;</a>
+<a name="ln154">}</a>
+<a name="ln155"> </a>
+<a name="ln156">static GtkWidget *_lib_location_place_widget_new(dt_lib_location_t *lib, _lib_location_result_t *place)</a>
+<a name="ln157">{</a>
+<a name="ln158">  GtkWidget *eb, *hb, *vb, *w;</a>
+<a name="ln159">  eb = gtk_event_box_new();</a>
+<a name="ln160">  hb = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, DT_PIXEL_APPLY_DPI(2));</a>
+<a name="ln161">  vb = gtk_box_new(GTK_ORIENTATION_VERTICAL, DT_PIXEL_APPLY_DPI(2));</a>
+<a name="ln162"> </a>
+<a name="ln163">  /* add name */</a>
+<a name="ln164">  w = gtk_label_new(place-&gt;name);</a>
+<a name="ln165">  gtk_label_set_line_wrap(GTK_LABEL(w), TRUE);</a>
+<a name="ln166">  gtk_widget_set_halign(w, GTK_ALIGN_START);</a>
+<a name="ln167">  g_object_set(G_OBJECT(w), &quot;xalign&quot;, 0.0, (gchar *)0);</a>
+<a name="ln168">  gtk_box_pack_start(GTK_BOX(vb), w, FALSE, FALSE, 0);</a>
+<a name="ln169"> </a>
+<a name="ln170">  /* add location coord */</a>
+<a name="ln171">  gchar *lat = dt_util_latitude_str(place-&gt;lat);</a>
+<a name="ln172">  gchar *lon = dt_util_longitude_str(place-&gt;lon);</a>
+<a name="ln173">  gchar *location = g_strconcat(lat, &quot;, &quot;, lon, NULL);</a>
+<a name="ln174">  w = gtk_label_new(location);</a>
+<a name="ln175">  g_free(lat);</a>
+<a name="ln176">  g_free(lon);</a>
+<a name="ln177">  g_free(location);</a>
+<a name="ln178">  gtk_label_set_line_wrap(GTK_LABEL(w), TRUE);</a>
+<a name="ln179">  gtk_widget_set_halign(w, GTK_ALIGN_START);</a>
+<a name="ln180">  gtk_box_pack_start(GTK_BOX(vb), w, FALSE, FALSE, 0);</a>
+<a name="ln181"> </a>
+<a name="ln182">  /* type icon */</a>
+<a name="ln183">  GtkWidget *icon = dtgtk_icon_new(dtgtk_cairo_paint_triangle, CPF_DIRECTION_LEFT, NULL);</a>
+<a name="ln184">  gtk_widget_set_size_request(icon, DT_PIXEL_APPLY_DPI(10), -1);</a>
+<a name="ln185"> </a>
+<a name="ln186">  /* setup layout */</a>
+<a name="ln187">  gtk_box_pack_start(GTK_BOX(hb), icon, FALSE, FALSE, DT_PIXEL_APPLY_DPI(2));</a>
+<a name="ln188">  gtk_box_pack_start(GTK_BOX(hb), vb, FALSE, FALSE, DT_PIXEL_APPLY_DPI(2));</a>
+<a name="ln189">  gtk_container_add(GTK_CONTAINER(eb), hb);</a>
+<a name="ln190"> </a>
+<a name="ln191">  gtk_widget_show_all(eb);</a>
+<a name="ln192"> </a>
+<a name="ln193">  /* connect button press signal for result item */</a>
+<a name="ln194">  _callback_param_t *param = (_callback_param_t *)malloc(sizeof(_callback_param_t));</a>
+<a name="ln195">  lib-&gt;callback_params = g_list_append(lib-&gt;callback_params, param);</a>
+<a name="ln196">  param-&gt;lib = lib;</a>
+<a name="ln197">  param-&gt;result = place;</a>
+<a name="ln198">  g_signal_connect(G_OBJECT(eb), &quot;button-press-event&quot;, G_CALLBACK(_lib_location_result_item_activated),</a>
+<a name="ln199">                   (gpointer)param);</a>
+<a name="ln200"> </a>
+<a name="ln201"> </a>
+<a name="ln202">  return eb;</a>
+<a name="ln203">}</a>
+<a name="ln204"> </a>
+<a name="ln205">static size_t _lib_location_curl_write_data(void *buffer, size_t size, size_t nmemb, void *userp)</a>
+<a name="ln206">{</a>
+<a name="ln207">  dt_lib_location_t *lib = (dt_lib_location_t *)userp;</a>
+<a name="ln208"> </a>
+<a name="ln209">  char *newdata = g_malloc0(lib-&gt;response_size + nmemb + 1);</a>
+<a name="ln210">  if(lib-&gt;response != NULL) memcpy(newdata, lib-&gt;response, lib-&gt;response_size);</a>
+<a name="ln211">  memcpy(newdata + lib-&gt;response_size, buffer, nmemb);</a>
+<a name="ln212">  g_free(lib-&gt;response);</a>
+<a name="ln213">  lib-&gt;response = newdata;</a>
+<a name="ln214">  lib-&gt;response_size += nmemb;</a>
+<a name="ln215"> </a>
+<a name="ln216">  return nmemb;</a>
+<a name="ln217">}</a>
+<a name="ln218"> </a>
+<a name="ln219"> </a>
+<a name="ln220">static GMarkupParser _lib_location_parser = { _lib_location_parser_start_element, NULL, NULL, NULL, NULL };</a>
+<a name="ln221"> </a>
+<a name="ln222"> </a>
+<a name="ln223">static int32_t _lib_location_place_get_zoom(_lib_location_result_t *place)</a>
+<a name="ln224">{</a>
+<a name="ln225">  switch(place-&gt;type)</a>
+<a name="ln226">  {</a>
+<a name="ln227">    case LOCATION_TYPE_RESIDENTAL:</a>
+<a name="ln228">      return 18;</a>
+<a name="ln229"> </a>
+<a name="ln230">    case LOCATION_TYPE_ADMINISTRATIVE:</a>
+<a name="ln231">      return 17;</a>
+<a name="ln232"> </a>
+<a name="ln233">    case LOCATION_TYPE_VILLAGE:</a>
+<a name="ln234">      return 12;</a>
+<a name="ln235"> </a>
+<a name="ln236">    case LOCATION_TYPE_HAMLET:</a>
+<a name="ln237">    case LOCATION_TYPE_CITY:</a>
+<a name="ln238">    case LOCATION_TYPE_UNKNOWN:</a>
+<a name="ln239">    default:</a>
+<a name="ln240">      return 8;</a>
+<a name="ln241">  }</a>
+<a name="ln242"> </a>
+<a name="ln243">  /* should never get here */</a>
+<a name="ln244">  return 0;</a>
+<a name="ln245">}</a>
+<a name="ln246"> </a>
+<a name="ln247">static void _clear_markers(dt_lib_location_t *lib)</a>
+<a name="ln248">{</a>
+<a name="ln249">  if(lib-&gt;marker_type == MAP_DISPLAY_NONE) return;</a>
+<a name="ln250">  dt_view_map_remove_marker(darktable.view_manager, lib-&gt;marker_type, lib-&gt;marker);</a>
+<a name="ln251">  g_object_unref(lib-&gt;marker);</a>
+<a name="ln252">  lib-&gt;marker = NULL;</a>
+<a name="ln253">  lib-&gt;marker_type = MAP_DISPLAY_NONE;</a>
+<a name="ln254">}</a>
+<a name="ln255"> </a>
+<a name="ln256">static void free_location(_lib_location_result_t *location)</a>
+<a name="ln257">{</a>
+<a name="ln258">  g_free(location-&gt;name);</a>
+<a name="ln259">  g_list_free_full(location-&gt;marker_points, free);</a>
+<a name="ln260">  free(location);</a>
+<a name="ln261">}</a>
+<a name="ln262"> </a>
+<a name="ln263">static void clear_search(dt_lib_location_t *lib)</a>
+<a name="ln264">{</a>
+<a name="ln265">  g_free(lib-&gt;response);</a>
+<a name="ln266">  lib-&gt;response = NULL;</a>
+<a name="ln267">  lib-&gt;response_size = 0;</a>
+<a name="ln268">  lib-&gt;selected_location = NULL;</a>
+<a name="ln269"> </a>
+<a name="ln270">  g_list_free_full(lib-&gt;places, (GDestroyNotify)free_location);</a>
+<a name="ln271">  lib-&gt;places = NULL;</a>
+<a name="ln272"> </a>
+<a name="ln273">  gtk_container_foreach(GTK_CONTAINER(lib-&gt;result), (GtkCallback)gtk_widget_destroy, NULL);</a>
+<a name="ln274">  g_list_free_full(lib-&gt;callback_params, free);</a>
+<a name="ln275">  lib-&gt;callback_params = NULL;</a>
+<a name="ln276"> </a>
+<a name="ln277">  _clear_markers(lib);</a>
+<a name="ln278">}</a>
+<a name="ln279"> </a>
+<a name="ln280">static void _show_location(dt_lib_location_t *lib, _lib_location_result_t *p)</a>
+<a name="ln281">{</a>
+<a name="ln282">  if(isnan(p-&gt;bbox_lon1) || isnan(p-&gt;bbox_lat1) || isnan(p-&gt;bbox_lon2) || isnan(p-&gt;bbox_lat2))</a>
+<a name="ln283">  {</a>
+<a name="ln284">    int32_t zoom = _lib_location_place_get_zoom(p);</a>
+<a name="ln285">    dt_view_map_center_on_location(darktable.view_manager, p-&gt;lon, p-&gt;lat, zoom);</a>
+<a name="ln286">  }</a>
+<a name="ln287">  else</a>
+<a name="ln288">  {</a>
+<a name="ln289">    dt_view_map_center_on_bbox(darktable.view_manager, p-&gt;bbox_lon1, p-&gt;bbox_lat1, p-&gt;bbox_lon2, p-&gt;bbox_lat2);</a>
+<a name="ln290">  }</a>
+<a name="ln291"> </a>
+<a name="ln292">  _clear_markers(lib);</a>
+<a name="ln293"> </a>
+<a name="ln294">  lib-&gt;marker = dt_view_map_add_marker(darktable.view_manager, p-&gt;marker_type, p-&gt;marker_points);</a>
+<a name="ln295">  lib-&gt;marker_type = p-&gt;marker_type;</a>
+<a name="ln296">  lib-&gt;selected_location = p;</a>
+<a name="ln297">}</a>
+<a name="ln298"> </a>
+<a name="ln299">/* called when search job has been processed and</a>
+<a name="ln300">   result has been parsed */</a>
+<a name="ln301">static void _lib_location_search_finish(gpointer user_data)</a>
+<a name="ln302">{</a>
+<a name="ln303">  dt_lib_module_t *self = (dt_lib_module_t *)user_data;</a>
+<a name="ln304">  dt_lib_location_t *lib = (dt_lib_location_t *)self-&gt;data;</a>
+<a name="ln305"> </a>
+<a name="ln306">  /* check if search gave us some result */</a>
+<a name="ln307">  if(!lib-&gt;places) return;</a>
+<a name="ln308"> </a>
+<a name="ln309">  /* for each location found populate the result list */</a>
+<a name="ln310">  GList *item = lib-&gt;places;</a>
+<a name="ln311">  do</a>
+<a name="ln312">  {</a>
+<a name="ln313">    _lib_location_result_t *place = (_lib_location_result_t *)item-&gt;data;</a>
+<a name="ln314">    gtk_box_pack_start(GTK_BOX(lib-&gt;result), _lib_location_place_widget_new(lib, place), TRUE, TRUE, 0);</a>
+<a name="ln315">    gtk_widget_show(lib-&gt;result);</a>
+<a name="ln316">  } while((item = g_list_next(item)) != NULL);</a>
+<a name="ln317"> </a>
+<a name="ln318">  /* if we only got one search result back lets</a>
+<a name="ln319">     set center location and zoom based on place type  */</a>
+<a name="ln320">  if(g_list_length(lib-&gt;places) == 1)</a>
+<a name="ln321">  {</a>
+<a name="ln322">    _lib_location_result_t *place = (_lib_location_result_t *)lib-&gt;places-&gt;data;</a>
+<a name="ln323">    _show_location(lib, place);</a>
+<a name="ln324">  }</a>
+<a name="ln325">}</a>
+<a name="ln326"> </a>
+<a name="ln327">static gboolean _lib_location_search(gpointer user_data)</a>
+<a name="ln328">{</a>
+<a name="ln329">  GMarkupParseContext *ctx = NULL;</a>
+<a name="ln330">  CURL *curl = NULL;</a>
+<a name="ln331">  CURLcode res;</a>
+<a name="ln332">  GError *err = NULL;</a>
+<a name="ln333"> </a>
+<a name="ln334">  dt_lib_module_t *self = (dt_lib_module_t *)user_data;</a>
+<a name="ln335">  dt_lib_location_t *lib = (dt_lib_location_t *)self-&gt;data;</a>
+<a name="ln336">  gchar *query = NULL, *text = NULL, *search_url = NULL;</a>
+<a name="ln337"> </a>
+<a name="ln338">  /* get escaped search text */</a>
+<a name="ln339">  text = g_uri_escape_string(gtk_entry_get_text(lib-&gt;search), NULL, FALSE);</a>
+<a name="ln340"> </a>
+<a name="ln341">  if(!(text &amp;&amp; *text)) goto bail_out;</a>
+<a name="ln342"> </a>
+<a name="ln343">  /* clean up previous results before adding new */</a>
+<a name="ln344">  clear_search(lib);</a>
+<a name="ln345"> </a>
+<a name="ln346">  /* build the query url */</a>
+<a name="ln347">  search_url = dt_conf_get_string(&quot;plugins/map/geotagging_search_url&quot;);</a>
+<a name="ln348">  query = dt_util_dstrcat(query, search_url, text, LIMIT_RESULT);</a>
+<a name="ln349">  /* load url */</a>
+<a name="ln350">  curl = curl_easy_init();</a>
+<a name="ln351">  if(!curl) goto bail_out;</a>
+<a name="ln352"> </a>
+<a name="ln353">  curl_easy_setopt(curl, CURLOPT_URL, query);</a>
+<a name="ln354">  // curl_easy_setopt(curl, CURLOPT_VERBOSE, 1);</a>
+<a name="ln355">  curl_easy_setopt(curl, CURLOPT_WRITEDATA, lib);</a>
+<a name="ln356">  curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, _lib_location_curl_write_data);</a>
+<a name="ln357">  curl_easy_setopt(curl, CURLOPT_USERAGENT, (char *)darktable_package_string);</a>
+<a name="ln358">  curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);</a>
+<a name="ln359">  curl_easy_setopt(curl, CURLOPT_TIMEOUT, 20L);</a>
+<a name="ln360"> </a>
+<a name="ln361">  res = curl_easy_perform(curl);</a>
+<a name="ln362">  if(res != 0) goto bail_out;</a>
+<a name="ln363"> </a>
+<a name="ln364">  if(!lib-&gt;response) goto bail_out;</a>
+<a name="ln365"> </a>
+<a name="ln366">  /* parse xml response and populate the result list */</a>
+<a name="ln367">  ctx = g_markup_parse_context_new(&amp;_lib_location_parser, 0, lib, NULL);</a>
+<a name="ln368">  g_markup_parse_context_parse(ctx, lib-&gt;response, lib-&gt;response_size, &amp;err);</a>
+<a name="ln369">  if(err) goto bail_out;</a>
+<a name="ln370"> </a>
+<a name="ln371">  /* add the places into the result list */</a>
+<a name="ln372">  GList *item = lib-&gt;places;</a>
+<a name="ln373">  if(!item) goto bail_out;</a>
+<a name="ln374"> </a>
+<a name="ln375">//   while(item)</a>
+<a name="ln376">//   {</a>
+<a name="ln377">//     _lib_location_result_t *p = (_lib_location_result_t *)item-&gt;data;</a>
+<a name="ln378">//     fprintf(stderr, &quot;(%f,%f) %s\n&quot;, p-&gt;lon, p-&gt;lat, p-&gt;name);</a>
+<a name="ln379">//     item = g_list_next(item);</a>
+<a name="ln380">//   }</a>
+<a name="ln381"> </a>
+<a name="ln382">/* cleanup an exit search job */</a>
+<a name="ln383">bail_out:</a>
+<a name="ln384">  if(err)</a>
+<a name="ln385">  {</a>
+<a name="ln386">    fprintf(stderr, &quot;location search: %s\n&quot;, err-&gt;message);</a>
+<a name="ln387">    g_error_free(err);</a>
+<a name="ln388">  }</a>
+<a name="ln389"> </a>
+<a name="ln390">  if(curl) curl_easy_cleanup(curl);</a>
+<a name="ln391"> </a>
+<a name="ln392">  g_free(text);</a>
+<a name="ln393">  g_free(query);</a>
+<a name="ln394">  g_free(search_url);</a>
+<a name="ln395"> </a>
+<a name="ln396">  if(ctx) g_markup_parse_context_free(ctx);</a>
+<a name="ln397"> </a>
+<a name="ln398">  /* enable the widgets */</a>
+<a name="ln399">  gtk_widget_set_sensitive(GTK_WIDGET(lib-&gt;search), TRUE);</a>
+<a name="ln400">  // gtk_widget_set_sensitive(lib-&gt;result, FALSE);</a>
+<a name="ln401"> </a>
+<a name="ln402">  return FALSE;</a>
+<a name="ln403">}</a>
+<a name="ln404"> </a>
+<a name="ln405">gboolean _lib_location_result_item_activated(GtkButton *button, GdkEventButton *ev, gpointer user_data)</a>
+<a name="ln406">{</a>
+<a name="ln407">  _callback_param_t *param = (_callback_param_t *)user_data;</a>
+<a name="ln408">  dt_lib_location_t *lib = param-&gt;lib;</a>
+<a name="ln409">  _lib_location_result_t *result = param-&gt;result;</a>
+<a name="ln410">  _show_location(lib, result);</a>
+<a name="ln411">  return TRUE;</a>
+<a name="ln412">}</a>
+<a name="ln413"> </a>
+<a name="ln414">void _lib_location_entry_activated(GtkButton *button, gpointer user_data)</a>
+<a name="ln415">{</a>
+<a name="ln416">  dt_lib_module_t *self = (dt_lib_module_t *)user_data;</a>
+<a name="ln417">  dt_lib_location_t *lib = (dt_lib_location_t *)self-&gt;data;</a>
+<a name="ln418">  const gchar *text = gtk_entry_get_text(lib-&gt;search);</a>
+<a name="ln419">  if(!text || text[0] == '\0') return;</a>
+<a name="ln420"> </a>
+<a name="ln421">  /* lock the widget while search job is performing */</a>
+<a name="ln422">  gtk_widget_set_sensitive(GTK_WIDGET(lib-&gt;search), FALSE);</a>
+<a name="ln423">  // gtk_widget_set_sensitive(lib-&gt;result, FALSE);</a>
+<a name="ln424"> </a>
+<a name="ln425">  /* start a bg job for fetching results of a search */</a>
+<a name="ln426">  g_idle_add_full(G_PRIORITY_DEFAULT_IDLE, _lib_location_search, user_data, _lib_location_search_finish);</a>
+<a name="ln427">}</a>
+<a name="ln428"> </a>
+<a name="ln429"> </a>
+<a name="ln430">static void _lib_location_parser_start_element(GMarkupParseContext *cxt, const char *element_name,</a>
+<a name="ln431">                                               const char **attribute_names, const gchar **attribute_values,</a>
+<a name="ln432">                                               gpointer user_data, GError **e)</a>
+<a name="ln433">{</a>
+<a name="ln434">  dt_lib_location_t *lib = (dt_lib_location_t *)user_data;</a>
+<a name="ln435"> </a>
+<a name="ln436">  /* only interested in place element */</a>
+<a name="ln437">  if(strcmp(element_name, &quot;place&quot;) != 0) return;</a>
+<a name="ln438"> </a>
+<a name="ln439">  /* create new place */</a>
+<a name="ln440">  _lib_location_result_t *place = g_malloc0(sizeof(_lib_location_result_t));</a>
+<a name="ln441">  if(!place) return;</a>
+<a name="ln442"> </a>
+<a name="ln443">  place-&gt;lon = NAN;</a>
+<a name="ln444">  place-&gt;lat = NAN;</a>
+<a name="ln445">  place-&gt;bbox_lon1 = NAN;</a>
+<a name="ln446">  place-&gt;bbox_lat1 = NAN;</a>
+<a name="ln447">  place-&gt;bbox_lon2 = NAN;</a>
+<a name="ln448">  place-&gt;bbox_lat2 = NAN;</a>
+<a name="ln449">  place-&gt;marker_type = MAP_DISPLAY_NONE;</a>
+<a name="ln450">  place-&gt;marker_points = NULL;</a>
+<a name="ln451"> </a>
+<a name="ln452">  gboolean show_outline = dt_conf_get_bool(&quot;plugins/map/show_outline&quot;);</a>
+<a name="ln453">  int max_outline_nodes = dt_conf_get_int(&quot;plugins/map/max_outline_nodes&quot;);</a>
+<a name="ln454"> </a>
+<a name="ln455">  /* handle the element attribute values */</a>
+<a name="ln456">  const gchar **aname = attribute_names;</a>
+<a name="ln457">  const gchar **avalue = attribute_values;</a>
+<a name="ln458">  if(*aname)</a>
+<a name="ln459">  {</a>
+<a name="ln460">    while(*aname)</a>
+<a name="ln461">    {</a>
+<a name="ln462">      if(strcmp(*aname, &quot;display_name&quot;) == 0)</a>
+<a name="ln463">      {</a>
+<a name="ln464">        place-&gt;name = g_strdup(*avalue);</a>
+<a name="ln465">        if(!(place-&gt;name)) goto bail_out;</a>
+<a name="ln466">      }</a>
+<a name="ln467">      else if(strcmp(*aname, &quot;lon&quot;) == 0)</a>
+<a name="ln468">        place-&gt;lon = g_strtod(*avalue, NULL);</a>
+<a name="ln469">      else if(strcmp(*aname, &quot;lat&quot;) == 0)</a>
+<a name="ln470">        place-&gt;lat = g_strtod(*avalue, NULL);</a>
+<a name="ln471">      else if(strcmp(*aname, &quot;boundingbox&quot;) == 0)</a>
+<a name="ln472">      {</a>
+<a name="ln473">        char *endptr;</a>
+<a name="ln474">        float lon1, lat1, lon2, lat2;</a>
+<a name="ln475"> </a>
+<a name="ln476">        lat1 = g_ascii_strtod(*avalue, &amp;endptr);</a>
+<a name="ln477">        if(*endptr != ',') goto broken_bbox;</a>
+<a name="ln478">        endptr++;</a>
+<a name="ln479"> </a>
+<a name="ln480">        lat2 = g_ascii_strtod(endptr, &amp;endptr);</a>
+<a name="ln481">        if(*endptr != ',') goto broken_bbox;</a>
+<a name="ln482">        endptr++;</a>
+<a name="ln483"> </a>
+<a name="ln484">        lon1 = g_ascii_strtod(endptr, &amp;endptr);</a>
+<a name="ln485">        if(*endptr != ',') goto broken_bbox;</a>
+<a name="ln486">        endptr++;</a>
+<a name="ln487"> </a>
+<a name="ln488">        lon2 = g_ascii_strtod(endptr, &amp;endptr);</a>
+<a name="ln489">        if(*endptr != '\0') goto broken_bbox;</a>
+<a name="ln490"> </a>
+<a name="ln491">        place-&gt;bbox_lon1 = lon1;</a>
+<a name="ln492">        place-&gt;bbox_lat1 = lat1;</a>
+<a name="ln493">        place-&gt;bbox_lon2 = lon2;</a>
+<a name="ln494">        place-&gt;bbox_lat2 = lat2;</a>
+<a name="ln495">broken_bbox:</a>
+<a name="ln496">        ;</a>
+<a name="ln497">      }</a>
+<a name="ln498">      // only use the first 'geotext' entry</a>
+<a name="ln499">      else if(show_outline &amp;&amp;</a>
+<a name="ln500">              strcmp(*aname, &quot;geotext&quot;) == 0 &amp;&amp;</a>
+<a name="ln501">              place-&gt;marker_type == MAP_DISPLAY_NONE)</a>
+<a name="ln502">      {</a>
+<a name="ln503">        if(g_str_has_prefix(*avalue, &quot;POINT&quot;))</a>
+<a name="ln504">        {</a>
+<a name="ln505">          char *endptr;</a>
+<a name="ln506">          float lon = g_ascii_strtod(*avalue + strlen(&quot;POINT(&quot;), &amp;endptr);</a>
+<a name="ln507">          float lat = g_ascii_strtod(endptr, &amp;endptr);</a>
+<a name="ln508">          if(*endptr == ')')</a>
+<a name="ln509">          {</a>
+<a name="ln510">            place-&gt;marker_type = MAP_DISPLAY_POINT;</a>
+<a name="ln511">            dt_geo_map_display_point_t *p = malloc(sizeof(dt_geo_map_display_point_t));</a>
+<a name="ln512">            p-&gt;lon = lon;</a>
+<a name="ln513">            p-&gt;lat = lat;</a>
+<a name="ln514">            place-&gt;marker_points = g_list_append(place-&gt;marker_points, p);</a>
+<a name="ln515">          }</a>
+<a name="ln516">        }</a>
+<a name="ln517">        else if(g_str_has_prefix(*avalue, &quot;LINESTRING&quot;)</a>
+<a name="ln518">#ifdef HAVE_OSMGPSMAP_110_OR_NEWER</a>
+<a name="ln519">                || g_str_has_prefix(*avalue, &quot;POLYGON&quot;)</a>
+<a name="ln520">                || g_str_has_prefix(*avalue, &quot;MULTIPOLYGON&quot;)</a>
+<a name="ln521">#endif</a>
+<a name="ln522">        )</a>
+<a name="ln523">        {</a>
+<a name="ln524">          gboolean error = FALSE;</a>
+<a name="ln525">          const char *startptr = *avalue;</a>
+<a name="ln526">          char *endptr;</a>
+<a name="ln527">          while(startptr &amp;&amp; (*startptr == ' ' || *startptr == '(' || (*startptr &gt;= 'A' &amp;&amp; *startptr &lt;= 'Z')))</a>
+<a name="ln528">            startptr++;</a>
+<a name="ln529"> </a>
+<a name="ln530">          int i = 0;</a>
+<a name="ln531">          while(1)</a>
+<a name="ln532">          {</a>
+<a name="ln533">            float lon = g_ascii_strtod(startptr, &amp;endptr);</a>
+<a name="ln534">            float lat = g_ascii_strtod(endptr, &amp;endptr);</a>
+<a name="ln535"> </a>
+<a name="ln536">            if(*endptr == ')') break; // TODO: support holes in POLYGON and several forms in MULTIPOLYGON?</a>
+<a name="ln537">            if(*endptr != ',' || i &gt; max_outline_nodes) // don't go too big for speed reasons</a>
+<a name="ln538">            {</a>
+<a name="ln539">              error = TRUE;</a>
+<a name="ln540">              break;</a>
+<a name="ln541">            }</a>
+<a name="ln542">            dt_geo_map_display_point_t *p = malloc(sizeof(dt_geo_map_display_point_t));</a>
+<a name="ln543">            p-&gt;lon = lon;</a>
+<a name="ln544">            p-&gt;lat = lat;</a>
+<a name="ln545">            place-&gt;marker_points = g_list_append(place-&gt;marker_points, p);</a>
+<a name="ln546">            startptr = endptr+1;</a>
+<a name="ln547">            i++;</a>
+<a name="ln548">          }</a>
+<a name="ln549"> </a>
+<a name="ln550">          if(error)</a>
+<a name="ln551">          {</a>
+<a name="ln552">            g_list_free_full(place-&gt;marker_points, free);</a>
+<a name="ln553">            place-&gt;marker_points = NULL;</a>
+<a name="ln554">          }</a>
+<a name="ln555">          else</a>
+<a name="ln556">          {</a>
+<a name="ln557">            place-&gt;marker_type = g_str_has_prefix(*avalue, &quot;LINESTRING&quot;) ? MAP_DISPLAY_TRACK : MAP_DISPLAY_POLYGON;</a>
+<a name="ln558">          }</a>
+<a name="ln559">        }</a>
+<a name="ln560">        else</a>
+<a name="ln561">        {</a>
+<a name="ln562">          gchar *s = g_strndup(*avalue, 100);</a>
+<a name="ln563">          fprintf(stderr, &quot;unsupported outline: %s%s\n&quot;, s, strlen(s) == strlen(*avalue) ? &quot;&quot; : &quot; ...&quot;);</a>
+<a name="ln564">          g_free(s);</a>
+<a name="ln565">        }</a>
+<a name="ln566">      }</a>
+<a name="ln567">      else if(strcmp(*aname, &quot;type&quot;) == 0)</a>
+<a name="ln568">      {</a>
+<a name="ln569"> </a>
+<a name="ln570">        if(strcmp(*avalue, &quot;village&quot;) == 0)</a>
+<a name="ln571">          place-&gt;type = LOCATION_TYPE_RESIDENTAL;</a>
+<a name="ln572">        else if(strcmp(*avalue, &quot;hamlet&quot;) == 0)</a>
+<a name="ln573">          place-&gt;type = LOCATION_TYPE_HAMLET;</a>
+<a name="ln574">        else if(strcmp(*avalue, &quot;city&quot;) == 0)</a>
+<a name="ln575">          place-&gt;type = LOCATION_TYPE_CITY;</a>
+<a name="ln576">        else if(strcmp(*avalue, &quot;administrative&quot;) == 0)</a>
+<a name="ln577">          place-&gt;type = LOCATION_TYPE_ADMINISTRATIVE;</a>
+<a name="ln578">        else if(strcmp(*avalue, &quot;residental&quot;) == 0)</a>
+<a name="ln579">          place-&gt;type = LOCATION_TYPE_RESIDENTAL;</a>
+<a name="ln580">      }</a>
+<a name="ln581"> </a>
+<a name="ln582">      aname++;</a>
+<a name="ln583">      avalue++;</a>
+<a name="ln584">    }</a>
+<a name="ln585">  }</a>
+<a name="ln586"> </a>
+<a name="ln587">  /* check if we got sane data */</a>
+<a name="ln588">  if(isnan(place-&gt;lon) || isnan(place-&gt;lat)) goto bail_out;</a>
+<a name="ln589"> </a>
+<a name="ln590">  /* add place to result list */</a>
+<a name="ln591">  lib-&gt;places = g_list_append(lib-&gt;places, place);</a>
+<a name="ln592"> </a>
+<a name="ln593">  return;</a>
+<a name="ln594"> </a>
+<a name="ln595">bail_out:</a>
+<a name="ln596">  g_free(place-&gt;name);</a>
+<a name="ln597">  g_free(place);</a>
+<a name="ln598">}</a>
+<a name="ln599"> </a>
+<a name="ln600">void init_presets(dt_lib_module_t *self)</a>
+<a name="ln601">{}</a>
+<a name="ln602"> </a>
+<a name="ln603">struct params_fixed_t</a>
+<a name="ln604">{</a>
+<a name="ln605">  int32_t relevance;</a>
+<a name="ln606">  _lib_location_type_t type;</a>
+<a name="ln607">  float lon;</a>
+<a name="ln608">  float lat;</a>
+<a name="ln609">  float bbox_lon1, bbox_lat1, bbox_lon2, bbox_lat2;</a>
+<a name="ln610">  dt_geo_map_display_t marker_type;</a>
+<a name="ln611">} __attribute__((packed));</a>
+<a name="ln612"> </a>
+<a name="ln613">void *get_params(dt_lib_module_t *self, int *size)</a>
+<a name="ln614">{</a>
+<a name="ln615">  dt_lib_location_t *lib = (dt_lib_location_t *)self-&gt;data;</a>
+<a name="ln616">  _lib_location_result_t *location = lib-&gt;selected_location;</a>
+<a name="ln617"> </a>
+<a name="ln618">  // we have nothing to store when the user hasn't picked a search result</a>
+<a name="ln619">  if(location == NULL) return NULL;</a>
+<a name="ln620"> </a>
+<a name="ln621">  const size_t size_fixed = sizeof(struct params_fixed_t);</a>
+<a name="ln622">  const size_t size_name = strlen(location-&gt;name) + 1;</a>
+<a name="ln623">  const size_t size_points = 2 * sizeof(float) * g_list_length(location-&gt;marker_points);</a>
+<a name="ln624">  const size_t size_total = size_fixed + size_name + size_points;</a>
+<a name="ln625"> </a>
+<a name="ln626">  void *params = malloc(size_total);</a>
+<a name="ln627">  struct params_fixed_t *params_fixed = (struct params_fixed_t *)params;</a>
+<a name="ln628">  params_fixed-&gt;relevance = location-&gt;relevance;</a>
+<a name="ln629">  params_fixed-&gt;type = location-&gt;type;</a>
+<a name="ln630">  params_fixed-&gt;lon = location-&gt;lon;</a>
+<a name="ln631">  params_fixed-&gt;lat = location-&gt;lat;</a>
+<a name="ln632">  params_fixed-&gt;bbox_lon1 = location-&gt;bbox_lon1;</a>
+<a name="ln633">  params_fixed-&gt;bbox_lat1 = location-&gt;bbox_lat1;</a>
+<a name="ln634">  params_fixed-&gt;bbox_lon2 = location-&gt;bbox_lon2;</a>
+<a name="ln635">  params_fixed-&gt;bbox_lat2 = location-&gt;bbox_lat2;</a>
+<a name="ln636">  params_fixed-&gt;marker_type = location-&gt;marker_type;</a>
+<a name="ln637"> </a>
+<a name="ln638">  memcpy(params + size_fixed, location-&gt;name, size_name);</a>
+<a name="ln639"> </a>
+<a name="ln640">  float *points = (float *)(params + size_fixed + size_name);</a>
+<a name="ln641">  for(GList *iter = location-&gt;marker_points; iter; iter = g_list_next(iter), points += 2)</a>
+<a name="ln642">  {</a>
+<a name="ln643">    dt_geo_map_display_point_t *point = (dt_geo_map_display_point_t *)iter-&gt;data;</a>
+<a name="ln644">    points[0] = point-&gt;lat;</a>
+<a name="ln645">    points[1] = point-&gt;lon;</a>
+<a name="ln646">  }</a>
+<a name="ln647"> </a>
+<a name="ln648">  *size = size_total;</a>
+<a name="ln649">  return params;</a>
+<a name="ln650">}</a>
+<a name="ln651"> </a>
+<a name="ln652">int set_params(dt_lib_module_t *self, const void *params, int size)</a>
+<a name="ln653">{</a>
+<a name="ln654">  dt_lib_location_t *lib = (dt_lib_location_t *)self-&gt;data;</a>
+<a name="ln655"> </a>
+<a name="ln656">  const size_t size_fixed = sizeof(struct params_fixed_t);</a>
+<a name="ln657"> </a>
+<a name="ln658">  if(size &lt; size_fixed) return 1;</a>
+<a name="ln659"> </a>
+<a name="ln660">  const struct params_fixed_t *params_fixed = (struct params_fixed_t *)params;</a>
+<a name="ln661">  const char *name = (char *)(params + size_fixed);</a>
+<a name="ln662">  const size_t size_name = strlen(name) + 1;</a>
+<a name="ln663"> </a>
+<a name="ln664">  if(size_fixed + size_name &gt; size) return 1;</a>
+<a name="ln665"> </a>
+<a name="ln666">  const size_t size_points = size - (size_fixed + size_name);</a>
+<a name="ln667"> </a>
+<a name="ln668">  if(size_points % 2 * sizeof(float) != 0) return 1;</a>
+<a name="ln669"> </a>
+<a name="ln670">  _lib_location_result_t *location = (_lib_location_result_t *)malloc(sizeof(_lib_location_result_t));</a>
+<a name="ln671"> </a>
+<a name="ln672">  location-&gt;relevance = params_fixed-&gt;relevance;</a>
+<a name="ln673">  location-&gt;type = params_fixed-&gt;type;</a>
+<a name="ln674">  location-&gt;lon = params_fixed-&gt;lon;</a>
+<a name="ln675">  location-&gt;lat = params_fixed-&gt;lat;</a>
+<a name="ln676">  location-&gt;bbox_lon1 = params_fixed-&gt;bbox_lon1;</a>
+<a name="ln677">  location-&gt;bbox_lat1 = params_fixed-&gt;bbox_lat1;</a>
+<a name="ln678">  location-&gt;bbox_lon2 = params_fixed-&gt;bbox_lon2;</a>
+<a name="ln679">  location-&gt;bbox_lat2 = params_fixed-&gt;bbox_lat2;</a>
+<a name="ln680">  location-&gt;marker_type = params_fixed-&gt;marker_type;</a>
+<a name="ln681">  location-&gt;name = g_strdup(name);</a>
+<a name="ln682">  location-&gt;marker_points = NULL;</a>
+<a name="ln683"> </a>
+<a name="ln684">  for(const float *points = (float *)(params + size_fixed + size_name); (void *)points &lt; params + size; points += 2)</a>
+<a name="ln685">  {</a>
+<a name="ln686">    dt_geo_map_display_point_t *p = (dt_geo_map_display_point_t *)malloc(sizeof(dt_geo_map_display_point_t));</a>
+<a name="ln687">    p-&gt;lat = points[0];</a>
+<a name="ln688">    p-&gt;lon = points[1];</a>
+<a name="ln689">    location-&gt;marker_points = g_list_append(location-&gt;marker_points, p);</a>
+<a name="ln690">  }</a>
+<a name="ln691"> </a>
+<a name="ln692">  clear_search(lib);</a>
+<a name="ln693">  lib-&gt;places = g_list_append(lib-&gt;places, location);</a>
+<a name="ln694">  gtk_entry_set_text(lib-&gt;search, &quot;&quot;);</a>
+<a name="ln695">  _lib_location_search_finish(self);</a>
+<a name="ln696"> </a>
+<a name="ln697">  return 0;</a>
+<a name="ln698">}</a>
+<a name="ln699"> </a>
+<a name="ln700">// modelines: These editor modelines have been set for all relevant files by tools/update_modelines.sh</a>
+<a name="ln701">// vim: shiftwidth=2 expandtab tabstop=2 cindent</a>
+<a name="ln702">// kate: tab-indents: off; indent-width 2; replace-tabs on; indent-mode cstyle; remove-trailing-spaces modified;</a>
+
+</code></pre>
+<div class="balloon" rel="136"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v522/" target="_blank">V522</a> There might be dereferencing of a potential null pointer 'lib'. Check lines: 136, 129.</p></div>
+<div class="balloon" rel="196"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v522/" target="_blank">V522</a> There might be dereferencing of a potential null pointer 'param'. Check lines: 196, 194.</p></div>
+<div class="balloon" rel="355"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v568/" target="_blank">V568</a> It's odd that 'sizeof()' operator evaluates the size of a pointer to a class, but not the size of the 'lib' class object.</p></div>
+<div class="balloon" rel="512"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v522/" target="_blank">V522</a> There might be dereferencing of a potential null pointer 'p'. Check lines: 512, 511.</p></div>
+<div class="balloon" rel="543"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v522/" target="_blank">V522</a> There might be dereferencing of a potential null pointer 'p'. Check lines: 543, 542.</p></div>
+<div class="balloon" rel="628"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v522/" target="_blank">V522</a> There might be dereferencing of a potential null pointer 'params_fixed'. Check lines: 628, 626.</p></div>
+<div class="balloon" rel="638"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v769/" target="_blank">V769</a> The 'params' pointer in the 'params + size_fixed' expression could be nullptr. In such case, resulting value will be senseless and it should not be used. Check lines: 638, 626.</p></div>
+<div class="balloon" rel="672"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v522/" target="_blank">V522</a> There might be dereferencing of a potential null pointer 'location'. Check lines: 672, 670.</p></div>
+<div class="balloon" rel="687"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v522/" target="_blank">V522</a> There might be dereferencing of a potential null pointer 'p'. Check lines: 687, 686.</p></div>
+
+<link rel="stylesheet" href="highlight.css">
+<script src="highlight.pack.js"></script>
+<script src="highlightjs-line-numbers.js"></script>
+<script>hljs.initHighlightingOnLoad();</script>
+<script>hljs.initLineNumbersOnLoad();</script>
+<script>
+  $(document).ready(function() {
+      $('.balloon').each(function () {
+          var bl = $(this);
+          var line = bl.attr('rel');
+          var text = $('a[name="ln'+line+'"]').text();
+
+          var space_count = 0;
+          for(var i = 0; i<text.length; i++){
+              var char = text[i];
+              if((char !== ' ')&&(char !== '\t'))break;
+              if(char === '\t')space_count++;
+              space_count++;
+          }
+
+          bl.css('margin-left', space_count*8);
+          $('a[name="ln'+line+'"]').after(bl);
+      });
+
+      window.location = window.location;
+  });
+</script>
+</body>
+</html>

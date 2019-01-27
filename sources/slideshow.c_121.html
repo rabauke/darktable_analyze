@@ -1,0 +1,591 @@
+
+<html>
+<head>
+  <link rel="stylesheet" href="../style.css"/>
+  <script src="../jquery-3.2.1.min.js"></script>
+</head>
+<body>
+<pre><code class = "cpp">
+<a name="ln1">/*</a>
+<a name="ln2">    This file is part of darktable,</a>
+<a name="ln3">    copyright (c) 2013 johannes hanika.</a>
+<a name="ln4"> </a>
+<a name="ln5">    darktable is free software: you can redistribute it and/or modify</a>
+<a name="ln6">    it under the terms of the GNU General Public License as published by</a>
+<a name="ln7">    the Free Software Foundation, either version 3 of the License, or</a>
+<a name="ln8">    (at your option) any later version.</a>
+<a name="ln9"> </a>
+<a name="ln10">    darktable is distributed in the hope that it will be useful,</a>
+<a name="ln11">    but WITHOUT ANY WARRANTY; without even the implied warranty of</a>
+<a name="ln12">    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the</a>
+<a name="ln13">    GNU General Public License for more details.</a>
+<a name="ln14"> </a>
+<a name="ln15">    You should have received a copy of the GNU General Public License</a>
+<a name="ln16">    along with darktable.  If not, see &lt;http://www.gnu.org/licenses/&gt;.</a>
+<a name="ln17">*/</a>
+<a name="ln18"> </a>
+<a name="ln19">#include &quot;common/collection.h&quot;</a>
+<a name="ln20">#include &quot;common/colorspaces.h&quot;</a>
+<a name="ln21">#include &quot;common/debug.h&quot;</a>
+<a name="ln22">#include &quot;common/dtpthread.h&quot;</a>
+<a name="ln23">#include &quot;common/imageio.h&quot;</a>
+<a name="ln24">#include &quot;common/imageio_module.h&quot;</a>
+<a name="ln25">#include &quot;control/conf.h&quot;</a>
+<a name="ln26">#include &quot;control/control.h&quot;</a>
+<a name="ln27">#include &quot;gui/accelerators.h&quot;</a>
+<a name="ln28">#include &quot;gui/gtk.h&quot;</a>
+<a name="ln29">#include &quot;views/view.h&quot;</a>
+<a name="ln30">#include &quot;views/view_api.h&quot;</a>
+<a name="ln31"> </a>
+<a name="ln32">#include &lt;gdk/gdkkeysyms.h&gt;</a>
+<a name="ln33">#include &lt;stdint.h&gt;</a>
+<a name="ln34"> </a>
+<a name="ln35">DT_MODULE(1)</a>
+<a name="ln36"> </a>
+<a name="ln37">typedef enum dt_slideshow_event_t</a>
+<a name="ln38">{</a>
+<a name="ln39">  S_REQUEST_STEP,</a>
+<a name="ln40">  S_REQUEST_STEP_BACK,</a>
+<a name="ln41">  S_IMAGE_LOADED,</a>
+<a name="ln42">  S_BLENDED</a>
+<a name="ln43">} dt_slideshow_event_t;</a>
+<a name="ln44"> </a>
+<a name="ln45">typedef enum dt_slideshow_state_t</a>
+<a name="ln46">{</a>
+<a name="ln47">  S_PREFETCHING,</a>
+<a name="ln48">  S_WAITING_FOR_USER,</a>
+<a name="ln49">  S_BLENDING</a>
+<a name="ln50">} dt_slideshow_state_t;</a>
+<a name="ln51"> </a>
+<a name="ln52">typedef struct dt_slideshow_t</a>
+<a name="ln53">{</a>
+<a name="ln54">  uint32_t random_state;</a>
+<a name="ln55">  uint32_t scramble;</a>
+<a name="ln56">  uint32_t use_random;</a>
+<a name="ln57">  int32_t step;</a>
+<a name="ln58">  uint32_t width, height;</a>
+<a name="ln59"> </a>
+<a name="ln60"> </a>
+<a name="ln61">  // double buffer</a>
+<a name="ln62">  uint32_t *buf1, *buf2;</a>
+<a name="ln63">  uint32_t *front, *back;</a>
+<a name="ln64">  // processed sizes might differ from screen size</a>
+<a name="ln65">  uint32_t front_width, front_height;</a>
+<a name="ln66">  uint32_t back_width, back_height;</a>
+<a name="ln67">  int32_t front_num, back_num;</a>
+<a name="ln68"> </a>
+<a name="ln69">  // state machine stuff for image transitions:</a>
+<a name="ln70">  dt_pthread_mutex_t lock;</a>
+<a name="ln71">  dt_slideshow_state_t state;      // global state cycle</a>
+<a name="ln72">  uint32_t state_waiting_for_user; // user input (needed to step the cycle at one point)</a>
+<a name="ln73"> </a>
+<a name="ln74">  uint32_t auto_advance;</a>
+<a name="ln75">  int delay;</a>
+<a name="ln76"> </a>
+<a name="ln77">  // some magic to hide the mosue pointer</a>
+<a name="ln78">  guint mouse_timeout;</a>
+<a name="ln79">} dt_slideshow_t;</a>
+<a name="ln80"> </a>
+<a name="ln81">typedef struct dt_slideshow_format_t</a>
+<a name="ln82">{</a>
+<a name="ln83">  int max_width, max_height;</a>
+<a name="ln84">  int width, height;</a>
+<a name="ln85">  char style[128];</a>
+<a name="ln86">  gboolean style_append;</a>
+<a name="ln87">  dt_slideshow_t *d;</a>
+<a name="ln88">} dt_slideshow_format_t;</a>
+<a name="ln89"> </a>
+<a name="ln90">// fwd declare state machine mechanics:</a>
+<a name="ln91">static void _step_state(dt_slideshow_t *d, dt_slideshow_event_t event);</a>
+<a name="ln92"> </a>
+<a name="ln93">// callbacks for in-memory export</a>
+<a name="ln94">static int bpp(dt_imageio_module_data_t *data)</a>
+<a name="ln95">{</a>
+<a name="ln96">  return 8;</a>
+<a name="ln97">}</a>
+<a name="ln98"> </a>
+<a name="ln99">static int levels(dt_imageio_module_data_t *data)</a>
+<a name="ln100">{</a>
+<a name="ln101">  return IMAGEIO_RGB | IMAGEIO_INT8;</a>
+<a name="ln102">}</a>
+<a name="ln103"> </a>
+<a name="ln104">static const char *mime(dt_imageio_module_data_t *data)</a>
+<a name="ln105">{</a>
+<a name="ln106">  return &quot;memory&quot;;</a>
+<a name="ln107">}</a>
+<a name="ln108"> </a>
+<a name="ln109">static int write_image(dt_imageio_module_data_t *datai, const char *filename, const void *in,</a>
+<a name="ln110">                       dt_colorspaces_color_profile_type_t over_type, const char *over_filename,</a>
+<a name="ln111">                       void *exif, int exif_len, int imgid, int num, int total, dt_dev_pixelpipe_t *pipe)</a>
+<a name="ln112">{</a>
+<a name="ln113">  dt_slideshow_format_t *data = (dt_slideshow_format_t *)datai;</a>
+<a name="ln114">  dt_pthread_mutex_lock(&amp;data-&gt;d-&gt;lock);</a>
+<a name="ln115">  if(data-&gt;d-&gt;back)</a>
+<a name="ln116">  { // might have been cleaned up when leaving slide show</a>
+<a name="ln117">    memcpy(data-&gt;d-&gt;back, in, sizeof(uint32_t) * datai-&gt;width * datai-&gt;height);</a>
+<a name="ln118">    data-&gt;d-&gt;back_width = datai-&gt;width;</a>
+<a name="ln119">    data-&gt;d-&gt;back_height = datai-&gt;height;</a>
+<a name="ln120">  }</a>
+<a name="ln121">  dt_pthread_mutex_unlock(&amp;data-&gt;d-&gt;lock);</a>
+<a name="ln122">  _step_state(data-&gt;d, S_IMAGE_LOADED);</a>
+<a name="ln123">  // trigger expose</a>
+<a name="ln124">  dt_control_queue_redraw_center();</a>
+<a name="ln125">  return 0;</a>
+<a name="ln126">}</a>
+<a name="ln127"> </a>
+<a name="ln128">static uint32_t next_random(dt_slideshow_t *d)</a>
+<a name="ln129">{</a>
+<a name="ln130">  uint32_t i = d-&gt;random_state++;</a>
+<a name="ln131">  // van der corput for 32 bits. this guarantees every number will appear exactly once</a>
+<a name="ln132">  i = ((i &amp; 0x0000ffff) &lt;&lt; 16) | (i &gt;&gt; 16);</a>
+<a name="ln133">  i = ((i &amp; 0x00ff00ff) &lt;&lt; 8) | ((i &amp; 0xff00ff00) &gt;&gt; 8);</a>
+<a name="ln134">  i = ((i &amp; 0x0f0f0f0f) &lt;&lt; 4) | ((i &amp; 0xf0f0f0f0) &gt;&gt; 4);</a>
+<a name="ln135">  i = ((i &amp; 0x33333333) &lt;&lt; 2) | ((i &amp; 0xcccccccc) &gt;&gt; 2);</a>
+<a name="ln136">  i = ((i &amp; 0x55555555) &lt;&lt; 1) | ((i &amp; 0xaaaaaaaa) &gt;&gt; 1);</a>
+<a name="ln137">  return i ^ d-&gt;scramble;</a>
+<a name="ln138">}</a>
+<a name="ln139"> </a>
+<a name="ln140">// process image</a>
+<a name="ln141">static int process_next_image(dt_slideshow_t *d)</a>
+<a name="ln142">{</a>
+<a name="ln143">  dt_imageio_module_format_t buf;</a>
+<a name="ln144">  dt_slideshow_format_t dat;</a>
+<a name="ln145">  buf.mime = mime;</a>
+<a name="ln146">  buf.levels = levels;</a>
+<a name="ln147">  buf.bpp = bpp;</a>
+<a name="ln148">  buf.write_image = write_image;</a>
+<a name="ln149">  dat.max_width = d-&gt;width;</a>
+<a name="ln150">  dat.max_height = d-&gt;height;</a>
+<a name="ln151">  dat.style[0] = '\0';</a>
+<a name="ln152">  dat.d = d;</a>
+<a name="ln153"> </a>
+<a name="ln154">  // get random image id from sql</a>
+<a name="ln155">  int32_t id = 0;</a>
+<a name="ln156">  const int32_t cnt = dt_collection_get_count(darktable.collection);</a>
+<a name="ln157">  if(!cnt) return 1;</a>
+<a name="ln158">  dt_pthread_mutex_lock(&amp;d-&gt;lock);</a>
+<a name="ln159">  d-&gt;back_num = d-&gt;front_num + d-&gt;step;</a>
+<a name="ln160">  int32_t ran = d-&gt;back_num;</a>
+<a name="ln161">  dt_pthread_mutex_unlock(&amp;d-&gt;lock);</a>
+<a name="ln162">  // enumerated all images? i.e. prefetching the one two after the limit, when viewing the one past the end.</a>
+<a name="ln163">  if(ran == -2 || ran == cnt + 1)</a>
+<a name="ln164">  {</a>
+<a name="ln165">    dt_control_log(_(&quot;end of images. press any key to return to lighttable mode&quot;));</a>
+<a name="ln166">  }</a>
+<a name="ln167">  if(d-&gt;use_random)</a>
+<a name="ln168">  {</a>
+<a name="ln169">    // get random number up to next power of two greater than cnt:</a>
+<a name="ln170">    const uint32_t zeros = __builtin_clz(cnt);</a>
+<a name="ln171">    // pull radical inverses only in our desired range:</a>
+<a name="ln172">    do</a>
+<a name="ln173">      ran = next_random(d) &gt;&gt; zeros;</a>
+<a name="ln174">    while(ran &gt;= cnt);</a>
+<a name="ln175">  }</a>
+<a name="ln176">  int32_t rand = ran % cnt;</a>
+<a name="ln177">  while(rand &lt; 0) rand += cnt;</a>
+<a name="ln178">  const gchar *query = dt_collection_get_query(darktable.collection);</a>
+<a name="ln179">  if(!query) return 1;</a>
+<a name="ln180">  sqlite3_stmt *stmt;</a>
+<a name="ln181">  DT_DEBUG_SQLITE3_PREPARE_V2(dt_database_get(darktable.db), query, -1, &amp;stmt, NULL);</a>
+<a name="ln182">  DT_DEBUG_SQLITE3_BIND_INT(stmt, 1, rand);</a>
+<a name="ln183">  DT_DEBUG_SQLITE3_BIND_INT(stmt, 2, rand + 1);</a>
+<a name="ln184">  if(sqlite3_step(stmt) == SQLITE_ROW) id = sqlite3_column_int(stmt, 0);</a>
+<a name="ln185">  sqlite3_finalize(stmt);</a>
+<a name="ln186"> </a>
+<a name="ln187">  // this is a little slow, might be worth to do an option:</a>
+<a name="ln188">  const gboolean high_quality = dt_conf_get_bool(&quot;plugins/slideshow/high_quality&quot;);</a>
+<a name="ln189">  if(id)</a>
+<a name="ln190">    // the flags are: ignore exif, display byteorder, high quality, upscale, thumbnail</a>
+<a name="ln191">    dt_imageio_export_with_flags(id, &quot;unused&quot;, &amp;buf, (dt_imageio_module_data_t *)&amp;dat, TRUE, TRUE, high_quality, TRUE,</a>
+<a name="ln192">                                 FALSE, NULL, FALSE, DT_COLORSPACE_DISPLAY, NULL, DT_INTENT_LAST, NULL, NULL, 1, 1);</a>
+<a name="ln193">  return 0;</a>
+<a name="ln194">}</a>
+<a name="ln195"> </a>
+<a name="ln196">static int32_t process_job_run(dt_job_t *job)</a>
+<a name="ln197">{</a>
+<a name="ln198">  dt_slideshow_t *d = dt_control_job_get_params(job);</a>
+<a name="ln199">  process_next_image(d);</a>
+<a name="ln200">  return 0;</a>
+<a name="ln201">}</a>
+<a name="ln202"> </a>
+<a name="ln203">static dt_job_t *process_job_create(dt_slideshow_t *d)</a>
+<a name="ln204">{</a>
+<a name="ln205">  dt_job_t *job = dt_control_job_create(&amp;process_job_run, &quot;process slideshow image&quot;);</a>
+<a name="ln206">  if(!job) return NULL;</a>
+<a name="ln207">  dt_control_job_set_params(job, d, NULL);</a>
+<a name="ln208">  return job;</a>
+<a name="ln209">}</a>
+<a name="ln210"> </a>
+<a name="ln211">static gboolean auto_advance(gpointer user_data)</a>
+<a name="ln212">{</a>
+<a name="ln213">  dt_slideshow_t *d = (dt_slideshow_t *)user_data;</a>
+<a name="ln214">  if(!d-&gt;auto_advance) return FALSE;</a>
+<a name="ln215">  _step_state(d, S_REQUEST_STEP);</a>
+<a name="ln216">  return FALSE;</a>
+<a name="ln217">}</a>
+<a name="ln218"> </a>
+<a name="ln219">// state machine stepping</a>
+<a name="ln220">static void _step_state(dt_slideshow_t *d, dt_slideshow_event_t event)</a>
+<a name="ln221">{</a>
+<a name="ln222">  dt_pthread_mutex_lock(&amp;d-&gt;lock);</a>
+<a name="ln223"> </a>
+<a name="ln224">  if(event == S_REQUEST_STEP || event == S_REQUEST_STEP_BACK)</a>
+<a name="ln225">  {</a>
+<a name="ln226">    if(event == S_REQUEST_STEP) d-&gt;step = 1;</a>
+<a name="ln227">    if(event == S_REQUEST_STEP_BACK) d-&gt;step = -1;</a>
+<a name="ln228">    // make sure we only enter busy if really flipping the bit</a>
+<a name="ln229">    if(d-&gt;state_waiting_for_user) dt_control_log_busy_enter();</a>
+<a name="ln230">    d-&gt;state_waiting_for_user = 0;</a>
+<a name="ln231">  }</a>
+<a name="ln232"> </a>
+<a name="ln233">  switch(d-&gt;state)</a>
+<a name="ln234">  {</a>
+<a name="ln235">    case S_PREFETCHING:</a>
+<a name="ln236">      if(event == S_IMAGE_LOADED)</a>
+<a name="ln237">      {</a>
+<a name="ln238">        d-&gt;state = S_WAITING_FOR_USER;</a>
+<a name="ln239">        // and go to next case</a>
+<a name="ln240">      }</a>
+<a name="ln241">      else</a>
+<a name="ln242">        break;</a>
+<a name="ln243"> </a>
+<a name="ln244">    case S_WAITING_FOR_USER:</a>
+<a name="ln245">      if(d-&gt;state_waiting_for_user == 0)</a>
+<a name="ln246">      {</a>
+<a name="ln247">        d-&gt;state = S_BLENDING;</a>
+<a name="ln248">        // swap buffers, start blending cycle</a>
+<a name="ln249">        if(d-&gt;front_num + d-&gt;step == d-&gt;back_num)</a>
+<a name="ln250">        {</a>
+<a name="ln251">          // if step changed, don't just swap but kick off new job</a>
+<a name="ln252">          dt_control_log_busy_leave();</a>
+<a name="ln253">          uint32_t *tmp = d-&gt;front;</a>
+<a name="ln254">          d-&gt;front = d-&gt;back;</a>
+<a name="ln255">          d-&gt;back = tmp;</a>
+<a name="ln256">          d-&gt;front_width = d-&gt;back_width;</a>
+<a name="ln257">          d-&gt;front_height = d-&gt;back_height;</a>
+<a name="ln258">          int32_t tn = d-&gt;front_num;</a>
+<a name="ln259">          d-&gt;front_num = d-&gt;back_num;</a>
+<a name="ln260">          d-&gt;back_num = tn;</a>
+<a name="ln261">          // start over</a>
+<a name="ln262">          d-&gt;state_waiting_for_user = 1;</a>
+<a name="ln263"> </a>
+<a name="ln264">          // start new one-off timer from when flipping buffers.</a>
+<a name="ln265">          // this will show images before processing-heavy shots a little</a>
+<a name="ln266">          // longer, but at least not result in shorter viewing times just after these</a>
+<a name="ln267">          if(d-&gt;auto_advance) g_timeout_add_seconds(d-&gt;delay, auto_advance, d);</a>
+<a name="ln268">        }</a>
+<a name="ln269">        // and execute the next case, too</a>
+<a name="ln270">      }</a>
+<a name="ln271">      else</a>
+<a name="ln272">        break;</a>
+<a name="ln273"> </a>
+<a name="ln274">    case S_BLENDING:</a>
+<a name="ln275">      // draw new front buf</a>
+<a name="ln276">      dt_control_queue_redraw_center();</a>
+<a name="ln277"> </a>
+<a name="ln278">      // TODO: wait for that once there are fancy effects:</a>
+<a name="ln279">      // if(event == s_blended)</a>
+<a name="ln280">      {</a>
+<a name="ln281">        // start bgjob</a>
+<a name="ln282">        dt_control_add_job(darktable.control, DT_JOB_QUEUE_USER_BG, process_job_create(d));</a>
+<a name="ln283">        d-&gt;state = S_PREFETCHING;</a>
+<a name="ln284">      }</a>
+<a name="ln285">      break;</a>
+<a name="ln286"> </a>
+<a name="ln287">    default:</a>
+<a name="ln288">      // uh. should never happen. sanitize:</a>
+<a name="ln289">      d-&gt;state_waiting_for_user = 1;</a>
+<a name="ln290">      d-&gt;state = S_PREFETCHING;</a>
+<a name="ln291">      break;</a>
+<a name="ln292">  }</a>
+<a name="ln293">  dt_pthread_mutex_unlock(&amp;d-&gt;lock);</a>
+<a name="ln294">}</a>
+<a name="ln295"> </a>
+<a name="ln296">// callbacks for a view module:</a>
+<a name="ln297"> </a>
+<a name="ln298">const char *name(dt_view_t *self)</a>
+<a name="ln299">{</a>
+<a name="ln300">  return _(&quot;slideshow&quot;);</a>
+<a name="ln301">}</a>
+<a name="ln302"> </a>
+<a name="ln303">uint32_t view(const dt_view_t *self)</a>
+<a name="ln304">{</a>
+<a name="ln305">  return DT_VIEW_SLIDESHOW;</a>
+<a name="ln306">}</a>
+<a name="ln307"> </a>
+<a name="ln308">void init(dt_view_t *self)</a>
+<a name="ln309">{</a>
+<a name="ln310">  self-&gt;data = calloc(1, sizeof(dt_slideshow_t));</a>
+<a name="ln311">  dt_slideshow_t *lib = (dt_slideshow_t *)self-&gt;data;</a>
+<a name="ln312">  dt_pthread_mutex_init(&amp;lib-&gt;lock, 0);</a>
+<a name="ln313">}</a>
+<a name="ln314"> </a>
+<a name="ln315"> </a>
+<a name="ln316">void cleanup(dt_view_t *self)</a>
+<a name="ln317">{</a>
+<a name="ln318">  dt_slideshow_t *lib = (dt_slideshow_t *)self-&gt;data;</a>
+<a name="ln319">  dt_pthread_mutex_destroy(&amp;lib-&gt;lock);</a>
+<a name="ln320">  free(self-&gt;data);</a>
+<a name="ln321">}</a>
+<a name="ln322"> </a>
+<a name="ln323">int try_enter(dt_view_t *self)</a>
+<a name="ln324">{</a>
+<a name="ln325">  /* verify that there are images to display */</a>
+<a name="ln326">  if(dt_collection_get_count(darktable.collection) != 0)</a>
+<a name="ln327">  {</a>
+<a name="ln328">    return 0;</a>
+<a name="ln329">  }</a>
+<a name="ln330">  else</a>
+<a name="ln331">  {</a>
+<a name="ln332">    dt_control_log(_(&quot;there are no images in this collection&quot;));</a>
+<a name="ln333">    return 1;</a>
+<a name="ln334">  }</a>
+<a name="ln335">}</a>
+<a name="ln336"> </a>
+<a name="ln337">void enter(dt_view_t *self)</a>
+<a name="ln338">{</a>
+<a name="ln339">  dt_slideshow_t *d = (dt_slideshow_t *)self-&gt;data;</a>
+<a name="ln340"> </a>
+<a name="ln341">  dt_control_change_cursor(GDK_BLANK_CURSOR);</a>
+<a name="ln342">  d-&gt;mouse_timeout = 0;</a>
+<a name="ln343"> </a>
+<a name="ln344">  dt_ui_panel_show(darktable.gui-&gt;ui, DT_UI_PANEL_LEFT, FALSE, TRUE);</a>
+<a name="ln345">  dt_ui_panel_show(darktable.gui-&gt;ui, DT_UI_PANEL_RIGHT, FALSE, TRUE);</a>
+<a name="ln346">  dt_ui_panel_show(darktable.gui-&gt;ui, DT_UI_PANEL_TOP, FALSE, TRUE);</a>
+<a name="ln347">  dt_ui_panel_show(darktable.gui-&gt;ui, DT_UI_PANEL_BOTTOM, FALSE, TRUE);</a>
+<a name="ln348">  dt_ui_panel_show(darktable.gui-&gt;ui, DT_UI_PANEL_CENTER_TOP, FALSE, TRUE);</a>
+<a name="ln349">  dt_ui_panel_show(darktable.gui-&gt;ui, DT_UI_PANEL_CENTER_BOTTOM, FALSE, TRUE);</a>
+<a name="ln350">  // also hide arrows</a>
+<a name="ln351">  dt_ui_border_show(darktable.gui-&gt;ui, FALSE);</a>
+<a name="ln352"> </a>
+<a name="ln353">  // alloc screen-size double buffer</a>
+<a name="ln354">  GtkWidget *window = dt_ui_main_window(darktable.gui-&gt;ui);</a>
+<a name="ln355">  GdkRectangle rect;</a>
+<a name="ln356"> </a>
+<a name="ln357">#if GTK_CHECK_VERSION(3, 22, 0)</a>
+<a name="ln358">  GdkDisplay *display = gtk_widget_get_display(window);</a>
+<a name="ln359">  GdkMonitor *mon = gdk_display_get_monitor_at_window(display, gtk_widget_get_window(window));</a>
+<a name="ln360">  gdk_monitor_get_geometry(mon, &amp;rect);</a>
+<a name="ln361">#else</a>
+<a name="ln362">  GdkScreen *screen = gtk_widget_get_screen(window);</a>
+<a name="ln363">  if(!screen) screen = gdk_screen_get_default();</a>
+<a name="ln364">  int monitor = gdk_screen_get_monitor_at_window(screen, gtk_widget_get_window(window));</a>
+<a name="ln365">  gdk_screen_get_monitor_geometry(screen, monitor, &amp;rect);</a>
+<a name="ln366">#endif</a>
+<a name="ln367"> </a>
+<a name="ln368">  dt_pthread_mutex_lock(&amp;d-&gt;lock);</a>
+<a name="ln369"> </a>
+<a name="ln370">  d-&gt;width = rect.width * darktable.gui-&gt;ppd;</a>
+<a name="ln371">  d-&gt;height = rect.height * darktable.gui-&gt;ppd;</a>
+<a name="ln372">  d-&gt;buf1 = dt_alloc_align(64, sizeof(uint32_t) * d-&gt;width * d-&gt;height);</a>
+<a name="ln373">  d-&gt;buf2 = dt_alloc_align(64, sizeof(uint32_t) * d-&gt;width * d-&gt;height);</a>
+<a name="ln374">  d-&gt;front = d-&gt;buf1;</a>
+<a name="ln375">  d-&gt;back = d-&gt;buf2;</a>
+<a name="ln376"> </a>
+<a name="ln377">  // start in prefetching phase, do that by initing one state before</a>
+<a name="ln378">  // and stepping through that at the very end of this function</a>
+<a name="ln379">  d-&gt;state = S_BLENDING;</a>
+<a name="ln380">  d-&gt;state_waiting_for_user = 1;</a>
+<a name="ln381"> </a>
+<a name="ln382">  d-&gt;auto_advance = 0;</a>
+<a name="ln383">  d-&gt;delay = dt_conf_get_int(&quot;slideshow_delay&quot;);</a>
+<a name="ln384">  // restart from beginning, will first increment counter by step and then prefetch</a>
+<a name="ln385">  d-&gt;front_num = d-&gt;back_num = dt_view_lighttable_get_position(darktable.view_manager) - 1;</a>
+<a name="ln386">  d-&gt;step = 1;</a>
+<a name="ln387">  dt_pthread_mutex_unlock(&amp;d-&gt;lock);</a>
+<a name="ln388"> </a>
+<a name="ln389">  gtk_widget_grab_focus(dt_ui_center(darktable.gui-&gt;ui));</a>
+<a name="ln390"> </a>
+<a name="ln391">  // start first job</a>
+<a name="ln392">  _step_state(d, S_REQUEST_STEP);</a>
+<a name="ln393">  dt_control_log(_(&quot;waiting to start slideshow&quot;));</a>
+<a name="ln394">}</a>
+<a name="ln395"> </a>
+<a name="ln396">void leave(dt_view_t *self)</a>
+<a name="ln397">{</a>
+<a name="ln398">  dt_slideshow_t *d = (dt_slideshow_t *)self-&gt;data;</a>
+<a name="ln399"> </a>
+<a name="ln400">  if(d-&gt;mouse_timeout &gt; 0) g_source_remove(d-&gt;mouse_timeout);</a>
+<a name="ln401">  d-&gt;mouse_timeout = 0;</a>
+<a name="ln402">  dt_control_change_cursor(GDK_LEFT_PTR);</a>
+<a name="ln403">  dt_ui_border_show(darktable.gui-&gt;ui, TRUE);</a>
+<a name="ln404">  d-&gt;auto_advance = 0;</a>
+<a name="ln405">  dt_view_lighttable_set_position(darktable.view_manager, d-&gt;front_num);</a>
+<a name="ln406">  dt_pthread_mutex_lock(&amp;d-&gt;lock);</a>
+<a name="ln407">  dt_free_align(d-&gt;buf1);</a>
+<a name="ln408">  dt_free_align(d-&gt;buf2);</a>
+<a name="ln409">  d-&gt;buf1 = d-&gt;buf2 = d-&gt;front = d-&gt;back = 0;</a>
+<a name="ln410">  dt_pthread_mutex_unlock(&amp;d-&gt;lock);</a>
+<a name="ln411">}</a>
+<a name="ln412"> </a>
+<a name="ln413">void reset(dt_view_t *self)</a>
+<a name="ln414">{</a>
+<a name="ln415">  // dt_slideshow_t *lib = (dt_slideshow_t *)self-&gt;data;</a>
+<a name="ln416">}</a>
+<a name="ln417"> </a>
+<a name="ln418">void expose(dt_view_t *self, cairo_t *cr, int32_t width, int32_t height, int32_t pointerx, int32_t pointery)</a>
+<a name="ln419">{</a>
+<a name="ln420">  // draw front buffer.</a>
+<a name="ln421">  dt_slideshow_t *d = (dt_slideshow_t *)self-&gt;data;</a>
+<a name="ln422"> </a>
+<a name="ln423">  dt_pthread_mutex_lock(&amp;d-&gt;lock);</a>
+<a name="ln424">  cairo_paint(cr);</a>
+<a name="ln425">  if(d-&gt;front)</a>
+<a name="ln426">  {</a>
+<a name="ln427">    // undo clip region/border around the image:</a>
+<a name="ln428">    cairo_restore(cr); // pop view manager</a>
+<a name="ln429">    cairo_restore(cr); // pop control</a>
+<a name="ln430">    cairo_reset_clip(cr);</a>
+<a name="ln431">    cairo_save(cr);</a>
+<a name="ln432">    cairo_translate(cr, (d-&gt;width - d-&gt;front_width) * .5f / darktable.gui-&gt;ppd, (d-&gt;height - d-&gt;front_height) * .5f / darktable.gui-&gt;ppd);</a>
+<a name="ln433">    cairo_surface_t *surface = NULL;</a>
+<a name="ln434">    const int32_t stride = cairo_format_stride_for_width(CAIRO_FORMAT_RGB24, d-&gt;front_width);</a>
+<a name="ln435">    surface = dt_cairo_image_surface_create_for_data((uint8_t *)d-&gt;front, CAIRO_FORMAT_RGB24, d-&gt;front_width,</a>
+<a name="ln436">                                                     d-&gt;front_height, stride);</a>
+<a name="ln437">    cairo_set_source_surface(cr, surface, 0, 0);</a>
+<a name="ln438">    cairo_pattern_set_filter(cairo_get_source(cr), CAIRO_FILTER_NEAREST);</a>
+<a name="ln439">    cairo_rectangle(cr, 0, 0, d-&gt;front_width/darktable.gui-&gt;ppd, d-&gt;front_height/darktable.gui-&gt;ppd);</a>
+<a name="ln440">    cairo_fill(cr);</a>
+<a name="ln441">    cairo_surface_destroy(surface);</a>
+<a name="ln442">    cairo_restore(cr);</a>
+<a name="ln443">    cairo_save(cr); // pretend we didn't already pop the stack</a>
+<a name="ln444">    cairo_save(cr);</a>
+<a name="ln445">  }</a>
+<a name="ln446"> </a>
+<a name="ln447">  d-&gt;width = width;</a>
+<a name="ln448">  d-&gt;height = height;</a>
+<a name="ln449">  dt_pthread_mutex_unlock(&amp;d-&gt;lock);</a>
+<a name="ln450">}</a>
+<a name="ln451"> </a>
+<a name="ln452">static gboolean _hide_mouse(gpointer user_data)</a>
+<a name="ln453">{</a>
+<a name="ln454">  dt_view_t *self = (dt_view_t *)user_data;</a>
+<a name="ln455">  dt_slideshow_t *d = (dt_slideshow_t *)self-&gt;data;</a>
+<a name="ln456">  d-&gt;mouse_timeout = 0;</a>
+<a name="ln457">  dt_control_change_cursor(GDK_BLANK_CURSOR);</a>
+<a name="ln458">  return FALSE;</a>
+<a name="ln459">}</a>
+<a name="ln460"> </a>
+<a name="ln461"> </a>
+<a name="ln462">void mouse_moved(dt_view_t *self, double x, double y, double pressure, int which)</a>
+<a name="ln463">{</a>
+<a name="ln464">  dt_slideshow_t *d = (dt_slideshow_t *)self-&gt;data;</a>
+<a name="ln465"> </a>
+<a name="ln466">  if(d-&gt;mouse_timeout &gt; 0) g_source_remove(d-&gt;mouse_timeout);</a>
+<a name="ln467">  else dt_control_change_cursor(GDK_LEFT_PTR);</a>
+<a name="ln468">  d-&gt;mouse_timeout = g_timeout_add_seconds(1, _hide_mouse, self);</a>
+<a name="ln469">}</a>
+<a name="ln470"> </a>
+<a name="ln471"> </a>
+<a name="ln472">int button_released(dt_view_t *self, double x, double y, int which, uint32_t state)</a>
+<a name="ln473">{</a>
+<a name="ln474">  return 0;</a>
+<a name="ln475">}</a>
+<a name="ln476"> </a>
+<a name="ln477"> </a>
+<a name="ln478">int button_pressed(dt_view_t *self, double x, double y, double pressure, int which, int type, uint32_t state)</a>
+<a name="ln479">{</a>
+<a name="ln480">  dt_slideshow_t *d = (dt_slideshow_t *)self-&gt;data;</a>
+<a name="ln481">  if(which == 1)</a>
+<a name="ln482">    _step_state(d, S_REQUEST_STEP);</a>
+<a name="ln483">  else if(which == 3)</a>
+<a name="ln484">    _step_state(d, S_REQUEST_STEP_BACK);</a>
+<a name="ln485">  else</a>
+<a name="ln486">    return 1;</a>
+<a name="ln487"> </a>
+<a name="ln488">  return 0;</a>
+<a name="ln489">}</a>
+<a name="ln490"> </a>
+<a name="ln491">int key_released(dt_view_t *self, guint key, guint state)</a>
+<a name="ln492">{</a>
+<a name="ln493">  return 0;</a>
+<a name="ln494">}</a>
+<a name="ln495"> </a>
+<a name="ln496">int key_pressed(dt_view_t *self, guint key, guint state)</a>
+<a name="ln497">{</a>
+<a name="ln498">  dt_slideshow_t *d = (dt_slideshow_t *)self-&gt;data;</a>
+<a name="ln499">  dt_control_accels_t *accels = &amp;darktable.control-&gt;accels;</a>
+<a name="ln500"> </a>
+<a name="ln501">  if(key == accels-&gt;slideshow_start.accel_key &amp;&amp; state == accels-&gt;slideshow_start.accel_mods)</a>
+<a name="ln502">  {</a>
+<a name="ln503">    if(!d-&gt;auto_advance)</a>
+<a name="ln504">    {</a>
+<a name="ln505">      d-&gt;auto_advance = 1;</a>
+<a name="ln506">      _step_state(d, S_REQUEST_STEP);</a>
+<a name="ln507">    }</a>
+<a name="ln508">    else</a>
+<a name="ln509">    {</a>
+<a name="ln510">      d-&gt;auto_advance = 0;</a>
+<a name="ln511">      dt_control_log(_(&quot;slideshow paused&quot;));</a>
+<a name="ln512">    }</a>
+<a name="ln513">    return 0;</a>
+<a name="ln514">  }</a>
+<a name="ln515">  else if(key == GDK_KEY_Right || key == GDK_KEY_KP_Add)</a>
+<a name="ln516">  {</a>
+<a name="ln517">    d-&gt;delay = CLAMP(d-&gt;delay + 1, 1, 60);</a>
+<a name="ln518">    dt_control_log(ngettext(&quot;slideshow delay set to %d second&quot;, &quot;slideshow delay set to %d seconds&quot;, d-&gt;delay), d-&gt;delay);</a>
+<a name="ln519">    dt_conf_set_int(&quot;slideshow_delay&quot;, d-&gt;delay);</a>
+<a name="ln520">    return 0;</a>
+<a name="ln521">  }</a>
+<a name="ln522">  else if(key == GDK_KEY_Left || key == GDK_KEY_KP_Subtract)</a>
+<a name="ln523">  {</a>
+<a name="ln524">    d-&gt;delay = CLAMP(d-&gt;delay - 1, 1, 60);</a>
+<a name="ln525">    dt_control_log(ngettext(&quot;slideshow delay set to %d second&quot;, &quot;slideshow delay set to %d seconds&quot;, d-&gt;delay), d-&gt;delay);</a>
+<a name="ln526">    dt_conf_set_int(&quot;slideshow_delay&quot;, d-&gt;delay);</a>
+<a name="ln527">    return 0;</a>
+<a name="ln528">  }</a>
+<a name="ln529">  else if(key == GDK_KEY_Shift_L || key == GDK_KEY_Shift_R)</a>
+<a name="ln530">  {</a>
+<a name="ln531">    return 0;</a>
+<a name="ln532">  }</a>
+<a name="ln533"> </a>
+<a name="ln534">  // go back to lt mode</a>
+<a name="ln535">  dt_ctl_switch_mode_to(&quot;lighttable&quot;);</a>
+<a name="ln536">  return 0;</a>
+<a name="ln537">}</a>
+<a name="ln538"> </a>
+<a name="ln539">void init_key_accels(dt_view_t *self)</a>
+<a name="ln540">{</a>
+<a name="ln541">  dt_accel_register_view(self, NC_(&quot;accel&quot;, &quot;start and stop&quot;), GDK_KEY_space, 0);</a>
+<a name="ln542">}</a>
+<a name="ln543"> </a>
+<a name="ln544">void connect_key_accels(dt_view_t *self)</a>
+<a name="ln545">{</a>
+<a name="ln546">}</a>
+<a name="ln547"> </a>
+<a name="ln548">// modelines: These editor modelines have been set for all relevant files by tools/update_modelines.sh</a>
+<a name="ln549">// vim: shiftwidth=2 expandtab tabstop=2 cindent</a>
+<a name="ln550">// kate: tab-indents: off; indent-width 2; replace-tabs on; indent-mode cstyle; remove-trailing-spaces modified;</a>
+
+</code></pre>
+<div class="balloon" rel="312"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v522/" target="_blank">V522</a> There might be dereferencing of a potential null pointer 'lib'. Check lines: 312, 310.</p></div>
+
+<link rel="stylesheet" href="highlight.css">
+<script src="highlight.pack.js"></script>
+<script src="highlightjs-line-numbers.js"></script>
+<script>hljs.initHighlightingOnLoad();</script>
+<script>hljs.initLineNumbersOnLoad();</script>
+<script>
+  $(document).ready(function() {
+      $('.balloon').each(function () {
+          var bl = $(this);
+          var line = bl.attr('rel');
+          var text = $('a[name="ln'+line+'"]').text();
+
+          var space_count = 0;
+          for(var i = 0; i<text.length; i++){
+              var char = text[i];
+              if((char !== ' ')&&(char !== '\t'))break;
+              if(char === '\t')space_count++;
+              space_count++;
+          }
+
+          bl.css('margin-left', space_count*8);
+          $('a[name="ln'+line+'"]').after(bl);
+      });
+
+      window.location = window.location;
+  });
+</script>
+</body>
+</html>

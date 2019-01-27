@@ -1,0 +1,2006 @@
+
+<html>
+<head>
+  <link rel="stylesheet" href="../style.css"/>
+  <script src="../jquery-3.2.1.min.js"></script>
+</head>
+<body>
+<pre><code class = "cpp">
+<a name="ln1">/*</a>
+<a name="ln2">    This file is part of darktable,</a>
+<a name="ln3">    copyright (c) 2011 henrik andersson.</a>
+<a name="ln4">    copyright (c) 2012-2016 tobias ellinghaus.</a>
+<a name="ln5"> </a>
+<a name="ln6">    darktable is free software: you can redistribute it and/or modify</a>
+<a name="ln7">    it under the terms of the GNU General Public License as published by</a>
+<a name="ln8">    the Free Software Foundation, either version 3 of the License, or</a>
+<a name="ln9">    (at your option) any later version.</a>
+<a name="ln10"> </a>
+<a name="ln11">    darktable is distributed in the hope that it will be useful,</a>
+<a name="ln12">    but WITHOUT ANY WARRANTY; without even the implied warranty of</a>
+<a name="ln13">    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the</a>
+<a name="ln14">    GNU General Public License for more details.</a>
+<a name="ln15"> </a>
+<a name="ln16">    You should have received a copy of the GNU General Public License</a>
+<a name="ln17">    along with darktable.  If not, see &lt;http://www.gnu.org/licenses/&gt;.</a>
+<a name="ln18">*/</a>
+<a name="ln19"> </a>
+<a name="ln20">#include &quot;common/database.h&quot;</a>
+<a name="ln21">#include &quot;common/darktable.h&quot;</a>
+<a name="ln22">#include &quot;common/debug.h&quot;</a>
+<a name="ln23">#include &quot;control/conf.h&quot;</a>
+<a name="ln24">#include &quot;control/control.h&quot;</a>
+<a name="ln25">#include &quot;gui/legacy_presets.h&quot;</a>
+<a name="ln26"> </a>
+<a name="ln27">#include &lt;gio/gio.h&gt;</a>
+<a name="ln28">#include &lt;glib.h&gt;</a>
+<a name="ln29">#include &lt;glib/gstdio.h&gt;</a>
+<a name="ln30">#include &lt;sqlite3.h&gt;</a>
+<a name="ln31"> </a>
+<a name="ln32">#include &lt;errno.h&gt;</a>
+<a name="ln33">#include &lt;fcntl.h&gt;</a>
+<a name="ln34">#include &lt;signal.h&gt;</a>
+<a name="ln35">#include &lt;sys/stat.h&gt;</a>
+<a name="ln36">#include &lt;sys/types.h&gt;</a>
+<a name="ln37"> </a>
+<a name="ln38">// whenever _create_*_schema() gets changed you HAVE to bump this version and add an update path to</a>
+<a name="ln39">// _upgrade_*_schema_step()!</a>
+<a name="ln40">#define CURRENT_DATABASE_VERSION_LIBRARY 17</a>
+<a name="ln41">#define CURRENT_DATABASE_VERSION_DATA 1</a>
+<a name="ln42"> </a>
+<a name="ln43">typedef struct dt_database_t</a>
+<a name="ln44">{</a>
+<a name="ln45">  gboolean lock_acquired;</a>
+<a name="ln46"> </a>
+<a name="ln47">  /* data database filename */</a>
+<a name="ln48">  gchar *dbfilename_data, *lockfile_data;</a>
+<a name="ln49"> </a>
+<a name="ln50">  /* library database filename */</a>
+<a name="ln51">  gchar *dbfilename_library, *lockfile_library;</a>
+<a name="ln52"> </a>
+<a name="ln53">  /* ondisk DB */</a>
+<a name="ln54">  sqlite3 *handle;</a>
+<a name="ln55"> </a>
+<a name="ln56">  gchar *error_message, *error_dbfilename;</a>
+<a name="ln57">} dt_database_t;</a>
+<a name="ln58"> </a>
+<a name="ln59"> </a>
+<a name="ln60">/* migrates database from old place to new */</a>
+<a name="ln61">static void _database_migrate_to_xdg_structure();</a>
+<a name="ln62"> </a>
+<a name="ln63">/* delete old mipmaps files */</a>
+<a name="ln64">static void _database_delete_mipmaps_files();</a>
+<a name="ln65"> </a>
+<a name="ln66">#define _SQLITE3_EXEC(a, b, c, d, e)                                                                         \</a>
+<a name="ln67">  if(sqlite3_exec(a, b, c, d, e) != SQLITE_OK)                                                               \</a>
+<a name="ln68">  {                                                                                                          \</a>
+<a name="ln69">    all_ok = FALSE;                                                                                          \</a>
+<a name="ln70">    failing_query = b;                                                                                       \</a>
+<a name="ln71">    goto end;                                                                                                \</a>
+<a name="ln72">  }</a>
+<a name="ln73"> </a>
+<a name="ln74">/* migrate from the legacy db format (with the 'settings' blob) to the first version this system knows */</a>
+<a name="ln75">static gboolean _migrate_schema(dt_database_t *db, int version)</a>
+<a name="ln76">{</a>
+<a name="ln77">  gboolean all_ok = TRUE;</a>
+<a name="ln78">  const char *failing_query = NULL;</a>
+<a name="ln79">  sqlite3_stmt *stmt;</a>
+<a name="ln80">  sqlite3_stmt *innerstmt;</a>
+<a name="ln81"> </a>
+<a name="ln82">  if(version != 36) // if anyone shows up with an older db we can probably add extra code</a>
+<a name="ln83">    return FALSE;</a>
+<a name="ln84"> </a>
+<a name="ln85">  sqlite3_exec(db-&gt;handle, &quot;BEGIN TRANSACTION&quot;, NULL, NULL, NULL);</a>
+<a name="ln86"> </a>
+<a name="ln87">  // remove stuff that is either no longer needed or that got renamed</a>
+<a name="ln88">  _SQLITE3_EXEC(db-&gt;handle, &quot;DROP TABLE IF EXISTS main.lock&quot;, NULL, NULL, NULL);</a>
+<a name="ln89">  _SQLITE3_EXEC(db-&gt;handle, &quot;DROP TABLE IF EXISTS main.settings&quot;, NULL, NULL, NULL); // yes, we do this in many</a>
+<a name="ln90">                                                                                     // places. because it's really</a>
+<a name="ln91">                                                                                     // important to not miss it in</a>
+<a name="ln92">                                                                                     // any code path.</a>
+<a name="ln93">  _SQLITE3_EXEC(db-&gt;handle, &quot;DROP INDEX IF EXISTS main.group_id_index&quot;, NULL, NULL, NULL);</a>
+<a name="ln94">  _SQLITE3_EXEC(db-&gt;handle, &quot;DROP INDEX IF EXISTS main.imgid_index&quot;, NULL, NULL, NULL);</a>
+<a name="ln95">  _SQLITE3_EXEC(db-&gt;handle, &quot;DROP TABLE IF EXISTS main.mipmaps&quot;, NULL, NULL, NULL);</a>
+<a name="ln96">  _SQLITE3_EXEC(db-&gt;handle, &quot;DROP TABLE IF EXISTS main.mipmap_timestamps&quot;, NULL, NULL, NULL);</a>
+<a name="ln97">  _SQLITE3_EXEC(db-&gt;handle, &quot;DROP TABLE IF EXISTS main.dt_migration_table&quot;, NULL, NULL, NULL);</a>
+<a name="ln98"> </a>
+<a name="ln99">  // using _create_library_schema() and filling that with the old data doesn't work since we always want to generate</a>
+<a name="ln100">  // version 1 tables</a>
+<a name="ln101">  ////////////////////////////// db_info</a>
+<a name="ln102">  _SQLITE3_EXEC(db-&gt;handle, &quot;CREATE TABLE main.db_info (key VARCHAR PRIMARY KEY, value VARCHAR)&quot;,</a>
+<a name="ln103">                NULL, NULL, NULL);</a>
+<a name="ln104">  _SQLITE3_EXEC(db-&gt;handle, &quot;INSERT OR REPLACE INTO main.db_info (key, value) VALUES ('version', 1)&quot;,</a>
+<a name="ln105">                NULL, NULL, NULL);</a>
+<a name="ln106">  ////////////////////////////// film_rolls</a>
+<a name="ln107">  _SQLITE3_EXEC(db-&gt;handle, &quot;CREATE INDEX IF NOT EXISTS main.film_rolls_folder_index ON film_rolls (folder)&quot;,</a>
+<a name="ln108">                NULL, NULL, NULL);</a>
+<a name="ln109">  ////////////////////////////// images</a>
+<a name="ln110">  sqlite3_exec(db-&gt;handle, &quot;ALTER TABLE main.images ADD COLUMN orientation INTEGER&quot;, NULL, NULL, NULL);</a>
+<a name="ln111">  sqlite3_exec(db-&gt;handle, &quot;ALTER TABLE main.images ADD COLUMN focus_distance REAL&quot;, NULL, NULL, NULL);</a>
+<a name="ln112">  sqlite3_exec(db-&gt;handle, &quot;ALTER TABLE main.images ADD COLUMN group_id INTEGER&quot;, NULL, NULL, NULL);</a>
+<a name="ln113">  sqlite3_exec(db-&gt;handle, &quot;ALTER TABLE main.images ADD COLUMN histogram BLOB&quot;, NULL, NULL, NULL);</a>
+<a name="ln114">  sqlite3_exec(db-&gt;handle, &quot;ALTER TABLE main.images ADD COLUMN lightmap BLOB&quot;, NULL, NULL, NULL);</a>
+<a name="ln115">  sqlite3_exec(db-&gt;handle, &quot;ALTER TABLE main.images ADD COLUMN longitude REAL&quot;, NULL, NULL, NULL);</a>
+<a name="ln116">  sqlite3_exec(db-&gt;handle, &quot;ALTER TABLE main.images ADD COLUMN latitude REAL&quot;, NULL, NULL, NULL);</a>
+<a name="ln117">  sqlite3_exec(db-&gt;handle, &quot;ALTER TABLE main.images ADD COLUMN color_matrix BLOB&quot;, NULL, NULL, NULL);</a>
+<a name="ln118">  // the colorspace as specified in some image types</a>
+<a name="ln119">  sqlite3_exec(db-&gt;handle, &quot;ALTER TABLE main.images ADD COLUMN colorspace INTEGER&quot;, NULL, NULL, NULL);</a>
+<a name="ln120">  sqlite3_exec(db-&gt;handle, &quot;ALTER TABLE main.images ADD COLUMN version INTEGER&quot;, NULL, NULL, NULL);</a>
+<a name="ln121">  sqlite3_exec(db-&gt;handle, &quot;ALTER TABLE main.images ADD COLUMN max_version INTEGER&quot;, NULL, NULL, NULL);</a>
+<a name="ln122">  _SQLITE3_EXEC(db-&gt;handle, &quot;UPDATE main.images SET orientation = -1 WHERE orientation IS NULL&quot;, NULL, NULL, NULL);</a>
+<a name="ln123">  _SQLITE3_EXEC(db-&gt;handle, &quot;UPDATE main.images SET focus_distance = -1 WHERE focus_distance IS NULL&quot;,</a>
+<a name="ln124">                NULL, NULL, NULL);</a>
+<a name="ln125">  _SQLITE3_EXEC(db-&gt;handle, &quot;UPDATE main.images SET group_id = id WHERE group_id IS NULL&quot;, NULL, NULL, NULL);</a>
+<a name="ln126">  _SQLITE3_EXEC(db-&gt;handle, &quot;UPDATE main.images SET max_version = (SELECT COUNT(*)-1 FROM main.images i WHERE &quot;</a>
+<a name="ln127">                            &quot;i.filename = main.images.filename AND &quot;</a>
+<a name="ln128">                            &quot;i.film_id = main.images.film_id) WHERE max_version IS NULL&quot;,</a>
+<a name="ln129">                NULL, NULL, NULL);</a>
+<a name="ln130">  _SQLITE3_EXEC(</a>
+<a name="ln131">      db-&gt;handle,</a>
+<a name="ln132">      &quot;UPDATE main.images SET version = (SELECT COUNT(*) FROM main.images i &quot;</a>
+<a name="ln133">      &quot;WHERE i.filename = main.images.filename AND &quot;</a>
+<a name="ln134">      &quot;i.film_id = main.images.film_id AND i.id &lt; main.images.id) WHERE version IS NULL&quot;,</a>
+<a name="ln135">      NULL, NULL, NULL);</a>
+<a name="ln136">  // make sure we have AUTOINCREMENT on imgid --&gt; move the whole thing away and recreate the table :(</a>
+<a name="ln137">  _SQLITE3_EXEC(db-&gt;handle, &quot;ALTER TABLE main.images RENAME TO dt_migration_table&quot;, NULL, NULL, NULL);</a>
+<a name="ln138">  _SQLITE3_EXEC(db-&gt;handle, &quot;DROP INDEX IF EXISTS main.images_group_id_index&quot;, NULL, NULL, NULL);</a>
+<a name="ln139">  _SQLITE3_EXEC(db-&gt;handle, &quot;DROP INDEX IF EXISTS main.images_film_id_index&quot;, NULL, NULL, NULL);</a>
+<a name="ln140">  _SQLITE3_EXEC(</a>
+<a name="ln141">      db-&gt;handle,</a>
+<a name="ln142">      &quot;CREATE TABLE main.images (id INTEGER PRIMARY KEY AUTOINCREMENT, group_id INTEGER, film_id INTEGER, &quot;</a>
+<a name="ln143">      &quot;width INTEGER, height INTEGER, filename VARCHAR, maker VARCHAR, model VARCHAR, &quot;</a>
+<a name="ln144">      &quot;lens VARCHAR, exposure REAL, aperture REAL, iso REAL, focal_length REAL, &quot;</a>
+<a name="ln145">      &quot;focus_distance REAL, datetime_taken CHAR(20), flags INTEGER, &quot;</a>
+<a name="ln146">      &quot;output_width INTEGER, output_height INTEGER, crop REAL, &quot;</a>
+<a name="ln147">      &quot;raw_parameters INTEGER, raw_denoise_threshold REAL, &quot;</a>
+<a name="ln148">      &quot;raw_auto_bright_threshold REAL, raw_black INTEGER, raw_maximum INTEGER, &quot;</a>
+<a name="ln149">      &quot;caption VARCHAR, description VARCHAR, license VARCHAR, sha1sum CHAR(40), &quot;</a>
+<a name="ln150">      &quot;orientation INTEGER, histogram BLOB, lightmap BLOB, longitude REAL, &quot;</a>
+<a name="ln151">      &quot;latitude REAL, color_matrix BLOB, colorspace INTEGER, version INTEGER, max_version INTEGER)&quot;,</a>
+<a name="ln152">      NULL, NULL, NULL);</a>
+<a name="ln153">  _SQLITE3_EXEC(db-&gt;handle, &quot;CREATE INDEX main.images_group_id_index ON images (group_id)&quot;, NULL, NULL, NULL);</a>
+<a name="ln154">  _SQLITE3_EXEC(db-&gt;handle, &quot;CREATE INDEX main.images_film_id_index ON images (film_id)&quot;, NULL, NULL, NULL);</a>
+<a name="ln155">  _SQLITE3_EXEC(</a>
+<a name="ln156">      db-&gt;handle,</a>
+<a name="ln157">      &quot;INSERT INTO main.images (id, group_id, film_id, width, height, filename, maker, model, &quot;</a>
+<a name="ln158">      &quot;lens, exposure, aperture, iso, focal_length, focus_distance, datetime_taken, flags, &quot;</a>
+<a name="ln159">      &quot;output_width, output_height, crop, raw_parameters, raw_denoise_threshold, &quot;</a>
+<a name="ln160">      &quot;raw_auto_bright_threshold, raw_black, raw_maximum, caption, description, license, sha1sum, &quot;</a>
+<a name="ln161">      &quot;orientation, histogram, lightmap, longitude, latitude, color_matrix, colorspace, version, &quot;</a>
+<a name="ln162">      &quot;max_version) &quot;</a>
+<a name="ln163">      &quot;SELECT id, group_id, film_id, width, height, filename, maker, model, lens, exposure, aperture, iso, &quot;</a>
+<a name="ln164">      &quot;focal_length, focus_distance, datetime_taken, flags, output_width, output_height, crop, &quot;</a>
+<a name="ln165">      &quot;raw_parameters, raw_denoise_threshold, raw_auto_bright_threshold, raw_black, raw_maximum, &quot;</a>
+<a name="ln166">      &quot;caption, description, license, sha1sum, orientation, histogram, lightmap, longitude, &quot;</a>
+<a name="ln167">      &quot;latitude, color_matrix, colorspace, version, max_version FROM dt_migration_table&quot;,</a>
+<a name="ln168">      NULL, NULL, NULL);</a>
+<a name="ln169">  _SQLITE3_EXEC(db-&gt;handle, &quot;DROP TABLE dt_migration_table&quot;, NULL, NULL, NULL);</a>
+<a name="ln170">  ////////////////////////////// selected_images</a>
+<a name="ln171">  // selected_images should have a primary key. add it if it's missing:</a>
+<a name="ln172">  _SQLITE3_EXEC(db-&gt;handle, &quot;CREATE TEMPORARY TABLE dt_migration_table (imgid INTEGER)&quot;, NULL, NULL, NULL);</a>
+<a name="ln173">  _SQLITE3_EXEC(db-&gt;handle, &quot;INSERT INTO dt_migration_table SELECT imgid FROM main.selected_images&quot;, NULL, NULL,</a>
+<a name="ln174">                NULL);</a>
+<a name="ln175">  _SQLITE3_EXEC(db-&gt;handle, &quot;DROP TABLE main.selected_images&quot;, NULL, NULL, NULL);</a>
+<a name="ln176">  _SQLITE3_EXEC(db-&gt;handle, &quot;CREATE TABLE main.selected_images (imgid INTEGER PRIMARY KEY)&quot;, NULL, NULL, NULL);</a>
+<a name="ln177">  _SQLITE3_EXEC(db-&gt;handle, &quot;INSERT OR IGNORE INTO main.selected_images SELECT imgid FROM dt_migration_table&quot;,</a>
+<a name="ln178">                NULL, NULL, NULL);</a>
+<a name="ln179">  _SQLITE3_EXEC(db-&gt;handle, &quot;DROP TABLE dt_migration_table&quot;, NULL, NULL, NULL);</a>
+<a name="ln180">  ////////////////////////////// history</a>
+<a name="ln181">  sqlite3_exec(db-&gt;handle, &quot;ALTER TABLE main.history ADD COLUMN blendop_params BLOB&quot;, NULL, NULL, NULL);</a>
+<a name="ln182">  sqlite3_exec(db-&gt;handle, &quot;ALTER TABLE main.history ADD COLUMN blendop_version INTEGER&quot;, NULL, NULL, NULL);</a>
+<a name="ln183">  sqlite3_exec(db-&gt;handle, &quot;ALTER TABLE main.history ADD COLUMN multi_priority INTEGER&quot;, NULL, NULL, NULL);</a>
+<a name="ln184">  sqlite3_exec(db-&gt;handle, &quot;ALTER TABLE main.history ADD COLUMN multi_name VARCHAR(256)&quot;, NULL, NULL, NULL);</a>
+<a name="ln185">  _SQLITE3_EXEC(db-&gt;handle, &quot;CREATE INDEX IF NOT EXISTS main.history_imgid_index ON history (imgid)&quot;, NULL, NULL,</a>
+<a name="ln186">                NULL);</a>
+<a name="ln187">  _SQLITE3_EXEC(db-&gt;handle, &quot;UPDATE main.history SET blendop_version = 1 WHERE blendop_version IS NULL&quot;, NULL,</a>
+<a name="ln188">                NULL, NULL);</a>
+<a name="ln189">  _SQLITE3_EXEC(db-&gt;handle, &quot;UPDATE main.history SET multi_priority = 0 WHERE multi_priority IS NULL&quot;, NULL, NULL,</a>
+<a name="ln190">                NULL);</a>
+<a name="ln191">  _SQLITE3_EXEC(db-&gt;handle, &quot;UPDATE main.history SET multi_name = ' ' WHERE multi_name IS NULL&quot;, NULL, NULL, NULL);</a>
+<a name="ln192">  ////////////////////////////// mask</a>
+<a name="ln193">  _SQLITE3_EXEC(db-&gt;handle, &quot;CREATE TABLE IF NOT EXISTS main.mask (imgid INTEGER, formid INTEGER, form INTEGER, &quot;</a>
+<a name="ln194">                            &quot;name VARCHAR(256), version INTEGER, &quot;</a>
+<a name="ln195">                            &quot;points BLOB, points_count INTEGER, source BLOB)&quot;,</a>
+<a name="ln196">                NULL, NULL, NULL);</a>
+<a name="ln197">  sqlite3_exec(db-&gt;handle, &quot;ALTER TABLE main.mask ADD COLUMN source BLOB&quot;, NULL, NULL,</a>
+<a name="ln198">               NULL); // in case the table was there already but missed that column</a>
+<a name="ln199">  ////////////////////////////// tagged_images</a>
+<a name="ln200">  _SQLITE3_EXEC(db-&gt;handle, &quot;CREATE INDEX IF NOT EXISTS main.tagged_images_tagid_index ON tagged_images (tagid)&quot;,</a>
+<a name="ln201">                NULL, NULL, NULL);</a>
+<a name="ln202">  ////////////////////////////// styles</a>
+<a name="ln203">  _SQLITE3_EXEC(db-&gt;handle,</a>
+<a name="ln204">                &quot;CREATE TABLE IF NOT EXISTS main.styles (id INTEGER, name VARCHAR, description VARCHAR)&quot;, NULL,</a>
+<a name="ln205">                NULL, NULL);</a>
+<a name="ln206">  sqlite3_exec(db-&gt;handle, &quot;ALTER TABLE main.styles ADD COLUMN id INTEGER&quot;, NULL, NULL, NULL);</a>
+<a name="ln207">  _SQLITE3_EXEC(db-&gt;handle, &quot;UPDATE main.styles SET id = rowid WHERE id IS NULL&quot;, NULL, NULL, NULL);</a>
+<a name="ln208">  ////////////////////////////// style_items</a>
+<a name="ln209">  _SQLITE3_EXEC(db-&gt;handle, &quot;CREATE TABLE IF NOT EXISTS main.style_items (styleid INTEGER, num INTEGER, module &quot;</a>
+<a name="ln210">                            &quot;INTEGER, operation VARCHAR(256), op_params BLOB, &quot;</a>
+<a name="ln211">                            &quot;enabled INTEGER, blendop_params BLOB, blendop_version INTEGER, multi_priority &quot;</a>
+<a name="ln212">                            &quot;INTEGER, multi_name VARCHAR(256))&quot;,</a>
+<a name="ln213">                NULL, NULL, NULL);</a>
+<a name="ln214">  sqlite3_exec(db-&gt;handle, &quot;ALTER TABLE main.style_items ADD COLUMN blendop_params BLOB&quot;, NULL, NULL, NULL);</a>
+<a name="ln215">  sqlite3_exec(db-&gt;handle, &quot;ALTER TABLE main.style_items ADD COLUMN blendop_version INTEGER&quot;, NULL, NULL, NULL);</a>
+<a name="ln216">  sqlite3_exec(db-&gt;handle, &quot;ALTER TABLE main.style_items ADD COLUMN multi_priority INTEGER&quot;, NULL, NULL, NULL);</a>
+<a name="ln217">  sqlite3_exec(db-&gt;handle, &quot;ALTER TABLE main.style_items ADD COLUMN multi_name VARCHAR(256)&quot;, NULL, NULL, NULL);</a>
+<a name="ln218">  _SQLITE3_EXEC(db-&gt;handle, &quot;UPDATE main.style_items SET blendop_version = 1 WHERE blendop_version IS NULL&quot;, NULL,</a>
+<a name="ln219">                NULL, NULL);</a>
+<a name="ln220">  _SQLITE3_EXEC(db-&gt;handle, &quot;UPDATE main.style_items SET multi_priority = 0 WHERE multi_priority IS NULL&quot;, NULL,</a>
+<a name="ln221">                NULL, NULL);</a>
+<a name="ln222">  _SQLITE3_EXEC(db-&gt;handle, &quot;UPDATE main.style_items SET multi_name = ' ' WHERE multi_name IS NULL&quot;, NULL, NULL,</a>
+<a name="ln223">                NULL);</a>
+<a name="ln224">  ////////////////////////////// color_labels</a>
+<a name="ln225">  // color_labels could have a PRIMARY KEY that we don't want</a>
+<a name="ln226">  _SQLITE3_EXEC(db-&gt;handle, &quot;CREATE TEMPORARY TABLE dt_migration_table (imgid INTEGER, color INTEGER)&quot;, NULL,</a>
+<a name="ln227">                NULL, NULL);</a>
+<a name="ln228">  _SQLITE3_EXEC(db-&gt;handle, &quot;INSERT INTO dt_migration_table SELECT imgid, color FROM main.color_labels&quot;, NULL,</a>
+<a name="ln229">                NULL, NULL);</a>
+<a name="ln230">  _SQLITE3_EXEC(db-&gt;handle, &quot;DROP TABLE main.color_labels&quot;, NULL, NULL, NULL);</a>
+<a name="ln231">  _SQLITE3_EXEC(db-&gt;handle, &quot;CREATE TABLE main.color_labels (imgid INTEGER, color INTEGER)&quot;, NULL, NULL, NULL);</a>
+<a name="ln232">  _SQLITE3_EXEC(db-&gt;handle, &quot;CREATE UNIQUE INDEX main.color_labels_idx ON color_labels (imgid, color)&quot;, NULL, NULL,</a>
+<a name="ln233">                NULL);</a>
+<a name="ln234">  _SQLITE3_EXEC(db-&gt;handle, &quot;INSERT OR IGNORE INTO main.color_labels SELECT imgid, color FROM dt_migration_table&quot;,</a>
+<a name="ln235">                NULL, NULL, NULL);</a>
+<a name="ln236">  _SQLITE3_EXEC(db-&gt;handle, &quot;DROP TABLE dt_migration_table&quot;, NULL, NULL, NULL);</a>
+<a name="ln237">  ////////////////////////////// meta_data</a>
+<a name="ln238">  _SQLITE3_EXEC(db-&gt;handle, &quot;CREATE TABLE IF NOT EXISTS main.meta_data (id INTEGER, key INTEGER, value VARCHAR)&quot;,</a>
+<a name="ln239">                NULL, NULL, NULL);</a>
+<a name="ln240">  _SQLITE3_EXEC(db-&gt;handle, &quot;CREATE INDEX IF NOT EXISTS main.metadata_index ON meta_data (id, key)&quot;, NULL, NULL,</a>
+<a name="ln241">                NULL);</a>
+<a name="ln242">  ////////////////////////////// presets</a>
+<a name="ln243">  _SQLITE3_EXEC(db-&gt;handle, &quot;CREATE TABLE IF NOT EXISTS main.presets (name VARCHAR, description VARCHAR, &quot;</a>
+<a name="ln244">                            &quot;operation VARCHAR, op_version INTEGER, op_params BLOB, &quot;</a>
+<a name="ln245">                            &quot;enabled INTEGER, blendop_params BLOB, blendop_version INTEGER, multi_priority &quot;</a>
+<a name="ln246">                            &quot;INTEGER, multi_name VARCHAR(256), &quot;</a>
+<a name="ln247">                            &quot;model VARCHAR, maker VARCHAR, lens VARCHAR, iso_min REAL, iso_max REAL, &quot;</a>
+<a name="ln248">                            &quot;exposure_min REAL, exposure_max REAL, &quot;</a>
+<a name="ln249">                            &quot;aperture_min REAL, aperture_max REAL, focal_length_min REAL, focal_length_max &quot;</a>
+<a name="ln250">                            &quot;REAL, writeprotect INTEGER, &quot;</a>
+<a name="ln251">                            &quot;autoapply INTEGER, filter INTEGER, def INTEGER, isldr INTEGER)&quot;,</a>
+<a name="ln252">                NULL, NULL, NULL);</a>
+<a name="ln253">  sqlite3_exec(db-&gt;handle, &quot;ALTER TABLE main.presets ADD COLUMN op_version INTEGER&quot;, NULL, NULL, NULL);</a>
+<a name="ln254">  sqlite3_exec(db-&gt;handle, &quot;ALTER TABLE main.presets ADD COLUMN blendop_params BLOB&quot;, NULL, NULL, NULL);</a>
+<a name="ln255">  sqlite3_exec(db-&gt;handle, &quot;ALTER TABLE main.presets ADD COLUMN blendop_version INTEGER&quot;, NULL, NULL, NULL);</a>
+<a name="ln256">  sqlite3_exec(db-&gt;handle, &quot;ALTER TABLE main.presets ADD COLUMN multi_priority INTEGER&quot;, NULL, NULL, NULL);</a>
+<a name="ln257">  sqlite3_exec(db-&gt;handle, &quot;ALTER TABLE main.presets ADD COLUMN multi_name VARCHAR(256)&quot;, NULL, NULL, NULL);</a>
+<a name="ln258">  // the unique index only works if the db doesn't have any (name, operation, op_version) more than once.</a>
+<a name="ln259">  // apparently there are dbs out there which do have that. :(</a>
+<a name="ln260">  sqlite3_prepare_v2(db-&gt;handle,</a>
+<a name="ln261">                     &quot;SELECT p.rowid, p.name, p.operation, p.op_version FROM main.presets p INNER JOIN &quot;</a>
+<a name="ln262">                     &quot;(SELECT * FROM (SELECT rowid, name, operation, op_version, COUNT(*) AS count &quot;</a>
+<a name="ln263">                     &quot;FROM main.presets GROUP BY name, operation, op_version) WHERE count &gt; 1) s &quot;</a>
+<a name="ln264">                     &quot;ON p.name = s.name AND p.operation = s.operation AND p.op_version = s.op_version&quot;,</a>
+<a name="ln265">                     -1, &amp;stmt, NULL);</a>
+<a name="ln266">  char *last_name = NULL, *last_operation = NULL;</a>
+<a name="ln267">  int last_op_version = 0;</a>
+<a name="ln268">  int i = 0;</a>
+<a name="ln269">  while(sqlite3_step(stmt) == SQLITE_ROW)</a>
+<a name="ln270">  {</a>
+<a name="ln271">    int rowid = sqlite3_column_int(stmt, 0);</a>
+<a name="ln272">    const char *name = (const char *)sqlite3_column_text(stmt, 1);</a>
+<a name="ln273">    const char *operation = (const char *)sqlite3_column_text(stmt, 2);</a>
+<a name="ln274">    int op_version = sqlite3_column_int(stmt, 3);</a>
+<a name="ln275"> </a>
+<a name="ln276">    // is it still the same (name, operation, op_version) triple?</a>
+<a name="ln277">    if(!last_name || strcmp(last_name, name) || !last_operation || strcmp(last_operation, operation)</a>
+<a name="ln278">       || last_op_version != op_version)</a>
+<a name="ln279">    {</a>
+<a name="ln280">      g_free(last_name);</a>
+<a name="ln281">      g_free(last_operation);</a>
+<a name="ln282">      last_name = g_strdup(name);</a>
+<a name="ln283">      last_operation = g_strdup(operation);</a>
+<a name="ln284">      last_op_version = op_version;</a>
+<a name="ln285">      i = 0;</a>
+<a name="ln286">    }</a>
+<a name="ln287"> </a>
+<a name="ln288">    // find the next free amended version of name</a>
+<a name="ln289">    sqlite3_prepare_v2(db-&gt;handle, &quot;SELECT name FROM main.presets  WHERE name = ?1 || ' (' || ?2 || ')' AND &quot;</a>
+<a name="ln290">                                   &quot;operation = ?3 AND op_version = ?4&quot;,</a>
+<a name="ln291">                       -1, &amp;innerstmt, NULL);</a>
+<a name="ln292">    while(1)</a>
+<a name="ln293">    {</a>
+<a name="ln294">      sqlite3_bind_text(innerstmt, 1, name, -1, SQLITE_TRANSIENT);</a>
+<a name="ln295">      sqlite3_bind_int(innerstmt, 2, i);</a>
+<a name="ln296">      sqlite3_bind_text(innerstmt, 3, operation, -1, SQLITE_TRANSIENT);</a>
+<a name="ln297">      sqlite3_bind_int(innerstmt, 4, op_version);</a>
+<a name="ln298">      if(sqlite3_step(innerstmt) != SQLITE_ROW) break;</a>
+<a name="ln299">      sqlite3_reset(innerstmt);</a>
+<a name="ln300">      sqlite3_clear_bindings(innerstmt);</a>
+<a name="ln301">      i++;</a>
+<a name="ln302">    }</a>
+<a name="ln303">    sqlite3_finalize(innerstmt);</a>
+<a name="ln304"> </a>
+<a name="ln305">    // rename preset</a>
+<a name="ln306">    const char *query = &quot;UPDATE main.presets SET name = name || ' (' || ?1 || ')' WHERE rowid = ?2&quot;;</a>
+<a name="ln307">    sqlite3_prepare_v2(db-&gt;handle, query, -1, &amp;innerstmt, NULL);</a>
+<a name="ln308">    sqlite3_bind_int(innerstmt, 1, i);</a>
+<a name="ln309">    sqlite3_bind_int(innerstmt, 2, rowid);</a>
+<a name="ln310">    if(sqlite3_step(innerstmt) != SQLITE_DONE)</a>
+<a name="ln311">    {</a>
+<a name="ln312">      all_ok = FALSE;</a>
+<a name="ln313">      failing_query = query;</a>
+<a name="ln314">      goto end;</a>
+<a name="ln315">    }</a>
+<a name="ln316">    sqlite3_finalize(innerstmt);</a>
+<a name="ln317">  }</a>
+<a name="ln318">  sqlite3_finalize(stmt);</a>
+<a name="ln319">  g_free(last_name);</a>
+<a name="ln320">  g_free(last_operation);</a>
+<a name="ln321">  // now we should be able to create the index</a>
+<a name="ln322">  _SQLITE3_EXEC(db-&gt;handle,</a>
+<a name="ln323">                &quot;CREATE UNIQUE INDEX IF NOT EXISTS main.presets_idx ON presets (name, operation, op_version)&quot;,</a>
+<a name="ln324">                NULL, NULL, NULL);</a>
+<a name="ln325">  _SQLITE3_EXEC(db-&gt;handle, &quot;UPDATE main.presets SET blendop_version = 1 WHERE blendop_version IS NULL&quot;, NULL,</a>
+<a name="ln326">                NULL, NULL);</a>
+<a name="ln327">  _SQLITE3_EXEC(db-&gt;handle, &quot;UPDATE main.presets SET multi_priority = 0 WHERE multi_priority IS NULL&quot;, NULL, NULL,</a>
+<a name="ln328">                NULL);</a>
+<a name="ln329">  _SQLITE3_EXEC(db-&gt;handle, &quot;UPDATE main.presets SET multi_name = ' ' WHERE multi_name IS NULL&quot;, NULL, NULL, NULL);</a>
+<a name="ln330"> </a>
+<a name="ln331"> </a>
+<a name="ln332">  // There are systems where absolute paths don't start with '/' (like Windows).</a>
+<a name="ln333">  // Since the bug which introduced absolute paths to the db was fixed before a</a>
+<a name="ln334">  // Windows build was available this shouldn't matter though.</a>
+<a name="ln335">  sqlite3_prepare_v2(db-&gt;handle, &quot;SELECT id, filename FROM main.images WHERE filename LIKE '/%'&quot;, -1, &amp;stmt, NULL);</a>
+<a name="ln336">  sqlite3_prepare_v2(db-&gt;handle, &quot;UPDATE main.images SET filename = ?1 WHERE id = ?2&quot;, -1, &amp;innerstmt, NULL);</a>
+<a name="ln337">  while(sqlite3_step(stmt) == SQLITE_ROW)</a>
+<a name="ln338">  {</a>
+<a name="ln339">    int id = sqlite3_column_int(stmt, 0);</a>
+<a name="ln340">    const char *path = (const char *)sqlite3_column_text(stmt, 1);</a>
+<a name="ln341">    gchar *filename = g_path_get_basename(path);</a>
+<a name="ln342">    sqlite3_bind_text(innerstmt, 1, filename, -1, SQLITE_TRANSIENT);</a>
+<a name="ln343">    sqlite3_bind_int(innerstmt, 2, id);</a>
+<a name="ln344">    sqlite3_step(innerstmt);</a>
+<a name="ln345">    sqlite3_reset(innerstmt);</a>
+<a name="ln346">    sqlite3_clear_bindings(innerstmt);</a>
+<a name="ln347">    g_free(filename);</a>
+<a name="ln348">  }</a>
+<a name="ln349">  sqlite3_finalize(stmt);</a>
+<a name="ln350">  sqlite3_finalize(innerstmt);</a>
+<a name="ln351"> </a>
+<a name="ln352">  // We used to insert datetime_taken entries with '-' as date separators. Since that doesn't work well with</a>
+<a name="ln353">  // the regular ':' when parsing</a>
+<a name="ln354">  // or sorting we changed it to ':'. This takes care to change what we have as leftovers</a>
+<a name="ln355">  _SQLITE3_EXEC(</a>
+<a name="ln356">      db-&gt;handle,</a>
+<a name="ln357">      &quot;UPDATE main.images SET datetime_taken = REPLACE(datetime_taken, '-', ':') WHERE datetime_taken LIKE '%-%'&quot;,</a>
+<a name="ln358">      NULL, NULL, NULL);</a>
+<a name="ln359"> </a>
+<a name="ln360">end:</a>
+<a name="ln361">  if(all_ok)</a>
+<a name="ln362">    sqlite3_exec(db-&gt;handle, &quot;COMMIT&quot;, NULL, NULL, NULL);</a>
+<a name="ln363">  else</a>
+<a name="ln364">  {</a>
+<a name="ln365">    fprintf(stderr, &quot;[init] failing query: `%s'\n&quot;, failing_query);</a>
+<a name="ln366">    fprintf(stderr, &quot;[init]   %s\n&quot;, sqlite3_errmsg(db-&gt;handle));</a>
+<a name="ln367">    sqlite3_exec(db-&gt;handle, &quot;ROLLBACK TRANSACTION&quot;, NULL, NULL, NULL);</a>
+<a name="ln368">  }</a>
+<a name="ln369"> </a>
+<a name="ln370">  return all_ok;</a>
+<a name="ln371">}</a>
+<a name="ln372"> </a>
+<a name="ln373">#undef _SQLITE3_EXEC</a>
+<a name="ln374"> </a>
+<a name="ln375">#define TRY_EXEC(_query, _message)                                               \</a>
+<a name="ln376">  do                                                                             \</a>
+<a name="ln377">  {                                                                              \</a>
+<a name="ln378">    if(sqlite3_exec(db-&gt;handle, _query, NULL, NULL, NULL) != SQLITE_OK)          \</a>
+<a name="ln379">    {                                                                            \</a>
+<a name="ln380">      fprintf(stderr, _message);                                                 \</a>
+<a name="ln381">      fprintf(stderr, &quot;[init]   %s\n&quot;, sqlite3_errmsg(db-&gt;handle));              \</a>
+<a name="ln382">      FINALIZE;                                                                  \</a>
+<a name="ln383">      sqlite3_exec(db-&gt;handle, &quot;ROLLBACK TRANSACTION&quot;, NULL, NULL, NULL);        \</a>
+<a name="ln384">      return version;                                                            \</a>
+<a name="ln385">    }                                                                            \</a>
+<a name="ln386">  } while(0)</a>
+<a name="ln387"> </a>
+<a name="ln388">#define TRY_STEP(_stmt, _expected, _message)                                     \</a>
+<a name="ln389">  do                                                                             \</a>
+<a name="ln390">  {                                                                              \</a>
+<a name="ln391">    if(sqlite3_step(_stmt) != _expected)                                         \</a>
+<a name="ln392">    {                                                                            \</a>
+<a name="ln393">      fprintf(stderr, _message);                                                 \</a>
+<a name="ln394">      fprintf(stderr, &quot;[init]   %s\n&quot;, sqlite3_errmsg(db-&gt;handle));              \</a>
+<a name="ln395">      FINALIZE;                                                                  \</a>
+<a name="ln396">      sqlite3_exec(db-&gt;handle, &quot;ROLLBACK TRANSACTION&quot;, NULL, NULL, NULL);        \</a>
+<a name="ln397">      return version;                                                            \</a>
+<a name="ln398">    }                                                                            \</a>
+<a name="ln399">  } while(0)</a>
+<a name="ln400"> </a>
+<a name="ln401">#define TRY_PREPARE(_stmt, _query, _message)                                     \</a>
+<a name="ln402">  do                                                                             \</a>
+<a name="ln403">  {                                                                              \</a>
+<a name="ln404">    if(sqlite3_prepare_v2(db-&gt;handle, _query, -1, &amp;_stmt, NULL) != SQLITE_OK)    \</a>
+<a name="ln405">    {                                                                            \</a>
+<a name="ln406">      fprintf(stderr, _message);                                                 \</a>
+<a name="ln407">      fprintf(stderr, &quot;[init]   %s\n&quot;, sqlite3_errmsg(db-&gt;handle));              \</a>
+<a name="ln408">      FINALIZE;                                                                  \</a>
+<a name="ln409">      sqlite3_exec(db-&gt;handle, &quot;ROLLBACK TRANSACTION&quot;, NULL, NULL, NULL);        \</a>
+<a name="ln410">      return version;                                                            \</a>
+<a name="ln411">    }                                                                            \</a>
+<a name="ln412">  } while(0)</a>
+<a name="ln413"> </a>
+<a name="ln414">// redefine this where needed</a>
+<a name="ln415">#define FINALIZE</a>
+<a name="ln416"> </a>
+<a name="ln417">/* do the real migration steps, returns the version the db was converted to */</a>
+<a name="ln418">static int _upgrade_library_schema_step(dt_database_t *db, int version)</a>
+<a name="ln419">{</a>
+<a name="ln420">  sqlite3_stmt *stmt;</a>
+<a name="ln421">  int new_version = version;</a>
+<a name="ln422">  if(version == CURRENT_DATABASE_VERSION_LIBRARY)</a>
+<a name="ln423">    return version;</a>
+<a name="ln424">  else if(version == 0)</a>
+<a name="ln425">  {</a>
+<a name="ln426">    // this can't happen, we started with 1, but it's a good example how this function works</a>
+<a name="ln427">    // &lt;do some magic to the db&gt;</a>
+<a name="ln428">    new_version = 1; // the version we transformed the db to. this way it might be possible to roll back or</a>
+<a name="ln429">                     // add fast paths</a>
+<a name="ln430">  }</a>
+<a name="ln431">  else if(version == 1)</a>
+<a name="ln432">  {</a>
+<a name="ln433">    // 1 -&gt; 2 added write_timestamp</a>
+<a name="ln434">    sqlite3_exec(db-&gt;handle, &quot;BEGIN TRANSACTION&quot;, NULL, NULL, NULL);</a>
+<a name="ln435">    TRY_EXEC(&quot;ALTER TABLE main.images ADD COLUMN write_timestamp INTEGER&quot;,</a>
+<a name="ln436">             &quot;[init] can't add `write_timestamp' column to database\n&quot;);</a>
+<a name="ln437">    TRY_EXEC(&quot;UPDATE main.images SET write_timestamp = STRFTIME('%s', 'now') WHERE write_timestamp IS NULL&quot;,</a>
+<a name="ln438">             &quot;[init] can't initialize `write_timestamp' with current point in time\n&quot;);</a>
+<a name="ln439">    sqlite3_exec(db-&gt;handle, &quot;COMMIT&quot;, NULL, NULL, NULL);</a>
+<a name="ln440">    new_version = 2;</a>
+<a name="ln441">  }</a>
+<a name="ln442">  else if(version == 2)</a>
+<a name="ln443">  {</a>
+<a name="ln444">    // 2 -&gt; 3 reset raw_black and raw_maximum. in theory we should change the columns from REAL to INTEGER,</a>
+<a name="ln445">    // but sqlite doesn't care about types so whatever</a>
+<a name="ln446">    sqlite3_exec(db-&gt;handle, &quot;BEGIN TRANSACTION&quot;, NULL, NULL, NULL);</a>
+<a name="ln447">    TRY_EXEC(&quot;UPDATE main.images SET raw_black = 0, raw_maximum = 16384&quot;,</a>
+<a name="ln448">             &quot;[init] can't reset raw_black and raw_maximum\n&quot;);</a>
+<a name="ln449">    sqlite3_exec(db-&gt;handle, &quot;COMMIT&quot;, NULL, NULL, NULL);</a>
+<a name="ln450">    new_version = 3;</a>
+<a name="ln451">  }</a>
+<a name="ln452">  else if(version == 3)</a>
+<a name="ln453">  {</a>
+<a name="ln454">    sqlite3_exec(db-&gt;handle, &quot;BEGIN TRANSACTION&quot;, NULL, NULL, NULL);</a>
+<a name="ln455"> </a>
+<a name="ln456">    TRY_EXEC(&quot;CREATE TRIGGER insert_tag AFTER INSERT ON main.tags&quot;</a>
+<a name="ln457">             &quot; BEGIN&quot;</a>
+<a name="ln458">             &quot;   INSERT INTO tagxtag SELECT id, new.id, 0 FROM TAGS;&quot;</a>
+<a name="ln459">             &quot;   UPDATE tagxtag SET count = 1000000 WHERE id1=new.id AND id2=new.id;&quot;</a>
+<a name="ln460">             &quot; END&quot;,</a>
+<a name="ln461">             &quot;[init] can't create insert_tag trigger\n&quot;);</a>
+<a name="ln462">    TRY_EXEC(&quot;CREATE TRIGGER delete_tag BEFORE DELETE ON main.tags&quot;</a>
+<a name="ln463">             &quot; BEGIN&quot;</a>
+<a name="ln464">             &quot;   DELETE FROM tagxtag WHERE id1=old.id OR id2=old.id;&quot;</a>
+<a name="ln465">             &quot;   DELETE FROM tagged_images WHERE tagid=old.id;&quot;</a>
+<a name="ln466">             &quot; END&quot;,</a>
+<a name="ln467">             &quot;[init] can't create delete_tag trigger\n&quot;);</a>
+<a name="ln468">    TRY_EXEC(&quot;CREATE TRIGGER attach_tag AFTER INSERT ON main.tagged_images&quot;</a>
+<a name="ln469">             &quot; BEGIN&quot;</a>
+<a name="ln470">             &quot;   UPDATE tagxtag&quot;</a>
+<a name="ln471">             &quot;     SET count = count + 1&quot;</a>
+<a name="ln472">             &quot;     WHERE (id1=new.tagid AND id2 IN (SELECT tagid FROM tagged_images WHERE imgid=new.imgid))&quot;</a>
+<a name="ln473">             &quot;        OR (id2=new.tagid AND id1 IN (SELECT tagid FROM tagged_images WHERE imgid=new.imgid));&quot;</a>
+<a name="ln474">             &quot; END&quot;,</a>
+<a name="ln475">             &quot;[init] can't create attach_tag trigger\n&quot;);</a>
+<a name="ln476">    TRY_EXEC(&quot;CREATE TRIGGER detach_tag BEFORE DELETE ON main.tagged_images&quot;</a>
+<a name="ln477">             &quot; BEGIN&quot;</a>
+<a name="ln478">             &quot;   UPDATE tagxtag&quot;</a>
+<a name="ln479">             &quot;     SET count = count - 1&quot;</a>
+<a name="ln480">             &quot;     WHERE (id1=old.tagid AND id2 IN (SELECT tagid FROM tagged_images WHERE imgid=old.imgid))&quot;</a>
+<a name="ln481">             &quot;        OR (id2=old.tagid AND id1 IN (SELECT tagid FROM tagged_images WHERE imgid=old.imgid));&quot;</a>
+<a name="ln482">             &quot; END&quot;,</a>
+<a name="ln483">             &quot;[init] can't create detach_tag trigger\n&quot;);</a>
+<a name="ln484"> </a>
+<a name="ln485">    sqlite3_exec(db-&gt;handle, &quot;COMMIT&quot;, NULL, NULL, NULL);</a>
+<a name="ln486">    new_version = 4;</a>
+<a name="ln487">  }</a>
+<a name="ln488">  else if(version == 4)</a>
+<a name="ln489">  {</a>
+<a name="ln490">    sqlite3_exec(db-&gt;handle, &quot;BEGIN TRANSACTION&quot;, NULL, NULL, NULL);</a>
+<a name="ln491"> </a>
+<a name="ln492">    TRY_EXEC(&quot;ALTER TABLE main.presets RENAME TO tmp_presets&quot;,  &quot;[init] can't rename table presets\n&quot;);</a>
+<a name="ln493"> </a>
+<a name="ln494">    TRY_EXEC(&quot;CREATE TABLE main.presets (name VARCHAR, description VARCHAR, operation VARCHAR, op_params BLOB,&quot;</a>
+<a name="ln495">             &quot;enabled INTEGER, blendop_params BLOB, model VARCHAR, maker VARCHAR, lens VARCHAR,&quot;</a>
+<a name="ln496">             &quot;iso_min REAL, iso_max REAL, exposure_min REAL, exposure_max REAL, aperture_min REAL,&quot;</a>
+<a name="ln497">             &quot;aperture_max REAL, focal_length_min REAL, focal_length_max REAL, writeprotect INTEGER,&quot;</a>
+<a name="ln498">             &quot;autoapply INTEGER, filter INTEGER, def INTEGER, format INTEGER, op_version INTEGER,&quot;</a>
+<a name="ln499">             &quot;blendop_version INTEGER, multi_priority INTEGER, multi_name VARCHAR(256))&quot;,</a>
+<a name="ln500">             &quot;[init] can't create new presets table\n&quot;);</a>
+<a name="ln501"> </a>
+<a name="ln502">    TRY_EXEC(&quot;INSERT INTO main.presets (name, description, operation, op_params, enabled, blendop_params, model, &quot;</a>
+<a name="ln503">             &quot;maker, lens, iso_min, iso_max, exposure_min, exposure_max, aperture_min, aperture_max,&quot;</a>
+<a name="ln504">             &quot;focal_length_min, focal_length_max, writeprotect, autoapply, filter, def, format, op_version, &quot;</a>
+<a name="ln505">             &quot;blendop_version, multi_priority, multi_name) SELECT name, description, operation, op_params, &quot;</a>
+<a name="ln506">             &quot;enabled, blendop_params, model, maker, lens, iso_min, iso_max, exposure_min, exposure_max, &quot;</a>
+<a name="ln507">             &quot;aperture_min, aperture_max, focal_length_min, focal_length_max, writeprotect, autoapply, filter, &quot;</a>
+<a name="ln508">             &quot;def, isldr, op_version, blendop_version, multi_priority, multi_name FROM tmp_presets&quot;,</a>
+<a name="ln509">             &quot;[init] can't populate presets table from tmp_presets\n&quot;);</a>
+<a name="ln510"> </a>
+<a name="ln511">    TRY_EXEC(&quot;DROP TABLE tmp_presets&quot;, &quot;[init] can't delete table tmp_presets\n&quot;);</a>
+<a name="ln512"> </a>
+<a name="ln513">    sqlite3_exec(db-&gt;handle, &quot;COMMIT&quot;, NULL, NULL, NULL);</a>
+<a name="ln514">    new_version = 5;</a>
+<a name="ln515">  }</a>
+<a name="ln516">  else if(version == 5)</a>
+<a name="ln517">  {</a>
+<a name="ln518">    sqlite3_exec(db-&gt;handle, &quot;BEGIN TRANSACTION&quot;, NULL, NULL, NULL);</a>
+<a name="ln519"> </a>
+<a name="ln520">    TRY_EXEC(&quot;CREATE INDEX main.images_filename_index ON images (filename)&quot;,</a>
+<a name="ln521">             &quot;[init] can't create index on image filename\n&quot;);</a>
+<a name="ln522"> </a>
+<a name="ln523">    sqlite3_exec(db-&gt;handle, &quot;COMMIT&quot;, NULL, NULL, NULL);</a>
+<a name="ln524">    new_version = 6;</a>
+<a name="ln525">  }</a>
+<a name="ln526">  else if(version == 6)</a>
+<a name="ln527">  {</a>
+<a name="ln528">    // some ancient tables can have the styleid column of style_items be called style_id. fix that.</a>
+<a name="ln529">    sqlite3_exec(db-&gt;handle, &quot;BEGIN TRANSACTION&quot;, NULL, NULL, NULL);</a>
+<a name="ln530"> </a>
+<a name="ln531">    if(sqlite3_exec(db-&gt;handle, &quot;SELECT style_id FROM main.style_items&quot;, NULL, NULL, NULL) == SQLITE_OK)</a>
+<a name="ln532">    {</a>
+<a name="ln533">      TRY_EXEC(&quot;ALTER TABLE main.style_items RENAME TO tmp_style_items&quot;,</a>
+<a name="ln534">               &quot;[init] can't rename table style_items\n&quot;);</a>
+<a name="ln535"> </a>
+<a name="ln536">      TRY_EXEC(&quot;CREATE TABLE main.style_items (styleid INTEGER, num INTEGER, module INTEGER, &quot;</a>
+<a name="ln537">               &quot;operation VARCHAR(256), op_params BLOB, enabled INTEGER, &quot;</a>
+<a name="ln538">               &quot;blendop_params BLOB, blendop_version INTEGER, multi_priority INTEGER, multi_name VARCHAR(256))&quot;,</a>
+<a name="ln539">               &quot;[init] can't create new style_items table\n&quot;);</a>
+<a name="ln540"> </a>
+<a name="ln541">      TRY_EXEC(&quot;INSERT INTO main.style_items (styleid, num, module, operation, op_params, enabled,&quot;</a>
+<a name="ln542">               &quot;                         blendop_params, blendop_version, multi_priority, multi_name)&quot;</a>
+<a name="ln543">               &quot;                  SELECT style_id, num, module, operation, op_params, enabled,&quot;</a>
+<a name="ln544">               &quot;                         blendop_params, blendop_version, multi_priority, multi_name&quot;</a>
+<a name="ln545">               &quot;                  FROM   tmp_style_items&quot;,</a>
+<a name="ln546">               &quot;[init] can't populate style_items table from tmp_style_items\n&quot;);</a>
+<a name="ln547"> </a>
+<a name="ln548">      TRY_EXEC(&quot;DROP TABLE tmp_style_items&quot;, &quot;[init] can't delete table tmp_style_items\n&quot;);</a>
+<a name="ln549">    }</a>
+<a name="ln550"> </a>
+<a name="ln551">    sqlite3_exec(db-&gt;handle, &quot;COMMIT&quot;, NULL, NULL, NULL);</a>
+<a name="ln552">    new_version = 7;</a>
+<a name="ln553">  }</a>
+<a name="ln554">  else if(version == 7)</a>
+<a name="ln555">  {</a>
+<a name="ln556">    // make sure that we have no film rolls with a NULL folder</a>
+<a name="ln557">    sqlite3_exec(db-&gt;handle, &quot;BEGIN TRANSACTION&quot;, NULL, NULL, NULL);</a>
+<a name="ln558"> </a>
+<a name="ln559">    TRY_EXEC(&quot;ALTER TABLE main.film_rolls RENAME TO tmp_film_rolls&quot;, &quot;[init] can't rename table film_rolls\n&quot;);</a>
+<a name="ln560"> </a>
+<a name="ln561">    TRY_EXEC(&quot;CREATE TABLE main.film_rolls &quot;</a>
+<a name="ln562">             &quot;(id INTEGER PRIMARY KEY, datetime_accessed CHAR(20), &quot;</a>
+<a name="ln563">             &quot;folder VARCHAR(1024) NOT NULL)&quot;,</a>
+<a name="ln564">             &quot;[init] can't create new film_rolls table\n&quot;);</a>
+<a name="ln565"> </a>
+<a name="ln566">    TRY_EXEC(&quot;INSERT INTO main.film_rolls (id, datetime_accessed, folder) &quot;</a>
+<a name="ln567">             &quot;SELECT id, datetime_accessed, folder &quot;</a>
+<a name="ln568">             &quot;FROM   tmp_film_rolls &quot;</a>
+<a name="ln569">             &quot;WHERE  folder IS NOT NULL&quot;,</a>
+<a name="ln570">             &quot;[init] can't populate film_rolls table from tmp_film_rolls\n&quot;);</a>
+<a name="ln571"> </a>
+<a name="ln572">    TRY_EXEC(&quot;DROP TABLE tmp_film_rolls&quot;, &quot;[init] can't delete table tmp_film_rolls\n&quot;);</a>
+<a name="ln573"> </a>
+<a name="ln574">    sqlite3_exec(db-&gt;handle, &quot;COMMIT&quot;, NULL, NULL, NULL);</a>
+<a name="ln575">    new_version = 8;</a>
+<a name="ln576">  }</a>
+<a name="ln577">  else if(version == 8)</a>
+<a name="ln578">  {</a>
+<a name="ln579">    // 8 -&gt; 9 added history_end column to images</a>
+<a name="ln580">    sqlite3_exec(db-&gt;handle, &quot;BEGIN TRANSACTION&quot;, NULL, NULL, NULL);</a>
+<a name="ln581"> </a>
+<a name="ln582">    TRY_EXEC(&quot;ALTER TABLE main.images ADD COLUMN history_end INTEGER&quot;,</a>
+<a name="ln583">             &quot;[init] can't add `history_end' column to database\n&quot;);</a>
+<a name="ln584"> </a>
+<a name="ln585">    TRY_EXEC(&quot;UPDATE main.images SET history_end = (SELECT IFNULL(MAX(num) + 1, 0) FROM main.history &quot;</a>
+<a name="ln586">             &quot;WHERE imgid = id)&quot;, &quot;[init] can't initialize `history_end' with last history entry\n&quot;);</a>
+<a name="ln587"> </a>
+<a name="ln588">    sqlite3_exec(db-&gt;handle, &quot;COMMIT&quot;, NULL, NULL, NULL);</a>
+<a name="ln589">    new_version = 9;</a>
+<a name="ln590">  }</a>
+<a name="ln591">  else if(version == 9)</a>
+<a name="ln592">  {</a>
+<a name="ln593">    // 9 -&gt; 10 cleanup of last update :(</a>
+<a name="ln594">    sqlite3_exec(db-&gt;handle, &quot;BEGIN TRANSACTION&quot;, NULL, NULL, NULL);</a>
+<a name="ln595"> </a>
+<a name="ln596">    TRY_EXEC(&quot;UPDATE main.images SET history_end = (SELECT IFNULL(MAX(num) + 1, 0) FROM main.history &quot;</a>
+<a name="ln597">             &quot;WHERE imgid = id)&quot;, &quot;[init] can't set `history_end' to 0 where it was NULL\n&quot;);</a>
+<a name="ln598"> </a>
+<a name="ln599">    sqlite3_exec(db-&gt;handle, &quot;COMMIT&quot;, NULL, NULL, NULL);</a>
+<a name="ln600">    new_version = 10;</a>
+<a name="ln601">  }</a>
+<a name="ln602">  else if(version == 10)</a>
+<a name="ln603">  {</a>
+<a name="ln604">    // 10 -&gt; 11 added altitude column to images</a>
+<a name="ln605">    sqlite3_exec(db-&gt;handle, &quot;BEGIN TRANSACTION&quot;, NULL, NULL, NULL);</a>
+<a name="ln606"> </a>
+<a name="ln607">    TRY_EXEC(&quot;ALTER TABLE main.images ADD COLUMN altitude REAL&quot;,</a>
+<a name="ln608">             &quot;[init] can't add `altitude' column to database\n&quot;);</a>
+<a name="ln609"> </a>
+<a name="ln610">    TRY_EXEC(&quot;UPDATE main.images SET altitude = NULL&quot;, &quot;[init] can't initialize `altitude' with NULL\n&quot;);</a>
+<a name="ln611"> </a>
+<a name="ln612">    sqlite3_exec(db-&gt;handle, &quot;COMMIT&quot;, NULL, NULL, NULL);</a>
+<a name="ln613">    new_version = 11;</a>
+<a name="ln614">  }</a>
+<a name="ln615">  else if(version == 11)</a>
+<a name="ln616">  {</a>
+<a name="ln617">    // 11 -&gt; 12 tagxtag was removed in order to reduce database size</a>
+<a name="ln618">    sqlite3_exec(db-&gt;handle, &quot;BEGIN TRANSACTION&quot;, NULL, NULL, NULL);</a>
+<a name="ln619"> </a>
+<a name="ln620">    TRY_EXEC(&quot;DROP TRIGGER main.detach_tag&quot;, &quot;[init] can't drop trigger `detach_tag' from database\n&quot;);</a>
+<a name="ln621"> </a>
+<a name="ln622">    TRY_EXEC(&quot;DROP TRIGGER main.attach_tag&quot;, &quot;[init] can't drop trigger `attach_tag' from database\n&quot;);</a>
+<a name="ln623"> </a>
+<a name="ln624">    TRY_EXEC(&quot;DROP TRIGGER main.delete_tag&quot;, &quot;[init] can't drop trigger `delete_tag' from database\n&quot;);</a>
+<a name="ln625"> </a>
+<a name="ln626">    TRY_EXEC(&quot;DROP TRIGGER main.insert_tag&quot;, &quot;[init] can't drop trigger `insert_tag' from database\n&quot;);</a>
+<a name="ln627"> </a>
+<a name="ln628">    TRY_EXEC(&quot;DROP TABLE main.tagxtag&quot;, &quot;[init] can't drop table `tagxtag' from database\n&quot;);</a>
+<a name="ln629"> </a>
+<a name="ln630">    sqlite3_exec(db-&gt;handle, &quot;COMMIT&quot;, NULL, NULL, NULL);</a>
+<a name="ln631">    new_version = 12;</a>
+<a name="ln632">  }</a>
+<a name="ln633">  else if(version == 12)</a>
+<a name="ln634">  {</a>
+<a name="ln635">    // 11 -&gt; 12 move presets, styles and tags over to the data database</a>
+<a name="ln636">    sqlite3_exec(db-&gt;handle, &quot;BEGIN TRANSACTION&quot;, NULL, NULL, NULL);</a>
+<a name="ln637"> </a>
+<a name="ln638">    ////////////// presets</a>
+<a name="ln639">#undef FINALIZE</a>
+<a name="ln640">#define FINALIZE                                                                   \</a>
+<a name="ln641">    do                                                                             \</a>
+<a name="ln642">    {                                                                              \</a>
+<a name="ln643">      sqlite3_finalize(stmt);                                                      \</a>
+<a name="ln644">      sqlite3_finalize(select_stmt);                                               \</a>
+<a name="ln645">      sqlite3_finalize(count_clashes_stmt);                                        \</a>
+<a name="ln646">      sqlite3_finalize(update_name_stmt);                                          \</a>
+<a name="ln647">      sqlite3_finalize(insert_stmt);                                               \</a>
+<a name="ln648">      sqlite3_finalize(delete_stmt);                                               \</a>
+<a name="ln649">    } while(0)</a>
+<a name="ln650"> </a>
+<a name="ln651">    stmt = NULL;</a>
+<a name="ln652">    sqlite3_stmt *insert_stmt = NULL, *delete_stmt = NULL, *select_stmt = NULL, *count_clashes_stmt = NULL,</a>
+<a name="ln653">    *update_name_stmt = NULL;</a>
+<a name="ln654">    // remove presets that are already in data.</a>
+<a name="ln655">    // we can't use a NATURAL JOIN here as that fails when columns have NULL values. :-(</a>
+<a name="ln656">    TRY_EXEC(&quot;DELETE FROM main.presets WHERE rowid IN (SELECT p1.rowid FROM main.presets p1 &quot;</a>
+<a name="ln657">             &quot;JOIN data.presets p2 ON &quot;</a>
+<a name="ln658">                 &quot;p1.name IS p2.name AND &quot;</a>
+<a name="ln659">                 &quot;p1.description IS p2.description AND &quot;</a>
+<a name="ln660">                 &quot;p1.operation IS p2.operation AND &quot;</a>
+<a name="ln661">                 &quot;p1.op_version IS p2.op_version AND &quot;</a>
+<a name="ln662">                 &quot;p1.op_params IS p2.op_params AND &quot;</a>
+<a name="ln663">                 &quot;p1.enabled IS p2.enabled AND &quot;</a>
+<a name="ln664">                 &quot;p1.blendop_params IS p2.blendop_params AND &quot;</a>
+<a name="ln665">                 &quot;p1.blendop_version IS p2.blendop_version AND &quot;</a>
+<a name="ln666">                 &quot;p1.multi_priority IS p2.multi_priority AND &quot;</a>
+<a name="ln667">                 &quot;p1.multi_name IS p2.multi_name AND &quot;</a>
+<a name="ln668">                 &quot;p1.model IS p2.model AND &quot;</a>
+<a name="ln669">                 &quot;p1.maker IS p2.maker AND &quot;</a>
+<a name="ln670">                 &quot;p1.lens IS p2.lens AND &quot;</a>
+<a name="ln671">                 &quot;p1.iso_min IS p2.iso_min AND &quot;</a>
+<a name="ln672">                 &quot;p1.iso_max IS p2.iso_max AND &quot;</a>
+<a name="ln673">                 &quot;p1.exposure_min IS p2.exposure_min AND &quot;</a>
+<a name="ln674">                 &quot;p1.exposure_max IS p2.exposure_max AND &quot;</a>
+<a name="ln675">                 &quot;p1.aperture_min IS p2.aperture_min AND &quot;</a>
+<a name="ln676">                 &quot;p1.aperture_max IS p2.aperture_max AND &quot;</a>
+<a name="ln677">                 &quot;p1.focal_length_min IS p2.focal_length_min AND &quot;</a>
+<a name="ln678">                 &quot;p1.focal_length_max IS p2.focal_length_max AND &quot;</a>
+<a name="ln679">                 &quot;p1.writeprotect IS p2.writeprotect AND &quot;</a>
+<a name="ln680">                 &quot;p1.autoapply IS p2.autoapply AND &quot;</a>
+<a name="ln681">                 &quot;p1.filter IS p2.filter AND &quot;</a>
+<a name="ln682">                 &quot;p1.def IS p2.def AND &quot;</a>
+<a name="ln683">                 &quot;p1.format IS p2.format &quot;</a>
+<a name="ln684">             &quot;WHERE p1.writeprotect = 0)&quot;,</a>
+<a name="ln685">             &quot;[init] can't delete already migrated presets from database\n&quot;);</a>
+<a name="ln686"> </a>
+<a name="ln687">    // find all presets that are clashing with something else in presets. that can happen as we introduced an</a>
+<a name="ln688">    // index on presets in data which wasn't in place in library.</a>
+<a name="ln689">    TRY_PREPARE(select_stmt, &quot;SELECT p.rowid, r FROM main.presets AS p, (SELECT rowid AS r, name, operation, &quot;</a>
+<a name="ln690">                             &quot;op_version FROM main.presets GROUP BY name, operation, op_version HAVING &quot;</a>
+<a name="ln691">                             &quot;COUNT(*) &gt; 1) USING (name, operation, op_version) WHERE p.rowid != r&quot;,</a>
+<a name="ln692">                &quot;[init] can't prepare selecting presets with same name, operation, op_version from database\n&quot;);</a>
+<a name="ln693"> </a>
+<a name="ln694">    // see if an updated preset name still causes problems</a>
+<a name="ln695">    TRY_PREPARE(count_clashes_stmt, &quot;SELECT COUNT(*) FROM main.presets AS p, (SELECT name, operation, op_version &quot;</a>
+<a name="ln696">                                    &quot;FROM main.presets WHERE rowid = ?1) AS i ON p.name = i.name || \&quot; #\&quot; || ?2 &quot;</a>
+<a name="ln697">                                    &quot;AND p.operation = i.operation AND p.op_version = i.op_version&quot;,</a>
+<a name="ln698">                &quot;[init] can't prepare selection of preset count by name from database\n&quot;);</a>
+<a name="ln699"> </a>
+<a name="ln700">    // update the preset name for good</a>
+<a name="ln701">    TRY_PREPARE(update_name_stmt, &quot;UPDATE main.presets SET name = name || \&quot; #\&quot; || ?1 WHERE rowid = ?2&quot;,</a>
+<a name="ln702">                &quot;[init] can't prepare updating of preset name in database\n&quot;);</a>
+<a name="ln703"> </a>
+<a name="ln704">    // find all presets that would be clashing with something in data</a>
+<a name="ln705">    TRY_PREPARE(stmt, &quot;SELECT p1.rowid FROM main.presets p1 INNER JOIN data.presets p2 &quot;</a>
+<a name="ln706">                      &quot;USING (name, operation, op_version) WHERE p1.writeprotect = 0&quot;,</a>
+<a name="ln707">                &quot;[init] can't access table `presets' in database\n&quot;);</a>
+<a name="ln708"> </a>
+<a name="ln709">    // ... and move them over with a new name</a>
+<a name="ln710">    TRY_PREPARE(insert_stmt, &quot;INSERT OR FAIL INTO data.presets (name, description, operation, op_version, &quot;</a>
+<a name="ln711">                             &quot;op_params, enabled, blendop_params, blendop_version, multi_priority, multi_name, &quot;</a>
+<a name="ln712">                             &quot;model, maker, lens, iso_min, iso_max, exposure_min, exposure_max, aperture_min, &quot;</a>
+<a name="ln713">                             &quot;aperture_max, focal_length_min, focal_length_max, writeprotect, autoapply, filter, &quot;</a>
+<a name="ln714">                             &quot;def, format) &quot;</a>
+<a name="ln715">                             &quot;SELECT name || \&quot; #\&quot; || ?1, description, operation, op_version, op_params, &quot;</a>
+<a name="ln716">                             &quot;enabled, blendop_params, blendop_version, multi_priority, multi_name, model, maker, &quot;</a>
+<a name="ln717">                             &quot;lens, iso_min, iso_max, exposure_min, exposure_max, aperture_min, aperture_max, &quot;</a>
+<a name="ln718">                             &quot;focal_length_min, focal_length_max, writeprotect, autoapply, filter, def, format &quot;</a>
+<a name="ln719">                             &quot;FROM main.presets p1 WHERE p1.rowid = ?2&quot;,</a>
+<a name="ln720">                &quot;[init] can't prepare insertion statement\n&quot;);</a>
+<a name="ln721"> </a>
+<a name="ln722">    TRY_PREPARE(delete_stmt, &quot;DELETE FROM main.presets WHERE rowid = ?1&quot;, &quot;[init] can't prepare deletion statement\n&quot;);</a>
+<a name="ln723"> </a>
+<a name="ln724">    // first rename presets with (name, operation, op_version) not being unique</a>
+<a name="ln725">    while(sqlite3_step(select_stmt) == SQLITE_ROW)</a>
+<a name="ln726">    {</a>
+<a name="ln727">      int own_rowid = sqlite3_column_int(select_stmt, 0);</a>
+<a name="ln728">      int other_rowid = sqlite3_column_int(select_stmt, 1);</a>
+<a name="ln729">      int preset_version = 0;</a>
+<a name="ln730"> </a>
+<a name="ln731">      do</a>
+<a name="ln732">      {</a>
+<a name="ln733">        preset_version++;</a>
+<a name="ln734">        sqlite3_reset(count_clashes_stmt);</a>
+<a name="ln735">        sqlite3_clear_bindings(count_clashes_stmt);</a>
+<a name="ln736">        sqlite3_bind_int(count_clashes_stmt, 1, other_rowid);</a>
+<a name="ln737">        sqlite3_bind_int(count_clashes_stmt, 2, preset_version);</a>
+<a name="ln738">      }</a>
+<a name="ln739">      while(sqlite3_step(count_clashes_stmt) == SQLITE_ROW &amp;&amp; sqlite3_column_int(count_clashes_stmt, 0) &gt; 0);</a>
+<a name="ln740"> </a>
+<a name="ln741">      sqlite3_bind_int(update_name_stmt, 1, preset_version);</a>
+<a name="ln742">      sqlite3_bind_int(update_name_stmt, 2, own_rowid);</a>
+<a name="ln743">      TRY_STEP(update_name_stmt, SQLITE_DONE, &quot;[init] can't rename preset in database\n&quot;);</a>
+<a name="ln744">      sqlite3_reset(update_name_stmt);</a>
+<a name="ln745">      sqlite3_reset(update_name_stmt);</a>
+<a name="ln746">    }</a>
+<a name="ln747"> </a>
+<a name="ln748">    // now rename to avoid clashes with data.presets</a>
+<a name="ln749">    while(sqlite3_step(stmt) == SQLITE_ROW)</a>
+<a name="ln750">    {</a>
+<a name="ln751">      int preset_version = 0;</a>
+<a name="ln752">      int rowid = sqlite3_column_int(stmt, 0);</a>
+<a name="ln753"> </a>
+<a name="ln754">      do</a>
+<a name="ln755">      {</a>
+<a name="ln756">        preset_version++;</a>
+<a name="ln757">        sqlite3_reset(insert_stmt);</a>
+<a name="ln758">        sqlite3_clear_bindings(insert_stmt);</a>
+<a name="ln759">        sqlite3_bind_int(insert_stmt, 1, preset_version);</a>
+<a name="ln760">        sqlite3_bind_int(insert_stmt, 2, rowid);</a>
+<a name="ln761">      } while(sqlite3_step(insert_stmt) != SQLITE_DONE);</a>
+<a name="ln762"> </a>
+<a name="ln763">      sqlite3_reset(delete_stmt);</a>
+<a name="ln764">      sqlite3_clear_bindings(delete_stmt);</a>
+<a name="ln765">      sqlite3_bind_int(delete_stmt, 1, rowid);</a>
+<a name="ln766">      TRY_STEP(delete_stmt, SQLITE_DONE, &quot;[init] can't delete preset from database\n&quot;);</a>
+<a name="ln767">    }</a>
+<a name="ln768"> </a>
+<a name="ln769">    // all that is left in presets should be those that can be moved over without any further concerns</a>
+<a name="ln770">    TRY_EXEC(&quot;INSERT OR FAIL INTO data.presets SELECT name, description, operation, &quot;</a>
+<a name="ln771">             &quot;op_version, op_params, enabled, blendop_params, blendop_version, &quot;</a>
+<a name="ln772">             &quot;multi_priority, multi_name, model, maker, lens, iso_min, iso_max, &quot;</a>
+<a name="ln773">             &quot;exposure_min, exposure_max, aperture_min, aperture_max, &quot;</a>
+<a name="ln774">             &quot;focal_length_min, focal_length_max, writeprotect, autoapply, filter, &quot;</a>
+<a name="ln775">             &quot;def, format FROM main.presets WHERE writeprotect = 0&quot;,</a>
+<a name="ln776">             &quot;[init] can't copy presets to the data database\n&quot;);</a>
+<a name="ln777">    // ... delete them on the old side</a>
+<a name="ln778">    TRY_EXEC(&quot;DELETE FROM main.presets WHERE writeprotect = 0&quot;,</a>
+<a name="ln779">             &quot;[init] can't copy presets to the data database\n&quot;);</a>
+<a name="ln780"> </a>
+<a name="ln781">    FINALIZE;</a>
+<a name="ln782">#undef FINALIZE</a>
+<a name="ln783"> </a>
+<a name="ln784">    ////////////// styles</a>
+<a name="ln785">#define FINALIZE                                                                   \</a>
+<a name="ln786">    do                                                                             \</a>
+<a name="ln787">    {                                                                              \</a>
+<a name="ln788">      sqlite3_finalize(stmt);                                                      \</a>
+<a name="ln789">      sqlite3_finalize(insert_stmt);                                               \</a>
+<a name="ln790">      sqlite3_finalize(select_stmt);                                               \</a>
+<a name="ln791">      sqlite3_finalize(delete_stmt);                                               \</a>
+<a name="ln792">      sqlite3_finalize(update_name_stmt);                                          \</a>
+<a name="ln793">      sqlite3_finalize(select_new_stmt);                                           \</a>
+<a name="ln794">      sqlite3_finalize(copy_style_items_stmt);                                     \</a>
+<a name="ln795">      sqlite3_finalize(delete_style_items_stmt);                                   \</a>
+<a name="ln796">    } while(0)</a>
+<a name="ln797"> </a>
+<a name="ln798">    stmt = NULL;</a>
+<a name="ln799">    select_stmt = NULL;</a>
+<a name="ln800">    update_name_stmt = NULL;</a>
+<a name="ln801">    insert_stmt = NULL;</a>
+<a name="ln802">    delete_stmt = NULL;</a>
+<a name="ln803">    sqlite3_stmt *select_new_stmt = NULL, *copy_style_items_stmt = NULL, *delete_style_items_stmt = NULL;</a>
+<a name="ln804"> </a>
+<a name="ln805">    TRY_PREPARE(stmt, &quot;SELECT id, name FROM main.styles&quot;, &quot;[init] can't prepare style selection from database\n&quot;);</a>
+<a name="ln806">    TRY_PREPARE(select_stmt, &quot;SELECT rowid FROM data.styles WHERE name = ?1 LIMIT 1&quot;,</a>
+<a name="ln807">                &quot;[init] can't prepare style item selection from database\n&quot;);</a>
+<a name="ln808">    TRY_PREPARE(update_name_stmt, &quot;UPDATE main.styles SET name = ?1 WHERE id = ?2&quot;,</a>
+<a name="ln809">                &quot;[init] can't prepare style name update\n&quot;);</a>
+<a name="ln810">    TRY_PREPARE(insert_stmt, &quot;INSERT INTO data.styles (id, name, description) &quot;</a>
+<a name="ln811">                             &quot;SELECT (SELECT COALESCE(MAX(id),0)+1 FROM data.styles), name, description &quot;</a>
+<a name="ln812">                             &quot;FROM main.styles where id = ?1&quot;,</a>
+<a name="ln813">                &quot;[init] can't prepare style insertion for database\n&quot;);</a>
+<a name="ln814">    TRY_PREPARE(delete_stmt, &quot;DELETE FROM main.styles WHERE id = ?1&quot;,</a>
+<a name="ln815">                &quot;[init] can't prepare style deletion for database\n&quot;);</a>
+<a name="ln816">    TRY_PREPARE(select_new_stmt, &quot;SELECT id FROM data.styles WHERE rowid = ?1&quot;,</a>
+<a name="ln817">                &quot;[init] can't prepare style selection from data database\n&quot;);</a>
+<a name="ln818">    TRY_PREPARE(copy_style_items_stmt, &quot;INSERT INTO data.style_items &quot;</a>
+<a name="ln819">                                       &quot;(styleid, num, module, operation, op_params, enabled, blendop_params, &quot;</a>
+<a name="ln820">                                       &quot;blendop_version, multi_priority, multi_name) &quot;</a>
+<a name="ln821">                                       &quot;SELECT ?1, num, module, operation, op_params, enabled, blendop_params, &quot;</a>
+<a name="ln822">                                       &quot;blendop_version, multi_priority, multi_name FROM main.style_items &quot;</a>
+<a name="ln823">                                       &quot;WHERE styleid = ?2&quot;,</a>
+<a name="ln824">                &quot;[init] can't prepare style item copy into data database\n&quot;);</a>
+<a name="ln825">    TRY_PREPARE(delete_style_items_stmt, &quot;DELETE FROM main.style_items WHERE styleid = ?1&quot;,</a>
+<a name="ln826">                &quot;[init] can't prepare style item deletion for database\n&quot;);</a>
+<a name="ln827"> </a>
+<a name="ln828">    while(sqlite3_step(stmt) == SQLITE_ROW)</a>
+<a name="ln829">    {</a>
+<a name="ln830">      int id = sqlite3_column_int(stmt, 0);</a>
+<a name="ln831">      const char *name = (const char *)sqlite3_column_text(stmt, 1);</a>
+<a name="ln832"> </a>
+<a name="ln833">      // find a unique name of the style for data.styles</a>
+<a name="ln834">      sqlite3_bind_text(select_stmt, 1, name, -1, SQLITE_TRANSIENT);</a>
+<a name="ln835">      if(sqlite3_step(select_stmt) == SQLITE_ROW)</a>
+<a name="ln836">      {</a>
+<a name="ln837">        // we need to append a version</a>
+<a name="ln838">        int style_version = 0;</a>
+<a name="ln839">        char *new_name = NULL;</a>
+<a name="ln840">        do</a>
+<a name="ln841">        {</a>
+<a name="ln842">          style_version++;</a>
+<a name="ln843">          g_free(new_name);</a>
+<a name="ln844">          new_name = g_strdup_printf(&quot;%s #%d&quot;, name, style_version);</a>
+<a name="ln845">          sqlite3_reset(select_stmt);</a>
+<a name="ln846">          sqlite3_clear_bindings(select_stmt);</a>
+<a name="ln847">          sqlite3_bind_text(select_stmt, 1, new_name, -1, SQLITE_TRANSIENT);</a>
+<a name="ln848">        } while(sqlite3_step(select_stmt) == SQLITE_ROW);</a>
+<a name="ln849"> </a>
+<a name="ln850">        // update the name in the old place</a>
+<a name="ln851">        sqlite3_bind_text(update_name_stmt, 1, new_name, -1, SQLITE_TRANSIENT);</a>
+<a name="ln852">        sqlite3_bind_int(update_name_stmt, 2, id);</a>
+<a name="ln853">        TRY_STEP(update_name_stmt, SQLITE_DONE, &quot;[init] can't update name of style in database\n&quot;);</a>
+<a name="ln854">        sqlite3_reset(update_name_stmt);</a>
+<a name="ln855">        sqlite3_clear_bindings(update_name_stmt);</a>
+<a name="ln856">        g_free(new_name);</a>
+<a name="ln857">      }</a>
+<a name="ln858"> </a>
+<a name="ln859">      // move the style to data.styles and get the rowid</a>
+<a name="ln860">      sqlite3_bind_int(insert_stmt, 1, id);</a>
+<a name="ln861">      TRY_STEP(insert_stmt, SQLITE_DONE, &quot;[init] can't insert style into data database\n&quot;);</a>
+<a name="ln862">      sqlite3_int64 last_rowid = sqlite3_last_insert_rowid(db-&gt;handle);</a>
+<a name="ln863"> </a>
+<a name="ln864">      // delete style from styles</a>
+<a name="ln865">      sqlite3_bind_int(delete_stmt, 1, id);</a>
+<a name="ln866">      TRY_STEP(delete_stmt, SQLITE_DONE, &quot;[init] can't delete style from database\n&quot;);</a>
+<a name="ln867"> </a>
+<a name="ln868">      sqlite3_bind_int(select_new_stmt, 1, last_rowid);</a>
+<a name="ln869">      TRY_STEP(select_new_stmt, SQLITE_ROW, &quot;[init] can't select new style from data database\n&quot;);</a>
+<a name="ln870">      int new_id = sqlite3_column_int(select_new_stmt, 0);</a>
+<a name="ln871"> </a>
+<a name="ln872">      // now that we have the style over in data.styles and the new id we can just copy over all style items</a>
+<a name="ln873">      sqlite3_bind_int(copy_style_items_stmt, 1, new_id);</a>
+<a name="ln874">      sqlite3_bind_int(copy_style_items_stmt, 2, id);</a>
+<a name="ln875">      TRY_STEP(copy_style_items_stmt, SQLITE_DONE, &quot;[init] can't copy style items into data database\n&quot;);</a>
+<a name="ln876"> </a>
+<a name="ln877">      // delete the style items from the old table</a>
+<a name="ln878">      sqlite3_bind_int(delete_style_items_stmt, 1, id);</a>
+<a name="ln879">      TRY_STEP(delete_style_items_stmt, SQLITE_DONE, &quot;[init] can't delete style items from database\n&quot;);</a>
+<a name="ln880"> </a>
+<a name="ln881">      // cleanup for the next round</a>
+<a name="ln882">      sqlite3_reset(insert_stmt);</a>
+<a name="ln883">      sqlite3_clear_bindings(insert_stmt);</a>
+<a name="ln884">      sqlite3_reset(select_stmt);</a>
+<a name="ln885">      sqlite3_clear_bindings(select_stmt);</a>
+<a name="ln886">      sqlite3_reset(delete_stmt);</a>
+<a name="ln887">      sqlite3_clear_bindings(delete_stmt);</a>
+<a name="ln888">      sqlite3_reset(select_new_stmt);</a>
+<a name="ln889">      sqlite3_clear_bindings(select_new_stmt);</a>
+<a name="ln890">      sqlite3_reset(copy_style_items_stmt);</a>
+<a name="ln891">      sqlite3_clear_bindings(copy_style_items_stmt);</a>
+<a name="ln892">      sqlite3_reset(delete_style_items_stmt);</a>
+<a name="ln893">      sqlite3_clear_bindings(delete_style_items_stmt);</a>
+<a name="ln894">    }</a>
+<a name="ln895">    FINALIZE;</a>
+<a name="ln896">#undef FINALIZE</a>
+<a name="ln897"> </a>
+<a name="ln898">    ////////////// tags</a>
+<a name="ln899">#define FINALIZE</a>
+<a name="ln900"> </a>
+<a name="ln901">    // tags</a>
+<a name="ln902">    TRY_EXEC(&quot;INSERT OR IGNORE INTO data.tags (name, icon, description, flags) &quot;</a>
+<a name="ln903">             &quot;SELECT name, icon, description, flags FROM main.tags&quot;,</a>
+<a name="ln904">             &quot;[init] can't prepare insertion of used tags into data database\n&quot;);</a>
+<a name="ln905"> </a>
+<a name="ln906">    // tagged images</a>
+<a name="ln907">    // we need a temp table to update tagged_images due to its primary key</a>
+<a name="ln908">    TRY_EXEC(&quot;CREATE TEMPORARY TABLE tagged_images_tmp (imgid INTEGER, tagid INTEGER)&quot;,</a>
+<a name="ln909">             &quot;[init] can't create temporary table for updating `tagged_images'\n&quot;);</a>
+<a name="ln910"> </a>
+<a name="ln911">    TRY_EXEC(&quot;INSERT INTO tagged_images_tmp (imgid, tagid) &quot;</a>
+<a name="ln912">             &quot;SELECT imgid, (SELECT t2.id FROM main.tags t1, data.tags t2 USING (name) WHERE t1.id = tagid) &quot;</a>
+<a name="ln913">             &quot;FROM main.tagged_images&quot;, &quot;[init] can't insert into `tagged_images_tmp'\n&quot;);</a>
+<a name="ln914"> </a>
+<a name="ln915">    TRY_EXEC(&quot;DELETE FROM main.tagged_images&quot;, &quot;[init] can't delete tagged images in database\n&quot;);</a>
+<a name="ln916"> </a>
+<a name="ln917">    TRY_EXEC(&quot;INSERT OR IGNORE INTO main.tagged_images (imgid, tagid) SELECT imgid, tagid FROM tagged_images_tmp&quot;,</a>
+<a name="ln918">             &quot;[init] can't copy updated values back to `tagged_images'\n&quot;);</a>
+<a name="ln919"> </a>
+<a name="ln920">    TRY_EXEC(&quot;DROP TABLE tagged_images_tmp&quot;, &quot;[init] can't drop table `tagged_images_tmp' from database\n&quot;);</a>
+<a name="ln921"> </a>
+<a name="ln922">    ////////////// cleanup - drop the indexes and tags</a>
+<a name="ln923">    TRY_EXEC(&quot;DROP INDEX IF EXISTS main.presets_idx&quot;, &quot;[init] can't drop index `presets_idx' from database\n&quot;);</a>
+<a name="ln924">    TRY_EXEC(&quot;DROP TABLE main.presets&quot;, &quot;[init] can't drop table `presets' from database\n&quot;);</a>
+<a name="ln925">    TRY_EXEC(&quot;DROP TABLE main.style_items&quot;, &quot;[init] can't drop table `style_items' from database\n&quot;);</a>
+<a name="ln926">    TRY_EXEC(&quot;DROP TABLE main.styles&quot;, &quot;[init] can't drop table `styles' from database\n&quot;);</a>
+<a name="ln927">    TRY_EXEC(&quot;DROP TABLE main.tags&quot;, &quot;[init] can't drop table `tags' from database\n&quot;);</a>
+<a name="ln928"> </a>
+<a name="ln929">    sqlite3_exec(db-&gt;handle, &quot;COMMIT&quot;, NULL, NULL, NULL);</a>
+<a name="ln930">    new_version = 13;</a>
+<a name="ln931">  } else if(version == 13)</a>
+<a name="ln932">  {</a>
+<a name="ln933">    // 12 -&gt; 13 bring back the used tag names to library.db so people can use it independently of data.db</a>
+<a name="ln934">    sqlite3_exec(db-&gt;handle, &quot;BEGIN TRANSACTION&quot;, NULL, NULL, NULL);</a>
+<a name="ln935"> </a>
+<a name="ln936">    TRY_EXEC(&quot;CREATE TABLE main.used_tags (id INTEGER, name VARCHAR NOT NULL)&quot;,</a>
+<a name="ln937">             &quot;[init] can't create `used_tags` table\n&quot;);</a>
+<a name="ln938"> </a>
+<a name="ln939">    TRY_EXEC(&quot;CREATE INDEX main.used_tags_idx ON used_tags (id, name)&quot;,</a>
+<a name="ln940">             &quot;[init] can't create index on table `used_tags' in database\n&quot;);</a>
+<a name="ln941"> </a>
+<a name="ln942">    TRY_EXEC(&quot;INSERT INTO main.used_tags (id, name) SELECT t.id, t.name FROM data.tags AS t, main.tagged_images &quot;</a>
+<a name="ln943">             &quot;AS i ON t.id = i.tagid GROUP BY t.id&quot;,</a>
+<a name="ln944">             &quot;[init] can't insert used tags into `used_tags` table in database\n&quot;);</a>
+<a name="ln945"> </a>
+<a name="ln946">    sqlite3_exec(db-&gt;handle, &quot;COMMIT&quot;, NULL, NULL, NULL);</a>
+<a name="ln947">    new_version = 14;</a>
+<a name="ln948">  }</a>
+<a name="ln949">  else if(version == 14)</a>
+<a name="ln950">  {</a>
+<a name="ln951">    // 13 -&gt; fix the index on used_tags to be a UNIQUE index :-/</a>
+<a name="ln952">    sqlite3_exec(db-&gt;handle, &quot;BEGIN TRANSACTION&quot;, NULL, NULL, NULL);</a>
+<a name="ln953"> </a>
+<a name="ln954">    TRY_EXEC(&quot;DELETE FROM main.used_tags WHERE rowid NOT IN (SELECT rowid FROM used_tags GROUP BY id)&quot;,</a>
+<a name="ln955">             &quot;[init] can't delete duplicated entries from `used_tags' in database\n&quot;);</a>
+<a name="ln956"> </a>
+<a name="ln957">    TRY_EXEC(&quot;DROP INDEX main.used_tags_idx&quot;, &quot;[init] can't drop index `used_tags_idx' from database\n&quot;);</a>
+<a name="ln958"> </a>
+<a name="ln959">    TRY_EXEC(&quot;CREATE UNIQUE INDEX main.used_tags_idx ON used_tags (id, name)&quot;,</a>
+<a name="ln960">             &quot;[init] can't create index `used_tags_idx' in database\n&quot;);</a>
+<a name="ln961"> </a>
+<a name="ln962">    TRY_EXEC(&quot;DELETE FROM main.tagged_images WHERE tagid IS NULL&quot;,</a>
+<a name="ln963">             &quot;[init] can't delete NULL entries from `tagged_images' in database&quot;);</a>
+<a name="ln964"> </a>
+<a name="ln965">    TRY_EXEC(&quot;DELETE FROM main.used_tags WHERE id NOT IN (SELECT DISTINCT tagid FROM main.tagged_images)&quot;,</a>
+<a name="ln966">             &quot;[init] can't delete unused tags from `used_tags' in database\n&quot;);</a>
+<a name="ln967"> </a>
+<a name="ln968">    sqlite3_exec(db-&gt;handle, &quot;COMMIT&quot;, NULL, NULL, NULL);</a>
+<a name="ln969">    new_version = 15;</a>
+<a name="ln970">  }</a>
+<a name="ln971">  else if(version == 15)</a>
+<a name="ln972">  {</a>
+<a name="ln973">    sqlite3_exec(db-&gt;handle, &quot;BEGIN TRANSACTION&quot;, NULL, NULL, NULL);</a>
+<a name="ln974">    ////////////////////////////// custom image order</a>
+<a name="ln975">    TRY_EXEC(&quot;ALTER TABLE main.images ADD COLUMN position INTEGER&quot;,</a>
+<a name="ln976">             &quot;[init] can't add `position' column to images table in database\n&quot;);</a>
+<a name="ln977">    TRY_EXEC(&quot;CREATE INDEX main.image_position_index ON images (position)&quot;,</a>
+<a name="ln978">             &quot;[init] can't create index for custom image order table\n&quot;);</a>
+<a name="ln979"> </a>
+<a name="ln980">    // Set the initial image sequence. The image id - the sequece images were imported -</a>
+<a name="ln981">    // defines the initial order of images.</a>
+<a name="ln982">    //</a>
+<a name="ln983">    // An int64 is used for the position index. The upper 31 bits define the initial order.</a>
+<a name="ln984">    // The lower 32bit provide space to reorder images.</a>
+<a name="ln985">    //</a>
+<a name="ln986">    // see: dt_collection_move_before()</a>
+<a name="ln987">    //</a>
+<a name="ln988">    TRY_EXEC(&quot;UPDATE main.images SET position = id &lt;&lt; 32&quot;,</a>
+<a name="ln989">             &quot;[init] can't update positions custom image order table\n&quot;);</a>
+<a name="ln990"> </a>
+<a name="ln991">    sqlite3_exec(db-&gt;handle, &quot;COMMIT&quot;, NULL, NULL, NULL);</a>
+<a name="ln992">    new_version = 16;</a>
+<a name="ln993">  }</a>
+<a name="ln994">  else if(version == 16)</a>
+<a name="ln995">  {</a>
+<a name="ln996">    sqlite3_exec(db-&gt;handle, &quot;BEGIN TRANSACTION&quot;, NULL, NULL, NULL);</a>
+<a name="ln997">    ////////////////////////////// final image aspect ratio</a>
+<a name="ln998">    TRY_EXEC(&quot;ALTER TABLE main.images ADD COLUMN aspect_ratio REAL&quot;,</a>
+<a name="ln999">             &quot;[init] can't add `aspect_ratio' column to images table in database\n&quot;);</a>
+<a name="ln1000">    TRY_EXEC(&quot;UPDATE main.images SET aspect_ratio = 0.0&quot;,</a>
+<a name="ln1001">             &quot;[init] can't update aspect_ratio in database\n&quot;);</a>
+<a name="ln1002"> </a>
+<a name="ln1003">    sqlite3_exec(db-&gt;handle, &quot;COMMIT&quot;, NULL, NULL, NULL);</a>
+<a name="ln1004">    new_version = 17;</a>
+<a name="ln1005">  }</a>
+<a name="ln1006">  // maybe in the future, see commented out code elsewhere</a>
+<a name="ln1007">  //   else if(version == XXX)</a>
+<a name="ln1008">  //   {</a>
+<a name="ln1009">  //     sqlite3_exec(db-&gt;handle, &quot;ALTER TABLE film_rolls ADD COLUMN external_drive VARCHAR(1024)&quot;, NULL,</a>
+<a name="ln1010">  //     NULL, NULL);</a>
+<a name="ln1011">  //   }</a>
+<a name="ln1012">  else</a>
+<a name="ln1013">    new_version = version; // should be the fallback so that calling code sees that we are in an infinite loop</a>
+<a name="ln1014"> </a>
+<a name="ln1015">  // write the new version to db</a>
+<a name="ln1016">  sqlite3_prepare_v2(db-&gt;handle, &quot;INSERT OR REPLACE INTO main.db_info (key, value) VALUES ('version', ?1)&quot;, -1, &amp;stmt,</a>
+<a name="ln1017">                     NULL);</a>
+<a name="ln1018">  sqlite3_bind_int(stmt, 1, new_version);</a>
+<a name="ln1019">  sqlite3_step(stmt);</a>
+<a name="ln1020">  sqlite3_finalize(stmt);</a>
+<a name="ln1021"> </a>
+<a name="ln1022">  return new_version;</a>
+<a name="ln1023">}</a>
+<a name="ln1024"> </a>
+<a name="ln1025">#undef FINALIZE</a>
+<a name="ln1026"> </a>
+<a name="ln1027">#undef TRY_EXEC</a>
+<a name="ln1028">#undef TRY_STEP</a>
+<a name="ln1029">#undef TRY_PREPARE</a>
+<a name="ln1030"> </a>
+<a name="ln1031">/* do the real migration steps, returns the version the db was converted to */</a>
+<a name="ln1032">static int _upgrade_data_schema_step(dt_database_t *db, int version)</a>
+<a name="ln1033">{</a>
+<a name="ln1034">  sqlite3_stmt *stmt;</a>
+<a name="ln1035">  int new_version = version;</a>
+<a name="ln1036">  if(version == CURRENT_DATABASE_VERSION_DATA)</a>
+<a name="ln1037">    return version;</a>
+<a name="ln1038">  else if(version == 0)</a>
+<a name="ln1039">  {</a>
+<a name="ln1040">    // this can't happen, we started with 1, but it's a good example how this function works</a>
+<a name="ln1041">    // &lt;do some magic to the db&gt;</a>
+<a name="ln1042">    new_version = 1; // the version we transformed the db to. this way it might be possible to roll back or</a>
+<a name="ln1043">    // add fast paths</a>
+<a name="ln1044">  }</a>
+<a name="ln1045">  else</a>
+<a name="ln1046">    new_version = version; // should be the fallback so that calling code sees that we are in an infinite loop</a>
+<a name="ln1047"> </a>
+<a name="ln1048">  // write the new version to db</a>
+<a name="ln1049">  sqlite3_prepare_v2(db-&gt;handle, &quot;INSERT OR REPLACE INTO data.db_info (key, value) VALUES ('version', ?1)&quot;, -1, &amp;stmt,</a>
+<a name="ln1050">                     NULL);</a>
+<a name="ln1051">  sqlite3_bind_int(stmt, 1, new_version);</a>
+<a name="ln1052">  sqlite3_step(stmt);</a>
+<a name="ln1053">  sqlite3_finalize(stmt);</a>
+<a name="ln1054"> </a>
+<a name="ln1055">  return new_version;</a>
+<a name="ln1056">}</a>
+<a name="ln1057"> </a>
+<a name="ln1058">/* upgrade library db from 'version' to CURRENT_DATABASE_VERSION_LIBRARY. don't touch this function but</a>
+<a name="ln1059"> * _upgrade_library_schema_step() instead. */</a>
+<a name="ln1060">static gboolean _upgrade_library_schema(dt_database_t *db, int version)</a>
+<a name="ln1061">{</a>
+<a name="ln1062">  while(version &lt; CURRENT_DATABASE_VERSION_LIBRARY)</a>
+<a name="ln1063">  {</a>
+<a name="ln1064">    int new_version = _upgrade_library_schema_step(db, version);</a>
+<a name="ln1065">    if(new_version == version)</a>
+<a name="ln1066">      return FALSE; // we don't know how to upgrade this db. probably a bug in _upgrade_library_schema_step</a>
+<a name="ln1067">    else</a>
+<a name="ln1068">      version = new_version;</a>
+<a name="ln1069">  }</a>
+<a name="ln1070">  return TRUE;</a>
+<a name="ln1071">}</a>
+<a name="ln1072"> </a>
+<a name="ln1073">/* upgrade data db from 'version' to CURRENT_DATABASE_VERSION_DATA. don't touch this function but</a>
+<a name="ln1074"> * _upgrade_data_schema_step() instead. */</a>
+<a name="ln1075">static gboolean _upgrade_data_schema(dt_database_t *db, int version)</a>
+<a name="ln1076">{</a>
+<a name="ln1077">  while(version &lt; CURRENT_DATABASE_VERSION_DATA)</a>
+<a name="ln1078">  {</a>
+<a name="ln1079">    int new_version = _upgrade_data_schema_step(db, version);</a>
+<a name="ln1080">    if(new_version == version)</a>
+<a name="ln1081">      return FALSE; // we don't know how to upgrade this db. probably a bug in _upgrade_data_schema_step</a>
+<a name="ln1082">    else</a>
+<a name="ln1083">      version = new_version;</a>
+<a name="ln1084">  }</a>
+<a name="ln1085">  return TRUE;</a>
+<a name="ln1086">}</a>
+<a name="ln1087"> </a>
+<a name="ln1088">/* create the current database schema and set the version in db_info accordingly */</a>
+<a name="ln1089">static void _create_library_schema(dt_database_t *db)</a>
+<a name="ln1090">{</a>
+<a name="ln1091">  sqlite3_stmt *stmt;</a>
+<a name="ln1092">  ////////////////////////////// db_info</a>
+<a name="ln1093">  sqlite3_exec(db-&gt;handle, &quot;CREATE TABLE main.db_info (key VARCHAR PRIMARY KEY, value VARCHAR)&quot;, NULL,</a>
+<a name="ln1094">               NULL, NULL);</a>
+<a name="ln1095">  sqlite3_prepare_v2(</a>
+<a name="ln1096">      db-&gt;handle, &quot;INSERT OR REPLACE INTO main.db_info (key, value) VALUES ('version', ?1)&quot;, -1, &amp;stmt, NULL);</a>
+<a name="ln1097">  sqlite3_bind_int(stmt, 1, CURRENT_DATABASE_VERSION_LIBRARY);</a>
+<a name="ln1098">  sqlite3_step(stmt);</a>
+<a name="ln1099">  sqlite3_finalize(stmt);</a>
+<a name="ln1100">  ////////////////////////////// film_rolls</a>
+<a name="ln1101">  sqlite3_exec(db-&gt;handle,</a>
+<a name="ln1102">               &quot;CREATE TABLE main.film_rolls &quot;</a>
+<a name="ln1103">               &quot;(id INTEGER PRIMARY KEY, datetime_accessed CHAR(20), &quot;</a>
+<a name="ln1104">               //                        &quot;folder VARCHAR(1024), external_drive VARCHAR(1024))&quot;, //</a>
+<a name="ln1105">               //                        FIXME: make sure to bump CURRENT_DATABASE_VERSION_LIBRARY and add a</a>
+<a name="ln1106">               //                        case to _upgrade_library_schema_step when adding this!</a>
+<a name="ln1107">               &quot;folder VARCHAR(1024) NOT NULL)&quot;,</a>
+<a name="ln1108">               NULL, NULL, NULL);</a>
+<a name="ln1109">  sqlite3_exec(db-&gt;handle, &quot;CREATE INDEX main.film_rolls_folder_index ON film_rolls (folder)&quot;, NULL, NULL, NULL);</a>
+<a name="ln1110">  ////////////////////////////// images</a>
+<a name="ln1111">  sqlite3_exec(</a>
+<a name="ln1112">      db-&gt;handle,</a>
+<a name="ln1113">      &quot;CREATE TABLE main.images (id INTEGER PRIMARY KEY AUTOINCREMENT, group_id INTEGER, film_id INTEGER, &quot;</a>
+<a name="ln1114">      &quot;width INTEGER, height INTEGER, filename VARCHAR, maker VARCHAR, model VARCHAR, &quot;</a>
+<a name="ln1115">      &quot;lens VARCHAR, exposure REAL, aperture REAL, iso REAL, focal_length REAL, &quot;</a>
+<a name="ln1116">      &quot;focus_distance REAL, datetime_taken CHAR(20), flags INTEGER, &quot;</a>
+<a name="ln1117">      &quot;output_width INTEGER, output_height INTEGER, crop REAL, &quot;</a>
+<a name="ln1118">      &quot;raw_parameters INTEGER, raw_denoise_threshold REAL, &quot;</a>
+<a name="ln1119">      &quot;raw_auto_bright_threshold REAL, raw_black INTEGER, raw_maximum INTEGER, &quot;</a>
+<a name="ln1120">      &quot;caption VARCHAR, description VARCHAR, license VARCHAR, sha1sum CHAR(40), &quot;</a>
+<a name="ln1121">      &quot;orientation INTEGER, histogram BLOB, lightmap BLOB, longitude REAL, &quot;</a>
+<a name="ln1122">      &quot;latitude REAL, altitude REAL, color_matrix BLOB, colorspace INTEGER, version INTEGER, &quot;</a>
+<a name="ln1123">      &quot;max_version INTEGER, write_timestamp INTEGER, history_end INTEGER, position INTEGER, aspect_ratio REAL)&quot;,</a>
+<a name="ln1124">      NULL, NULL, NULL);</a>
+<a name="ln1125">  sqlite3_exec(db-&gt;handle, &quot;CREATE INDEX main.images_group_id_index ON images (group_id)&quot;, NULL, NULL, NULL);</a>
+<a name="ln1126">  sqlite3_exec(db-&gt;handle, &quot;CREATE INDEX main.images_film_id_index ON images (film_id)&quot;, NULL, NULL, NULL);</a>
+<a name="ln1127">  sqlite3_exec(db-&gt;handle, &quot;CREATE INDEX main.images_filename_index ON images (filename)&quot;, NULL, NULL, NULL);</a>
+<a name="ln1128">  sqlite3_exec(db-&gt;handle, &quot;CREATE INDEX main.image_position_index ON images (position)&quot;, NULL, NULL, NULL);</a>
+<a name="ln1129"> </a>
+<a name="ln1130">  ////////////////////////////// selected_images</a>
+<a name="ln1131">  sqlite3_exec(db-&gt;handle, &quot;CREATE TABLE main.selected_images (imgid INTEGER PRIMARY KEY)&quot;, NULL, NULL, NULL);</a>
+<a name="ln1132">  ////////////////////////////// history</a>
+<a name="ln1133">  sqlite3_exec(</a>
+<a name="ln1134">      db-&gt;handle,</a>
+<a name="ln1135">      &quot;CREATE TABLE main.history (imgid INTEGER, num INTEGER, module INTEGER, &quot;</a>
+<a name="ln1136">      &quot;operation VARCHAR(256), op_params BLOB, enabled INTEGER, &quot;</a>
+<a name="ln1137">      &quot;blendop_params BLOB, blendop_version INTEGER, multi_priority INTEGER, multi_name VARCHAR(256))&quot;,</a>
+<a name="ln1138">      NULL, NULL, NULL);</a>
+<a name="ln1139">  sqlite3_exec(db-&gt;handle, &quot;CREATE INDEX main.history_imgid_index ON history (imgid)&quot;, NULL, NULL, NULL);</a>
+<a name="ln1140">  ////////////////////////////// mask</a>
+<a name="ln1141">  sqlite3_exec(db-&gt;handle,</a>
+<a name="ln1142">               &quot;CREATE TABLE main.mask (imgid INTEGER, formid INTEGER, form INTEGER, name VARCHAR(256), &quot;</a>
+<a name="ln1143">               &quot;version INTEGER, points BLOB, points_count INTEGER, source BLOB)&quot;,</a>
+<a name="ln1144">               NULL, NULL, NULL);</a>
+<a name="ln1145">  ////////////////////////////// tagged_images</a>
+<a name="ln1146">  sqlite3_exec(db-&gt;handle, &quot;CREATE TABLE main.tagged_images (imgid INTEGER, tagid INTEGER, &quot;</a>
+<a name="ln1147">                           &quot;PRIMARY KEY (imgid, tagid))&quot;, NULL, NULL, NULL);</a>
+<a name="ln1148">  sqlite3_exec(db-&gt;handle, &quot;CREATE INDEX main.tagged_images_tagid_index ON tagged_images (tagid)&quot;, NULL, NULL, NULL);</a>
+<a name="ln1149">  ////////////////////////////// used_tags</a>
+<a name="ln1150">  sqlite3_exec(db-&gt;handle, &quot;CREATE TABLE main.used_tags (id INTEGER, name VARCHAR NOT NULL)&quot;, NULL, NULL, NULL);</a>
+<a name="ln1151">  sqlite3_exec(db-&gt;handle, &quot;CREATE UNIQUE INDEX main.used_tags_idx ON used_tags (id, name)&quot;, NULL, NULL, NULL);</a>
+<a name="ln1152">  ////////////////////////////// color_labels</a>
+<a name="ln1153">  sqlite3_exec(db-&gt;handle, &quot;CREATE TABLE main.color_labels (imgid INTEGER, color INTEGER)&quot;, NULL, NULL, NULL);</a>
+<a name="ln1154">  sqlite3_exec(db-&gt;handle, &quot;CREATE UNIQUE INDEX main.color_labels_idx ON color_labels (imgid, color)&quot;, NULL, NULL,</a>
+<a name="ln1155">               NULL);</a>
+<a name="ln1156">  ////////////////////////////// meta_data</a>
+<a name="ln1157">  sqlite3_exec(db-&gt;handle, &quot;CREATE TABLE main.meta_data (id INTEGER, key INTEGER, value VARCHAR)&quot;, NULL, NULL, NULL);</a>
+<a name="ln1158">  sqlite3_exec(db-&gt;handle, &quot;CREATE INDEX main.metadata_index ON meta_data (id, key)&quot;, NULL, NULL, NULL);</a>
+<a name="ln1159">}</a>
+<a name="ln1160"> </a>
+<a name="ln1161">/* create the current database schema and set the version in db_info accordingly */</a>
+<a name="ln1162">static void _create_data_schema(dt_database_t *db)</a>
+<a name="ln1163">{</a>
+<a name="ln1164">  sqlite3_stmt *stmt;</a>
+<a name="ln1165">  ////////////////////////////// db_info</a>
+<a name="ln1166">  sqlite3_exec(db-&gt;handle, &quot;CREATE TABLE data.db_info (key VARCHAR PRIMARY KEY, value VARCHAR)&quot;, NULL,</a>
+<a name="ln1167">               NULL, NULL);</a>
+<a name="ln1168">  sqlite3_prepare_v2(</a>
+<a name="ln1169">        db-&gt;handle, &quot;INSERT OR REPLACE INTO data.db_info (key, value) VALUES ('version', ?1)&quot;, -1, &amp;stmt, NULL);</a>
+<a name="ln1170">  sqlite3_bind_int(stmt, 1, CURRENT_DATABASE_VERSION_DATA);</a>
+<a name="ln1171">  sqlite3_step(stmt);</a>
+<a name="ln1172">  sqlite3_finalize(stmt);</a>
+<a name="ln1173">  ////////////////////////////// tags</a>
+<a name="ln1174">  sqlite3_exec(db-&gt;handle, &quot;CREATE TABLE data.tags (id INTEGER PRIMARY KEY, name VARCHAR, icon BLOB, &quot;</a>
+<a name="ln1175">                           &quot;description VARCHAR, flags INTEGER)&quot;, NULL, NULL, NULL);</a>
+<a name="ln1176">  sqlite3_exec(db-&gt;handle, &quot;CREATE UNIQUE INDEX data.tags_name_idx ON tags (name)&quot;, NULL, NULL, NULL);</a>
+<a name="ln1177">  ////////////////////////////// styles</a>
+<a name="ln1178">  sqlite3_exec(db-&gt;handle, &quot;CREATE TABLE data.styles (id INTEGER, name VARCHAR, description VARCHAR)&quot;,</a>
+<a name="ln1179">                        NULL, NULL, NULL);</a>
+<a name="ln1180">  ////////////////////////////// style_items</a>
+<a name="ln1181">  sqlite3_exec(</a>
+<a name="ln1182">      db-&gt;handle,</a>
+<a name="ln1183">      &quot;CREATE TABLE data.style_items (styleid INTEGER, num INTEGER, module INTEGER, &quot;</a>
+<a name="ln1184">      &quot;operation VARCHAR(256), op_params BLOB, enabled INTEGER, &quot;</a>
+<a name="ln1185">      &quot;blendop_params BLOB, blendop_version INTEGER, multi_priority INTEGER, multi_name VARCHAR(256))&quot;,</a>
+<a name="ln1186">      NULL, NULL, NULL);</a>
+<a name="ln1187">  ////////////////////////////// presets</a>
+<a name="ln1188">  sqlite3_exec(db-&gt;handle, &quot;CREATE TABLE data.presets (name VARCHAR, description VARCHAR, operation &quot;</a>
+<a name="ln1189">                           &quot;VARCHAR, op_version INTEGER, op_params BLOB, &quot;</a>
+<a name="ln1190">                           &quot;enabled INTEGER, blendop_params BLOB, blendop_version INTEGER, &quot;</a>
+<a name="ln1191">                           &quot;multi_priority INTEGER, multi_name VARCHAR(256), &quot;</a>
+<a name="ln1192">                           &quot;model VARCHAR, maker VARCHAR, lens VARCHAR, iso_min REAL, iso_max REAL, &quot;</a>
+<a name="ln1193">                           &quot;exposure_min REAL, exposure_max REAL, &quot;</a>
+<a name="ln1194">                           &quot;aperture_min REAL, aperture_max REAL, focal_length_min REAL, &quot;</a>
+<a name="ln1195">                           &quot;focal_length_max REAL, writeprotect INTEGER, &quot;</a>
+<a name="ln1196">                           &quot;autoapply INTEGER, filter INTEGER, def INTEGER, format INTEGER)&quot;,</a>
+<a name="ln1197">               NULL, NULL, NULL);</a>
+<a name="ln1198">  sqlite3_exec(db-&gt;handle, &quot;CREATE UNIQUE INDEX data.presets_idx ON presets (name, operation, op_version)&quot;,</a>
+<a name="ln1199">               NULL, NULL, NULL);</a>
+<a name="ln1200">}</a>
+<a name="ln1201"> </a>
+<a name="ln1202">// create the in-memory tables</a>
+<a name="ln1203">// temporary stuff for some ops, need this for some reason with newer sqlite3:</a>
+<a name="ln1204">static void _create_memory_schema(dt_database_t *db)</a>
+<a name="ln1205">{</a>
+<a name="ln1206">  sqlite3_exec(db-&gt;handle, &quot;CREATE TABLE memory.color_labels_temp (imgid INTEGER PRIMARY KEY)&quot;, NULL, NULL, NULL);</a>
+<a name="ln1207">  sqlite3_exec(</a>
+<a name="ln1208">      db-&gt;handle,</a>
+<a name="ln1209">      &quot;CREATE TABLE memory.collected_images (rowid INTEGER PRIMARY KEY AUTOINCREMENT, imgid INTEGER)&quot;, NULL,</a>
+<a name="ln1210">      NULL, NULL);</a>
+<a name="ln1211">  sqlite3_exec(db-&gt;handle, &quot;CREATE TABLE memory.tmp_selection (imgid INTEGER)&quot;, NULL, NULL, NULL);</a>
+<a name="ln1212">  sqlite3_exec(db-&gt;handle, &quot;CREATE TABLE memory.tagq (tmpid INTEGER PRIMARY KEY, id INTEGER)&quot;, NULL, NULL, NULL);</a>
+<a name="ln1213">  sqlite3_exec(db-&gt;handle, &quot;CREATE TABLE memory.taglist &quot;</a>
+<a name="ln1214">                           &quot;(tmpid INTEGER PRIMARY KEY, id INTEGER UNIQUE ON CONFLICT IGNORE, count INTEGER)&quot;,</a>
+<a name="ln1215">               NULL, NULL, NULL);</a>
+<a name="ln1216">  sqlite3_exec(db-&gt;handle, &quot;CREATE TABLE memory.similar_tags (tagid INTEGER)&quot;, NULL, NULL, NULL);</a>
+<a name="ln1217">  sqlite3_exec(</a>
+<a name="ln1218">      db-&gt;handle,</a>
+<a name="ln1219">      &quot;CREATE TABLE memory.history (imgid INTEGER, num INTEGER, module INTEGER, &quot;</a>
+<a name="ln1220">      &quot;operation VARCHAR(256) UNIQUE ON CONFLICT REPLACE, op_params BLOB, enabled INTEGER, &quot;</a>
+<a name="ln1221">      &quot;blendop_params BLOB, blendop_version INTEGER, multi_priority INTEGER, multi_name VARCHAR(256))&quot;,</a>
+<a name="ln1222">      NULL, NULL, NULL);</a>
+<a name="ln1223">  sqlite3_exec(</a>
+<a name="ln1224">      db-&gt;handle,</a>
+<a name="ln1225">      &quot;CREATE TABLE memory.style_items (styleid INTEGER, num INTEGER, module INTEGER, &quot;</a>
+<a name="ln1226">      &quot;operation VARCHAR(256), op_params BLOB, enabled INTEGER, &quot;</a>
+<a name="ln1227">      &quot;blendop_params BLOB, blendop_version INTEGER, multi_priority INTEGER, multi_name VARCHAR(256))&quot;,</a>
+<a name="ln1228">      NULL, NULL, NULL);</a>
+<a name="ln1229">}</a>
+<a name="ln1230"> </a>
+<a name="ln1231">static void _sanitize_db(dt_database_t *db)</a>
+<a name="ln1232">{</a>
+<a name="ln1233">  sqlite3_stmt *stmt, *innerstmt;</a>
+<a name="ln1234"> </a>
+<a name="ln1235">  /* first let's get rid of non-utf8 tags. */</a>
+<a name="ln1236">  sqlite3_prepare_v2(db-&gt;handle, &quot;SELECT id, name FROM data.tags&quot;, -1, &amp;stmt, NULL);</a>
+<a name="ln1237">  sqlite3_prepare_v2(db-&gt;handle, &quot;UPDATE data.tags SET name = ?1 WHERE id = ?2&quot;, -1, &amp;innerstmt, NULL);</a>
+<a name="ln1238">  while(sqlite3_step(stmt) == SQLITE_ROW)</a>
+<a name="ln1239">  {</a>
+<a name="ln1240">    int id = sqlite3_column_int(stmt, 0);</a>
+<a name="ln1241">    const char *tag = (const char *)sqlite3_column_text(stmt, 1);</a>
+<a name="ln1242"> </a>
+<a name="ln1243">    if(!g_utf8_validate(tag, -1, NULL))</a>
+<a name="ln1244">    {</a>
+<a name="ln1245">      gchar *new_tag = dt_util_foo_to_utf8(tag);</a>
+<a name="ln1246">      fprintf(stderr, &quot;[init]: tag `%s' is not valid utf8, replacing it with `%s'\n&quot;, tag, new_tag);</a>
+<a name="ln1247">      if(tag)</a>
+<a name="ln1248">      {</a>
+<a name="ln1249">        sqlite3_bind_text(innerstmt, 1, new_tag, -1, SQLITE_TRANSIENT);</a>
+<a name="ln1250">        sqlite3_bind_int(innerstmt, 2, id);</a>
+<a name="ln1251">        sqlite3_step(innerstmt);</a>
+<a name="ln1252">        sqlite3_reset(innerstmt);</a>
+<a name="ln1253">        sqlite3_clear_bindings(innerstmt);</a>
+<a name="ln1254">        g_free(new_tag);</a>
+<a name="ln1255">      }</a>
+<a name="ln1256">    }</a>
+<a name="ln1257">  }</a>
+<a name="ln1258">  sqlite3_finalize(stmt);</a>
+<a name="ln1259">  sqlite3_finalize(innerstmt);</a>
+<a name="ln1260">}</a>
+<a name="ln1261"> </a>
+<a name="ln1262">// in library we keep the names of the tags used in tagged_images. however, using that table at runtime results</a>
+<a name="ln1263">// in some overhead not necessary so instead we just use the used_tags table to update tagged_images on startup</a>
+<a name="ln1264">#define TRY_EXEC(_query, _message)                                                 \</a>
+<a name="ln1265">  do                                                                               \</a>
+<a name="ln1266">  {                                                                                \</a>
+<a name="ln1267">    if(sqlite3_exec(db-&gt;handle, _query, NULL, NULL, NULL) != SQLITE_OK)            \</a>
+<a name="ln1268">    {                                                                              \</a>
+<a name="ln1269">      fprintf(stderr, _message);                                                   \</a>
+<a name="ln1270">      fprintf(stderr, &quot;[init]   %s\n&quot;, sqlite3_errmsg(db-&gt;handle));                \</a>
+<a name="ln1271">      FINALIZE;                                                                    \</a>
+<a name="ln1272">      sqlite3_exec(db-&gt;handle, &quot;ROLLBACK TRANSACTION&quot;, NULL, NULL, NULL);          \</a>
+<a name="ln1273">      return FALSE;                                                                \</a>
+<a name="ln1274">    }                                                                              \</a>
+<a name="ln1275">  } while(0)</a>
+<a name="ln1276"> </a>
+<a name="ln1277">#define TRY_STEP(_stmt, _expected, _message)                                       \</a>
+<a name="ln1278">  do                                                                               \</a>
+<a name="ln1279">  {                                                                                \</a>
+<a name="ln1280">    if(sqlite3_step(_stmt) != _expected)                                           \</a>
+<a name="ln1281">    {                                                                              \</a>
+<a name="ln1282">      fprintf(stderr, _message);                                                   \</a>
+<a name="ln1283">      fprintf(stderr, &quot;[init]   %s\n&quot;, sqlite3_errmsg(db-&gt;handle));                \</a>
+<a name="ln1284">      FINALIZE;                                                                    \</a>
+<a name="ln1285">      sqlite3_exec(db-&gt;handle, &quot;ROLLBACK TRANSACTION&quot;, NULL, NULL, NULL);          \</a>
+<a name="ln1286">      return FALSE;                                                                \</a>
+<a name="ln1287">    }                                                                              \</a>
+<a name="ln1288">  } while(0)</a>
+<a name="ln1289"> </a>
+<a name="ln1290">#define TRY_PREPARE(_stmt, _query, _message)                                       \</a>
+<a name="ln1291">  do                                                                               \</a>
+<a name="ln1292">  {                                                                                \</a>
+<a name="ln1293">    if(sqlite3_prepare_v2(db-&gt;handle, _query, -1, &amp;_stmt, NULL) != SQLITE_OK)      \</a>
+<a name="ln1294">    {                                                                              \</a>
+<a name="ln1295">      fprintf(stderr, _message);                                                   \</a>
+<a name="ln1296">      fprintf(stderr, &quot;[init]   %s\n&quot;, sqlite3_errmsg(db-&gt;handle));                \</a>
+<a name="ln1297">      FINALIZE;                                                                    \</a>
+<a name="ln1298">      sqlite3_exec(db-&gt;handle, &quot;ROLLBACK TRANSACTION&quot;, NULL, NULL, NULL);          \</a>
+<a name="ln1299">      return FALSE;                                                                \</a>
+<a name="ln1300">    }                                                                              \</a>
+<a name="ln1301">  } while(0)</a>
+<a name="ln1302"> </a>
+<a name="ln1303">#define FINALIZE                                                                   \</a>
+<a name="ln1304">  do                                                                               \</a>
+<a name="ln1305">  {                                                                                \</a>
+<a name="ln1306">    sqlite3_finalize(stmt); stmt = NULL; /* NULL so that finalize becomes a NOP */ \</a>
+<a name="ln1307">  } while(0)</a>
+<a name="ln1308"> </a>
+<a name="ln1309">static gboolean _synchronize_tags(dt_database_t *db)</a>
+<a name="ln1310">{</a>
+<a name="ln1311">  sqlite3_stmt *stmt = NULL;</a>
+<a name="ln1312"> </a>
+<a name="ln1313">  sqlite3_exec(db-&gt;handle, &quot;BEGIN TRANSACTION&quot;, NULL, NULL, NULL);</a>
+<a name="ln1314"> </a>
+<a name="ln1315">  // create temporary tables -- that has to be done outside the if() as the db is locked inside</a>
+<a name="ln1316">  TRY_EXEC(&quot;CREATE TEMPORARY TABLE temp_used_tags (id INTEGER, name VARCHAR)&quot;,</a>
+<a name="ln1317">           &quot;[synchronize tags] can't create temporary table for used tags\n&quot;);</a>
+<a name="ln1318">  TRY_EXEC(&quot;CREATE TEMPORARY TABLE temp_tagged_images (imgid INTEGER, tagid INTEGER)&quot;,</a>
+<a name="ln1319">           &quot;[synchronize tags] can't create temporary table for tagged images\n&quot;);</a>
+<a name="ln1320"> </a>
+<a name="ln1321">  // are the two databases in sync already?</a>
+<a name="ln1322">  TRY_PREPARE(stmt, &quot;SELECT COUNT(*) FROM main.used_tags AS u LEFT JOIN data.tags AS t USING (id, name) &quot;</a>
+<a name="ln1323">                    &quot;WHERE u.id IS NULL OR t.id IS NULL&quot;,</a>
+<a name="ln1324">              &quot;[synchronize tags] can't prepare querying the number of tags that need to be synced\n&quot;);</a>
+<a name="ln1325"> </a>
+<a name="ln1326">  TRY_STEP(stmt, SQLITE_ROW, &quot;[synchronize tags] can't query the number of tags that need to be synced\n&quot;);</a>
+<a name="ln1327">  if(sqlite3_column_int(stmt, 0) &gt; 0)</a>
+<a name="ln1328">  {</a>
+<a name="ln1329">    // insert tags that are only present in main.used_tags into data.tags</a>
+<a name="ln1330">    TRY_EXEC(&quot;INSERT OR IGNORE INTO data.tags (name) SELECT name FROM main.used_tags&quot;,</a>
+<a name="ln1331">             &quot;[synchronize tags] can't import new tags from the library\n&quot;);</a>
+<a name="ln1332"> </a>
+<a name="ln1333">    // insert id, name for the tags in main.used_tags according to data.tags</a>
+<a name="ln1334">    TRY_EXEC(&quot;INSERT INTO temp_used_tags (id, name) SELECT t.id, t.name FROM main.used_tags, data.tags &quot;</a>
+<a name="ln1335">             &quot;AS t USING (name)&quot;, &quot;[synchronize tags] can't collect used tags into temporary table\n&quot;);</a>
+<a name="ln1336"> </a>
+<a name="ln1337">    // insert updated valued into temp_tagged_images</a>
+<a name="ln1338">    // FIXME: slowish!</a>
+<a name="ln1339">    TRY_EXEC(&quot;INSERT INTO temp_tagged_images (imgid, tagid) SELECT imgid, new_id FROM main.tagged_images, &quot;</a>
+<a name="ln1340">             &quot;(SELECT u.id AS old_id, tu.id AS new_id, name FROM used_tags AS u, temp_used_tags AS tu &quot;</a>
+<a name="ln1341">             &quot;USING (name)) ON old_id = tagid&quot;,</a>
+<a name="ln1342">             &quot;[synchronize tags] can't insert updated image tagging into temporary table\n&quot;);</a>
+<a name="ln1343"> </a>
+<a name="ln1344">    // clear table to not get in conflict with indices</a>
+<a name="ln1345">    TRY_EXEC(&quot;DELETE FROM main.tagged_images&quot;, &quot;[synchronize tags] can't clear table `tagged_images'\n&quot;);</a>
+<a name="ln1346">    TRY_EXEC(&quot;DELETE FROM main.used_tags&quot;, &quot;[synchronize tags] can't clear table `used_tags'\n&quot;);</a>
+<a name="ln1347"> </a>
+<a name="ln1348">    // copy back to main.tagged_images</a>
+<a name="ln1349">    // FIXME: slow with huge db! dropping the index first and adding it back in the end speeds it up a little</a>
+<a name="ln1350">    TRY_EXEC(&quot;INSERT INTO main.tagged_images (imgid, tagid) SELECT imgid, tagid FROM temp_tagged_images&quot;,</a>
+<a name="ln1351">             &quot;[synchronize tags] can't update table `tagged_images`\n&quot;);</a>
+<a name="ln1352"> </a>
+<a name="ln1353">    // copy back to main.used_tags</a>
+<a name="ln1354">    TRY_EXEC(&quot;INSERT INTO main.used_tags (id, name) SELECT id, name FROM temp_used_tags&quot;,</a>
+<a name="ln1355">             &quot;[synchronize tags] can't update table `used_tags'\n&quot;);</a>
+<a name="ln1356">  }</a>
+<a name="ln1357"> </a>
+<a name="ln1358">  FINALIZE; // we need to finalize before dropping the tables due to locking issues!</a>
+<a name="ln1359"> </a>
+<a name="ln1360">  // drop temporary tables</a>
+<a name="ln1361">  TRY_EXEC(&quot;DROP TABLE temp_tagged_images&quot;, &quot;[synchronize tags] can't drop temporary table for tagged_images\n&quot;);</a>
+<a name="ln1362">  TRY_EXEC(&quot;DROP TABLE temp_used_tags&quot;, &quot;[synchronize tags] can't drop temporary table for used_tags\n&quot;);</a>
+<a name="ln1363"> </a>
+<a name="ln1364">  sqlite3_exec(db-&gt;handle, &quot;COMMIT&quot;, NULL, NULL, NULL);</a>
+<a name="ln1365"> </a>
+<a name="ln1366">  return TRUE;</a>
+<a name="ln1367">}</a>
+<a name="ln1368"> </a>
+<a name="ln1369">#undef TRY_EXEC</a>
+<a name="ln1370">#undef TRY_STEP</a>
+<a name="ln1371">#undef TRY_PREPARE</a>
+<a name="ln1372">#undef FINALIZE</a>
+<a name="ln1373"> </a>
+<a name="ln1374">void dt_database_show_error(const dt_database_t *db)</a>
+<a name="ln1375">{</a>
+<a name="ln1376">  if(!db-&gt;lock_acquired)</a>
+<a name="ln1377">  {</a>
+<a name="ln1378">    char *label_text = g_markup_printf_escaped(_(&quot;an error has occurred while trying to open the database from\n&quot;</a>
+<a name="ln1379">                                                  &quot;\n&quot;</a>
+<a name="ln1380">                                                  &quot;&lt;span style=\&quot;italic\&quot;&gt;%s&lt;/span&gt;\n&quot;</a>
+<a name="ln1381">                                                  &quot;\n&quot;</a>
+<a name="ln1382">                                                  &quot;%s\n&quot;),</a>
+<a name="ln1383">                                                db-&gt;error_dbfilename, db-&gt;error_message ? db-&gt;error_message : &quot;&quot;);</a>
+<a name="ln1384"> </a>
+<a name="ln1385">    dt_gui_show_standalone_yes_no_dialog(_(&quot;darktable - error locking database&quot;), label_text, _(&quot;close darktable&quot;),</a>
+<a name="ln1386">                                         /*_(&quot;try again&quot;)*/NULL);</a>
+<a name="ln1387"> </a>
+<a name="ln1388">    g_free(label_text);</a>
+<a name="ln1389">  }</a>
+<a name="ln1390"> </a>
+<a name="ln1391">  g_free(db-&gt;error_message);</a>
+<a name="ln1392">  g_free(db-&gt;error_dbfilename);</a>
+<a name="ln1393">  ((dt_database_t *)db)-&gt;error_message = NULL;</a>
+<a name="ln1394">  ((dt_database_t *)db)-&gt;error_dbfilename = NULL;</a>
+<a name="ln1395">}</a>
+<a name="ln1396"> </a>
+<a name="ln1397">static gboolean pid_is_alive(int pid)</a>
+<a name="ln1398">{</a>
+<a name="ln1399">  gboolean pid_is_alive;</a>
+<a name="ln1400"> </a>
+<a name="ln1401">#ifdef _WIN32</a>
+<a name="ln1402">  pid_is_alive = FALSE;</a>
+<a name="ln1403">  HANDLE h = OpenProcess(PROCESS_QUERY_INFORMATION, FALSE, pid);</a>
+<a name="ln1404">  if(h)</a>
+<a name="ln1405">  {</a>
+<a name="ln1406">    wchar_t wfilename[MAX_PATH];</a>
+<a name="ln1407">    long unsigned int n_filename = sizeof(wfilename);</a>
+<a name="ln1408">    int ret = QueryFullProcessImageNameW(h, 0, wfilename, &amp;n_filename);</a>
+<a name="ln1409">    char *filename = g_utf16_to_utf8(wfilename, -1, NULL, NULL, NULL);</a>
+<a name="ln1410">    if(ret &amp;&amp; n_filename &gt; 0 &amp;&amp; filename &amp;&amp; g_str_has_suffix(filename, &quot;darktable.exe&quot;))</a>
+<a name="ln1411">      pid_is_alive = TRUE;</a>
+<a name="ln1412">    g_free(filename);</a>
+<a name="ln1413">    CloseHandle(h);</a>
+<a name="ln1414">  }</a>
+<a name="ln1415">#else</a>
+<a name="ln1416">  pid_is_alive = !((kill(pid, 0) == -1) &amp;&amp; errno == ESRCH);</a>
+<a name="ln1417"> </a>
+<a name="ln1418">#ifdef __linux__</a>
+<a name="ln1419">  // If this is Linux, we can query /proc to see if the pid is</a>
+<a name="ln1420">  // actually a darktable instance.</a>
+<a name="ln1421">  if(pid_is_alive)</a>
+<a name="ln1422">  {</a>
+<a name="ln1423">    gchar *contents;</a>
+<a name="ln1424">    gsize length;</a>
+<a name="ln1425">    gchar filename[64];</a>
+<a name="ln1426">    snprintf(filename, sizeof(filename), &quot;/proc/%d/cmdline&quot;, pid);</a>
+<a name="ln1427"> </a>
+<a name="ln1428">    if(g_file_get_contents(&quot;&quot;, &amp;contents, &amp;length, NULL))</a>
+<a name="ln1429">    {</a>
+<a name="ln1430">      if(strstr(contents, &quot;darktable&quot;) == NULL)</a>
+<a name="ln1431">      {</a>
+<a name="ln1432">        pid_is_alive = FALSE;</a>
+<a name="ln1433">      }</a>
+<a name="ln1434">      g_free(contents);</a>
+<a name="ln1435">    }</a>
+<a name="ln1436">  }</a>
+<a name="ln1437">#endif</a>
+<a name="ln1438"> </a>
+<a name="ln1439">#endif</a>
+<a name="ln1440"> </a>
+<a name="ln1441">  return pid_is_alive;</a>
+<a name="ln1442">}</a>
+<a name="ln1443"> </a>
+<a name="ln1444">static gboolean _lock_single_database(dt_database_t *db, const char *dbfilename, char **lockfile)</a>
+<a name="ln1445">{</a>
+<a name="ln1446">  gboolean lock_acquired = FALSE;</a>
+<a name="ln1447">  mode_t old_mode;</a>
+<a name="ln1448">  int fd = 0, lock_tries = 0;</a>
+<a name="ln1449">  gchar *pid = g_strdup_printf(&quot;%d&quot;, getpid());</a>
+<a name="ln1450"> </a>
+<a name="ln1451">  if(!strcmp(dbfilename, &quot;:memory:&quot;))</a>
+<a name="ln1452">  {</a>
+<a name="ln1453">    lock_acquired = TRUE;</a>
+<a name="ln1454">  }</a>
+<a name="ln1455">  else</a>
+<a name="ln1456">  {</a>
+<a name="ln1457">    *lockfile = g_strconcat(dbfilename, &quot;.lock&quot;, NULL);</a>
+<a name="ln1458">lock_again:</a>
+<a name="ln1459">    lock_tries++;</a>
+<a name="ln1460">    old_mode = umask(0);</a>
+<a name="ln1461">    fd = g_open(*lockfile, O_RDWR | O_CREAT | O_EXCL, 0666);</a>
+<a name="ln1462">    umask(old_mode);</a>
+<a name="ln1463"> </a>
+<a name="ln1464">    if(fd != -1) // the lockfile was successfully created - write our PID into it</a>
+<a name="ln1465">    {</a>
+<a name="ln1466">      if(write(fd, pid, strlen(pid) + 1) &gt; -1) lock_acquired = TRUE;</a>
+<a name="ln1467">      close(fd);</a>
+<a name="ln1468">    }</a>
+<a name="ln1469">    else // the lockfile already exists - see if it's a stale one left over from a crashed instance</a>
+<a name="ln1470">    {</a>
+<a name="ln1471">      char buf[64];</a>
+<a name="ln1472">      memset(buf, 0, sizeof(buf));</a>
+<a name="ln1473">      fd = g_open(*lockfile, O_RDWR | O_CREAT, 0666);</a>
+<a name="ln1474">      if(fd != -1)</a>
+<a name="ln1475">      {</a>
+<a name="ln1476">        int foo;</a>
+<a name="ln1477">        if((foo = read(fd, buf, sizeof(buf) - 1)) &gt; 0)</a>
+<a name="ln1478">        {</a>
+<a name="ln1479">          int other_pid = atoi(buf);</a>
+<a name="ln1480">          if(!pid_is_alive(other_pid))</a>
+<a name="ln1481">          {</a>
+<a name="ln1482">            // the other process seems to no longer exist. unlink the .lock file and try again</a>
+<a name="ln1483">            g_unlink(*lockfile);</a>
+<a name="ln1484">            if(lock_tries &lt; 5)</a>
+<a name="ln1485">            {</a>
+<a name="ln1486">              close(fd);</a>
+<a name="ln1487">              goto lock_again;</a>
+<a name="ln1488">            }</a>
+<a name="ln1489">          }</a>
+<a name="ln1490">          else</a>
+<a name="ln1491">          {</a>
+<a name="ln1492">            fprintf(</a>
+<a name="ln1493">              stderr,</a>
+<a name="ln1494">              &quot;[init] the database lock file contains a pid that seems to be alive in your system: %d\n&quot;,</a>
+<a name="ln1495">              other_pid);</a>
+<a name="ln1496">            db-&gt;error_message = g_strdup_printf(_(&quot;the database lock file contains a pid that seems to be alive in your system: %d&quot;), other_pid);</a>
+<a name="ln1497">          }</a>
+<a name="ln1498">        }</a>
+<a name="ln1499">        else</a>
+<a name="ln1500">        {</a>
+<a name="ln1501">          fprintf(stderr, &quot;[init] the database lock file seems to be empty\n&quot;);</a>
+<a name="ln1502">          db-&gt;error_message = g_strdup_printf(_(&quot;the database lock file seems to be empty&quot;));</a>
+<a name="ln1503">        }</a>
+<a name="ln1504">        close(fd);</a>
+<a name="ln1505">      }</a>
+<a name="ln1506">      else</a>
+<a name="ln1507">      {</a>
+<a name="ln1508">        int err = errno;</a>
+<a name="ln1509">        fprintf(stderr, &quot;[init] error opening the database lock file for reading: %s\n&quot;, strerror(err));</a>
+<a name="ln1510">        db-&gt;error_message = g_strdup_printf(_(&quot;error opening the database lock file for reading: %s&quot;), strerror(err));</a>
+<a name="ln1511">      }</a>
+<a name="ln1512">    }</a>
+<a name="ln1513">  }</a>
+<a name="ln1514"> </a>
+<a name="ln1515">  g_free(pid);</a>
+<a name="ln1516"> </a>
+<a name="ln1517">  if(db-&gt;error_message)</a>
+<a name="ln1518">    db-&gt;error_dbfilename = g_strdup(dbfilename);</a>
+<a name="ln1519"> </a>
+<a name="ln1520">  return lock_acquired;</a>
+<a name="ln1521">}</a>
+<a name="ln1522"> </a>
+<a name="ln1523">static gboolean _lock_databases(dt_database_t *db)</a>
+<a name="ln1524">{</a>
+<a name="ln1525">  if(!_lock_single_database(db, db-&gt;dbfilename_data, &amp;db-&gt;lockfile_data))</a>
+<a name="ln1526">    return FALSE;</a>
+<a name="ln1527">  if(!_lock_single_database(db, db-&gt;dbfilename_library, &amp;db-&gt;lockfile_library))</a>
+<a name="ln1528">  {</a>
+<a name="ln1529">    // unlock data.db to not leave a stale lock file around</a>
+<a name="ln1530">    g_unlink(db-&gt;lockfile_data);</a>
+<a name="ln1531">    return FALSE;</a>
+<a name="ln1532">  }</a>
+<a name="ln1533">  return TRUE;</a>
+<a name="ln1534">}</a>
+<a name="ln1535"> </a>
+<a name="ln1536">dt_database_t *dt_database_init(const char *alternative, const gboolean load_data)</a>
+<a name="ln1537">{</a>
+<a name="ln1538">  /*  set the threading mode to Serialized */</a>
+<a name="ln1539">  sqlite3_config(SQLITE_CONFIG_SERIALIZED);</a>
+<a name="ln1540"> </a>
+<a name="ln1541">  sqlite3_initialize();</a>
+<a name="ln1542"> </a>
+<a name="ln1543">start:</a>
+<a name="ln1544">  /* migrate default database location to new default */</a>
+<a name="ln1545">  _database_migrate_to_xdg_structure();</a>
+<a name="ln1546"> </a>
+<a name="ln1547">  /* delete old mipmaps files */</a>
+<a name="ln1548">  _database_delete_mipmaps_files();</a>
+<a name="ln1549"> </a>
+<a name="ln1550">  /* lets construct the db filename  */</a>
+<a name="ln1551">  gchar *dbname = NULL;</a>
+<a name="ln1552">  gchar dbfilename_library[PATH_MAX] = { 0 };</a>
+<a name="ln1553">  gchar datadir[PATH_MAX] = { 0 };</a>
+<a name="ln1554"> </a>
+<a name="ln1555">  dt_loc_get_user_config_dir(datadir, sizeof(datadir));</a>
+<a name="ln1556"> </a>
+<a name="ln1557">  if(alternative == NULL)</a>
+<a name="ln1558">  {</a>
+<a name="ln1559">    dbname = dt_conf_get_string(&quot;database&quot;);</a>
+<a name="ln1560">    if(!dbname)</a>
+<a name="ln1561">      snprintf(dbfilename_library, sizeof(dbfilename_library), &quot;%s/library.db&quot;, datadir);</a>
+<a name="ln1562">    else if(!strcmp(dbname, &quot;:memory:&quot;))</a>
+<a name="ln1563">      snprintf(dbfilename_library, sizeof(dbfilename_library), &quot;%s&quot;, dbname);</a>
+<a name="ln1564">    else if(dbname[0] != '/')</a>
+<a name="ln1565">      snprintf(dbfilename_library, sizeof(dbfilename_library), &quot;%s/%s&quot;, datadir, dbname);</a>
+<a name="ln1566">    else</a>
+<a name="ln1567">      snprintf(dbfilename_library, sizeof(dbfilename_library), &quot;%s&quot;, dbname);</a>
+<a name="ln1568">  }</a>
+<a name="ln1569">  else</a>
+<a name="ln1570">  {</a>
+<a name="ln1571">    snprintf(dbfilename_library, sizeof(dbfilename_library), &quot;%s&quot;, alternative);</a>
+<a name="ln1572"> </a>
+<a name="ln1573">    GFile *galternative = g_file_new_for_path(alternative);</a>
+<a name="ln1574">    dbname = g_file_get_basename(galternative);</a>
+<a name="ln1575">    g_object_unref(galternative);</a>
+<a name="ln1576">  }</a>
+<a name="ln1577"> </a>
+<a name="ln1578">  /* we also need a 2nd db with permanent data like presets, styles and tags */</a>
+<a name="ln1579">  char dbfilename_data[PATH_MAX] = { 0 };</a>
+<a name="ln1580">  if(load_data)</a>
+<a name="ln1581">    snprintf(dbfilename_data, sizeof(dbfilename_data), &quot;%s/data.db&quot;, datadir);</a>
+<a name="ln1582">  else</a>
+<a name="ln1583">    snprintf(dbfilename_data, sizeof(dbfilename_data), &quot;:memory:&quot;);</a>
+<a name="ln1584"> </a>
+<a name="ln1585">  /* create database */</a>
+<a name="ln1586">  dt_database_t *db = (dt_database_t *)g_malloc0(sizeof(dt_database_t));</a>
+<a name="ln1587">  db-&gt;dbfilename_data = g_strdup(dbfilename_data);</a>
+<a name="ln1588">  db-&gt;dbfilename_library = g_strdup(dbfilename_library);</a>
+<a name="ln1589"> </a>
+<a name="ln1590">  /* make sure the folder exists. this might not be the case for new databases */</a>
+<a name="ln1591">  char *data_path = g_path_get_dirname(db-&gt;dbfilename_data);</a>
+<a name="ln1592">  char *library_path = g_path_get_dirname(db-&gt;dbfilename_library);</a>
+<a name="ln1593">  g_mkdir_with_parents(data_path, 0750);</a>
+<a name="ln1594">  g_mkdir_with_parents(library_path, 0750);</a>
+<a name="ln1595">  g_free(data_path);</a>
+<a name="ln1596">  g_free(library_path);</a>
+<a name="ln1597"> </a>
+<a name="ln1598">  /* having more than one instance of darktable using the same database is a bad idea */</a>
+<a name="ln1599">  /* try to get locks for the databases */</a>
+<a name="ln1600">  db-&gt;lock_acquired = _lock_databases(db);</a>
+<a name="ln1601"> </a>
+<a name="ln1602">  if(!db-&gt;lock_acquired)</a>
+<a name="ln1603">  {</a>
+<a name="ln1604">    fprintf(stderr, &quot;[init] database is locked, probably another process is already using it\n&quot;);</a>
+<a name="ln1605">    g_free(dbname);</a>
+<a name="ln1606">    return db;</a>
+<a name="ln1607">  }</a>
+<a name="ln1608"> </a>
+<a name="ln1609"> </a>
+<a name="ln1610">  /* opening / creating database */</a>
+<a name="ln1611">  if(sqlite3_open(db-&gt;dbfilename_library, &amp;db-&gt;handle))</a>
+<a name="ln1612">  {</a>
+<a name="ln1613">    fprintf(stderr, &quot;[init] could not find database &quot;);</a>
+<a name="ln1614">    if(dbname)</a>
+<a name="ln1615">      fprintf(stderr, &quot;`%s'!\n&quot;, dbname);</a>
+<a name="ln1616">    else</a>
+<a name="ln1617">      fprintf(stderr, &quot;\n&quot;);</a>
+<a name="ln1618">    fprintf(stderr, &quot;[init] maybe your %s/darktablerc is corrupt?\n&quot;, datadir);</a>
+<a name="ln1619">    dt_loc_get_datadir(dbfilename_library, sizeof(dbfilename_library));</a>
+<a name="ln1620">    fprintf(stderr, &quot;[init] try `cp %s/darktablerc %s/darktablerc'\n&quot;, dbfilename_library, datadir);</a>
+<a name="ln1621">    sqlite3_close(db-&gt;handle);</a>
+<a name="ln1622">    g_free(dbname);</a>
+<a name="ln1623">    g_free(db-&gt;lockfile_data);</a>
+<a name="ln1624">    g_free(db-&gt;dbfilename_data);</a>
+<a name="ln1625">    g_free(db-&gt;lockfile_library);</a>
+<a name="ln1626">    g_free(db-&gt;dbfilename_library);</a>
+<a name="ln1627">    g_free(db);</a>
+<a name="ln1628">    return NULL;</a>
+<a name="ln1629">  }</a>
+<a name="ln1630"> </a>
+<a name="ln1631">  /* attach a memory database to db connection for use with temporary tables</a>
+<a name="ln1632">     used during instance life time, which is discarded on exit.</a>
+<a name="ln1633">  */</a>
+<a name="ln1634">  sqlite3_exec(db-&gt;handle, &quot;attach database ':memory:' as memory&quot;, NULL, NULL, NULL);</a>
+<a name="ln1635"> </a>
+<a name="ln1636">  // attach the data database which contains presets, styles, tags and similar things not tied to single images</a>
+<a name="ln1637">  sqlite3_stmt *stmt;</a>
+<a name="ln1638">  gboolean have_data_db = load_data &amp;&amp; g_file_test(dbfilename_data, G_FILE_TEST_EXISTS);</a>
+<a name="ln1639">  int rc = sqlite3_prepare_v2(db-&gt;handle, &quot;ATTACH DATABASE ?1 AS data&quot;, -1, &amp;stmt, NULL);</a>
+<a name="ln1640">  sqlite3_bind_text(stmt, 1, dbfilename_data, -1, SQLITE_TRANSIENT);</a>
+<a name="ln1641">  if(rc != SQLITE_OK || sqlite3_step(stmt) != SQLITE_DONE)</a>
+<a name="ln1642">  {</a>
+<a name="ln1643">    sqlite3_finalize(stmt);</a>
+<a name="ln1644">    fprintf(stderr, &quot;[init] database `%s' couldn't be opened. aborting\n&quot;, dbfilename_data);</a>
+<a name="ln1645">    dt_database_destroy(db);</a>
+<a name="ln1646">    db = NULL;</a>
+<a name="ln1647">    goto error;</a>
+<a name="ln1648">  }</a>
+<a name="ln1649">  sqlite3_finalize(stmt);</a>
+<a name="ln1650"> </a>
+<a name="ln1651">  // some sqlite3 config</a>
+<a name="ln1652">  sqlite3_exec(db-&gt;handle, &quot;PRAGMA synchronous = OFF&quot;, NULL, NULL, NULL);</a>
+<a name="ln1653">  sqlite3_exec(db-&gt;handle, &quot;PRAGMA journal_mode = MEMORY&quot;, NULL, NULL, NULL);</a>
+<a name="ln1654">  sqlite3_exec(db-&gt;handle, &quot;PRAGMA page_size = 32768&quot;, NULL, NULL, NULL);</a>
+<a name="ln1655"> </a>
+<a name="ln1656">  /* now that we got functional databases that are locked for us we can make sure that the schema is set up */</a>
+<a name="ln1657"> </a>
+<a name="ln1658">  // first we update the data database to the latest version so that we can potentially move data from the library</a>
+<a name="ln1659">  // over when updating that one</a>
+<a name="ln1660">  if(!have_data_db)</a>
+<a name="ln1661">  {</a>
+<a name="ln1662">    _create_data_schema(db); // a brand new db it seems</a>
+<a name="ln1663">  }</a>
+<a name="ln1664">  else</a>
+<a name="ln1665">  {</a>
+<a name="ln1666">    rc = sqlite3_prepare_v2(db-&gt;handle, &quot;select value from data.db_info where key = 'version'&quot;, -1, &amp;stmt, NULL);</a>
+<a name="ln1667">    if(rc == SQLITE_OK &amp;&amp; sqlite3_step(stmt) == SQLITE_ROW)</a>
+<a name="ln1668">    {</a>
+<a name="ln1669">      // compare the version of the db with what is current for this executable</a>
+<a name="ln1670">      const int db_version = sqlite3_column_int(stmt, 0);</a>
+<a name="ln1671">      sqlite3_finalize(stmt);</a>
+<a name="ln1672">      if(db_version &lt; CURRENT_DATABASE_VERSION_DATA)</a>
+<a name="ln1673">      {</a>
+<a name="ln1674">        // older: upgrade</a>
+<a name="ln1675">        if(!_upgrade_data_schema(db, db_version))</a>
+<a name="ln1676">        {</a>
+<a name="ln1677">          // we couldn't upgrade the db for some reason. bail out.</a>
+<a name="ln1678">          fprintf(stderr, &quot;[init] database `%s' couldn't be upgraded from version %d to %d. aborting\n&quot;,</a>
+<a name="ln1679">                  dbfilename_data, db_version, CURRENT_DATABASE_VERSION_DATA);</a>
+<a name="ln1680">          dt_database_destroy(db);</a>
+<a name="ln1681">          db = NULL;</a>
+<a name="ln1682">          goto error;</a>
+<a name="ln1683">        }</a>
+<a name="ln1684">      }</a>
+<a name="ln1685">      else if(db_version &gt; CURRENT_DATABASE_VERSION_DATA)</a>
+<a name="ln1686">      {</a>
+<a name="ln1687">        // newer: bail out</a>
+<a name="ln1688">        fprintf(stderr, &quot;[init] database version of `%s' is too new for this build of darktable. aborting\n&quot;,</a>
+<a name="ln1689">                dbfilename_data);</a>
+<a name="ln1690">        dt_database_destroy(db);</a>
+<a name="ln1691">        db = NULL;</a>
+<a name="ln1692">        goto error;</a>
+<a name="ln1693">      }</a>
+<a name="ln1694">      // else: the current version, do nothing</a>
+<a name="ln1695">    }</a>
+<a name="ln1696">    else</a>
+<a name="ln1697">    {</a>
+<a name="ln1698">      // oh, bad situation. the database is corrupt and can't be read!</a>
+<a name="ln1699">      // we inform the user here and let him decide what to do: exit or delete and try again.</a>
+<a name="ln1700"> </a>
+<a name="ln1701">      char *label_text = g_markup_printf_escaped(_(&quot;an error has occurred while trying to open the database from\n&quot;</a>
+<a name="ln1702">                                                   &quot;\n&quot;</a>
+<a name="ln1703">                                                   &quot;&lt;span style=\&quot;italic\&quot;&gt;%s&lt;/span&gt;\n&quot;</a>
+<a name="ln1704">                                                   &quot;\n&quot;</a>
+<a name="ln1705">                                                   &quot;it seems that the database is corrupt.\n&quot;</a>
+<a name="ln1706">                                                   &quot;do you want to close darktable now to manually restore\n&quot;</a>
+<a name="ln1707">                                                   &quot;the database from a backup or start with a new one?&quot;),</a>
+<a name="ln1708">                                                 dbfilename_data);</a>
+<a name="ln1709"> </a>
+<a name="ln1710">      gboolean shall_we_delete_the_db =</a>
+<a name="ln1711">          dt_gui_show_standalone_yes_no_dialog(_(&quot;darktable - error opening database&quot;), label_text,</a>
+<a name="ln1712">                                               _(&quot;close darktable&quot;), _(&quot;delete database&quot;));</a>
+<a name="ln1713"> </a>
+<a name="ln1714">      g_free(label_text);</a>
+<a name="ln1715"> </a>
+<a name="ln1716">      dt_database_destroy(db);</a>
+<a name="ln1717">      db = NULL;</a>
+<a name="ln1718"> </a>
+<a name="ln1719">      if(shall_we_delete_the_db)</a>
+<a name="ln1720">      {</a>
+<a name="ln1721">        fprintf(stderr, &quot;[init] deleting `%s' on user request&quot;, dbfilename_data);</a>
+<a name="ln1722"> </a>
+<a name="ln1723">        if(g_unlink(dbfilename_data) == 0)</a>
+<a name="ln1724">          fprintf(stderr, &quot; ... ok\n&quot;);</a>
+<a name="ln1725">        else</a>
+<a name="ln1726">          fprintf(stderr, &quot; ... failed\n&quot;);</a>
+<a name="ln1727"> </a>
+<a name="ln1728">        goto start;</a>
+<a name="ln1729">      }</a>
+<a name="ln1730">      else</a>
+<a name="ln1731">      {</a>
+<a name="ln1732">        fprintf(stderr, &quot;[init] database `%s' is corrupt and can't be opened! either replace it from a backup or &quot;</a>
+<a name="ln1733">        &quot;delete the file so that darktable can create a new one the next time. aborting\n&quot;, dbfilename_data);</a>
+<a name="ln1734">        goto error;</a>
+<a name="ln1735">      }</a>
+<a name="ln1736">    }</a>
+<a name="ln1737">  }</a>
+<a name="ln1738"> </a>
+<a name="ln1739">  // next we are looking at the library database</a>
+<a name="ln1740">  // does the db contain the new 'db_info' table?</a>
+<a name="ln1741">  rc = sqlite3_prepare_v2(db-&gt;handle, &quot;select value from main.db_info where key = 'version'&quot;, -1, &amp;stmt, NULL);</a>
+<a name="ln1742">  if(rc == SQLITE_OK &amp;&amp; sqlite3_step(stmt) == SQLITE_ROW)</a>
+<a name="ln1743">  {</a>
+<a name="ln1744">    // compare the version of the db with what is current for this executable</a>
+<a name="ln1745">    const int db_version = sqlite3_column_int(stmt, 0);</a>
+<a name="ln1746"> </a>
+<a name="ln1747">    sqlite3_finalize(stmt);</a>
+<a name="ln1748">    if(db_version &lt; CURRENT_DATABASE_VERSION_LIBRARY)</a>
+<a name="ln1749">    {</a>
+<a name="ln1750">      // older: upgrade</a>
+<a name="ln1751">      if(!_upgrade_library_schema(db, db_version))</a>
+<a name="ln1752">      {</a>
+<a name="ln1753">        // we couldn't upgrade the db for some reason. bail out.</a>
+<a name="ln1754">        fprintf(stderr, &quot;[init] database `%s' couldn't be upgraded from version %d to %d. aborting\n&quot;, dbname,</a>
+<a name="ln1755">                db_version, CURRENT_DATABASE_VERSION_LIBRARY);</a>
+<a name="ln1756">        dt_database_destroy(db);</a>
+<a name="ln1757">        db = NULL;</a>
+<a name="ln1758">        goto error;</a>
+<a name="ln1759">      }</a>
+<a name="ln1760">    }</a>
+<a name="ln1761">    else if(db_version &gt; CURRENT_DATABASE_VERSION_LIBRARY)</a>
+<a name="ln1762">    {</a>
+<a name="ln1763">      // newer: bail out. it's better than what we did before: delete everything</a>
+<a name="ln1764">      fprintf(stderr, &quot;[init] database version of `%s' is too new for this build of darktable. aborting\n&quot;,</a>
+<a name="ln1765">              dbname);</a>
+<a name="ln1766">      dt_database_destroy(db);</a>
+<a name="ln1767">      db = NULL;</a>
+<a name="ln1768">      goto error;</a>
+<a name="ln1769">    }</a>
+<a name="ln1770">    // else: the current version, do nothing</a>
+<a name="ln1771">  }</a>
+<a name="ln1772">  else if(rc == SQLITE_CORRUPT || rc == SQLITE_NOTADB)</a>
+<a name="ln1773">  {</a>
+<a name="ln1774">    // oh, bad situation. the database is corrupt and can't be read!</a>
+<a name="ln1775">    // we inform the user here and let him decide what to do: exit or delete and try again.</a>
+<a name="ln1776"> </a>
+<a name="ln1777">    char *label_text = g_markup_printf_escaped(_(&quot;an error has occurred while trying to open the database from\n&quot;</a>
+<a name="ln1778">                                                  &quot;\n&quot;</a>
+<a name="ln1779">                                                  &quot;&lt;span style=\&quot;italic\&quot;&gt;%s&lt;/span&gt;\n&quot;</a>
+<a name="ln1780">                                                  &quot;\n&quot;</a>
+<a name="ln1781">                                                  &quot;it seems that the database is corrupt.\n&quot;</a>
+<a name="ln1782">                                                  &quot;do you want to close darktable now to manually restore\n&quot;</a>
+<a name="ln1783">                                                  &quot;the database from a backup or start with a new one?&quot;),</a>
+<a name="ln1784">                                               dbfilename_library);</a>
+<a name="ln1785"> </a>
+<a name="ln1786">    gboolean shall_we_delete_the_db =</a>
+<a name="ln1787">        dt_gui_show_standalone_yes_no_dialog(_(&quot;darktable - error opening database&quot;), label_text,</a>
+<a name="ln1788">                                              _(&quot;close darktable&quot;), _(&quot;delete database&quot;));</a>
+<a name="ln1789"> </a>
+<a name="ln1790">    g_free(label_text);</a>
+<a name="ln1791"> </a>
+<a name="ln1792">    dt_database_destroy(db);</a>
+<a name="ln1793">    db = NULL;</a>
+<a name="ln1794"> </a>
+<a name="ln1795">    if(shall_we_delete_the_db)</a>
+<a name="ln1796">    {</a>
+<a name="ln1797">      fprintf(stderr, &quot;[init] deleting `%s' on user request&quot;, dbfilename_library);</a>
+<a name="ln1798"> </a>
+<a name="ln1799">      if(g_unlink(dbfilename_library) == 0)</a>
+<a name="ln1800">        fprintf(stderr, &quot; ... ok\n&quot;);</a>
+<a name="ln1801">      else</a>
+<a name="ln1802">        fprintf(stderr, &quot; ... failed\n&quot;);</a>
+<a name="ln1803"> </a>
+<a name="ln1804">      goto start;</a>
+<a name="ln1805">    }</a>
+<a name="ln1806">    else</a>
+<a name="ln1807">    {</a>
+<a name="ln1808">      fprintf(stderr, &quot;[init] database `%s' is corrupt and can't be opened! either replace it from a backup or &quot;</a>
+<a name="ln1809">                      &quot;delete the file so that darktable can create a new one the next time. aborting\n&quot;, dbname);</a>
+<a name="ln1810">      goto error;</a>
+<a name="ln1811">    }</a>
+<a name="ln1812">  }</a>
+<a name="ln1813">  else</a>
+<a name="ln1814">  {</a>
+<a name="ln1815">    // does it contain the legacy 'settings' table?</a>
+<a name="ln1816">    sqlite3_finalize(stmt);</a>
+<a name="ln1817">    rc = sqlite3_prepare_v2(db-&gt;handle, &quot;select settings from main.settings&quot;, -1, &amp;stmt, NULL);</a>
+<a name="ln1818">    if(rc == SQLITE_OK &amp;&amp; sqlite3_step(stmt) == SQLITE_ROW)</a>
+<a name="ln1819">    {</a>
+<a name="ln1820">      // the old blob had the version as an int in the first place</a>
+<a name="ln1821">      const void *set = sqlite3_column_blob(stmt, 0);</a>
+<a name="ln1822">      const int db_version = *(int *)set;</a>
+<a name="ln1823">      sqlite3_finalize(stmt);</a>
+<a name="ln1824">      if(!_migrate_schema(db, db_version)) // bring the legacy layout to the first one known to our upgrade</a>
+<a name="ln1825">                                           // path ...</a>
+<a name="ln1826">      {</a>
+<a name="ln1827">        // we couldn't migrate the db for some reason. bail out.</a>
+<a name="ln1828">        fprintf(stderr, &quot;[init] database `%s' couldn't be migrated from the legacy version %d. aborting\n&quot;,</a>
+<a name="ln1829">                dbname, db_version);</a>
+<a name="ln1830">        dt_database_destroy(db);</a>
+<a name="ln1831">        db = NULL;</a>
+<a name="ln1832">        goto error;</a>
+<a name="ln1833">      }</a>
+<a name="ln1834">      if(!_upgrade_library_schema(db, 1)) // ... and upgrade it</a>
+<a name="ln1835">      {</a>
+<a name="ln1836">        // we couldn't upgrade the db for some reason. bail out.</a>
+<a name="ln1837">        fprintf(stderr, &quot;[init] database `%s' couldn't be upgraded from version 1 to %d. aborting\n&quot;, dbname,</a>
+<a name="ln1838">                CURRENT_DATABASE_VERSION_LIBRARY);</a>
+<a name="ln1839">        dt_database_destroy(db);</a>
+<a name="ln1840">        db = NULL;</a>
+<a name="ln1841">        goto error;</a>
+<a name="ln1842">      }</a>
+<a name="ln1843">    }</a>
+<a name="ln1844">    else</a>
+<a name="ln1845">    {</a>
+<a name="ln1846">      sqlite3_finalize(stmt);</a>
+<a name="ln1847">      _create_library_schema(db); // a brand new db it seems</a>
+<a name="ln1848">    }</a>
+<a name="ln1849">  }</a>
+<a name="ln1850"> </a>
+<a name="ln1851">  // create the in-memory tables</a>
+<a name="ln1852">  _create_memory_schema(db);</a>
+<a name="ln1853"> </a>
+<a name="ln1854">  // create a table legacy_presets with all the presets from pre-auto-apply-cleanup darktable.</a>
+<a name="ln1855">  dt_legacy_presets_create(db);</a>
+<a name="ln1856"> </a>
+<a name="ln1857">  // drop table settings -- we don't want old versions of dt to drop our tables</a>
+<a name="ln1858">  sqlite3_exec(db-&gt;handle, &quot;drop table main.settings&quot;, NULL, NULL, NULL);</a>
+<a name="ln1859"> </a>
+<a name="ln1860">  // take care of potential bad data in the db.</a>
+<a name="ln1861">  _sanitize_db(db);</a>
+<a name="ln1862"> </a>
+<a name="ln1863">  // make sure that the tag ids in the library match the ones in data</a>
+<a name="ln1864">  if(!_synchronize_tags(db))</a>
+<a name="ln1865">  {</a>
+<a name="ln1866">    fprintf(stderr, &quot;[init] couldn't synchronize tags between library and data. aborting\n&quot;);</a>
+<a name="ln1867">    dt_database_destroy(db);</a>
+<a name="ln1868">    db = NULL;</a>
+<a name="ln1869">    goto error;</a>
+<a name="ln1870">  }</a>
+<a name="ln1871"> </a>
+<a name="ln1872">error:</a>
+<a name="ln1873">  g_free(dbname);</a>
+<a name="ln1874"> </a>
+<a name="ln1875">  return db;</a>
+<a name="ln1876">}</a>
+<a name="ln1877"> </a>
+<a name="ln1878">void dt_database_destroy(const dt_database_t *db)</a>
+<a name="ln1879">{</a>
+<a name="ln1880">  sqlite3_close(db-&gt;handle);</a>
+<a name="ln1881">  if (db-&gt;lockfile_data)</a>
+<a name="ln1882">  {</a>
+<a name="ln1883">    g_unlink(db-&gt;lockfile_data);</a>
+<a name="ln1884">    g_free(db-&gt;lockfile_data);</a>
+<a name="ln1885">  }</a>
+<a name="ln1886">  if (db-&gt;lockfile_library)</a>
+<a name="ln1887">  {</a>
+<a name="ln1888">    g_unlink(db-&gt;lockfile_library);</a>
+<a name="ln1889">    g_free(db-&gt;lockfile_library);</a>
+<a name="ln1890">  }</a>
+<a name="ln1891">  g_free(db-&gt;dbfilename_data);</a>
+<a name="ln1892">  g_free(db-&gt;dbfilename_library);</a>
+<a name="ln1893">  g_free((dt_database_t *)db);</a>
+<a name="ln1894"> </a>
+<a name="ln1895">  sqlite3_shutdown();</a>
+<a name="ln1896">}</a>
+<a name="ln1897"> </a>
+<a name="ln1898">sqlite3 *dt_database_get(const dt_database_t *db)</a>
+<a name="ln1899">{</a>
+<a name="ln1900">  return db ? db-&gt;handle : NULL;</a>
+<a name="ln1901">}</a>
+<a name="ln1902"> </a>
+<a name="ln1903">const gchar *dt_database_get_path(const struct dt_database_t *db)</a>
+<a name="ln1904">{</a>
+<a name="ln1905">  return db-&gt;dbfilename_library;</a>
+<a name="ln1906">}</a>
+<a name="ln1907"> </a>
+<a name="ln1908">static void _database_migrate_to_xdg_structure()</a>
+<a name="ln1909">{</a>
+<a name="ln1910">  gchar dbfilename[PATH_MAX] = { 0 };</a>
+<a name="ln1911">  gchar *conf_db = dt_conf_get_string(&quot;database&quot;);</a>
+<a name="ln1912"> </a>
+<a name="ln1913">  gchar datadir[PATH_MAX] = { 0 };</a>
+<a name="ln1914">  dt_loc_get_datadir(datadir, sizeof(datadir));</a>
+<a name="ln1915"> </a>
+<a name="ln1916">  if(conf_db &amp;&amp; conf_db[0] != '/')</a>
+<a name="ln1917">  {</a>
+<a name="ln1918">    char *homedir = getenv(&quot;HOME&quot;);</a>
+<a name="ln1919">    snprintf(dbfilename, sizeof(dbfilename), &quot;%s/%s&quot;, homedir, conf_db);</a>
+<a name="ln1920">    if(g_file_test(dbfilename, G_FILE_TEST_EXISTS))</a>
+<a name="ln1921">    {</a>
+<a name="ln1922">      fprintf(stderr, &quot;[init] moving database into new XDG directory structure\n&quot;);</a>
+<a name="ln1923">      char destdbname[PATH_MAX] = { 0 };</a>
+<a name="ln1924">      snprintf(destdbname, sizeof(dbfilename), &quot;%s/%s&quot;, datadir, &quot;library.db&quot;);</a>
+<a name="ln1925">      if(!g_file_test(destdbname, G_FILE_TEST_EXISTS))</a>
+<a name="ln1926">      {</a>
+<a name="ln1927">        rename(dbfilename, destdbname);</a>
+<a name="ln1928">        dt_conf_set_string(&quot;database&quot;, &quot;library.db&quot;);</a>
+<a name="ln1929">      }</a>
+<a name="ln1930">    }</a>
+<a name="ln1931">  }</a>
+<a name="ln1932"> </a>
+<a name="ln1933">  g_free(conf_db);</a>
+<a name="ln1934">}</a>
+<a name="ln1935"> </a>
+<a name="ln1936">/* delete old mipmaps files */</a>
+<a name="ln1937">static void _database_delete_mipmaps_files()</a>
+<a name="ln1938">{</a>
+<a name="ln1939">  /* This migration is intended to be run only from 0.9.x to new cache in 1.0 */</a>
+<a name="ln1940"> </a>
+<a name="ln1941">  // Directory</a>
+<a name="ln1942">  char cachedir[PATH_MAX] = { 0 }, mipmapfilename[PATH_MAX] = { 0 };</a>
+<a name="ln1943">  dt_loc_get_user_cache_dir(cachedir, sizeof(cachedir));</a>
+<a name="ln1944"> </a>
+<a name="ln1945">  snprintf(mipmapfilename, sizeof(mipmapfilename), &quot;%s/mipmaps&quot;, cachedir);</a>
+<a name="ln1946"> </a>
+<a name="ln1947">  if(access(mipmapfilename, F_OK) != -1)</a>
+<a name="ln1948">  {</a>
+<a name="ln1949">    fprintf(stderr, &quot;[mipmap_cache] dropping old version file: %s\n&quot;, mipmapfilename);</a>
+<a name="ln1950">    g_unlink(mipmapfilename);</a>
+<a name="ln1951"> </a>
+<a name="ln1952">    snprintf(mipmapfilename, sizeof(mipmapfilename), &quot;%s/mipmaps.fallback&quot;, cachedir);</a>
+<a name="ln1953"> </a>
+<a name="ln1954">    if(access(mipmapfilename, F_OK) != -1) g_unlink(mipmapfilename);</a>
+<a name="ln1955">  }</a>
+<a name="ln1956">}</a>
+<a name="ln1957"> </a>
+<a name="ln1958">gboolean dt_database_get_lock_acquired(const dt_database_t *db)</a>
+<a name="ln1959">{</a>
+<a name="ln1960">  return db-&gt;lock_acquired;</a>
+<a name="ln1961">}</a>
+<a name="ln1962"> </a>
+<a name="ln1963">// modelines: These editor modelines have been set for all relevant files by tools/update_modelines.sh</a>
+<a name="ln1964">// vim: shiftwidth=2 expandtab tabstop=2 cindent</a>
+<a name="ln1965">// kate: tab-indents: off; indent-width 2; replace-tabs on; indent-mode cstyle; remove-trailing-spaces modified;</a>
+
+</code></pre>
+<div class="balloon" rel="1502"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v618/" target="_blank">V618</a> It's dangerous to call the 'g_strdup_printf' function in such a manner, as the line being passed could contain format specification. The example of the safe code: printf("%s", str);</p></div>
+
+<link rel="stylesheet" href="highlight.css">
+<script src="highlight.pack.js"></script>
+<script src="highlightjs-line-numbers.js"></script>
+<script>hljs.initHighlightingOnLoad();</script>
+<script>hljs.initLineNumbersOnLoad();</script>
+<script>
+  $(document).ready(function() {
+      $('.balloon').each(function () {
+          var bl = $(this);
+          var line = bl.attr('rel');
+          var text = $('a[name="ln'+line+'"]').text();
+
+          var space_count = 0;
+          for(var i = 0; i<text.length; i++){
+              var char = text[i];
+              if((char !== ' ')&&(char !== '\t'))break;
+              if(char === '\t')space_count++;
+              space_count++;
+          }
+
+          bl.css('margin-left', space_count*8);
+          $('a[name="ln'+line+'"]').after(bl);
+      });
+
+      window.location = window.location;
+  });
+</script>
+</body>
+</html>

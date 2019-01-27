@@ -1,0 +1,656 @@
+
+<html>
+<head>
+  <link rel="stylesheet" href="../style.css"/>
+  <script src="../jquery-3.2.1.min.js"></script>
+</head>
+<body>
+<pre><code class = "cpp">
+<a name="ln1">/*</a>
+<a name="ln2"> *    This file is part of darktable,</a>
+<a name="ln3"> *    copyright (c) 2016 tobias ellinghaus.</a>
+<a name="ln4"> *</a>
+<a name="ln5"> *    darktable is free software: you can redistribute it and/or modify</a>
+<a name="ln6"> *    it under the terms of the GNU General Public License as published by</a>
+<a name="ln7"> *    the Free Software Foundation, either version 3 of the License, or</a>
+<a name="ln8"> *    (at your option) any later version.</a>
+<a name="ln9"> *</a>
+<a name="ln10"> *    darktable is distributed in the hope that it will be useful,</a>
+<a name="ln11"> *    but WITHOUT ANY WARRANTY; without even the implied warranty of</a>
+<a name="ln12"> *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the</a>
+<a name="ln13"> *    GNU General Public License for more details.</a>
+<a name="ln14"> *</a>
+<a name="ln15"> *    You should have received a copy of the GNU General Public License</a>
+<a name="ln16"> *    along with darktable.  If not, see &lt;http://www.gnu.org/licenses/&gt;.</a>
+<a name="ln17"> */</a>
+<a name="ln18"> </a>
+<a name="ln19">#include &lt;lcms2.h&gt;</a>
+<a name="ln20">#include &lt;stdio.h&gt;</a>
+<a name="ln21">#include &lt;stdlib.h&gt;</a>
+<a name="ln22">#include &lt;string.h&gt;</a>
+<a name="ln23"> </a>
+<a name="ln24">#pragma GCC diagnostic ignored &quot;-Wshadow&quot;</a>
+<a name="ln25"> </a>
+<a name="ln26">#include &quot;colorchart.h&quot;</a>
+<a name="ln27"> </a>
+<a name="ln28">#define MAX_LINE_LENGTH 512</a>
+<a name="ln29"> </a>
+<a name="ln30">typedef enum parser_state_t {</a>
+<a name="ln31">  BLOCK_NONE = 0,</a>
+<a name="ln32">  BLOCK_BOXES,</a>
+<a name="ln33">  BLOCK_BOX_SHRINK,</a>
+<a name="ln34">  BLOCK_REF_ROTATION,</a>
+<a name="ln35">  BLOCK_XLIST,</a>
+<a name="ln36">  BLOCK_YLIST,</a>
+<a name="ln37">  BLOCK_EXPECTED</a>
+<a name="ln38">} parser_state_t;</a>
+<a name="ln39"> </a>
+<a name="ln40">void free_chart(chart_t *chart)</a>
+<a name="ln41">{</a>
+<a name="ln42">  if(!chart) return;</a>
+<a name="ln43">  g_list_free_full(chart-&gt;f_list, free);</a>
+<a name="ln44">  if(chart-&gt;d_table) g_hash_table_unref(chart-&gt;d_table);</a>
+<a name="ln45">  if(chart-&gt;box_table) g_hash_table_unref(chart-&gt;box_table);</a>
+<a name="ln46">  if(chart-&gt;patch_sets) g_hash_table_unref(chart-&gt;patch_sets);</a>
+<a name="ln47">  free(chart);</a>
+<a name="ln48">}</a>
+<a name="ln49"> </a>
+<a name="ln50">static char *parse_string(char **c)</a>
+<a name="ln51">{</a>
+<a name="ln52">  while(**c == ' ' || **c == '\t') (*c)++;</a>
+<a name="ln53">  char *result = *c;</a>
+<a name="ln54">  while(**c != ' ' &amp;&amp; **c != '\t' &amp;&amp; **c != '\0' &amp;&amp; **c != '\n') (*c)++;</a>
+<a name="ln55">  *(*c)++ = '\0';</a>
+<a name="ln56">  return result;</a>
+<a name="ln57">}</a>
+<a name="ln58"> </a>
+<a name="ln59">static double parse_double(char **c)</a>
+<a name="ln60">{</a>
+<a name="ln61">  while(**c == ' ' || **c == '\t') (*c)++;</a>
+<a name="ln62">  double result = g_ascii_strtod(*c, c);</a>
+<a name="ln63">  *((*c) - 1) = '\0';</a>
+<a name="ln64">  return result;</a>
+<a name="ln65">}</a>
+<a name="ln66"> </a>
+<a name="ln67">// this is not the code from argyll but a rewrite!</a>
+<a name="ln68">static int strinc(char *label, size_t buffer_size)</a>
+<a name="ln69">{</a>
+<a name="ln70">  size_t label_len = strlen(label);</a>
+<a name="ln71">  char *c = label + label_len - 1;</a>
+<a name="ln72">  while(c &gt;= label)</a>
+<a name="ln73">  {</a>
+<a name="ln74">    char carry_over = 0;</a>
+<a name="ln75">    switch(*c)</a>
+<a name="ln76">    {</a>
+<a name="ln77">      case 'z':</a>
+<a name="ln78">      case 'Z':</a>
+<a name="ln79">        *c -= 25;</a>
+<a name="ln80">        carry_over = *c;</a>
+<a name="ln81">        break;</a>
+<a name="ln82">      case '9':</a>
+<a name="ln83">        *c = '0';</a>
+<a name="ln84">        carry_over = '1';</a>
+<a name="ln85">        break;</a>
+<a name="ln86">      default:</a>
+<a name="ln87">        (*c)++;</a>
+<a name="ln88">    }</a>
+<a name="ln89">    if(!carry_over)</a>
+<a name="ln90">      break;</a>
+<a name="ln91">    else if(c == label)</a>
+<a name="ln92">    {</a>
+<a name="ln93">      if(label_len + 1 &gt;= buffer_size) return 0;</a>
+<a name="ln94">      memmove(c + 1, c, label_len + 1);</a>
+<a name="ln95">      *c = carry_over;</a>
+<a name="ln96">    }</a>
+<a name="ln97">    c--;</a>
+<a name="ln98">  }</a>
+<a name="ln99">  return 1;</a>
+<a name="ln100">}</a>
+<a name="ln101"> </a>
+<a name="ln102">void set_color(box_t *box, dt_colorspaces_color_profile_type_t color_space, float c0, float c1, float c2)</a>
+<a name="ln103">{</a>
+<a name="ln104">  box-&gt;color_space = color_space;</a>
+<a name="ln105">  box-&gt;color[0] = c0;</a>
+<a name="ln106">  box-&gt;color[1] = c1;</a>
+<a name="ln107">  box-&gt;color[2] = c2;</a>
+<a name="ln108"> </a>
+<a name="ln109">  float Lab[3] = { c0, c1, c2 };</a>
+<a name="ln110">  float XYZ[3] = { c0 * 0.01, c1 * 0.01, c2 * 0.01 };</a>
+<a name="ln111"> </a>
+<a name="ln112">  switch(color_space)</a>
+<a name="ln113">  {</a>
+<a name="ln114">    default:</a>
+<a name="ln115">    case DT_COLORSPACE_NONE:</a>
+<a name="ln116">      for(int c = 0; c &lt; 3; c++) box-&gt;rgb[c] = 0.0;</a>
+<a name="ln117">      break;</a>
+<a name="ln118">    case DT_COLORSPACE_LAB:</a>
+<a name="ln119">      dt_Lab_to_XYZ(Lab, XYZ);</a>
+<a name="ln120">    case DT_COLORSPACE_XYZ:</a>
+<a name="ln121">      dt_XYZ_to_sRGB_clipped(XYZ, box-&gt;rgb);</a>
+<a name="ln122">      break;</a>
+<a name="ln123">  }</a>
+<a name="ln124">}</a>
+<a name="ln125"> </a>
+<a name="ln126">static void free_labels_list(gpointer data)</a>
+<a name="ln127">{</a>
+<a name="ln128">  g_list_free_full((GList *)data, g_free);</a>
+<a name="ln129">}</a>
+<a name="ln130"> </a>
+<a name="ln131">// In some environments ERROR is already defined, ie: WIN32</a>
+<a name="ln132">#if defined(ERROR)</a>
+<a name="ln133">#undef ERROR</a>
+<a name="ln134">#endif // defined (ERROR)</a>
+<a name="ln135"> </a>
+<a name="ln136">#define ERROR                                                                                                     \</a>
+<a name="ln137">  {                                                                                                               \</a>
+<a name="ln138">    lineno = __LINE__;                                                                                            \</a>
+<a name="ln139">    goto error;                                                                                                   \</a>
+<a name="ln140">  }</a>
+<a name="ln141">// according to cht_format.html from argyll:</a>
+<a name="ln142">// &quot;The keywords and associated data must be used in the following order: BOXES, BOX_SHRINK, REF_ROTATION,</a>
+<a name="ln143">// XLIST, YLIST and EXPECTED.&quot;</a>
+<a name="ln144">chart_t *parse_cht(const char *filename)</a>
+<a name="ln145">{</a>
+<a name="ln146">  chart_t *result = (chart_t *)calloc(1, sizeof(chart_t));</a>
+<a name="ln147">  int lineno = 0;</a>
+<a name="ln148"> </a>
+<a name="ln149">  FILE *fp = g_fopen(filename, &quot;rb&quot;);</a>
+<a name="ln150">  if(!fp)</a>
+<a name="ln151">  {</a>
+<a name="ln152">    fprintf(stderr, &quot;error opening `%s'\n&quot;, filename);</a>
+<a name="ln153">    ERROR;</a>
+<a name="ln154">  }</a>
+<a name="ln155"> </a>
+<a name="ln156">  // parser control</a>
+<a name="ln157">  char line[MAX_LINE_LENGTH] = { 0 };</a>
+<a name="ln158">  parser_state_t last_block = BLOCK_NONE;</a>
+<a name="ln159">  int skip_block = 0;</a>
+<a name="ln160"> </a>
+<a name="ln161">  // data gathered from the CHT file</a>
+<a name="ln162">  unsigned int n_boxes;</a>
+<a name="ln163">  result-&gt;d_table = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, free);</a>
+<a name="ln164">  result-&gt;box_table = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, free);</a>
+<a name="ln165">  result-&gt;patch_sets = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, free_labels_list);</a>
+<a name="ln166"> </a>
+<a name="ln167">  float x_min = FLT_MAX, x_max = FLT_MIN, y_min = FLT_MAX, y_max = FLT_MIN;</a>
+<a name="ln168"> </a>
+<a name="ln169">  // main loop over the input file</a>
+<a name="ln170">  while(fgets(line, MAX_LINE_LENGTH, fp))</a>
+<a name="ln171">  {</a>
+<a name="ln172">    if(line[0] == '\0' || line[0] == '\n')</a>
+<a name="ln173">    {</a>
+<a name="ln174">      skip_block = 0;</a>
+<a name="ln175">      continue;</a>
+<a name="ln176">    }</a>
+<a name="ln177">    if(skip_block) continue;</a>
+<a name="ln178"> </a>
+<a name="ln179">    // we should be at the start of a block now</a>
+<a name="ln180">    char *c = line;</a>
+<a name="ln181">    ssize_t len = strlen(line);</a>
+<a name="ln182">    char *keyword = parse_string(&amp;c);</a>
+<a name="ln183"> </a>
+<a name="ln184">    if(!g_strcmp0(keyword, &quot;BOXES&quot;) &amp;&amp; last_block &lt; BLOCK_BOXES)</a>
+<a name="ln185">    {</a>
+<a name="ln186">      last_block = BLOCK_BOXES;</a>
+<a name="ln187">      if(c - line &gt;= len) ERROR;</a>
+<a name="ln188">      n_boxes = parse_double(&amp;c);</a>
+<a name="ln189"> </a>
+<a name="ln190">      // let's have another loop reading from the file.</a>
+<a name="ln191">      while(fgets(line, MAX_LINE_LENGTH, fp))</a>
+<a name="ln192">      {</a>
+<a name="ln193">        if(line[0] == '\0' || line[0] == '\n') break;</a>
+<a name="ln194"> </a>
+<a name="ln195">        char *c = line;</a>
+<a name="ln196">        ssize_t len = strlen(line);</a>
+<a name="ln197">        while(*c == ' ') c++;</a>
+<a name="ln198">        if(*c == 'F')</a>
+<a name="ln199">        {</a>
+<a name="ln200">          float x0, y0, x1, y1, x2, y2, x3, y3;</a>
+<a name="ln201">          // using sscanf would be nice, but parsing floats does only work with LANG=C</a>
+<a name="ln202">          // if(sscanf(line, &quot; F _ _ %f %f %f %f %f %f %f %f&quot;, &amp;x0, &amp;y0, &amp;x1, &amp;y1, &amp;x2, &amp;y2, &amp;x3, &amp;y3) != 8)</a>
+<a name="ln203">          // ERROR;</a>
+<a name="ln204">          c++;</a>
+<a name="ln205">          while(*c == ' ') c++;</a>
+<a name="ln206">          if(*c++ != '_') ERROR;</a>
+<a name="ln207">          while(*c == ' ') c++;</a>
+<a name="ln208">          if(*c++ != '_') ERROR;</a>
+<a name="ln209">          while(*c == ' ') c++;</a>
+<a name="ln210">          if(c - line &gt;= len) ERROR;</a>
+<a name="ln211">          x0 = parse_double(&amp;c);</a>
+<a name="ln212">          if(c - line &gt;= len) ERROR;</a>
+<a name="ln213">          y0 = parse_double(&amp;c);</a>
+<a name="ln214">          if(c - line &gt;= len) ERROR;</a>
+<a name="ln215">          x1 = parse_double(&amp;c);</a>
+<a name="ln216">          if(c - line &gt;= len) ERROR;</a>
+<a name="ln217">          y1 = parse_double(&amp;c);</a>
+<a name="ln218">          if(c - line &gt;= len) ERROR;</a>
+<a name="ln219">          x2 = parse_double(&amp;c);</a>
+<a name="ln220">          if(c - line &gt;= len) ERROR;</a>
+<a name="ln221">          y2 = parse_double(&amp;c);</a>
+<a name="ln222">          if(c - line &gt;= len) ERROR;</a>
+<a name="ln223">          x3 = parse_double(&amp;c);</a>
+<a name="ln224">          if(c - line &gt;= len) ERROR;</a>
+<a name="ln225">          y3 = parse_double(&amp;c);</a>
+<a name="ln226"> </a>
+<a name="ln227">          x_min = MIN(x_min, x0);</a>
+<a name="ln228">          x_min = MIN(x_min, x1);</a>
+<a name="ln229">          x_min = MIN(x_min, x2);</a>
+<a name="ln230">          x_min = MIN(x_min, x3);</a>
+<a name="ln231"> </a>
+<a name="ln232">          y_min = MIN(y_min, y0);</a>
+<a name="ln233">          y_min = MIN(y_min, y1);</a>
+<a name="ln234">          y_min = MIN(y_min, y2);</a>
+<a name="ln235">          y_min = MIN(y_min, y3);</a>
+<a name="ln236"> </a>
+<a name="ln237">          x_max = MAX(x_max, x0);</a>
+<a name="ln238">          x_max = MAX(x_max, x1);</a>
+<a name="ln239">          x_max = MAX(x_max, x2);</a>
+<a name="ln240">          x_max = MAX(x_max, x3);</a>
+<a name="ln241"> </a>
+<a name="ln242">          y_max = MAX(y_max, y0);</a>
+<a name="ln243">          y_max = MAX(y_max, y1);</a>
+<a name="ln244">          y_max = MAX(y_max, y2);</a>
+<a name="ln245">          y_max = MAX(y_max, y3);</a>
+<a name="ln246"> </a>
+<a name="ln247">          f_line_t *l = (f_line_t *)malloc(sizeof(f_line_t));</a>
+<a name="ln248"> </a>
+<a name="ln249">          l-&gt;p[0].x = x0;</a>
+<a name="ln250">          l-&gt;p[0].y = y0;</a>
+<a name="ln251">          l-&gt;p[1].x = x1;</a>
+<a name="ln252">          l-&gt;p[1].y = y1;</a>
+<a name="ln253">          l-&gt;p[2].x = x2;</a>
+<a name="ln254">          l-&gt;p[2].y = y2;</a>
+<a name="ln255">          l-&gt;p[3].x = x3;</a>
+<a name="ln256">          l-&gt;p[3].y = y3;</a>
+<a name="ln257"> </a>
+<a name="ln258">          result-&gt;f_list = g_list_append(result-&gt;f_list, l);</a>
+<a name="ln259">        }</a>
+<a name="ln260">        // these get parsed the same way</a>
+<a name="ln261">        else if((*c == 'D') || (*c == 'X') || (*c == 'Y'))</a>
+<a name="ln262">        {</a>
+<a name="ln263">          char kl, *lxs, *lxe, *lys, *lye;</a>
+<a name="ln264">          float w, h, xo, yo, xi, yi;</a>
+<a name="ln265">          kl = *c;</a>
+<a name="ln266">          *c++ = '\0';</a>
+<a name="ln267"> </a>
+<a name="ln268">          if(c - line &gt;= len) ERROR;</a>
+<a name="ln269">          lxs = parse_string(&amp;c);</a>
+<a name="ln270">          if(c - line &gt;= len) ERROR;</a>
+<a name="ln271">          lxe = parse_string(&amp;c);</a>
+<a name="ln272">          if(c - line &gt;= len) ERROR;</a>
+<a name="ln273">          lys = parse_string(&amp;c);</a>
+<a name="ln274">          if(c - line &gt;= len) ERROR;</a>
+<a name="ln275">          lye = parse_string(&amp;c);</a>
+<a name="ln276"> </a>
+<a name="ln277">          if(c - line &gt;= len) ERROR;</a>
+<a name="ln278">          w = parse_double(&amp;c);</a>
+<a name="ln279">          if(c - line &gt;= len) ERROR;</a>
+<a name="ln280">          h = parse_double(&amp;c);</a>
+<a name="ln281">          if(c - line &gt;= len) ERROR;</a>
+<a name="ln282">          xo = parse_double(&amp;c);</a>
+<a name="ln283">          if(c - line &gt;= len) ERROR;</a>
+<a name="ln284">          yo = parse_double(&amp;c);</a>
+<a name="ln285">          if(c - line &gt;= len) ERROR;</a>
+<a name="ln286">          xi = parse_double(&amp;c);</a>
+<a name="ln287">          if(c - line &gt;= len) ERROR;</a>
+<a name="ln288">          yi = parse_double(&amp;c);</a>
+<a name="ln289"> </a>
+<a name="ln290">          x_min = MIN(x_min, xo);</a>
+<a name="ln291">          y_min = MIN(y_min, yo);</a>
+<a name="ln292"> </a>
+<a name="ln293">          int x_steps = 1, y_steps = 1;</a>
+<a name="ln294">          size_t lxs_len = strlen(lxs), lxe_len = strlen(lxe), lys_len = strlen(lys), lye_len = strlen(lye);</a>
+<a name="ln295">          if(lxs_len &gt; lxe_len || lys_len &gt; lye_len) ERROR;</a>
+<a name="ln296"> </a>
+<a name="ln297">          // make sure there is enough room to add another char in the beginning</a>
+<a name="ln298">          const size_t x_label_size = lxe_len + 1;</a>
+<a name="ln299">          const size_t y_label_size = lye_len + 1;</a>
+<a name="ln300"> </a>
+<a name="ln301">          char *x_label = malloc(x_label_size * sizeof(char));</a>
+<a name="ln302">          char *y_label = malloc(y_label_size * sizeof(char));</a>
+<a name="ln303"> </a>
+<a name="ln304">          char *first_label = NULL, *last_label = NULL;</a>
+<a name="ln305">          GList *labels = NULL;</a>
+<a name="ln306"> </a>
+<a name="ln307">          float y = yo;</a>
+<a name="ln308">          memcpy(y_label, lys, lys_len + 1);</a>
+<a name="ln309">          while(1)</a>
+<a name="ln310">          {</a>
+<a name="ln311">            float x = xo;</a>
+<a name="ln312">            memcpy(x_label, lxs, lxs_len + 1);</a>
+<a name="ln313">            while(1)</a>
+<a name="ln314">            {</a>
+<a name="ln315">              // build the label of the box</a>
+<a name="ln316">              char *label;</a>
+<a name="ln317">              if(!g_strcmp0(x_label, &quot;_&quot;))</a>
+<a name="ln318">                label = g_strdup(y_label);</a>
+<a name="ln319">              else if(!g_strcmp0(y_label, &quot;_&quot;))</a>
+<a name="ln320">                label = g_strdup(x_label);</a>
+<a name="ln321">              else</a>
+<a name="ln322">              {</a>
+<a name="ln323">                if(kl == 'Y')</a>
+<a name="ln324">                  label = g_strconcat(y_label, x_label, NULL);</a>
+<a name="ln325">                else</a>
+<a name="ln326">                  label = g_strconcat(x_label, y_label, NULL);</a>
+<a name="ln327">              }</a>
+<a name="ln328"> </a>
+<a name="ln329">              if(!first_label) first_label = label;</a>
+<a name="ln330">              last_label = label;</a>
+<a name="ln331"> </a>
+<a name="ln332">              // store it</a>
+<a name="ln333">              box_t *box = (box_t *)calloc(1, sizeof(box_t));</a>
+<a name="ln334">              box-&gt;p.x = x;</a>
+<a name="ln335">              box-&gt;p.y = y;</a>
+<a name="ln336">              box-&gt;w = w;</a>
+<a name="ln337">              box-&gt;h = h;</a>
+<a name="ln338">              box-&gt;color_space = DT_COLORSPACE_NONE; // no color for this box yet</a>
+<a name="ln339">              if(kl == 'D')</a>
+<a name="ln340">                g_hash_table_insert(result-&gt;d_table, label, box);</a>
+<a name="ln341">              else</a>
+<a name="ln342">                g_hash_table_insert(result-&gt;box_table, label, box);</a>
+<a name="ln343">              if(kl == 'X' || kl == 'Y') labels = g_list_append(labels, g_strdup(label));</a>
+<a name="ln344"> </a>
+<a name="ln345">              // increment in x direction</a>
+<a name="ln346">              if(!g_strcmp0(x_label, lxe)) break;</a>
+<a name="ln347">              x += xi;</a>
+<a name="ln348">              x_steps++;</a>
+<a name="ln349">              if(!strinc(x_label, x_label_size)) ERROR;</a>
+<a name="ln350">            }</a>
+<a name="ln351">            x_max = MAX(x_max, x + w);</a>
+<a name="ln352">            // increment in y direction</a>
+<a name="ln353">            if(!g_strcmp0(y_label, lye)) break;</a>
+<a name="ln354">            y += yi;</a>
+<a name="ln355">            y_steps++;</a>
+<a name="ln356">            if(!strinc(y_label, y_label_size)) ERROR;</a>
+<a name="ln357">          }</a>
+<a name="ln358">          y_max = MAX(y_max, y + h);</a>
+<a name="ln359">          if(kl == 'X' || kl == 'Y')</a>
+<a name="ln360">            g_hash_table_insert(result-&gt;patch_sets, g_strdup_printf(&quot;%s .. %s&quot;, first_label, last_label), labels);</a>
+<a name="ln361"> </a>
+<a name="ln362">          free(y_label);</a>
+<a name="ln363">          free(x_label);</a>
+<a name="ln364">        }</a>
+<a name="ln365">        else</a>
+<a name="ln366">          ERROR;</a>
+<a name="ln367">      }</a>
+<a name="ln368"> </a>
+<a name="ln369">      if(n_boxes != g_hash_table_size(result-&gt;d_table) + g_hash_table_size(result-&gt;box_table)) ERROR;</a>
+<a name="ln370"> </a>
+<a name="ln371">      // all the box lines are read and we know the bounding box,</a>
+<a name="ln372">      // so let's scale all the values to have a bounding box with the longer side having length 1 and start</a>
+<a name="ln373">      // at (0, 0)</a>
+<a name="ln374"> </a>
+<a name="ln375">      result-&gt;bb_w = x_max - x_min;</a>
+<a name="ln376">      result-&gt;bb_h = y_max - y_min;</a>
+<a name="ln377"> </a>
+<a name="ln378">#define SCALE_X(x) x = (x - x_min) / result-&gt;bb_w</a>
+<a name="ln379">#define SCALE_Y(y) y = (y - y_min) / result-&gt;bb_h</a>
+<a name="ln380"> </a>
+<a name="ln381">      GList *iter = result-&gt;f_list;</a>
+<a name="ln382">      while(iter)</a>
+<a name="ln383">      {</a>
+<a name="ln384">        f_line_t *f = iter-&gt;data;</a>
+<a name="ln385">        for(int i = 0; i &lt; 4; i++)</a>
+<a name="ln386">        {</a>
+<a name="ln387">          SCALE_X(f-&gt;p[i].x);</a>
+<a name="ln388">          SCALE_Y(f-&gt;p[i].y);</a>
+<a name="ln389">        }</a>
+<a name="ln390">        iter = g_list_next(iter);</a>
+<a name="ln391">      }</a>
+<a name="ln392"> </a>
+<a name="ln393">      GHashTableIter table_iter;</a>
+<a name="ln394">      gpointer key, value;</a>
+<a name="ln395"> </a>
+<a name="ln396">      g_hash_table_iter_init(&amp;table_iter, result-&gt;d_table);</a>
+<a name="ln397">      while(g_hash_table_iter_next(&amp;table_iter, &amp;key, &amp;value))</a>
+<a name="ln398">      {</a>
+<a name="ln399">        box_t *box = (box_t *)value;</a>
+<a name="ln400">        SCALE_X(box-&gt;p.x);</a>
+<a name="ln401">        SCALE_Y(box-&gt;p.y);</a>
+<a name="ln402">        box-&gt;w /= result-&gt;bb_w;</a>
+<a name="ln403">        box-&gt;h /= result-&gt;bb_h;</a>
+<a name="ln404">      }</a>
+<a name="ln405"> </a>
+<a name="ln406">      g_hash_table_iter_init(&amp;table_iter, result-&gt;box_table);</a>
+<a name="ln407">      while(g_hash_table_iter_next(&amp;table_iter, &amp;key, &amp;value))</a>
+<a name="ln408">      {</a>
+<a name="ln409">        box_t *box = (box_t *)value;</a>
+<a name="ln410">        SCALE_X(box-&gt;p.x);</a>
+<a name="ln411">        SCALE_Y(box-&gt;p.y);</a>
+<a name="ln412">        box-&gt;w /= result-&gt;bb_w;</a>
+<a name="ln413">        box-&gt;h /= result-&gt;bb_h;</a>
+<a name="ln414">      }</a>
+<a name="ln415"> </a>
+<a name="ln416">#undef SCALE_X</a>
+<a name="ln417">#undef SCALE_Y</a>
+<a name="ln418">    }</a>
+<a name="ln419">    else if(!g_strcmp0(keyword, &quot;BOX_SHRINK&quot;) &amp;&amp; last_block &lt; BLOCK_BOX_SHRINK)</a>
+<a name="ln420">    {</a>
+<a name="ln421">      last_block = BLOCK_BOX_SHRINK;</a>
+<a name="ln422">      if(c - line &gt;= len) ERROR;</a>
+<a name="ln423">      result-&gt;box_shrink = parse_double(&amp;c);</a>
+<a name="ln424">    }</a>
+<a name="ln425">    else if(!g_strcmp0(keyword, &quot;REF_ROTATION&quot;) &amp;&amp; last_block &lt; BLOCK_REF_ROTATION)</a>
+<a name="ln426">    {</a>
+<a name="ln427">      last_block = BLOCK_REF_ROTATION;</a>
+<a name="ln428">      if(c - line &gt;= len) ERROR;</a>
+<a name="ln429">      result-&gt;ref_rotation = parse_double(&amp;c);</a>
+<a name="ln430">    }</a>
+<a name="ln431">    else if(!g_strcmp0(keyword, &quot;XLIST&quot;) &amp;&amp; last_block &lt; BLOCK_XLIST)</a>
+<a name="ln432">    {</a>
+<a name="ln433">      last_block = BLOCK_XLIST;</a>
+<a name="ln434">      // skip until empty line, we don't care about these</a>
+<a name="ln435">      skip_block = 1;</a>
+<a name="ln436">    }</a>
+<a name="ln437">    else if(!g_strcmp0(keyword, &quot;YLIST&quot;) &amp;&amp; last_block &lt; BLOCK_YLIST)</a>
+<a name="ln438">    {</a>
+<a name="ln439">      last_block = BLOCK_YLIST;</a>
+<a name="ln440">      // skip until empty line, we don't care about these</a>
+<a name="ln441">      skip_block = 1;</a>
+<a name="ln442">    }</a>
+<a name="ln443">    else if(!g_strcmp0(keyword, &quot;EXPECTED&quot;) &amp;&amp; last_block &lt; BLOCK_EXPECTED)</a>
+<a name="ln444">    {</a>
+<a name="ln445">      last_block = BLOCK_EXPECTED;</a>
+<a name="ln446">      dt_colorspaces_color_profile_type_t color_space = DT_COLORSPACE_NONE;</a>
+<a name="ln447">      if(c - line &gt;= len) ERROR;</a>
+<a name="ln448">      char *cs = parse_string(&amp;c);</a>
+<a name="ln449">      if(c - line &gt;= len) ERROR;</a>
+<a name="ln450">      unsigned int n_colors = parse_double(&amp;c);</a>
+<a name="ln451"> </a>
+<a name="ln452">      if(!g_strcmp0(cs, &quot;XYZ&quot;))</a>
+<a name="ln453">        color_space = DT_COLORSPACE_XYZ;</a>
+<a name="ln454">      else if(!g_strcmp0(cs, &quot;LAB&quot;))</a>
+<a name="ln455">        color_space = DT_COLORSPACE_LAB;</a>
+<a name="ln456">      else</a>
+<a name="ln457">        ERROR;</a>
+<a name="ln458"> </a>
+<a name="ln459">      // read and store the numbers.</a>
+<a name="ln460">      // we use them 1) to draw visual hints on the grid and 2) as a fallback reference set</a>
+<a name="ln461"> </a>
+<a name="ln462">      // let's have another loop reading from the file.</a>
+<a name="ln463">      while(fgets(line, MAX_LINE_LENGTH, fp))</a>
+<a name="ln464">      {</a>
+<a name="ln465">        if(line[0] == '\0' || line[0] == '\n') break;</a>
+<a name="ln466">        n_colors--;</a>
+<a name="ln467">        ssize_t len = strlen(line);</a>
+<a name="ln468">        char *c = line;</a>
+<a name="ln469"> </a>
+<a name="ln470">        char *label = parse_string(&amp;c);</a>
+<a name="ln471">        box_t *box = (box_t *)g_hash_table_lookup(result-&gt;box_table, label);</a>
+<a name="ln472">        if(!box) ERROR;</a>
+<a name="ln473"> </a>
+<a name="ln474">        if(c - line &gt;= len) ERROR;</a>
+<a name="ln475">        float c0 = parse_double(&amp;c);</a>
+<a name="ln476">        if(c - line &gt;= len) ERROR;</a>
+<a name="ln477">        float c1 = parse_double(&amp;c);</a>
+<a name="ln478">        if(c - line &gt;= len) ERROR;</a>
+<a name="ln479">        float c2 = parse_double(&amp;c);</a>
+<a name="ln480">        set_color(box, color_space, c0, c1, c2);</a>
+<a name="ln481">      }</a>
+<a name="ln482">      if(n_colors != 0) ERROR;</a>
+<a name="ln483">    }</a>
+<a name="ln484">    else</a>
+<a name="ln485">    {</a>
+<a name="ln486">      fprintf(stderr, &quot;unknown keyword `%s'\n&quot;, keyword);</a>
+<a name="ln487">      ERROR;</a>
+<a name="ln488">    }</a>
+<a name="ln489">  }</a>
+<a name="ln490"> </a>
+<a name="ln491">  fprintf(stderr, &quot;cht `%s' done\n&quot;, filename);</a>
+<a name="ln492">  goto end;</a>
+<a name="ln493"> </a>
+<a name="ln494">error:</a>
+<a name="ln495">  fprintf(stderr, &quot;error parsing CHT file, (%s:%d)\n&quot;, __FUNCTION__, lineno);</a>
+<a name="ln496">  // clean up</a>
+<a name="ln497">  free_chart(result);</a>
+<a name="ln498">  result = NULL;</a>
+<a name="ln499"> </a>
+<a name="ln500">end:</a>
+<a name="ln501">  if(fp) fclose(fp);</a>
+<a name="ln502">  return result;</a>
+<a name="ln503">}</a>
+<a name="ln504"> </a>
+<a name="ln505">int parse_it8(const char *filename, chart_t *chart)</a>
+<a name="ln506">{</a>
+<a name="ln507">  int result = 1;</a>
+<a name="ln508">  cmsHANDLE hIT8 = cmsIT8LoadFromFile(NULL, filename);</a>
+<a name="ln509">  if(!hIT8)</a>
+<a name="ln510">  {</a>
+<a name="ln511">    fprintf(stderr, &quot;error loading IT8 file `%s'\n&quot;, filename);</a>
+<a name="ln512">    goto error;</a>
+<a name="ln513">  }</a>
+<a name="ln514"> </a>
+<a name="ln515">  if(cmsIT8TableCount(hIT8) != 1)</a>
+<a name="ln516">  {</a>
+<a name="ln517">    fprintf(stderr, &quot;error with the IT8 file, we only support files with one table at the moment\n&quot;);</a>
+<a name="ln518">    goto error;</a>
+<a name="ln519">  }</a>
+<a name="ln520"> </a>
+<a name="ln521">  dt_colorspaces_color_profile_type_t color_space = DT_COLORSPACE_NONE;</a>
+<a name="ln522">  int column_SAMPLE_ID = -1, column_X = -1, column_Y = -1, column_Z = -1, column_L = -1, column_a = -1,</a>
+<a name="ln523">      column_b = -1;</a>
+<a name="ln524">  char **sample_names = NULL;</a>
+<a name="ln525">  int n_columns = cmsIT8EnumDataFormat(hIT8, &amp;sample_names);</a>
+<a name="ln526"> </a>
+<a name="ln527">  if(n_columns == -1)</a>
+<a name="ln528">  {</a>
+<a name="ln529">    fprintf(stderr, &quot;error with the IT8 file, can't get column types\n&quot;);</a>
+<a name="ln530">    goto error;</a>
+<a name="ln531">  }</a>
+<a name="ln532"> </a>
+<a name="ln533">  for(int i = 0; i &lt; n_columns; i++)</a>
+<a name="ln534">  {</a>
+<a name="ln535">    if(!g_strcmp0(sample_names[i], &quot;SAMPLE_ID&quot;))</a>
+<a name="ln536">      column_SAMPLE_ID = i;</a>
+<a name="ln537">    else if(!g_strcmp0(sample_names[i], &quot;XYZ_X&quot;))</a>
+<a name="ln538">      column_X = i;</a>
+<a name="ln539">    else if(!g_strcmp0(sample_names[i], &quot;XYZ_Y&quot;))</a>
+<a name="ln540">      column_Y = i;</a>
+<a name="ln541">    else if(!g_strcmp0(sample_names[i], &quot;XYZ_Z&quot;))</a>
+<a name="ln542">      column_Z = i;</a>
+<a name="ln543">    else if(!g_strcmp0(sample_names[i], &quot;LAB_L&quot;))</a>
+<a name="ln544">      column_L = i;</a>
+<a name="ln545">    else if(!g_strcmp0(sample_names[i], &quot;LAB_A&quot;))</a>
+<a name="ln546">      column_a = i;</a>
+<a name="ln547">    else if(!g_strcmp0(sample_names[i], &quot;LAB_B&quot;))</a>
+<a name="ln548">      column_b = i;</a>
+<a name="ln549">  }</a>
+<a name="ln550"> </a>
+<a name="ln551">  if(column_SAMPLE_ID == -1)</a>
+<a name="ln552">  {</a>
+<a name="ln553">    fprintf(stderr, &quot;error with the IT8 file, can't find the SAMPLE_ID column\n&quot;);</a>
+<a name="ln554">    goto error;</a>
+<a name="ln555">  }</a>
+<a name="ln556"> </a>
+<a name="ln557">  char *columns[3] = { 0 };</a>
+<a name="ln558">  if(column_X != -1 &amp;&amp; column_Y != -1 &amp;&amp; column_Z != -1)</a>
+<a name="ln559">  {</a>
+<a name="ln560">    color_space = DT_COLORSPACE_XYZ;</a>
+<a name="ln561">    columns[0] = &quot;XYZ_X&quot;;</a>
+<a name="ln562">    columns[1] = &quot;XYZ_Y&quot;;</a>
+<a name="ln563">    columns[2] = &quot;XYZ_Z&quot;;</a>
+<a name="ln564">  }</a>
+<a name="ln565">  else if(column_L != -1 &amp;&amp; column_a != -1 &amp;&amp; column_b != -1)</a>
+<a name="ln566">  {</a>
+<a name="ln567">    color_space = DT_COLORSPACE_LAB;</a>
+<a name="ln568">    columns[0] = &quot;LAB_L&quot;;</a>
+<a name="ln569">    columns[1] = &quot;LAB_A&quot;;</a>
+<a name="ln570">    columns[2] = &quot;LAB_B&quot;;</a>
+<a name="ln571">  }</a>
+<a name="ln572">  else</a>
+<a name="ln573">  {</a>
+<a name="ln574">    fprintf(stderr, &quot;error with the IT8 file, can't find XYZ or Lab columns\n&quot;);</a>
+<a name="ln575">    goto error;</a>
+<a name="ln576">  }</a>
+<a name="ln577"> </a>
+<a name="ln578">  GHashTableIter table_iter;</a>
+<a name="ln579">  gpointer key, value;</a>
+<a name="ln580"> </a>
+<a name="ln581">  g_hash_table_iter_init(&amp;table_iter, chart-&gt;box_table);</a>
+<a name="ln582">  while(g_hash_table_iter_next(&amp;table_iter, &amp;key, &amp;value))</a>
+<a name="ln583">  {</a>
+<a name="ln584">    box_t *box = (box_t *)value;</a>
+<a name="ln585"> </a>
+<a name="ln586">    if(cmsIT8GetData(hIT8, key, &quot;SAMPLE_ID&quot;) == NULL)</a>
+<a name="ln587">    {</a>
+<a name="ln588">      fprintf(stderr, &quot;error with the IT8 file, can't find sample `%s'\n&quot;, (char *)key);</a>
+<a name="ln589">      goto error;</a>
+<a name="ln590">    }</a>
+<a name="ln591"> </a>
+<a name="ln592">    set_color(box, color_space, cmsIT8GetDataDbl(hIT8, key, columns[0]), cmsIT8GetDataDbl(hIT8, key, columns[1]),</a>
+<a name="ln593">              cmsIT8GetDataDbl(hIT8, key, columns[2]));</a>
+<a name="ln594">  }</a>
+<a name="ln595"> </a>
+<a name="ln596">  fprintf(stderr, &quot;it8 `%s' done\n&quot;, filename);</a>
+<a name="ln597">  goto end;</a>
+<a name="ln598"> </a>
+<a name="ln599">error:</a>
+<a name="ln600">  result = 0;</a>
+<a name="ln601">end:</a>
+<a name="ln602">  if(hIT8) cmsIT8Free(hIT8);</a>
+<a name="ln603">  return result;</a>
+<a name="ln604">}</a>
+<a name="ln605"> </a>
+<a name="ln606">#undef MAX_LINE_LENGTH</a>
+<a name="ln607"> </a>
+<a name="ln608">// modelines: These editor modelines have been set for all relevant files by tools/update_modelines.sh</a>
+<a name="ln609">// vim: shiftwidth=2 expandtab tabstop=2 cindent</a>
+<a name="ln610">// kate: tab-indents: off; indent-width 2; replace-tabs on; indent-mode cstyle; remove-trailing-spaces</a>
+<a name="ln611">// modified;</a>
+
+</code></pre>
+<div class="balloon" rel="163"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v522/" target="_blank">V522</a> There might be dereferencing of a potential null pointer 'result'. Check lines: 163, 146.</p></div>
+<div class="balloon" rel="249"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v522/" target="_blank">V522</a> There might be dereferencing of a potential null pointer 'l'. Check lines: 249, 247.</p></div>
+<div class="balloon" rel="308"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v575/" target="_blank">V575</a> The potential null pointer is passed into 'memcpy' function. Inspect the first argument. Check lines: 308, 302.</p></div>
+<div class="balloon" rel="312"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v575/" target="_blank">V575</a> The potential null pointer is passed into 'memcpy' function. Inspect the first argument. Check lines: 312, 301.</p></div>
+<div class="balloon" rel="334"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v522/" target="_blank">V522</a> There might be dereferencing of a potential null pointer 'box'. Check lines: 334, 333.</p></div>
+
+<link rel="stylesheet" href="highlight.css">
+<script src="highlight.pack.js"></script>
+<script src="highlightjs-line-numbers.js"></script>
+<script>hljs.initHighlightingOnLoad();</script>
+<script>hljs.initLineNumbersOnLoad();</script>
+<script>
+  $(document).ready(function() {
+      $('.balloon').each(function () {
+          var bl = $(this);
+          var line = bl.attr('rel');
+          var text = $('a[name="ln'+line+'"]').text();
+
+          var space_count = 0;
+          for(var i = 0; i<text.length; i++){
+              var char = text[i];
+              if((char !== ' ')&&(char !== '\t'))break;
+              if(char === '\t')space_count++;
+              space_count++;
+          }
+
+          bl.css('margin-left', space_count*8);
+          $('a[name="ln'+line+'"]').after(bl);
+      });
+
+      window.location = window.location;
+  });
+</script>
+</body>
+</html>

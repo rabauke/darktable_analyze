@@ -1,0 +1,493 @@
+
+<html>
+<head>
+  <link rel="stylesheet" href="../style.css"/>
+  <script src="../jquery-3.2.1.min.js"></script>
+</head>
+<body>
+<pre><code class = "cpp">
+<a name="ln1">/*</a>
+<a name="ln2"> *    This file is part of darktable,</a>
+<a name="ln3"> *    copyright (c) 2016 johannes hanika.</a>
+<a name="ln4"> *</a>
+<a name="ln5"> *    darktable is free software: you can redistribute it and/or modify</a>
+<a name="ln6"> *    it under the terms of the GNU General Public License as published by</a>
+<a name="ln7"> *    the Free Software Foundation, either version 3 of the License, or</a>
+<a name="ln8"> *    (at your option) any later version.</a>
+<a name="ln9"> *</a>
+<a name="ln10"> *    darktable is distributed in the hope that it will be useful,</a>
+<a name="ln11"> *    but WITHOUT ANY WARRANTY; without even the implied warranty of</a>
+<a name="ln12"> *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the</a>
+<a name="ln13"> *    GNU General Public License for more details.</a>
+<a name="ln14"> *</a>
+<a name="ln15"> *    You should have received a copy of the GNU General Public License</a>
+<a name="ln16"> *    along with darktable.  If not, see &lt;http://www.gnu.org/licenses/&gt;.</a>
+<a name="ln17"> */</a>
+<a name="ln18"> </a>
+<a name="ln19">#ifndef MAX</a>
+<a name="ln20">#define MAX(a, b) ((a) &lt; (b) ? (b) : (a))</a>
+<a name="ln21">#endif</a>
+<a name="ln22">#ifndef MIN</a>
+<a name="ln23">#define MIN(a, b) ((a) &gt; (b) ? (b) : (a))</a>
+<a name="ln24">#endif</a>
+<a name="ln25"> </a>
+<a name="ln26">#include &quot;chart/thinplate.h&quot;</a>
+<a name="ln27">#include &quot;chart/deltaE.h&quot;</a>
+<a name="ln28">#include &quot;iop/svd.h&quot;</a>
+<a name="ln29"> </a>
+<a name="ln30">#include &lt;assert.h&gt;</a>
+<a name="ln31">#include &lt;float.h&gt;</a>
+<a name="ln32">#include &lt;stdlib.h&gt;</a>
+<a name="ln33">#include &lt;string.h&gt;</a>
+<a name="ln34"> </a>
+<a name="ln35">// #define REPLACEMENT // either broken code or doesn't help at all</a>
+<a name="ln36">// #define EXACT       // use full solve instead of dot in inner loop</a>
+<a name="ln37"> </a>
+<a name="ln38">// very fast, very approximate</a>
+<a name="ln39">static inline float __attribute__((__unused__)) fasterlog(float x)</a>
+<a name="ln40">{</a>
+<a name="ln41">  union { float f; uint32_t i; } vx = { x };</a>
+<a name="ln42">  float y = vx.i;</a>
+<a name="ln43">  y *= 8.2629582881927490e-8f;</a>
+<a name="ln44">  return y - 87.989971088f;</a>
+<a name="ln45">}</a>
+<a name="ln46"> </a>
+<a name="ln47">// thinplate spline kernel \phi(r)</a>
+<a name="ln48">static inline double thinplate_kernel(const double *x, const double *y)</a>
+<a name="ln49">{</a>
+<a name="ln50">  const double r</a>
+<a name="ln51">      = sqrt((x[0] - y[0]) * (x[0] - y[0]) + (x[1] - y[1]) * (x[1] - y[1]) + (x[2] - y[2]) * (x[2] - y[2]));</a>
+<a name="ln52">  return r * r * logf(MAX(1e-8f, r));</a>
+<a name="ln53">  // even when using both here and in the iop the approximate version,</a>
+<a name="ln54">  // it still doesn't work so well. need to be a bit more precise it seems.</a>
+<a name="ln55">  // return r * r * fasterlog(MAX(1e-8f, r));</a>
+<a name="ln56">}</a>
+<a name="ln57"> </a>
+<a name="ln58">static inline double compute_error(</a>
+<a name="ln59">    const tonecurve_t *c,</a>
+<a name="ln60">    const double **target,</a>
+<a name="ln61">    const double *residual_L,</a>
+<a name="ln62">    const double *residual_a,</a>
+<a name="ln63">    const double *residual_b,</a>
+<a name="ln64">    const int wd,</a>
+<a name="ln65">    double *maxerr)</a>
+<a name="ln66">{</a>
+<a name="ln67">  // compute error:</a>
+<a name="ln68">  double err = 0.0;</a>
+<a name="ln69">  double merr = 0.0;</a>
+<a name="ln70">  for(int i = 0; i &lt; wd; i++)</a>
+<a name="ln71">  {</a>
+<a name="ln72">#ifdef EXACT</a>
+<a name="ln73">    const double Lt = target[0][i];</a>
+<a name="ln74">    const double L0 = tonecurve_apply(c, Lt);</a>
+<a name="ln75">    const double L1 = tonecurve_apply(c, Lt + residual_L[i]);</a>
+<a name="ln76">    float Lab0[3] = { L0, target[1][i], target[2][i] };</a>
+<a name="ln77">    float Lab1[3] = { L1, target[1][i], target[2][i] };</a>
+<a name="ln78">    const double localerr = dt_colorspaces_deltaE_2000(Lab0, Lab1);</a>
+<a name="ln79">    err += localerr;</a>
+<a name="ln80">#else</a>
+<a name="ln81">    const double localerr = sqrt(residual_L[i] * residual_L[i] + residual_a[i] * residual_a[i] + residual_b[i] * residual_b[i]);</a>
+<a name="ln82">    err += localerr/wd;</a>
+<a name="ln83">#endif</a>
+<a name="ln84">    merr = MAX(merr, localerr);</a>
+<a name="ln85"> </a>
+<a name="ln86">#if 0</a>
+<a name="ln87">#if 0   // max rmse</a>
+<a name="ln88">    // err = MAX(err, residual_L[i]*residual_L[i] +</a>
+<a name="ln89">    //     residual_a[i]*residual_a[i] + residual_b[i]*residual_b[i]);</a>
+<a name="ln90">#elif 0 // total rmse</a>
+<a name="ln91">    err += (residual_L[i]*residual_L[i] +</a>
+<a name="ln92">        residual_a[i]*residual_a[i] + residual_b[i]*residual_b[i])/wd;</a>
+<a name="ln93">#elif 1 // delta e 2000</a>
+<a name="ln94">    const double Lt = target[0][i];</a>
+<a name="ln95">    const double L0 = tonecurve_apply(c, Lt);</a>
+<a name="ln96">    const double L1 = tonecurve_apply(c, Lt + residual_L[i]);</a>
+<a name="ln97">    float Lab0[3] = {L0, target[1][i], target[2][i]};</a>
+<a name="ln98">    float Lab1[3] = {L1, target[1][i], target[2][i]};</a>
+<a name="ln99">    err += dt_colorspaces_deltaE_2000(Lab0, Lab1);</a>
+<a name="ln100">#else</a>
+<a name="ln101">    const double Lt = target[0][i];</a>
+<a name="ln102">    const double L = tonecurve_apply(c, Lt + residual_L[i]);</a>
+<a name="ln103">    const double dL = L - tonecurve_apply(c, Lt);</a>
+<a name="ln104">    err = MAX(err, dL*dL +</a>
+<a name="ln105">        residual_a[i]*residual_a[i] + residual_b[i]*residual_b[i]);</a>
+<a name="ln106">#endif</a>
+<a name="ln107">#endif</a>
+<a name="ln108">  }</a>
+<a name="ln109">  if(maxerr) *maxerr = merr;</a>
+<a name="ln110">  return err;</a>
+<a name="ln111">}</a>
+<a name="ln112"> </a>
+<a name="ln113">static inline int solve(double *As, double *w, double *v, const double *b, double *coeff, int wd, int s, int S)</a>
+<a name="ln114">{</a>
+<a name="ln115">  // A'[wd][s+1] = u[wd][s+1] diag(w[s+1]) v[s+1][s+1]^t</a>
+<a name="ln116">  //</a>
+<a name="ln117">  // svd to solve for c:</a>
+<a name="ln118">  // A * c = b</a>
+<a name="ln119">  // A = u w v^t =&gt; A-1 = v 1/w u^t</a>
+<a name="ln120">  dsvd(As, wd, s + 1, S, w, v); // As is wd x s+1 but row stride S.</a>
+<a name="ln121">  if(w[s] &lt; 1e-3)               // if the smallest singular value becomes too small, we're done</a>
+<a name="ln122">    return 1;</a>
+<a name="ln123">  double *tmp = malloc(S * sizeof(double));</a>
+<a name="ln124">  for(int i = 0; i &lt;= s; i++) // compute tmp = u^t * b</a>
+<a name="ln125">  {</a>
+<a name="ln126">    tmp[i] = 0.0;</a>
+<a name="ln127">    for(int j = 0; j &lt; wd; j++) tmp[i] += As[j * S + i] * b[j];</a>
+<a name="ln128">  }</a>
+<a name="ln129">  for(int i = 0; i &lt;= s; i++) // apply singular values:</a>
+<a name="ln130">    tmp[i] /= w[i];</a>
+<a name="ln131">  for(int j = 0; j &lt;= s; j++)</a>
+<a name="ln132">  { // compute first s output coefficients coeff[j]</a>
+<a name="ln133">    coeff[j] = 0.0;</a>
+<a name="ln134">    for(int i = 0; i &lt;= s; i++) coeff[j] += v[j * (s + 1) + i] * tmp[i];</a>
+<a name="ln135">  }</a>
+<a name="ln136">  free(tmp);</a>
+<a name="ln137">  return 0;</a>
+<a name="ln138">}</a>
+<a name="ln139"> </a>
+<a name="ln140">#pragma GCC diagnostic push</a>
+<a name="ln141">#pragma GCC diagnostic warning &quot;-Wvla&quot;</a>
+<a name="ln142"> </a>
+<a name="ln143">// returns sparsity &lt;= S</a>
+<a name="ln144">int thinplate_match(const tonecurve_t *curve, // tonecurve to apply after this (needed for error estimation)</a>
+<a name="ln145">                    int dim,                  // dimensionality of points</a>
+<a name="ln146">                    int N,                    // number of points</a>
+<a name="ln147">                    const double *point,      // dim-strided points</a>
+<a name="ln148">                    const double **target,    // target values, one pointer per dimension</a>
+<a name="ln149">                    int S,                    // desired sparsity level, actual result will be returned</a>
+<a name="ln150">                    int *permutation, // pointing to original order of points, to identify correct output coeff</a>
+<a name="ln151">                    double **coeff,   // output coefficient arrays for each dimension, ordered according to</a>
+<a name="ln152">                                      // permutation[dim]</a>
+<a name="ln153">                    double *avgerr,           // average error</a>
+<a name="ln154">                    double *maxerr)           // max error</a>
+<a name="ln155">{</a>
+<a name="ln156">  if(avgerr) *avgerr = 0.0;</a>
+<a name="ln157">  if(maxerr) *maxerr = 0.0;</a>
+<a name="ln158"> </a>
+<a name="ln159">  const int wd = N + 4;</a>
+<a name="ln160">  double *A = malloc(wd * wd * sizeof(double));</a>
+<a name="ln161">  // construct system matrix A such that:</a>
+<a name="ln162">  // A c = f</a>
+<a name="ln163">  //</a>
+<a name="ln164">  // | R   P | |c| = |f|</a>
+<a name="ln165">  // | P^t 0 | |d|   |0|</a>
+<a name="ln166">  //</a>
+<a name="ln167">  // to interpolate values f_i with the radial basis function system matrix R and a polynomial term P.</a>
+<a name="ln168">  // P is a 3D linear polynomial a + b x + c y + d z</a>
+<a name="ln169">  //</a>
+<a name="ln170">  // radial basis function part R</a>
+<a name="ln171">  for(int j = 0; j &lt; N; j++)</a>
+<a name="ln172">    for(int i = j; i &lt; N; i++) A[j * wd + i] = A[i * wd + j] = thinplate_kernel(point + 3 * i, point + 3 * j);</a>
+<a name="ln173"> </a>
+<a name="ln174">  // polynomial part P: constant + 3x linear</a>
+<a name="ln175">  for(int i = 0; i &lt; N; i++) A[i * wd + N + 0] = A[(N + 0) * wd + i] = 1.0f;</a>
+<a name="ln176">  for(int i = 0; i &lt; N; i++) A[i * wd + N + 1] = A[(N + 1) * wd + i] = point[3 * i + 0];</a>
+<a name="ln177">  for(int i = 0; i &lt; N; i++) A[i * wd + N + 2] = A[(N + 2) * wd + i] = point[3 * i + 1];</a>
+<a name="ln178">  for(int i = 0; i &lt; N; i++) A[i * wd + N + 3] = A[(N + 3) * wd + i] = point[3 * i + 2];</a>
+<a name="ln179"> </a>
+<a name="ln180">  for(int j = N; j &lt; wd; j++)</a>
+<a name="ln181">    for(int i = N; i &lt; wd; i++) A[j * wd + i] = 0.0f;</a>
+<a name="ln182"> </a>
+<a name="ln183">  // precompute normalisation factors for columns of A</a>
+<a name="ln184">  double *norm = malloc(wd * sizeof(double));</a>
+<a name="ln185">  for(int i = 0; i &lt; wd; i++)</a>
+<a name="ln186">  {</a>
+<a name="ln187">    norm[i] = 0.0;</a>
+<a name="ln188">    for(int j = 0; j &lt; wd; j++) norm[i] += A[j * wd + i] * A[j * wd + i];</a>
+<a name="ln189">    norm[i] = 1.0 / sqrt(norm[i]);</a>
+<a name="ln190">  }</a>
+<a name="ln191"> </a>
+<a name="ln192">  // XXX do we need these explicitly?</a>
+<a name="ln193">  // residual = target vector</a>
+<a name="ln194">  double(*r)[wd] = malloc(dim * wd * sizeof(double));</a>
+<a name="ln195">  const double **b = malloc(dim * sizeof(double *));</a>
+<a name="ln196">  for(int k = 0; k &lt; dim; k++) b[k] = target[k];</a>
+<a name="ln197">  for(int k = 0; k &lt; dim; k++) memcpy(r[k], b[k], wd * sizeof(double));</a>
+<a name="ln198"> </a>
+<a name="ln199">  double *w = malloc(S * sizeof(double));</a>
+<a name="ln200">  double *v = malloc(S * S * sizeof(double));</a>
+<a name="ln201">  double *As = calloc(wd * S, sizeof(double));</a>
+<a name="ln202"> </a>
+<a name="ln203">  // for rank from 0 to sparsity level</a>
+<a name="ln204">  int s = 0, patches = 0;</a>
+<a name="ln205">  double olderr = FLT_MAX;</a>
+<a name="ln206">  // in case of replacement, iterate all the way to wd</a>
+<a name="ln207">  for(; s &lt; wd; s++)</a>
+<a name="ln208">  {</a>
+<a name="ln209">    const int sparsity = MIN(s, S);</a>
+<a name="ln210">#ifndef REPLACEMENT</a>
+<a name="ln211">    if(patches &gt;= S - 4)</a>
+<a name="ln212">    {</a>
+<a name="ln213">      free(r);</a>
+<a name="ln214">      free(b);</a>
+<a name="ln215">      free(w);</a>
+<a name="ln216">      free(v);</a>
+<a name="ln217">      free(As);</a>
+<a name="ln218">      free(norm);</a>
+<a name="ln219">      free(A);</a>
+<a name="ln220">      return sparsity;</a>
+<a name="ln221">    }</a>
+<a name="ln222">    assert(sparsity &lt; S + 4);</a>
+<a name="ln223">#endif</a>
+<a name="ln224">    // find (sparsity+1)-th column a_m by m = argmax_t{ a_t^t r . norm_t}</a>
+<a name="ln225">    // by searching over all three residuals</a>
+<a name="ln226">    double maxdot = 0.0;</a>
+<a name="ln227">    int maxcol = 0;</a>
+<a name="ln228">    for(int t = 0; t &lt; wd; t++)</a>
+<a name="ln229">    {</a>
+<a name="ln230">      double dot = 0.0;</a>
+<a name="ln231">      if(norm[t] &gt; 0.0)</a>
+<a name="ln232">      {</a>
+<a name="ln233">#ifdef EXACT // use full solve</a>
+<a name="ln234">        permutation[sparsity] = t;</a>
+<a name="ln235">        for(int ch = 0; ch &lt; dim; ch++)</a>
+<a name="ln236">        {</a>
+<a name="ln237">          // re-init columns in As</a>
+<a name="ln238">          // svd will destroy its contents:</a>
+<a name="ln239">          for(int i = 0; i &lt;= sparsity; i++)</a>
+<a name="ln240">            for(int j = 0; j &lt; wd; j++) As[j * S + i] = A[j * wd + permutation[i]];</a>
+<a name="ln241"> </a>
+<a name="ln242">          if(solve(As, w, v, b[ch], coeff[ch], wd, sparsity, S))</a>
+<a name="ln243">          {</a>
+<a name="ln244">            free(r);</a>
+<a name="ln245">            free(b);</a>
+<a name="ln246">            free(w);</a>
+<a name="ln247">            free(v);</a>
+<a name="ln248">            free(As);</a>
+<a name="ln249">            free(norm);</a>
+<a name="ln250">            free(A);</a>
+<a name="ln251">            return sparsity;</a>
+<a name="ln252">          }</a>
+<a name="ln253"> </a>
+<a name="ln254">          // compute tentative residual:</a>
+<a name="ln255">          // r = b - As c</a>
+<a name="ln256">          for(int j = 0; j &lt; wd; j++)</a>
+<a name="ln257">          {</a>
+<a name="ln258">            r[ch][j] = b[ch][j];</a>
+<a name="ln259">            for(int i = 0; i &lt;= sparsity; i++) r[ch][j] -= A[j * wd + permutation[i]] * coeff[ch][i];</a>
+<a name="ln260">          }</a>
+<a name="ln261">        }</a>
+<a name="ln262"> </a>
+<a name="ln263">        // compute error:</a>
+<a name="ln264">        const double err = compute_error(curve, target, r[0], r[1], r[2], wd, 0);</a>
+<a name="ln265">        dot = 1. / err; // searching for smallest error or largest dot</a>
+<a name="ln266">#else                   // use dot product</a>
+<a name="ln267">        for(int ch = 0; ch &lt; dim; ch++)</a>
+<a name="ln268">        {</a>
+<a name="ln269">          double chdot = 0.0;</a>
+<a name="ln270">          for(int j = 0; j &lt; wd; j++) chdot += A[j * wd + t] * r[ch][j];</a>
+<a name="ln271">          dot += fabs(chdot);</a>
+<a name="ln272">        }</a>
+<a name="ln273">        dot *= norm[t];</a>
+<a name="ln274">#endif</a>
+<a name="ln275">      }</a>
+<a name="ln276">      // fprintf(stderr, &quot;dot %d = %g\n&quot;, i, dot);</a>
+<a name="ln277">      if(dot &gt; maxdot)</a>
+<a name="ln278">      {</a>
+<a name="ln279">        maxcol = t;</a>
+<a name="ln280">        maxdot = dot;</a>
+<a name="ln281">      }</a>
+<a name="ln282">    }</a>
+<a name="ln283"> </a>
+<a name="ln284">    if(patches &lt; S - 4)</a>
+<a name="ln285">    {</a>
+<a name="ln286">      // remember which column that was, we'll need it to evaluate later:</a>
+<a name="ln287">      permutation[s] = maxcol;</a>
+<a name="ln288">      if(maxcol &lt; N) patches++;</a>
+<a name="ln289">      // make sure we won't choose it again:</a>
+<a name="ln290">      norm[maxcol] = 0.0;</a>
+<a name="ln291">    }</a>
+<a name="ln292">    else</a>
+<a name="ln293">    { // already have chosen S-4 patches as columns, now do the replacement:</a>
+<a name="ln294">      int mincol = 0;</a>
+<a name="ln295">      double minerr = FLT_MAX;</a>
+<a name="ln296">      for(int t = 0; t &lt; sparsity; t++)</a>
+<a name="ln297">      {</a>
+<a name="ln298">        // find already chosen column t with min error reduction when replacing</a>
+<a name="ln299">        // XXX do we set perm[t] above, ever? for t=S-1?</a>
+<a name="ln300">        int oldperm = permutation[t];</a>
+<a name="ln301">        permutation[t] = maxcol;</a>
+<a name="ln302">#ifdef EXACT</a>
+<a name="ln303">        for(int ch = 0; ch &lt; dim; ch++)</a>
+<a name="ln304">        {</a>
+<a name="ln305">          // re-init all columns in As</a>
+<a name="ln306">          for(int i = 0; i &lt; sparsity; i++)</a>
+<a name="ln307">            for(int j = 0; j &lt; wd; j++) As[j * S + i] = A[j * wd + permutation[i]];</a>
+<a name="ln308"> </a>
+<a name="ln309">          if(solve(As, w, v, b[ch], coeff[ch], wd, sparsity-1, S))</a>
+<a name="ln310">          {</a>
+<a name="ln311">            free(r);</a>
+<a name="ln312">            free(b);</a>
+<a name="ln313">            free(w);</a>
+<a name="ln314">            free(v);</a>
+<a name="ln315">            free(As);</a>
+<a name="ln316">            free(norm);</a>
+<a name="ln317">            free(A);</a>
+<a name="ln318">            return s;</a>
+<a name="ln319">          }</a>
+<a name="ln320"> </a>
+<a name="ln321">          // compute tentative residual:</a>
+<a name="ln322">          // r = b - As c</a>
+<a name="ln323">          for(int j = 0; j &lt; wd; j++)</a>
+<a name="ln324">          {</a>
+<a name="ln325">            r[ch][j] = b[ch][j];</a>
+<a name="ln326">            for(int i = 0; i &lt; sparsity; i++) r[ch][j] -= A[j * wd + permutation[i]] * coeff[ch][i];</a>
+<a name="ln327">          }</a>
+<a name="ln328">        }</a>
+<a name="ln329"> </a>
+<a name="ln330">        // compute error:</a>
+<a name="ln331">        const double err = compute_error(curve, target, r[0], r[1], r[2], wd, 0);</a>
+<a name="ln332">#else</a>
+<a name="ln333">        double dot = 0.0;</a>
+<a name="ln334">        for(int ch = 0; ch &lt; dim; ch++)</a>
+<a name="ln335">        {</a>
+<a name="ln336">          double chdot = 0.0;</a>
+<a name="ln337">          for(int j = 0; j &lt; wd; j++) chdot += A[j * wd + t] * r[ch][j];</a>
+<a name="ln338">          dot += fabs(chdot);</a>
+<a name="ln339">        }</a>
+<a name="ln340">        double n = 0.0; // recompute column norm</a>
+<a name="ln341">        for(int j = 0; j &lt; wd; j++) n += A[j * wd + mincol] * A[j * wd + mincol];</a>
+<a name="ln342">        dot *= n;</a>
+<a name="ln343">        double err = 1. / dot;</a>
+<a name="ln344">#endif</a>
+<a name="ln345"> </a>
+<a name="ln346">        if(err &lt; minerr)</a>
+<a name="ln347">        {</a>
+<a name="ln348">          mincol = t;</a>
+<a name="ln349">          minerr = err;</a>
+<a name="ln350">        }</a>
+<a name="ln351">        permutation[t] = oldperm;</a>
+<a name="ln352">        // fprintf(stderr, &quot;perm %d %d\n&quot;, t, oldperm);</a>
+<a name="ln353">      }</a>
+<a name="ln354">      // if(minerr &gt;= 1. / maxdot) return sparsity + 1;</a>
+<a name="ln355">      if(minerr &lt; 1. / maxdot)</a>
+<a name="ln356">      {</a>
+<a name="ln357">        fprintf(stderr, &quot;replacing %d &lt;- %d\n&quot;, mincol, maxcol);</a>
+<a name="ln358">        // replace column</a>
+<a name="ln359">        permutation[mincol] = maxcol;</a>
+<a name="ln360">        // reset norm[] of discarded column to something &gt; 0</a>
+<a name="ln361">#ifdef EXACT</a>
+<a name="ln362">        norm[mincol] = 1.0;</a>
+<a name="ln363">#else</a>
+<a name="ln364">        norm[mincol] = 0.0;</a>
+<a name="ln365">        for(int j = 0; j &lt; wd; j++) norm[mincol] += A[j * wd + mincol] * A[j * wd + mincol];</a>
+<a name="ln366">        norm[mincol] = 1.0 / sqrt(norm[mincol]);</a>
+<a name="ln367">#endif</a>
+<a name="ln368">        norm[maxcol] = 0.0;</a>
+<a name="ln369">      }</a>
+<a name="ln370">    }</a>
+<a name="ln371"> </a>
+<a name="ln372">#ifdef EXACT</a>
+<a name="ln373">    double err = 1. / maxdot;</a>
+<a name="ln374">#else</a>
+<a name="ln375">    const int sp = MIN(sparsity, S-1); // need to fix up for replacement</a>
+<a name="ln376">    // solve linear least squares for sparse c for every output channel:</a>
+<a name="ln377">    for(int ch = 0; ch &lt; dim; ch++)</a>
+<a name="ln378">    {</a>
+<a name="ln379">      // re-init all of the previous columns in As since</a>
+<a name="ln380">      // svd will destroy its contents:</a>
+<a name="ln381">      for(int i = 0; i &lt;= sp; i++)</a>
+<a name="ln382">        for(int j = 0; j &lt; wd; j++) As[j * S + i] = A[j * wd + permutation[i]];</a>
+<a name="ln383"> </a>
+<a name="ln384">      // on error, return last valid configuration</a>
+<a name="ln385">      if(solve(As, w, v, b[ch], coeff[ch], wd, sp, S))</a>
+<a name="ln386">      {</a>
+<a name="ln387">        free(r);</a>
+<a name="ln388">        free(b);</a>
+<a name="ln389">        free(w);</a>
+<a name="ln390">        free(v);</a>
+<a name="ln391">        free(As);</a>
+<a name="ln392">        free(norm);</a>
+<a name="ln393">        free(A);</a>
+<a name="ln394">        return sparsity;</a>
+<a name="ln395">      }</a>
+<a name="ln396"> </a>
+<a name="ln397">      // compute new residual:</a>
+<a name="ln398">      // r = b - As c</a>
+<a name="ln399">      for(int j = 0; j &lt; wd; j++)</a>
+<a name="ln400">      {</a>
+<a name="ln401">        r[ch][j] = b[ch][j];</a>
+<a name="ln402">        for(int i = 0; i &lt;= sp; i++) r[ch][j] -= A[j * wd + permutation[i]] * coeff[ch][i];</a>
+<a name="ln403">      }</a>
+<a name="ln404">    }</a>
+<a name="ln405"> </a>
+<a name="ln406">    double merr = 0.0;</a>
+<a name="ln407">    const double err = compute_error(curve, target, r[0], r[1], r[2], wd, &amp;merr);</a>
+<a name="ln408">#endif</a>
+<a name="ln409">    // residual is max CIE76 delta E now</a>
+<a name="ln410">    // everything &lt; 2 is usually considired a very good approximation:</a>
+<a name="ln411">    if(patches == S-4)</a>
+<a name="ln412">    {</a>
+<a name="ln413">      if(avgerr) *avgerr = err;</a>
+<a name="ln414">      if(maxerr) *maxerr = merr;</a>
+<a name="ln415">      fprintf(stderr, &quot;rank %d/%d avg DE %g max DE %g\n&quot;, sp + 1, patches, err, merr);</a>
+<a name="ln416">    }</a>
+<a name="ln417">    if(s &gt;= S &amp;&amp; err &gt;= olderr)</a>
+<a name="ln418">      fprintf(stderr, &quot;error increased!\n&quot;);</a>
+<a name="ln419">      // return sparsity + 1;</a>
+<a name="ln420">    // if(err &lt; 2.0) return sparsity+1;</a>
+<a name="ln421">    olderr = err;</a>
+<a name="ln422">  }</a>
+<a name="ln423">  free(r);</a>
+<a name="ln424">  free(b);</a>
+<a name="ln425">  free(w);</a>
+<a name="ln426">  free(v);</a>
+<a name="ln427">  free(As);</a>
+<a name="ln428">  free(norm);</a>
+<a name="ln429">  free(A);</a>
+<a name="ln430">  return -1;</a>
+<a name="ln431">}</a>
+<a name="ln432"> </a>
+<a name="ln433">#pragma GCC diagnostic pop</a>
+<a name="ln434"> </a>
+<a name="ln435">float thinplate_color_pos(float L, float a, float b)</a>
+<a name="ln436">{</a>
+<a name="ln437">  const float pi = 3.14153f; // clearly true.</a>
+<a name="ln438">  const float h = atan2f(b, a) + pi;</a>
+<a name="ln439">  // const float C = sqrtf(a*a + b*b);</a>
+<a name="ln440">  const int sector = 4.0f * h / (2.0f * pi);</a>
+<a name="ln441">  return 256.0 * sector + L; // C;</a>
+<a name="ln442">}</a>
+<a name="ln443"> </a>
+<a name="ln444">// modelines: These editor modelines have been set for all relevant files by tools/update_modelines.sh</a>
+<a name="ln445">// vim: shiftwidth=2 expandtab tabstop=2 cindent</a>
+<a name="ln446">// kate: tab-indents: off; indent-width 2; replace-tabs on; indent-mode cstyle; remove-trailing-spaces modified;</a>
+
+</code></pre>
+<div class="balloon" rel="126"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v522/" target="_blank">V522</a> There might be dereferencing of a potential null pointer 'tmp'. Check lines: 126, 123.</p></div>
+<div class="balloon" rel="172"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v522/" target="_blank">V522</a> There might be dereferencing of a potential null pointer 'A'. Check lines: 172, 160.</p></div>
+<div class="balloon" rel="187"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v522/" target="_blank">V522</a> There might be dereferencing of a potential null pointer 'norm'. Check lines: 187, 184.</p></div>
+<div class="balloon" rel="196"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v522/" target="_blank">V522</a> There might be dereferencing of a potential null pointer 'b'. Check lines: 196, 195.</p></div>
+<div class="balloon" rel="197"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v522/" target="_blank">V522</a> There might be dereferencing of a potential null pointer 'r'. Check lines: 197, 194.</p></div>
+<div class="balloon" rel="382"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v522/" target="_blank">V522</a> There might be dereferencing of a potential null pointer 'As'. Check lines: 382, 201.</p></div>
+<div class="balloon" rel="121"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v522/" target="_blank">V522</a> Dereferencing of the null pointer 'w' might take place. The potential null pointer is passed into 'solve' function. Inspect the second argument. Check lines: 121, 385, 199.</p></div>
+
+<link rel="stylesheet" href="highlight.css">
+<script src="highlight.pack.js"></script>
+<script src="highlightjs-line-numbers.js"></script>
+<script>hljs.initHighlightingOnLoad();</script>
+<script>hljs.initLineNumbersOnLoad();</script>
+<script>
+  $(document).ready(function() {
+      $('.balloon').each(function () {
+          var bl = $(this);
+          var line = bl.attr('rel');
+          var text = $('a[name="ln'+line+'"]').text();
+
+          var space_count = 0;
+          for(var i = 0; i<text.length; i++){
+              var char = text[i];
+              if((char !== ' ')&&(char !== '\t'))break;
+              if(char === '\t')space_count++;
+              space_count++;
+          }
+
+          bl.css('margin-left', space_count*8);
+          $('a[name="ln'+line+'"]').after(bl);
+      });
+
+      window.location = window.location;
+  });
+</script>
+</body>
+</html>

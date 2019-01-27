@@ -1,0 +1,298 @@
+
+<html>
+<head>
+  <link rel="stylesheet" href="../style.css"/>
+  <script src="../jquery-3.2.1.min.js"></script>
+</head>
+<body>
+<pre><code class = "cpp">
+<a name="ln1">/*</a>
+<a name="ln2">    RawSpeed - RAW file decoder.</a>
+<a name="ln3"> </a>
+<a name="ln4">    Copyright (C) 2017 Axel Waggershauser</a>
+<a name="ln5">    Copyright (C) 2017-2018 Roman Lebedev</a>
+<a name="ln6"> </a>
+<a name="ln7">    This library is free software; you can redistribute it and/or</a>
+<a name="ln8">    modify it under the terms of the GNU Lesser General Public</a>
+<a name="ln9">    License as published by the Free Software Foundation; either</a>
+<a name="ln10">    version 2 of the License, or (at your option) any later version.</a>
+<a name="ln11"> </a>
+<a name="ln12">    This library is distributed in the hope that it will be useful,</a>
+<a name="ln13">    but WITHOUT ANY WARRANTY; without even the implied warranty of</a>
+<a name="ln14">    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU</a>
+<a name="ln15">    Lesser General Public License for more details.</a>
+<a name="ln16"> </a>
+<a name="ln17">    You should have received a copy of the GNU Lesser General Public</a>
+<a name="ln18">    License along with this library; if not, write to the Free Software</a>
+<a name="ln19">    Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA</a>
+<a name="ln20">*/</a>
+<a name="ln21"> </a>
+<a name="ln22">#pragma once</a>
+<a name="ln23"> </a>
+<a name="ln24">#include &quot;common/Common.h&quot;                      // for uint32, ushort16, int32</a>
+<a name="ln25">#include &quot;decoders/RawDecoderException.h&quot;       // for ThrowRDE</a>
+<a name="ln26">#include &quot;decompressors/AbstractHuffmanTable.h&quot; // for AbstractHuffmanTable</a>
+<a name="ln27">#include &quot;io/BitStream.h&quot;                       // for BitStreamTraits</a>
+<a name="ln28">#include &lt;cassert&gt;                              // for assert</a>
+<a name="ln29">#include &lt;cstddef&gt;                              // for size_t</a>
+<a name="ln30">#include &lt;memory&gt;                               // for allocator_traits&lt;&gt;::...</a>
+<a name="ln31">#include &lt;vector&gt;                               // for vector</a>
+<a name="ln32"> </a>
+<a name="ln33">/*</a>
+<a name="ln34">* The following code is inspired by the IJG JPEG library.</a>
+<a name="ln35">*</a>
+<a name="ln36">* Copyright (C) 1991, 1992, Thomas G. Lane.</a>
+<a name="ln37">* Part of the Independent JPEG Group's software.</a>
+<a name="ln38">* See the file Copyright for more details.</a>
+<a name="ln39">*</a>
+<a name="ln40">* Copyright (c) 1993 Brian C. Smith, The Regents of the University</a>
+<a name="ln41">* of California</a>
+<a name="ln42">* All rights reserved.</a>
+<a name="ln43">*</a>
+<a name="ln44">* Copyright (c) 1994 Kongji Huang and Brian C. Smith.</a>
+<a name="ln45">* Cornell University</a>
+<a name="ln46">* All rights reserved.</a>
+<a name="ln47">*</a>
+<a name="ln48">* Permission to use, copy, modify, and distribute this software and its</a>
+<a name="ln49">* documentation for any purpose, without fee, and without written agreement is</a>
+<a name="ln50">* hereby granted, provided that the above copyright notice and the following</a>
+<a name="ln51">* two paragraphs appear in all copies of this software.</a>
+<a name="ln52">*</a>
+<a name="ln53">* IN NO EVENT SHALL CORNELL UNIVERSITY BE LIABLE TO ANY PARTY FOR</a>
+<a name="ln54">* DIRECT, INDIRECT, SPECIAL, INCIDENTAL, OR CONSEQUENTIAL DAMAGES ARISING OUT</a>
+<a name="ln55">* OF THE USE OF THIS SOFTWARE AND ITS DOCUMENTATION, EVEN IF CORNELL</a>
+<a name="ln56">* UNIVERSITY HAS BEEN ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.</a>
+<a name="ln57">*</a>
+<a name="ln58">* CORNELL UNIVERSITY SPECIFICALLY DISCLAIMS ANY WARRANTIES,</a>
+<a name="ln59">* INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY</a>
+<a name="ln60">* AND FITNESS FOR A PARTICULAR PURPOSE.  THE SOFTWARE PROVIDED HEREUNDER IS</a>
+<a name="ln61">* ON AN &quot;AS IS&quot; BASIS, AND CORNELL UNIVERSITY HAS NO OBLIGATION TO</a>
+<a name="ln62">* PROVIDE MAINTENANCE, SUPPORT, UPDATES, ENHANCEMENTS, OR MODIFICATIONS.</a>
+<a name="ln63">*/</a>
+<a name="ln64"> </a>
+<a name="ln65">namespace rawspeed {</a>
+<a name="ln66"> </a>
+<a name="ln67">class HuffmanTableLUT final : public AbstractHuffmanTable {</a>
+<a name="ln68">  // private fields calculated from codesPerBits and codeValues</a>
+<a name="ln69">  // they are index '1' based, so we can directly lookup the value</a>
+<a name="ln70">  // for code length l without decrementing</a>
+<a name="ln71">  std::vector&lt;uint32&gt; maxCodeOL;      // index is length of code</a>
+<a name="ln72">  std::vector&lt;ushort16&gt; codeOffsetOL; // index is length of code</a>
+<a name="ln73"> </a>
+<a name="ln74">  // The code can be compiled with two different decode lookup table layouts.</a>
+<a name="ln75">  // The idea is that different CPU architectures may perform better with</a>
+<a name="ln76">  // one or the other, depending on the relative performance of their arithmetic</a>
+<a name="ln77">  // core vs their memory access. For an Intel Core i7, the big table is better.</a>
+<a name="ln78">#if 1</a>
+<a name="ln79">  // lookup table containing 3 fields: payload:16|flag:8|len:8</a>
+<a name="ln80">  // The payload may be the fully decoded diff or the length of the diff.</a>
+<a name="ln81">  // The len field contains the number of bits, this lookup consumed.</a>
+<a name="ln82">  // A lookup value of 0 means the code was too big to fit into the table.</a>
+<a name="ln83">  // The optimal LookupDepth is also likely to depend on the CPU architecture.</a>
+<a name="ln84">  static constexpr unsigned PayloadShift = 16;</a>
+<a name="ln85">  static constexpr unsigned FlagMask = 0x100;</a>
+<a name="ln86">  static constexpr unsigned LenMask = 0xff;</a>
+<a name="ln87">  static constexpr unsigned LookupDepth = 11;</a>
+<a name="ln88">  std::vector&lt;int32&gt; decodeLookup;</a>
+<a name="ln89">#else</a>
+<a name="ln90">  // lookup table containing 2 fields: payload:4|len:4</a>
+<a name="ln91">  // the payload is the length of the diff, len is the length of the code</a>
+<a name="ln92">  static constexpr unsigned LookupDepth = 15;</a>
+<a name="ln93">  static constexpr unsigned PayloadShift = 4;</a>
+<a name="ln94">  static constexpr unsigned FlagMask = 0;</a>
+<a name="ln95">  static constexpr unsigned LenMask = 0x0f;</a>
+<a name="ln96">  std::vector&lt;uchar8&gt; decodeLookup;</a>
+<a name="ln97">#endif</a>
+<a name="ln98"> </a>
+<a name="ln99">  bool fullDecode = true;</a>
+<a name="ln100">  bool fixDNGBug16 = false;</a>
+<a name="ln101"> </a>
+<a name="ln102">public:</a>
+<a name="ln103">  void setup(bool fullDecode_, bool fixDNGBug16_) {</a>
+<a name="ln104">    this-&gt;fullDecode = fullDecode_;</a>
+<a name="ln105">    this-&gt;fixDNGBug16 = fixDNGBug16_;</a>
+<a name="ln106"> </a>
+<a name="ln107">    assert(!nCodesPerLength.empty());</a>
+<a name="ln108">    assert(maxCodesCount() &gt; 0);</a>
+<a name="ln109"> </a>
+<a name="ln110">    unsigned int maxCodeLength = nCodesPerLength.size() - 1U;</a>
+<a name="ln111">    assert(codeValues.size() == maxCodesCount());</a>
+<a name="ln112"> </a>
+<a name="ln113">    assert(maxCodePlusDiffLength() &lt;= 32U);</a>
+<a name="ln114"> </a>
+<a name="ln115">    // Figure C.1: make table of Huffman code length for each symbol</a>
+<a name="ln116">    // Figure C.2: generate the codes themselves</a>
+<a name="ln117">    const auto symbols = generateCodeSymbols();</a>
+<a name="ln118">    assert(symbols.size() == maxCodesCount());</a>
+<a name="ln119"> </a>
+<a name="ln120">    // Figure F.15: generate decoding tables</a>
+<a name="ln121">    codeOffsetOL.resize(maxCodeLength + 1UL, 0xFFFF);</a>
+<a name="ln122">    maxCodeOL.resize(maxCodeLength + 1UL, 0xFFFFFFFF);</a>
+<a name="ln123">    int code_index = 0;</a>
+<a name="ln124">    for (unsigned int l = 1U; l &lt;= maxCodeLength; l++) {</a>
+<a name="ln125">      if (nCodesPerLength[l]) {</a>
+<a name="ln126">        codeOffsetOL[l] = symbols[code_index].code - code_index;</a>
+<a name="ln127">        code_index += nCodesPerLength[l];</a>
+<a name="ln128">        maxCodeOL[l] = symbols[code_index - 1].code;</a>
+<a name="ln129">      }</a>
+<a name="ln130">    }</a>
+<a name="ln131"> </a>
+<a name="ln132">    // Generate lookup table for fast decoding lookup.</a>
+<a name="ln133">    // See definition of decodeLookup above</a>
+<a name="ln134">    decodeLookup.resize(1 &lt;&lt; LookupDepth);</a>
+<a name="ln135">    for (size_t i = 0; i &lt; symbols.size(); i++) {</a>
+<a name="ln136">      uchar8 code_l = symbols[i].code_len;</a>
+<a name="ln137">      if (code_l &gt; static_cast&lt;int&gt;(LookupDepth))</a>
+<a name="ln138">        break;</a>
+<a name="ln139"> </a>
+<a name="ln140">      ushort16 ll = symbols[i].code &lt;&lt; (LookupDepth - code_l);</a>
+<a name="ln141">      ushort16 ul = ll | ((1 &lt;&lt; (LookupDepth - code_l)) - 1);</a>
+<a name="ln142">      ushort16 diff_l = codeValues[i];</a>
+<a name="ln143">      for (ushort16 c = ll; c &lt;= ul; c++) {</a>
+<a name="ln144">        if (!(c &lt; decodeLookup.size()))</a>
+<a name="ln145">          ThrowRDE(&quot;Corrupt Huffman&quot;);</a>
+<a name="ln146"> </a>
+<a name="ln147">        if (!FlagMask || !fullDecode || diff_l + code_l &gt; LookupDepth) {</a>
+<a name="ln148">          // lookup bit depth is too small to fit both the encoded length</a>
+<a name="ln149">          // and the final difference value.</a>
+<a name="ln150">          // -&gt; store only the length and do a normal sign extension later</a>
+<a name="ln151">          decodeLookup[c] = diff_l &lt;&lt; PayloadShift | code_l;</a>
+<a name="ln152">        } else {</a>
+<a name="ln153">          // diff_l + code_l &lt;= lookupDepth</a>
+<a name="ln154">          // The table bit depth is large enough to store both.</a>
+<a name="ln155">          decodeLookup[c] = (code_l + diff_l) | FlagMask;</a>
+<a name="ln156"> </a>
+<a name="ln157">          if (diff_l) {</a>
+<a name="ln158">            uint32 diff = (c &gt;&gt; (LookupDepth - code_l - diff_l)) &amp; ((1 &lt;&lt; diff_l) - 1);</a>
+<a name="ln159">            decodeLookup[c] |= static_cast&lt;int32&gt;(</a>
+<a name="ln160">                static_cast&lt;uint32&gt;(signExtended(diff, diff_l))</a>
+<a name="ln161">                &lt;&lt; PayloadShift);</a>
+<a name="ln162">          }</a>
+<a name="ln163">        }</a>
+<a name="ln164">      }</a>
+<a name="ln165">    }</a>
+<a name="ln166">  }</a>
+<a name="ln167"> </a>
+<a name="ln168">  template&lt;typename BIT_STREAM&gt; inline int decodeLength(BIT_STREAM&amp; bs) const {</a>
+<a name="ln169">    static_assert(BitStreamTraits&lt;BIT_STREAM&gt;::canUseWithHuffmanTable,</a>
+<a name="ln170">                  &quot;This BitStream specialization is not marked as usable here&quot;);</a>
+<a name="ln171">    assert(!fullDecode);</a>
+<a name="ln172">    return decode&lt;BIT_STREAM, false&gt;(bs);</a>
+<a name="ln173">  }</a>
+<a name="ln174"> </a>
+<a name="ln175">  template&lt;typename BIT_STREAM&gt; inline int decodeNext(BIT_STREAM&amp; bs) const {</a>
+<a name="ln176">    static_assert(BitStreamTraits&lt;BIT_STREAM&gt;::canUseWithHuffmanTable,</a>
+<a name="ln177">                  &quot;This BitStream specialization is not marked as usable here&quot;);</a>
+<a name="ln178">    assert(fullDecode);</a>
+<a name="ln179">    return decode&lt;BIT_STREAM, true&gt;(bs);</a>
+<a name="ln180">  }</a>
+<a name="ln181"> </a>
+<a name="ln182">  // The bool template paraeter is to enable two versions:</a>
+<a name="ln183">  // one returning only the length of the of diff bits (see Hasselblad),</a>
+<a name="ln184">  // one to return the fully decoded diff.</a>
+<a name="ln185">  // All ifs depending on this bool will be optimized out by the compiler</a>
+<a name="ln186">  template&lt;typename BIT_STREAM, bool FULL_DECODE&gt; inline int decode(BIT_STREAM&amp; bs) const {</a>
+<a name="ln187">    static_assert(BitStreamTraits&lt;BIT_STREAM&gt;::canUseWithHuffmanTable,</a>
+<a name="ln188">                  &quot;This BitStream specialization is not marked as usable here&quot;);</a>
+<a name="ln189">    assert(FULL_DECODE == fullDecode);</a>
+<a name="ln190"> </a>
+<a name="ln191">    // 32 is the absolute maximum combined length of code + diff</a>
+<a name="ln192">    // assertion  maxCodePlusDiffLength() &lt;= 32U  is already checked in setup()</a>
+<a name="ln193">    bs.fill(32);</a>
+<a name="ln194"> </a>
+<a name="ln195">    // for processors supporting bmi2 instructions, using maxCodePlusDiffLength()</a>
+<a name="ln196">    // might be benifitial</a>
+<a name="ln197"> </a>
+<a name="ln198">    uint32 code = bs.peekBitsNoFill(LookupDepth);</a>
+<a name="ln199">    assert(code &lt; decodeLookup.size());</a>
+<a name="ln200">    auto val = static_cast&lt;unsigned&gt;(decodeLookup[code]);</a>
+<a name="ln201">    int len = val &amp; LenMask;</a>
+<a name="ln202">    assert(len &gt;= 0);</a>
+<a name="ln203">    assert(len &lt;= 16);</a>
+<a name="ln204"> </a>
+<a name="ln205">    // if the code is invalid (bitstream corrupted) len will be 0</a>
+<a name="ln206">    bs.skipBitsNoFill(len);</a>
+<a name="ln207">    if (FULL_DECODE &amp;&amp; val &amp; FlagMask) {</a>
+<a name="ln208">      // if the flag bit is set, the payload is the already sign extended difference</a>
+<a name="ln209">      return static_cast&lt;int&gt;(val) &gt;&gt; PayloadShift;</a>
+<a name="ln210">    }</a>
+<a name="ln211"> </a>
+<a name="ln212">    if (len) {</a>
+<a name="ln213">      // if the flag bit is not set but len != 0, the payload is the number of bits to sign extend and return</a>
+<a name="ln214">      const int l_diff = static_cast&lt;int&gt;(val) &gt;&gt; PayloadShift;</a>
+<a name="ln215">      assert((FULL_DECODE &amp;&amp; (len + l_diff &lt;= 32)) || !FULL_DECODE);</a>
+<a name="ln216">      if (FULL_DECODE &amp;&amp; l_diff == 16) {</a>
+<a name="ln217">        if (fixDNGBug16)</a>
+<a name="ln218">          bs.skipBits(16);</a>
+<a name="ln219">        return -32768;</a>
+<a name="ln220">      }</a>
+<a name="ln221">      return FULL_DECODE ? signExtended(bs.getBitsNoFill(l_diff), l_diff) : l_diff;</a>
+<a name="ln222">    }</a>
+<a name="ln223"> </a>
+<a name="ln224">    uint32 code_l = LookupDepth;</a>
+<a name="ln225">    bs.skipBitsNoFill(code_l);</a>
+<a name="ln226">    while (code_l &lt; maxCodeOL.size() &amp;&amp;</a>
+<a name="ln227">           (0xFFFFFFFF == maxCodeOL[code_l] || code &gt; maxCodeOL[code_l])) {</a>
+<a name="ln228">      uint32 temp = bs.getBitsNoFill(1);</a>
+<a name="ln229">      code = (code &lt;&lt; 1) | temp;</a>
+<a name="ln230">      code_l++;</a>
+<a name="ln231">    }</a>
+<a name="ln232"> </a>
+<a name="ln233">    if (code_l &gt;= maxCodeOL.size() ||</a>
+<a name="ln234">        (0xFFFFFFFF == maxCodeOL[code_l] || code &gt; maxCodeOL[code_l]))</a>
+<a name="ln235">      ThrowRDE(&quot;bad Huffman code: %u (len: %u)&quot;, code, code_l);</a>
+<a name="ln236"> </a>
+<a name="ln237">    if (code &lt; codeOffsetOL[code_l])</a>
+<a name="ln238">      ThrowRDE(&quot;likely corrupt Huffman code: %u (len: %u)&quot;, code, code_l);</a>
+<a name="ln239"> </a>
+<a name="ln240">    int diff_l = codeValues[code - codeOffsetOL[code_l]];</a>
+<a name="ln241"> </a>
+<a name="ln242">    if (!FULL_DECODE)</a>
+<a name="ln243">      return diff_l;</a>
+<a name="ln244"> </a>
+<a name="ln245">    if (diff_l == 16) {</a>
+<a name="ln246">      if (fixDNGBug16)</a>
+<a name="ln247">        bs.skipBits(16);</a>
+<a name="ln248">      return -32768;</a>
+<a name="ln249">    }</a>
+<a name="ln250"> </a>
+<a name="ln251">    assert(FULL_DECODE);</a>
+<a name="ln252">    assert((diff_l &amp;&amp; (len + code_l + diff_l &lt;= 32)) || !diff_l);</a>
+<a name="ln253">    return diff_l ? signExtended(bs.getBitsNoFill(diff_l), diff_l) : 0;</a>
+<a name="ln254">  }</a>
+<a name="ln255">};</a>
+<a name="ln256"> </a>
+<a name="ln257">} // namespace rawspeed</a>
+
+</code></pre>
+<div class="balloon" rel="147"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v560/" target="_blank">V560</a> A part of conditional expression is always false: !FlagMask.</p></div>
+
+<link rel="stylesheet" href="highlight.css">
+<script src="highlight.pack.js"></script>
+<script src="highlightjs-line-numbers.js"></script>
+<script>hljs.initHighlightingOnLoad();</script>
+<script>hljs.initLineNumbersOnLoad();</script>
+<script>
+  $(document).ready(function() {
+      $('.balloon').each(function () {
+          var bl = $(this);
+          var line = bl.attr('rel');
+          var text = $('a[name="ln'+line+'"]').text();
+
+          var space_count = 0;
+          for(var i = 0; i<text.length; i++){
+              var char = text[i];
+              if((char !== ' ')&&(char !== '\t'))break;
+              if(char === '\t')space_count++;
+              space_count++;
+          }
+
+          bl.css('margin-left', space_count*8);
+          $('a[name="ln'+line+'"]').after(bl);
+      });
+
+      window.location = window.location;
+  });
+</script>
+</body>
+</html>

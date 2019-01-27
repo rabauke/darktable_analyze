@@ -1,0 +1,1468 @@
+
+<html>
+<head>
+  <link rel="stylesheet" href="../style.css"/>
+  <script src="../jquery-3.2.1.min.js"></script>
+</head>
+<body>
+<pre><code class = "cpp">
+<a name="ln1">/*</a>
+<a name="ln2">    This file is part of darktable,</a>
+<a name="ln3">    copyright (c) 2017 johannes hanika.</a>
+<a name="ln4"> </a>
+<a name="ln5">    darktable is free software: you can redistribute it and/or modify</a>
+<a name="ln6">    it under the terms of the GNU General Public License as published by</a>
+<a name="ln7">    the Free Software Foundation, either version 3 of the License, or</a>
+<a name="ln8">    (at your option) any later version.</a>
+<a name="ln9"> </a>
+<a name="ln10">    darktable is distributed in the hope that it will be useful,</a>
+<a name="ln11">    but WITHOUT ANY WARRANTY; without even the implied warranty of</a>
+<a name="ln12">    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the</a>
+<a name="ln13">    GNU General Public License for more details.</a>
+<a name="ln14"> </a>
+<a name="ln15">    You should have received a copy of the GNU General Public License</a>
+<a name="ln16">    along with darktable.  If not, see &lt;http://www.gnu.org/licenses/&gt;.</a>
+<a name="ln17">*/</a>
+<a name="ln18">#include &quot;bauhaus/bauhaus.h&quot;</a>
+<a name="ln19">#include &quot;common/colorspaces.h&quot;</a>
+<a name="ln20">#include &quot;common/opencl.h&quot;</a>
+<a name="ln21">#include &quot;common/exif.h&quot;</a>
+<a name="ln22">#include &quot;control/control.h&quot;</a>
+<a name="ln23">#include &quot;develop/develop.h&quot;</a>
+<a name="ln24">#include &quot;develop/imageop.h&quot;</a>
+<a name="ln25">#include &quot;develop/imageop_math.h&quot;</a>
+<a name="ln26">#include &quot;develop/tiling.h&quot;</a>
+<a name="ln27">#include &quot;dtgtk/drawingarea.h&quot;</a>
+<a name="ln28">#include &quot;gui/accelerators.h&quot;</a>
+<a name="ln29">#include &quot;gui/gtk.h&quot;</a>
+<a name="ln30">#include &quot;gui/presets.h&quot;</a>
+<a name="ln31">#include &quot;iop/iop_api.h&quot;</a>
+<a name="ln32">#include &quot;iop/gaussian_elimination.h&quot;</a>
+<a name="ln33">#include &quot;libs/colorpicker.h&quot;</a>
+<a name="ln34"> </a>
+<a name="ln35">#include &lt;assert.h&gt;</a>
+<a name="ln36">#include &lt;math.h&gt;</a>
+<a name="ln37">#include &lt;stdlib.h&gt;</a>
+<a name="ln38">#include &lt;string.h&gt;</a>
+<a name="ln39"> </a>
+<a name="ln40">#include &lt;gtk/gtk.h&gt;</a>
+<a name="ln41">#include &lt;inttypes.h&gt;</a>
+<a name="ln42"> </a>
+<a name="ln43">DT_MODULE_INTROSPECTION(2, dt_iop_colorchecker_params_t)</a>
+<a name="ln44"> </a>
+<a name="ln45">static const int colorchecker_patches = 24;</a>
+<a name="ln46">static const float colorchecker_Lab[] =</a>
+<a name="ln47">{ // from argyll ColorChecker.cie</a>
+<a name="ln48"> 37.99,   13.56,  14.06, // dark skin</a>
+<a name="ln49"> 65.71,   18.13,  17.81, // light skin</a>
+<a name="ln50"> 49.93,   -4.88, -21.93, // blue sky</a>
+<a name="ln51"> 43.14,  -13.10,  21.91, // foliage</a>
+<a name="ln52"> 55.11,    8.84, -25.40, // blue flower</a>
+<a name="ln53"> 70.72,  -33.40, -0.20 , // bluish green</a>
+<a name="ln54"> 62.66,   36.07,  57.10, // orange</a>
+<a name="ln55"> 40.02,   10.41, -45.96, // purple red</a>
+<a name="ln56"> 51.12,   48.24,  16.25, // moderate red</a>
+<a name="ln57"> 30.33,   22.98, -21.59, // purple</a>
+<a name="ln58"> 72.53,  -23.71,  57.26, // yellow green</a>
+<a name="ln59"> 71.94,  19.36 ,  67.86, // orange yellow</a>
+<a name="ln60"> 28.78,  14.18 , -50.30, // blue</a>
+<a name="ln61"> 55.26,  -38.34,  31.37, // green</a>
+<a name="ln62"> 42.10,  53.38 ,  28.19, // red</a>
+<a name="ln63"> 81.73,  4.04  ,  79.82, // yellow</a>
+<a name="ln64"> 51.94,  49.99 , -14.57, // magenta</a>
+<a name="ln65"> 51.04,  -28.63, -28.64, // cyan</a>
+<a name="ln66"> 96.54,  -0.43 ,  1.19 , // white</a>
+<a name="ln67"> 81.26,  -0.64 , -0.34 , // neutral 8</a>
+<a name="ln68"> 66.77,  -0.73 , -0.50 , // neutral 65</a>
+<a name="ln69"> 50.87,  -0.15 , -0.27 , // neutral 5</a>
+<a name="ln70"> 35.66,  -0.42 , -1.23 , // neutral 35</a>
+<a name="ln71"> 20.46,  -0.08 , -0.97   // black</a>
+<a name="ln72">};</a>
+<a name="ln73"> </a>
+<a name="ln74">// we came to the conclusion that more than 7x7 patches will not be</a>
+<a name="ln75">// manageable in the gui. the fitting experiments show however that you</a>
+<a name="ln76">// can do significantly better with 49 than you can with 24 patches,</a>
+<a name="ln77">// especially when considering max delta E.</a>
+<a name="ln78">#define MAX_PATCHES 49</a>
+<a name="ln79">typedef struct dt_iop_colorchecker_params_t</a>
+<a name="ln80">{</a>
+<a name="ln81">  float source_L[MAX_PATCHES];</a>
+<a name="ln82">  float source_a[MAX_PATCHES];</a>
+<a name="ln83">  float source_b[MAX_PATCHES];</a>
+<a name="ln84">  float target_L[MAX_PATCHES];</a>
+<a name="ln85">  float target_a[MAX_PATCHES];</a>
+<a name="ln86">  float target_b[MAX_PATCHES];</a>
+<a name="ln87">  int32_t num_patches;</a>
+<a name="ln88">} dt_iop_colorchecker_params_t;</a>
+<a name="ln89"> </a>
+<a name="ln90">typedef struct dt_iop_colorchecker_gui_data_t</a>
+<a name="ln91">{</a>
+<a name="ln92">  GtkWidget *area, *combobox_patch, *scale_L, *scale_a, *scale_b, *scale_C, *combobox_target;</a>
+<a name="ln93">  int patch, drawn_patch;</a>
+<a name="ln94">  cmsHTRANSFORM xform;</a>
+<a name="ln95">  int absolute_target; // 0: show relative offsets in sliders, 1: show absolute Lab values</a>
+<a name="ln96">} dt_iop_colorchecker_gui_data_t;</a>
+<a name="ln97"> </a>
+<a name="ln98">typedef struct dt_iop_colorchecker_data_t</a>
+<a name="ln99">{</a>
+<a name="ln100">  int32_t num_patches;</a>
+<a name="ln101">  float source_Lab[3*MAX_PATCHES];</a>
+<a name="ln102">  float coeff_L[MAX_PATCHES+4];</a>
+<a name="ln103">  float coeff_a[MAX_PATCHES+4];</a>
+<a name="ln104">  float coeff_b[MAX_PATCHES+4];</a>
+<a name="ln105">} dt_iop_colorchecker_data_t;</a>
+<a name="ln106"> </a>
+<a name="ln107">typedef struct dt_iop_colorchecker_global_data_t</a>
+<a name="ln108">{</a>
+<a name="ln109">  int kernel_colorchecker;</a>
+<a name="ln110">} dt_iop_colorchecker_global_data_t;</a>
+<a name="ln111"> </a>
+<a name="ln112"> </a>
+<a name="ln113">const char *name()</a>
+<a name="ln114">{</a>
+<a name="ln115">  return _(&quot;color look up table&quot;);</a>
+<a name="ln116">}</a>
+<a name="ln117"> </a>
+<a name="ln118">int default_group()</a>
+<a name="ln119">{</a>
+<a name="ln120">  return IOP_GROUP_COLOR;</a>
+<a name="ln121">}</a>
+<a name="ln122"> </a>
+<a name="ln123">int flags()</a>
+<a name="ln124">{</a>
+<a name="ln125">  return IOP_FLAGS_SUPPORTS_BLENDING | IOP_FLAGS_ALLOW_TILING;</a>
+<a name="ln126">}</a>
+<a name="ln127"> </a>
+<a name="ln128">int legacy_params(</a>
+<a name="ln129">    dt_iop_module_t  *self,</a>
+<a name="ln130">    const void *const old_params,</a>
+<a name="ln131">    const int         old_version,</a>
+<a name="ln132">    void             *new_params,</a>
+<a name="ln133">    const int         new_version)</a>
+<a name="ln134">{</a>
+<a name="ln135">  static const float colorchecker_Lab_v1[] = {</a>
+<a name="ln136">    39.19, 13.76,  14.29,  // dark skin</a>
+<a name="ln137">    65.18, 19.00,  17.32,  // light skin</a>
+<a name="ln138">    49.46, -4.23,  -22.95, // blue sky</a>
+<a name="ln139">    42.85, -13.33, 22.12,  // foliage</a>
+<a name="ln140">    55.18, 9.44,   -24.94, // blue flower</a>
+<a name="ln141">    70.36, -32.77, -0.04,  // bluish green</a>
+<a name="ln142">    62.92, 35.49,  57.10,  // orange</a>
+<a name="ln143">    40.75, 11.41,  -46.03, // purple red</a>
+<a name="ln144">    52.10, 48.11,  16.89,  // moderate red</a>
+<a name="ln145">    30.67, 21.19,  -20.81, // purple</a>
+<a name="ln146">    73.08, -23.55, 56.97,  // yellow green</a>
+<a name="ln147">    72.43, 17.48,  68.20,  // orange yellow</a>
+<a name="ln148">    30.97, 12.67,  -46.30, // blue</a>
+<a name="ln149">    56.43, -40.66, 31.94,  // green</a>
+<a name="ln150">    43.40, 50.68,  28.84,  // red</a>
+<a name="ln151">    82.45, 2.41,   80.25,  // yellow</a>
+<a name="ln152">    51.98, 50.68,  -14.84, // magenta</a>
+<a name="ln153">    51.02, -27.63, -28.03, // cyan</a>
+<a name="ln154">    95.97, -0.40,  1.24,   // white</a>
+<a name="ln155">    81.10, -0.83,  -0.43,  // neutral 8</a>
+<a name="ln156">    66.81, -1.08,  -0.70,  // neutral 65</a>
+<a name="ln157">    50.98, -0.19,  -0.30,  // neutral 5</a>
+<a name="ln158">    35.72, -0.69,  -1.11,  // neutral 35</a>
+<a name="ln159">    21.46, 0.06,   -0.95,  // black</a>
+<a name="ln160">  };</a>
+<a name="ln161"> </a>
+<a name="ln162">  typedef struct dt_iop_colorchecker_params_v1_t</a>
+<a name="ln163">  {</a>
+<a name="ln164">    float target_L[24];</a>
+<a name="ln165">    float target_a[24];</a>
+<a name="ln166">    float target_b[24];</a>
+<a name="ln167">  } dt_iop_colorchecker_params_v1_t;</a>
+<a name="ln168"> </a>
+<a name="ln169">  if(old_version == 1 &amp;&amp; new_version == 2)</a>
+<a name="ln170">  {</a>
+<a name="ln171">    dt_iop_colorchecker_params_v1_t *p1 = (dt_iop_colorchecker_params_v1_t *)old_params;</a>
+<a name="ln172">    dt_iop_colorchecker_params_t  *p2 = (dt_iop_colorchecker_params_t  *)new_params;</a>
+<a name="ln173"> </a>
+<a name="ln174">    p2-&gt;num_patches = 24;</a>
+<a name="ln175">    for(int k=0;k&lt;24;k++)</a>
+<a name="ln176">    {</a>
+<a name="ln177">      p2-&gt;target_L[k] = p1-&gt;target_L[k];</a>
+<a name="ln178">      p2-&gt;target_a[k] = p1-&gt;target_a[k];</a>
+<a name="ln179">      p2-&gt;target_b[k] = p1-&gt;target_b[k];</a>
+<a name="ln180">      p2-&gt;source_L[k] = colorchecker_Lab_v1[3 * k + 0];</a>
+<a name="ln181">      p2-&gt;source_a[k] = colorchecker_Lab_v1[3 * k + 1];</a>
+<a name="ln182">      p2-&gt;source_b[k] = colorchecker_Lab_v1[3 * k + 2];</a>
+<a name="ln183">    }</a>
+<a name="ln184">    return 0;</a>
+<a name="ln185">  }</a>
+<a name="ln186">  return 1;</a>
+<a name="ln187">}</a>
+<a name="ln188"> </a>
+<a name="ln189">void init_presets(dt_iop_module_so_t *self)</a>
+<a name="ln190">{</a>
+<a name="ln191">  dt_iop_colorchecker_params_t p;</a>
+<a name="ln192">  memset(&amp;p, 0, sizeof(p));</a>
+<a name="ln193">  p.num_patches = 24;</a>
+<a name="ln194">  p.target_L[ 0] = p.source_L[ 0] = 17.460945129394531;</a>
+<a name="ln195">  p.target_L[ 1] = p.source_L[ 1] = 26.878498077392578;</a>
+<a name="ln196">  p.target_L[ 2] = p.source_L[ 2] = 34.900054931640625;</a>
+<a name="ln197">  p.target_L[ 3] = p.source_L[ 3] = 21.692604064941406;</a>
+<a name="ln198">  p.target_L[ 4] = p.source_L[ 4] = 32.18853759765625;</a>
+<a name="ln199">  p.target_L[ 5] = p.source_L[ 5] = 62.531227111816406;</a>
+<a name="ln200">  p.target_L[ 6] = p.source_L[ 6] = 18.933284759521484;</a>
+<a name="ln201">  p.target_L[ 7] = p.source_L[ 7] = 53.936111450195312;</a>
+<a name="ln202">  p.target_L[ 8] = p.source_L[ 8] = 69.154266357421875;</a>
+<a name="ln203">  p.target_L[ 9] = p.source_L[ 9] = 43.381229400634766;</a>
+<a name="ln204">  p.target_L[10] = p.source_L[10] = 57.797889709472656;</a>
+<a name="ln205">  p.target_L[11] = p.source_L[11] = 73.27630615234375;</a>
+<a name="ln206">  p.target_L[12] = p.source_L[12] = 53.175498962402344;</a>
+<a name="ln207">  p.target_L[13] = p.source_L[13] = 49.111373901367188;</a>
+<a name="ln208">  p.target_L[14] = p.source_L[14] = 63.169830322265625;</a>
+<a name="ln209">  p.target_L[15] = p.source_L[15] = 61.896102905273438;</a>
+<a name="ln210">  p.target_L[16] = p.source_L[16] = 67.852409362792969;</a>
+<a name="ln211">  p.target_L[17] = p.source_L[17] = 72.489517211914062;</a>
+<a name="ln212">  p.target_L[18] = p.source_L[18] = 70.935714721679688;</a>
+<a name="ln213">  p.target_L[19] = p.source_L[19] = 70.173004150390625;</a>
+<a name="ln214">  p.target_L[20] = p.source_L[20] = 77.78826904296875;</a>
+<a name="ln215">  p.target_L[21] = p.source_L[21] = 76.070747375488281;</a>
+<a name="ln216">  p.target_L[22] = p.source_L[22] = 68.645004272460938;</a>
+<a name="ln217">  p.target_L[23] = p.source_L[23] = 74.502906799316406;</a>
+<a name="ln218">  p.target_a[ 0] = p.source_a[ 0] = 8.4928874969482422;</a>
+<a name="ln219">  p.target_a[ 1] = p.source_a[ 1] = 27.94782829284668;</a>
+<a name="ln220">  p.target_a[ 2] = p.source_a[ 2] = 43.8824462890625;</a>
+<a name="ln221">  p.target_a[ 3] = p.source_a[ 3] = 16.723676681518555;</a>
+<a name="ln222">  p.target_a[ 4] = p.source_a[ 4] = 39.174972534179688;</a>
+<a name="ln223">  p.target_a[ 5] = p.source_a[ 5] = 24.966419219970703;</a>
+<a name="ln224">  p.target_a[ 6] = p.source_a[ 6] = 8.8226642608642578;</a>
+<a name="ln225">  p.target_a[ 7] = p.source_a[ 7] = 34.451812744140625;</a>
+<a name="ln226">  p.target_a[ 8] = p.source_a[ 8] = 18.39008903503418;</a>
+<a name="ln227">  p.target_a[ 9] = p.source_a[ 9] = 28.272598266601562;</a>
+<a name="ln228">  p.target_a[10] = p.source_a[10] = 10.193824768066406;</a>
+<a name="ln229">  p.target_a[11] = p.source_a[11] = 13.241470336914062;</a>
+<a name="ln230">  p.target_a[12] = p.source_a[12] = 43.655307769775391;</a>
+<a name="ln231">  p.target_a[13] = p.source_a[13] = 23.247600555419922;</a>
+<a name="ln232">  p.target_a[14] = p.source_a[14] = 23.308664321899414;</a>
+<a name="ln233">  p.target_a[15] = p.source_a[15] = 11.138319969177246;</a>
+<a name="ln234">  p.target_a[16] = p.source_a[16] = 18.200069427490234;</a>
+<a name="ln235">  p.target_a[17] = p.source_a[17] = 15.363990783691406;</a>
+<a name="ln236">  p.target_a[18] = p.source_a[18] = 11.173545837402344;</a>
+<a name="ln237">  p.target_a[19] = p.source_a[19] = 11.313735961914062;</a>
+<a name="ln238">  p.target_a[20] = p.source_a[20] = 15.059500694274902;</a>
+<a name="ln239">  p.target_a[21] = p.source_a[21] = 4.7686996459960938;</a>
+<a name="ln240">  p.target_a[22] = p.source_a[22] = 3.0603706836700439;</a>
+<a name="ln241">  p.target_a[23] = p.source_a[23] = -3.687053918838501;</a>
+<a name="ln242">  p.target_b[ 0] = p.source_b[ 0] = -0.023579597473144531;</a>
+<a name="ln243">  p.target_b[ 1] = p.source_b[ 1] = 14.991056442260742;</a>
+<a name="ln244">  p.target_b[ 2] = p.source_b[ 2] = 26.443553924560547;</a>
+<a name="ln245">  p.target_b[ 3] = p.source_b[ 3] = 7.3905587196350098;</a>
+<a name="ln246">  p.target_b[ 4] = p.source_b[ 4] = 23.309671401977539;</a>
+<a name="ln247">  p.target_b[ 5] = p.source_b[ 5] = 19.262432098388672;</a>
+<a name="ln248">  p.target_b[ 6] = p.source_b[ 6] = 3.136211633682251;</a>
+<a name="ln249">  p.target_b[ 7] = p.source_b[ 7] = 31.949621200561523;</a>
+<a name="ln250">  p.target_b[ 8] = p.source_b[ 8] = 16.144514083862305;</a>
+<a name="ln251">  p.target_b[ 9] = p.source_b[ 9] = 25.893926620483398;</a>
+<a name="ln252">  p.target_b[10] = p.source_b[10] = 12.271202087402344;</a>
+<a name="ln253">  p.target_b[11] = p.source_b[11] = 16.763805389404297;</a>
+<a name="ln254">  p.target_b[12] = p.source_b[12] = 53.904998779296875;</a>
+<a name="ln255">  p.target_b[13] = p.source_b[13] = 36.537342071533203;</a>
+<a name="ln256">  p.target_b[14] = p.source_b[14] = 32.930683135986328;</a>
+<a name="ln257">  p.target_b[15] = p.source_b[15] = 19.008804321289062;</a>
+<a name="ln258">  p.target_b[16] = p.source_b[16] = 32.259223937988281;</a>
+<a name="ln259">  p.target_b[17] = p.source_b[17] = 25.815582275390625;</a>
+<a name="ln260">  p.target_b[18] = p.source_b[18] = 26.509498596191406;</a>
+<a name="ln261">  p.target_b[19] = p.source_b[19] = 40.572704315185547;</a>
+<a name="ln262">  p.target_b[20] = p.source_b[20] = 88.354469299316406;</a>
+<a name="ln263">  p.target_b[21] = p.source_b[21] = 33.434604644775391;</a>
+<a name="ln264">  p.target_b[22] = p.source_b[22] = 9.5750093460083008;</a>
+<a name="ln265">  p.target_b[23] = p.source_b[23] = 41.285167694091797;</a>
+<a name="ln266">  dt_gui_presets_add_generic(_(&quot;it8 skin tones&quot;), self-&gt;op, self-&gt;version(), &amp;p, sizeof(p), 1);</a>
+<a name="ln267"> </a>
+<a name="ln268">  // helmholtz/kohlrausch effect applied to black and white conversion.</a>
+<a name="ln269">  // implemented by wmader as an iop and matched as a clut for increased</a>
+<a name="ln270">  // flexibility. this was done using darktable-chart and this is copied</a>
+<a name="ln271">  // from the resulting dtstyle output file:</a>
+<a name="ln272">  const char *hk_params_input =</a>
+<a name="ln273">    &quot;9738b84231c098426fb8814234a82d422ac41d422e3fa04100004843f7daa24257e09a422a1a984225113842f89cc9410836ca4295049542ad1c9242887370427cb32b427c512242b5a40742545bd141808740412cc6964262e484429604c44100000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000ef6d3bc152c2acc1ef6566c093a522c2e7d4e4c1a87c7cc100000000b4c4dd407af09e40d060df418afc7d421dadd0413ec5124097d79041fcba2642fc9f484183eb92415d6b7040fcdcdc41b8fe2f42b64a1740fc8612c1276defc144432ec100000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000d237eb4022a72842f5639742396d1442a2660d411c338b40000000006e35ca408df2054289658d4132327a4118427741d4cf08c0f8a4d5c03abed7c13fac36c23b41a6c03c2230c07d5088c26caff7c1e0e9c6bff14ecec073b028c29e0accc10000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000085f2b642a4ba9a423c9a8442a6493c428baf28425667b64100004843a836a142a84e9b4226719d421cb15d424c22ee4175fcca4211ae96426e6d9a4243878142ef45354222f82542629527420280ff416c2066417e3996420d838e424182e3410000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000fa370000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000c8b700000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000004837000000000000c8b60000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000018000000&quot;;</a>
+<a name="ln274">  int params_len = 0;</a>
+<a name="ln275">  uint8_t *hk_params = dt_exif_xmp_decode(</a>
+<a name="ln276">      hk_params_input, strlen(hk_params_input), &amp;params_len);</a>
+<a name="ln277">  assert(params_len == sizeof(dt_iop_colorchecker_params_t));</a>
+<a name="ln278">  assert(hk_params);</a>
+<a name="ln279">  dt_gui_presets_add_generic(_(&quot;helmholtz/kohlrausch monochrome&quot;), self-&gt;op, self-&gt;version(), hk_params, params_len, 1);</a>
+<a name="ln280">  free(hk_params);</a>
+<a name="ln281"> </a>
+<a name="ln282">  /** The following are based on Jo's Fuji film emulations, without tonecurve which is let to user choice</a>
+<a name="ln283">   *  https://jo.dreggn.org/blog/darktable-fuji-styles.tar.xz</a>
+<a name="ln284">   * **/</a>
+<a name="ln285"> </a>
+<a name="ln286">  const char *astia_params_input =</a>
+<a name="ln287">  &quot;20f59e427e278d42a2ae6f4218265742c69f4e4282bb1b4200831942eca40942d85cb641000048430000c842083a964214368d42fb258b42928b73424cad4d4231ab3e42093f3c42d38e0c42d828fb412299b841c6e7ad41b2a0a44296dd90422827874224e97c42f4606f425c795b42088b434229b7154206ff1442f61f074229a70442a620fa4120bc9b4160729b41bc109b41ce889441be73904110486e419878b940fa849142fc3c7d42e4d37442aed36f42c5b50d42877d0742e821a0411ae11341a871a4be4a1979c17d9794c18c26ebc17682e8bfec9823c1d2ae6cc03bca04c27ea111c10000000000000000bcda0b3f18478e40040b023f66ca9741097a96413c7eb14104090b41079b0b4236804a423a1624412c95ab41f8e0323f672c684136a909401fb4dc4134380e4188acfe400e6d3e425f60564040228d40b041904176f8dd41127986420bcc2a42b88bc041e7eaa9402ab50341e5f6f841a2dab840333c36426ae64fc106e5aac1a0eac5c19e42babf844ad8c139be78c198f65fc1101fa8bda089444163890b413a7f8a41c748b741979736422c2798413b18fc4024fde6414f3b73410000000000000000fcfb134234fb754246425b4140dc353f4487ce412cf53142ea844d41089ebb41bc42ed411c3d7641af131b41aea35ac0e48351c13f1a92c0b182a7c1892d8ac158c606c2406af6c1992d3ac1dd9ae2c149a950c2c608e7c0c0ff0dc268aaf3c1bf8b90c1aea004c21f564bc2db46c9c0a8a098bf5ee18cc20b3878c18de1d7c1e0c533c142ba1bc1ecd83cc106d411c20603e9c0907a30c0bea4a142fe288c42d48b6042a4c54e42ac414842f68a1542804a1442510b06429c18ac41264845435e58b24213c197428e4b8d4255e18c42ceb17542d0d64042d3293942f92f364293aa0f4296bc0c42b42fb841ceadb441ca69a542e67e984293338742c2248742a8c07c42ee3c6342923a5a429e07184213dc2042d6901f42301d0d42778a2442d6dfd74108a7b541baecc641de56e841bedfb3417a076f41ec9dc24123d19742081185424e427a427c4578424ab81942c07c224200eea94108d1134170d930bfd5e49ac143b4adc1e3180bc2248b4dbf3e6624c13e266bc034f6c6c1f5a3ecc000803bb9008890baf892bf3eb7ffc0400a16fd3f497ab04161009a416eddc941121a0d417b740d42cbf6354235603e4136ce9c41002c493eda48614199e90640ac88f64135230e41a69fac40dbb23c427bce3540a18b4d40f4ce5a41c7b0d84110816b42b4ddf741d01a98418d2510413dcc8b412331bd41efe896407578e64129fd98c1617010c2242005c23e4d85c05be37ac194fa68bf0178d2c028bacc3d46f2674121d83a413a349f416a60d141d6e0264272e8a2417c590f414c1cc241c4df634100e0f63a00b6003c1df73442b2b97442d4d78f41481be73f06bbca41d39c1642f48c674191c5a8414638b9413cc6794191c3354102e024c0262653c11276b8c07a3ad5c1d4d8c1c1e7b039c28ec129c2b5156ec1d82a26c2160a97c2626400c1bec74ac2fe5bf6c1465e87c13ab90dc2c5c47ec2581a2bc038ea0cbf06b38bc2488593c1f8140dc240a6b6c1689254c182c683c13e216cc2a03dd9c0028e10c031000000&quot;;</a>
+<a name="ln288"> </a>
+<a name="ln289">  uint8_t *astia_params = dt_exif_xmp_decode(</a>
+<a name="ln290">      astia_params_input, strlen(astia_params_input), &amp;params_len);</a>
+<a name="ln291"> </a>
+<a name="ln292">  assert(params_len == sizeof(dt_iop_colorchecker_params_t));</a>
+<a name="ln293">  assert(astia_params);</a>
+<a name="ln294">  dt_gui_presets_add_generic(_(&quot;Fuji Astia emulation&quot;), self-&gt;op, self-&gt;version(), astia_params, params_len, 1);</a>
+<a name="ln295">  free(astia_params);</a>
+<a name="ln296"> </a>
+<a name="ln297"> </a>
+<a name="ln298">  const char *chrome_params_input =</a>
+<a name="ln299">  &quot;d303b542eb5a9742ccdd7d4288707142ee9d40427af718427062d641000048430000c8420d96bc42faeaae429c32aa423a6ca9423c9ba7425993a0424e639542788d9242a722894260eb7f42d2876b420c724442dcba4042b6c02b42a8990b421276de41ac68c2410790a542393b9242a7279242a45d8f42a132864230e57e42002145426c3f44428a0b274204e62342b092fd41d68fcd41e02cbb419e07bb41ac2433413247b742a3ad9242006a924293d98142ae892e422cd42642366a26429c7ec44175d738c170f6d7c16fbc62c0116916c25d263dc13639f4c1352ac7c0000000000000000050176d3fe59a98400047863f168f2a401e8d0a41d72e8c418626bb4110dd5341c02f0e4270d9b03ef8c9fd4116fbb9411f8f6542391bfa41a0872f42815d56415e5f06420deec841b2d5b141de5f0841ee252342db21154160bd43405af34f40d5688e42624ea741f1799641242473400a34294238e8114241ee0f41383f184052f118c1724989c18c3c9ec0cf0decc138a006c29d4f65c0ef399fc1ea1696c17ba0f7405e30a741a026964231230042f235c641d6eee641aa7a5a410000000000000000b421d241467c8142ae6de741f7a0ee40a00da9423cb40742d6f24240461c864112558741c9ae1542089484423d261242e79d0a427392c240668cd341d554b241dd0ced40e72188c1091983c1e40b55c1f7b6cdc1304713c2360f12c0b8ca24c06a8319c232e36dc2a96dffc185040ac00e1ae8c1449c95c2c20370c29c0736bf6cce33c12c2200c2d0235cc177a125c2aa6f4fc11aab49c1bcb428c274a900c14babb542f2118d42489f6a42e4de5442c2153142be3202428ef2be4137584743b41ac3428d7dc042f9e4a7422c8fac425b61b04217c69a42d69e9b4255ec974210fa8c4298b687428a7a714282ef5f4292923942805242423c032d4222a90e421665d841a0dbda4154d9aa4255269e425ac99842d51a9a42a8bf8b4244637e42ea414542eac56a4280184042bb6d3542a4070042bf650242a7c111425a620642466841414be5b34248d59042e58c95422ef8814264842c423bef2542bc3f3742e63ac141fb61aac16444c7c1b455523ff40b0ec259efe8c055ec9cc166182cc00000fab800007ab97fc70fc15aec44c1c0eaa4bf4e5fe84072b9f9c0cf0a0041e0859641ac1d5241bb43b641d2a95840ce0bdb41420ca541583e2842c50aba416d47f641188f51410313b5416eec9f41b120c041284ba040a6b2e3417c0ffbbf711224407cdd2f40d2a2364219c555c0daaef1407be03240a8b5b4412e221e402cc6bcbe3067883f51cbc5c1e74603c2d25b09c188a03bc2be01abc1b07bb0c029248cc131a90ac1320d4a41a82c6e416a983f42cd15b741b8ef8941c00e88415aeaee400080ed390010d63a78ed0242dcc74f427ad0de41c023394128677642a7aecb4154458440d4f8504140563b41a9c3e64150812542f354c6414e45ba41bab6c240b6a49241c3a15c412c6e08410c168ec108f28cc1707549c18795ecc1a2b80cc2b861c2bf40480bc035b8d1c13b7a27c2875cb7c18a91acbfc9cd7ac13b382fc27eed03c2003cbe3abf62ecc03433dec17f0a69c1b58ae7c1fc0df5c09cbf17c143b7d6c124d68ac031000000&quot;;</a>
+<a name="ln300"> </a>
+<a name="ln301">  uint8_t *chrome_params = dt_exif_xmp_decode(</a>
+<a name="ln302">      chrome_params_input, strlen(chrome_params_input), &amp;params_len);</a>
+<a name="ln303"> </a>
+<a name="ln304">  assert(params_len == sizeof(dt_iop_colorchecker_params_t));</a>
+<a name="ln305">  assert(chrome_params);</a>
+<a name="ln306">  dt_gui_presets_add_generic(_(&quot;Fuji Classic Chrome emulation&quot;), self-&gt;op, self-&gt;version(), chrome_params, params_len, 1);</a>
+<a name="ln307">  free(chrome_params);</a>
+<a name="ln308"> </a>
+<a name="ln309"> </a>
+<a name="ln310">  const char *mchrome_params_input =</a>
+<a name="ln311">  &quot;287bc242632bb84226d3b54263b1a142befa904280da8942e09a88426c9d67425e6254420abc3042000048438be5aa4213ca99420d748842548c7c42d00a5942a46147422410444227060042b8bfff41348ec742c672b04293a7aa425e7f9d425e779b421a2c9a422b1f9a42fd0b87420a1e7b426e0772429e404a422a3e4a4220fc47423e8d414290c1e8412c6ddd412422cf41cce0b7419cc96441050bc4427c9fc142cebba142dbe0a04224bba04239449f4206e96e42bcec42428292e341b63ed641ca5f2dc02cfe09bfeab32cc0ca08ccc1a49ebbc1640dfcc09c6465bf7de528c2828667c19a8516c2000000002024e040c553d1419ee5594166cd9d4102e2164294636342ae0a19427699cb41a4e0de3e24a60a3fca0aa24112b99040fe569340f8adb441dc810d42aa00f740e048cc3f226070428bc677410000fa3f1053a840e46ed341aea6494144836441a2fd2f42a702824152a14142a2ea103f00e426c1c897d0c1f462f6c1fbfea9c1cb29f1c1175d1ac1efcfb9c1175407c281b891c19ced14c161f0d04192d26b42863e9a41fd251042c58c5041189b884282c51641d981fa416aa89d413b0e1e4100000000ca02b040c8fafa3ffde2b541a4fc0641c47e2e429fb2da404125b14124141a3f7c06a53fc0aae9be3817c0c16f24a8c09a8cabc1e0f6fac154eb25c2927530c2389b4fc1e97a4cc210946ec23e2934c148e702c2400ce8c1257492c2c1fe84c15e791ac2868f90c2599db5c2f66fe9c082aa61c09e38abc0585464bfcec916c2f6cfb8c16b022bc14d3275c26955a0c11a2946c146d9fac1ccf5be428046ac4247acbe4208b697427529894244c87f421ac5874230733d42722546425c5c07426aca474358f8b9421ea1a6427ee58d42e7208842d2416a426a656742fa625742012c0f4280bafb414f0ec542b457bf42a8eab14292dd9c421c95a242e5e4a54279da9942574c8842ff55914222fd7a420e9c4b42f8c44842c2da59421ae935421a45fa4126010c42ecdbd1418a2bd94140c36041ec10bf424b81a9425cfd8f421fa88b42abfb8742d9a9994298f23242ad2f12422a33bd41c8dabb41008ae3bc00b209bc8045e4bc00e87dbb0028a0ba00606aba0028a0ba0000fab700007ab900b0b3390000fa3880fdefbc00d2d7bb00c406bb00f8a7ba007014ba00b033ba0020cbb900a08c390010a43900349ebb8051e2bc003248bc0044c5bb00f6d1bb00ccd8bb00007abb0010a4ba00d004bb003072ba00803bb900007ab90060eab90000fa3700b0b3390010a4390060ea390060ea3900e8003a0007e4bc0008cfbb00a00cbb00940ebb0010a4ba00f47bbb0000fa3700803b390030f2390000fa3920a14f3e8081733de017503e0041eb3c00ec103c0060d13b0012133c0000c8b80020b23a008419bb00001639404f593e00e6433d0094723c0044133c00ec903b000c943b0068583b00040dbb005421bb001d713de0eb4e3ec097b63d00442c3d807d313d005d453d007ee53c004a123c00ca693c00d8d63b0070ad3a0070ad3a00b8533b008009b9001c22bb00e012bb00d04fbb003847bb00b86cbbc0334f3e802f3e3d004e6d3c0038793c0012133c005fe63c008009b90088dbba007c5dbb00705fbb31000000&quot;;</a>
+<a name="ln312"> </a>
+<a name="ln313">  uint8_t *mchrome_params = dt_exif_xmp_decode(</a>
+<a name="ln314">      mchrome_params_input, strlen(mchrome_params_input), &amp;params_len);</a>
+<a name="ln315"> </a>
+<a name="ln316">  assert(params_len == sizeof(dt_iop_colorchecker_params_t));</a>
+<a name="ln317">  assert(mchrome_params);</a>
+<a name="ln318">  dt_gui_presets_add_generic(_(&quot;Fuji Monochrome emulation&quot;), self-&gt;op, self-&gt;version(), mchrome_params, params_len, 1);</a>
+<a name="ln319">  free(mchrome_params);</a>
+<a name="ln320"> </a>
+<a name="ln321"> </a>
+<a name="ln322">  const char *provia_params_input =</a>
+<a name="ln323">  &quot;aa1fae42b13a98429c8997420bbc8f4264bb81424e3f76423a034642de774542b8522142000048430000c8422467bc42f123b2422c209e4282049842fc5b9342567d8b423c50704286f657424e153842deec2f4239fc0d428857de41de0aca414552bd4233bdb342973099428ddb95420af59442f7df9442f0a89442a73d874206ff75428c79704248b5484214c93e42aaee344234af074246a0d04156a284412c803b41f8d7ba4248029d42ddd3964200e884421e123142485c2c42c80e2c42ce24c441ff528ec1f8f123c14b9869c05c0bfdc18c4191bf6dc517c25d1ad6c1f2cd3ec176a711c200000000000000003242bd3fce19a2407cc67a41c7b6784152e27a41982e1142ecbd9f4142e53142f0da7d423b50ff41e574314270501140f6fad04154c232414eef50402f2ce040164c1c4184deb64190aa8f4048930a42bd5d46409d2f6642a6bd4841704e5c40e18dd441b6b79a42ca88dc41ee6e5542333e7d413cc16d3e39061ec16f90cec1c6736ac1143cefc14e0ad8c180ce9dc181d75dc0f5da2dc1b2ce4141fd67a4414d0d26427e43c6419a48664289f20042a8713f42c7dbc441c3dd52410000000000000000a1cd1242fab58242300db2427767e94004a1cd41aa56844166861442a95c5542b9287a41c117b340f682cb414e54c440fdeb76411c4c0bc1469f58c0cce3f0c1537f02c1c7768ac13a0a9ec1d151cdc1a43e47c0946b09c2e9b036c2b8de42c0a5de98c15c0722c2934588c22a7911c2ef9cddc1377a1ec072313dc18f46f2c125f1f7c0acb628c2367522c1fe682bc2c68d55c1af28ccc1ff7ab44211c69742e6f08d42e2918942b03c7842061e6c4265603b42dd9f3942ae882142cc0e48430e6dc842e4f5c2429960b942005490427ab3994210e68c4225cc86427ea6664270774a42fcf6394250a931427a111642226bce41de78d441963fc3425c07b44204ad9b42b72d9d42f9cb9f42d1f59c42bd9c9c4221488742c23a854240d87f4264c648426cb54a4264ce5642f4d92d429ef80d42accba741007f3b4154cabc42993ba44260959b422b7396421c5a3742f48a4a42397a2c429c51e14190161fc222ff73c16fe39dc0cbbd33c2e00058bffabb4bc283daf8c181095ac138a6f4c10000fa3800007a386881b1c15b5c03c24454f83f04aaa64170cd9141ca3cd641a618bc415d2c2042e1bf5542fd60054232552a42b6da20408ab1c14178bfa140f258b440c0e3ba3d66036e414efafa41aa6a3340158303424c05fe3fcbf3344231607a40a2e66440a045da4109637d425dbb6741f4002542b7c23141b018ff3d9b08fac10b2f6cc231a3c3c11e1a72c21ceed2c1b33887c1346393c0d2a38ac0c4c7b9416c71c34101e52d4208cce641b8fd5842397b14429dda1b42e4a2c841aab68d41000048b8000016b9a12f504214e69c422a9e8d42e6791241c41ed941b39a4a417a52144297102642dc4e2b41a152ca40086ac441748eb3404a6369413aac87c09cef18c1bb1805c2be0f4bc1a7bce6c1bc6701c26233f4c1b6b040c0909a26c2c2e040c290ca65c0aaa4b2c1bce85ac2df088fc2423808c2f7d5b5c1255fbcbfd0ad1cc1eef8eac10e2832c18df519c2df67f4c0accb37c26cf164c1f460a3c131000000&quot;;</a>
+<a name="ln324"> </a>
+<a name="ln325">  uint8_t *provia_params = dt_exif_xmp_decode(</a>
+<a name="ln326">      provia_params_input, strlen(provia_params_input), &amp;params_len);</a>
+<a name="ln327"> </a>
+<a name="ln328">  assert(params_len == sizeof(dt_iop_colorchecker_params_t));</a>
+<a name="ln329">  assert(provia_params);</a>
+<a name="ln330">  dt_gui_presets_add_generic(_(&quot;Fuji Provia emulation&quot;), self-&gt;op, self-&gt;version(), provia_params, params_len, 1);</a>
+<a name="ln331">  free(provia_params);</a>
+<a name="ln332"> </a>
+<a name="ln333"> </a>
+<a name="ln334">  const char *velvia_params_input =</a>
+<a name="ln335">  &quot;3f259c42b92693425c7b83420e107d42f86e4f4252a94b4293c32042db870442269da341000048430000c8427ee97f42ceca7342e81e6b42c9eb3e425514254248600f42c0fc0242ea69e941022bcd414624994222cb8d42f57d8842d77587428cea6e421c546c42b2a668429eda5e42da4a5e42242f2f42f37a1542c0fd0d42d0e30842867bab414eeca34154c46941482b5f41d08646415e552c41c512a5423390964242c7914260c07e42ea6176429c79744286010e4273310b42d6a28541fa0a4a41ca2161c0af9206c045d4f4c07ec5c3c1633ccec0d57efac17e2981c1f8449ec112a734c00000000000000000ad5fd440cb8a9441e0fab740a649a941f85d6b41387b2541888d2e42853cc241c33ad0406843c4408eb22d41c016713d7fd79541da99953f7d70c241ba600142f0d0273fd25e0541ceda4e42456b944138a29d41f76448424a941c41d0cc1642a54ba0412c030c428342874106e0e54032bfbdbfab3a48c13fe059c1d141a0c1e655c1c1ac9c49c190d038c1e3c242c094c185c0217c5ac075074e410485174251beb941c0c422412bf53c4282ada0410571a64130a5d93f584cab3e000000000000000004d88f4229c6ba4053185a41e8d51f4268579f41302c503f87e59a410806fe4085f0cf40e67992c190b1ccc0e75c45c19ee3d1c16677a1c11b6e81c1461c06c26c192cc1ef3128c2378125c29272b0c142de69c2154e7bc120564cc2d4a807c2aa6f15c12e2e82c20fa010c200327cc1fe8a4dc1502e4cc0a6debec11a4609c230e38cc112a5c5c042f01dc2b4aa7ec1fd3986c15abf8dc0282aa242f202994250707d429aed7b42604a51424c8b4e42efac1f4276070e426420a441d3d84443567fae4219ce83425a567b4214286242a8554642f1421e42c3f10d427cab1c426af6f5416221ce416de0a14206bf9242de7e8842d21d9142668d7d42465c7e42acb57c428ada5e42f4516242eaf9514232971f42c7522042028e2b42747af9410c8aef4158809141603adb4150e2a7411e1815413287a7429d2d9a420bea9c429a418d428ea5864280877f42687f3142e5cb0f42d85b9f4160000d41c30fbec0b4246fc03f0f46c19b1c1ac2f36b08c1f2513cc2b239b4c196fda7c1123632c000409cb90010a4ba349c76416a78ea410249f3404dfd00427f41974148854d4140604c42c70edc413bf6064131cc684008178941bcb2653fa9edaf4160fe4d40b8121a4222fd2a420238c03fd436d8405e0577429e85bb41f7b899419b5469426c50c541f7e217425da58e41c99c1442ef1690417ac27e416b5e56c0a5d1a5c12405f6c12c5e1bc26ab106c2c5a59ec142693dc0f43a11c082d65140698887c0efab9c41c5de6842b0e8054221f29041eeab36420440f241673fc6410201b4404822063f00e0123b001a1a3ce60f8242e6631e41ef649b41813329425bfeb741fea0973ff9f8d0419a453f41362007412eee15c128293fc18667b0c12eb0acc14bb20fc213a7ebc1281c0dc29cd587c1f61739c2f7974cc2ac6c08c2003c8fc2389bb6c119b5a2c214a74ec266f4ecc05264b6c2107819c2f476a9c17398a8c05af39dc02d6e5cc16d31cec11095f4c1fe9e20c1bfbd76c2d3adc1c12fea7fc196bf11c131000000&quot;;</a>
+<a name="ln336"> </a>
+<a name="ln337">  uint8_t *velvia_params = dt_exif_xmp_decode(</a>
+<a name="ln338">      velvia_params_input, strlen(velvia_params_input), &amp;params_len);</a>
+<a name="ln339"> </a>
+<a name="ln340">  assert(params_len == sizeof(dt_iop_colorchecker_params_t));</a>
+<a name="ln341">  assert(velvia_params);</a>
+<a name="ln342">  dt_gui_presets_add_generic(_(&quot;Fuji Velvia emulation&quot;), self-&gt;op, self-&gt;version(), velvia_params, params_len, 1);</a>
+<a name="ln343">  free(velvia_params);</a>
+<a name="ln344"> </a>
+<a name="ln345">}</a>
+<a name="ln346"> </a>
+<a name="ln347">// fast logarithms stolen from paul mineiro http://fastapprox.googlecode.com/svn/trunk/fastapprox/src/fastonebigheader.h</a>
+<a name="ln348">#if 0//def __SSE2__</a>
+<a name="ln349">#include &lt;xmmintrin.h&gt;</a>
+<a name="ln350"> </a>
+<a name="ln351">typedef __m128 v4sf;</a>
+<a name="ln352">typedef __m128i v4si;</a>
+<a name="ln353"> </a>
+<a name="ln354">#define v4si_to_v4sf _mm_cvtepi32_ps</a>
+<a name="ln355">#define v4sf_to_v4si _mm_cvttps_epi32</a>
+<a name="ln356"> </a>
+<a name="ln357">#define v4sfl(x) ((const v4sf) { (x), (x), (x), (x) })</a>
+<a name="ln358">#define v2dil(x) ((const v4si) { (x), (x) })</a>
+<a name="ln359">#define v4sil(x) v2dil((((unsigned long long) (x)) &lt;&lt; 32) | (x))</a>
+<a name="ln360">static inline v4sf</a>
+<a name="ln361">vfastlog2 (v4sf x)</a>
+<a name="ln362">{</a>
+<a name="ln363">  union { v4sf f; v4si i; } vx = { x };</a>
+<a name="ln364">  union { v4si i; v4sf f; } mx; mx.i = (vx.i &amp; v4sil (0x007FFFFF)) | v4sil (0x3f000000);</a>
+<a name="ln365">  v4sf y = v4si_to_v4sf (vx.i);</a>
+<a name="ln366">  y *= v4sfl (1.1920928955078125e-7f);</a>
+<a name="ln367"> </a>
+<a name="ln368">  const v4sf c_124_22551499 = v4sfl (124.22551499f);</a>
+<a name="ln369">  const v4sf c_1_498030302 = v4sfl (1.498030302f);</a>
+<a name="ln370">  const v4sf c_1_725877999 = v4sfl (1.72587999f);</a>
+<a name="ln371">  const v4sf c_0_3520087068 = v4sfl (0.3520887068f);</a>
+<a name="ln372"> </a>
+<a name="ln373">  return y - c_124_22551499</a>
+<a name="ln374">    - c_1_498030302 * mx.f</a>
+<a name="ln375">    - c_1_725877999 / (c_0_3520087068 + mx.f);</a>
+<a name="ln376">}</a>
+<a name="ln377"> </a>
+<a name="ln378">static inline v4sf</a>
+<a name="ln379">vfastlog (v4sf x)</a>
+<a name="ln380">{</a>
+<a name="ln381">  const v4sf c_0_69314718 = v4sfl (0.69314718f);</a>
+<a name="ln382">  return c_0_69314718 * vfastlog2 (x);</a>
+<a name="ln383">}</a>
+<a name="ln384"> </a>
+<a name="ln385">// thinplate spline kernel \phi(r) = 2 r^2 ln(r)</a>
+<a name="ln386">static inline v4sf kerneldist4(const float *x, const float *y)</a>
+<a name="ln387">{</a>
+<a name="ln388">  const float r2 =</a>
+<a name="ln389">      (x[0]-y[0])*(x[0]-y[0])+</a>
+<a name="ln390">      (x[1]-y[1])*(x[1]-y[1])+</a>
+<a name="ln391">      (x[2]-y[2])*(x[2]-y[2]);</a>
+<a name="ln392">  return r2 * fastlog(MAX(1e-8f,r2));</a>
+<a name="ln393">}</a>
+<a name="ln394">#endif</a>
+<a name="ln395"> </a>
+<a name="ln396">static inline float</a>
+<a name="ln397">fastlog2 (float x)</a>
+<a name="ln398">{</a>
+<a name="ln399">  union { float f; uint32_t i; } vx = { x };</a>
+<a name="ln400">  union { uint32_t i; float f; } mx = { (vx.i &amp; 0x007FFFFF) | 0x3f000000 };</a>
+<a name="ln401">  float y = vx.i;</a>
+<a name="ln402">  y *= 1.1920928955078125e-7f;</a>
+<a name="ln403"> </a>
+<a name="ln404">  return y - 124.22551499f</a>
+<a name="ln405">    - 1.498030302f * mx.f</a>
+<a name="ln406">    - 1.72587999f / (0.3520887068f + mx.f);</a>
+<a name="ln407">}</a>
+<a name="ln408"> </a>
+<a name="ln409">static inline float</a>
+<a name="ln410">fastlog (float x)</a>
+<a name="ln411">{</a>
+<a name="ln412">  return 0.69314718f * fastlog2 (x);</a>
+<a name="ln413">}</a>
+<a name="ln414"> </a>
+<a name="ln415">// static inline float</a>
+<a name="ln416">// fasterlog(float x)</a>
+<a name="ln417">// {</a>
+<a name="ln418">//   union { float f; uint32_t i; } vx = { x };</a>
+<a name="ln419">//   float y = vx.i;</a>
+<a name="ln420">//   y *= 8.2629582881927490e-8f;</a>
+<a name="ln421">//   return y - 87.989971088f;</a>
+<a name="ln422">// }</a>
+<a name="ln423"> </a>
+<a name="ln424">// thinplate spline kernel \phi(r) = 2 r^2 ln(r)</a>
+<a name="ln425">#if defined(_OPENMP) &amp;&amp; defined(OPENMP_SIMD_)</a>
+<a name="ln426">#pragma omp declare SIMD()</a>
+<a name="ln427">#endif</a>
+<a name="ln428">static inline float kernel(const float *x, const float *y)</a>
+<a name="ln429">{</a>
+<a name="ln430">  // return r*r*logf(MAX(1e-8f,r));</a>
+<a name="ln431">  // well damnit, this speedup thing unfortunately shows severe artifacts.</a>
+<a name="ln432">  // return r*r*fasterlog(MAX(1e-8f,r));</a>
+<a name="ln433">  // this one seems to be a lot better, let's see how it goes:</a>
+<a name="ln434">  const float r2 =</a>
+<a name="ln435">      (x[0]-y[0])*(x[0]-y[0])+</a>
+<a name="ln436">      (x[1]-y[1])*(x[1]-y[1])+</a>
+<a name="ln437">      (x[2]-y[2])*(x[2]-y[2]);</a>
+<a name="ln438">  return r2*fastlog(MAX(1e-8f,r2));</a>
+<a name="ln439">}</a>
+<a name="ln440"> </a>
+<a name="ln441">void process(struct dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, const void *const ivoid,</a>
+<a name="ln442">             void *const ovoid, const dt_iop_roi_t *const roi_in, const dt_iop_roi_t *const roi_out)</a>
+<a name="ln443">{</a>
+<a name="ln444">  const dt_iop_colorchecker_data_t *const data = (dt_iop_colorchecker_data_t *)piece-&gt;data;</a>
+<a name="ln445">  const int ch = piece-&gt;colors;</a>
+<a name="ln446">#ifdef _OPENMP</a>
+<a name="ln447">#pragma omp parallel for default(none) schedule(static) collapse(2)</a>
+<a name="ln448">#endif</a>
+<a name="ln449">  for(int j=0;j&lt;roi_out-&gt;height;j++)</a>
+<a name="ln450">  {</a>
+<a name="ln451">    for(int i=0;i&lt;roi_out-&gt;width;i++)</a>
+<a name="ln452">    {</a>
+<a name="ln453">      const float *in = ((float *)ivoid) + (size_t)ch * (j * roi_in-&gt;width + i);</a>
+<a name="ln454">      float *out = ((float *)ovoid) + (size_t)ch * (j * roi_in-&gt;width + i);</a>
+<a name="ln455">      out[0] = data-&gt;coeff_L[data-&gt;num_patches];</a>
+<a name="ln456">      out[1] = data-&gt;coeff_a[data-&gt;num_patches];</a>
+<a name="ln457">      out[2] = data-&gt;coeff_b[data-&gt;num_patches];</a>
+<a name="ln458">      // polynomial part:</a>
+<a name="ln459">      out[0] += data-&gt;coeff_L[data-&gt;num_patches+1] * in[0] +</a>
+<a name="ln460">                data-&gt;coeff_L[data-&gt;num_patches+2] * in[1] +</a>
+<a name="ln461">                data-&gt;coeff_L[data-&gt;num_patches+3] * in[2];</a>
+<a name="ln462">      out[1] += data-&gt;coeff_a[data-&gt;num_patches+1] * in[0] +</a>
+<a name="ln463">                data-&gt;coeff_a[data-&gt;num_patches+2] * in[1] +</a>
+<a name="ln464">                data-&gt;coeff_a[data-&gt;num_patches+3] * in[2];</a>
+<a name="ln465">      out[2] += data-&gt;coeff_b[data-&gt;num_patches+1] * in[0] +</a>
+<a name="ln466">                data-&gt;coeff_b[data-&gt;num_patches+2] * in[1] +</a>
+<a name="ln467">                data-&gt;coeff_b[data-&gt;num_patches+3] * in[2];</a>
+<a name="ln468">#if defined(_OPENMP) &amp;&amp; defined(OPENMP_SIMD_) // &lt;== nice try, i don't think this does anything here</a>
+<a name="ln469">#pragma omp SIMD()</a>
+<a name="ln470">#endif</a>
+<a name="ln471">      for(int k=0;k&lt;data-&gt;num_patches;k++)</a>
+<a name="ln472">      { // rbf from thin plate spline</a>
+<a name="ln473">        const float phi = kernel(in, data-&gt;source_Lab + 3*k);</a>
+<a name="ln474">        out[0] += data-&gt;coeff_L[k] * phi;</a>
+<a name="ln475">        out[1] += data-&gt;coeff_a[k] * phi;</a>
+<a name="ln476">        out[2] += data-&gt;coeff_b[k] * phi;</a>
+<a name="ln477">      }</a>
+<a name="ln478">    }</a>
+<a name="ln479">  }</a>
+<a name="ln480">  if(piece-&gt;pipe-&gt;mask_display &amp; DT_DEV_PIXELPIPE_DISPLAY_MASK) dt_iop_alpha_copy(ivoid, ovoid, roi_out-&gt;width, roi_out-&gt;height);</a>
+<a name="ln481">}</a>
+<a name="ln482"> </a>
+<a name="ln483">#if 0 // TODO:</a>
+<a name="ln484">void process_sse2(struct dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, const void *const ivoid,</a>
+<a name="ln485">             void *const ovoid, const dt_iop_roi_t *const roi_in, const dt_iop_roi_t *const roi_out)</a>
+<a name="ln486">{</a>
+<a name="ln487">  const dt_iop_colorchecker_data_t *const data = (dt_iop_colorchecker_data_t *)piece-&gt;data;</a>
+<a name="ln488">  const int ch = piece-&gt;colors;</a>
+<a name="ln489">  // TODO: swizzle this so we can eval the distance of one point</a>
+<a name="ln490">  // TODO: to four patches at the same time</a>
+<a name="ln491">  v4sf source_Lab[data-&gt;num_patches];</a>
+<a name="ln492">  for(int i=0;i&lt;data-&gt;num_patches;i++)</a>
+<a name="ln493">    source_Lab[i] = _mm_set_ps(1.0,</a>
+<a name="ln494">        data-&gt;source_Lab[3*i+0],</a>
+<a name="ln495">        data-&gt;source_Lab[3*i+1],</a>
+<a name="ln496">        data-&gt;source_Lab[3*i+2]);</a>
+<a name="ln497">#ifdef _OPENMP</a>
+<a name="ln498">#pragma omp parallel for default(none) schedule(static) collapse(2)</a>
+<a name="ln499">#endif</a>
+<a name="ln500">  for(int j=0;j&lt;roi_out-&gt;height;j++)</a>
+<a name="ln501">  {</a>
+<a name="ln502">    for(int i=0;i&lt;roi_out-&gt;width;i++)</a>
+<a name="ln503">    {</a>
+<a name="ln504">      const float *in = ((float *)ivoid) + (size_t)ch * (j * roi_in-&gt;width + i);</a>
+<a name="ln505">      float *out = ((float *)ovoid) + (size_t)ch * (j * roi_in-&gt;width + i);</a>
+<a name="ln506">      // TODO: do this part in SSE (maybe need to store coeff_L in _mm128 on data struct)</a>
+<a name="ln507">      out[0] = data-&gt;coeff_L[data-&gt;num_patches];</a>
+<a name="ln508">      out[1] = data-&gt;coeff_a[data-&gt;num_patches];</a>
+<a name="ln509">      out[2] = data-&gt;coeff_b[data-&gt;num_patches];</a>
+<a name="ln510">      // polynomial part:</a>
+<a name="ln511">      out[0] += data-&gt;coeff_L[data-&gt;num_patches+1] * in[0] +</a>
+<a name="ln512">                data-&gt;coeff_L[data-&gt;num_patches+2] * in[1] +</a>
+<a name="ln513">                data-&gt;coeff_L[data-&gt;num_patches+3] * in[2];</a>
+<a name="ln514">      out[1] += data-&gt;coeff_a[data-&gt;num_patches+1] * in[0] +</a>
+<a name="ln515">                data-&gt;coeff_a[data-&gt;num_patches+2] * in[1] +</a>
+<a name="ln516">                data-&gt;coeff_a[data-&gt;num_patches+3] * in[2];</a>
+<a name="ln517">      out[2] += data-&gt;coeff_b[data-&gt;num_patches+1] * in[0] +</a>
+<a name="ln518">                data-&gt;coeff_b[data-&gt;num_patches+2] * in[1] +</a>
+<a name="ln519">                data-&gt;coeff_b[data-&gt;num_patches+3] * in[2];</a>
+<a name="ln520">      for(int k=0;k&lt;data-&gt;num_patches;k+=4)</a>
+<a name="ln521">      { // rbf from thin plate spline</a>
+<a name="ln522">        const v4sf phi = kerneldist4(in, source_Lab[k]);</a>
+<a name="ln523">        // TODO: add up 4x output channels</a>
+<a name="ln524">        out[0] += data-&gt;coeff_L[k] * phi[0];</a>
+<a name="ln525">        out[1] += data-&gt;coeff_a[k] * phi[0];</a>
+<a name="ln526">        out[2] += data-&gt;coeff_b[k] * phi[0];</a>
+<a name="ln527">      }</a>
+<a name="ln528">    }</a>
+<a name="ln529">  }</a>
+<a name="ln530">  if(piece-&gt;pipe-&gt;mask_display &amp; DT_DEV_PIXELPIPE_DISPLAY_MASK) dt_iop_alpha_copy(ivoid, ovoid, roi_out-&gt;width, roi_out-&gt;height);</a>
+<a name="ln531">}</a>
+<a name="ln532">#endif</a>
+<a name="ln533"> </a>
+<a name="ln534">#ifdef HAVE_OPENCL</a>
+<a name="ln535">int process_cl(struct dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, cl_mem dev_in, cl_mem dev_out,</a>
+<a name="ln536">               const dt_iop_roi_t *const roi_in, const dt_iop_roi_t *const roi_out)</a>
+<a name="ln537">{</a>
+<a name="ln538">  dt_iop_colorchecker_data_t *d = (dt_iop_colorchecker_data_t *)piece-&gt;data;</a>
+<a name="ln539">  dt_iop_colorchecker_global_data_t *gd = (dt_iop_colorchecker_global_data_t *)self-&gt;data;</a>
+<a name="ln540"> </a>
+<a name="ln541">  const int devid = piece-&gt;pipe-&gt;devid;</a>
+<a name="ln542">  const int width = roi_out-&gt;width;</a>
+<a name="ln543">  const int height = roi_out-&gt;height;</a>
+<a name="ln544">  const int num_patches = d-&gt;num_patches;</a>
+<a name="ln545"> </a>
+<a name="ln546">  cl_int err = -999;</a>
+<a name="ln547">  cl_mem dev_params = NULL;</a>
+<a name="ln548"> </a>
+<a name="ln549">  const size_t params_size = (size_t)(4 * (2 * num_patches + 4)) * sizeof(float);</a>
+<a name="ln550">  float *params = malloc(params_size);</a>
+<a name="ln551">  float *idx = params;</a>
+<a name="ln552"> </a>
+<a name="ln553">  // re-arrange data-&gt;source_Lab and data-&gt;coeff_{L,a,b} into float4</a>
+<a name="ln554">  for(int n = 0; n &lt; num_patches; n++, idx += 4)</a>
+<a name="ln555">  {</a>
+<a name="ln556">    idx[0] = d-&gt;source_Lab[3 * n];</a>
+<a name="ln557">    idx[1] = d-&gt;source_Lab[3 * n + 1];</a>
+<a name="ln558">    idx[2] = d-&gt;source_Lab[3 * n + 2];</a>
+<a name="ln559">    idx[3] = 0.0f;</a>
+<a name="ln560">  }</a>
+<a name="ln561"> </a>
+<a name="ln562">  for(int n = 0; n &lt; num_patches + 4; n++, idx += 4)</a>
+<a name="ln563">  {</a>
+<a name="ln564">    idx[0] = d-&gt;coeff_L[n];</a>
+<a name="ln565">    idx[1] = d-&gt;coeff_a[n];</a>
+<a name="ln566">    idx[2] = d-&gt;coeff_b[n];</a>
+<a name="ln567">    idx[3] = 0.0f;</a>
+<a name="ln568">  }</a>
+<a name="ln569"> </a>
+<a name="ln570">  dev_params = dt_opencl_copy_host_to_device_constant(devid, params_size, params);</a>
+<a name="ln571">  if(dev_params == NULL) goto error;</a>
+<a name="ln572"> </a>
+<a name="ln573">  size_t sizes[3] = { ROUNDUPWD(width), ROUNDUPHT(height), 1 };</a>
+<a name="ln574">  dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_colorchecker, 0, sizeof(cl_mem), (void *)&amp;dev_in);</a>
+<a name="ln575">  dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_colorchecker, 1, sizeof(cl_mem), (void *)&amp;dev_out);</a>
+<a name="ln576">  dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_colorchecker, 2, sizeof(int), (void *)&amp;width);</a>
+<a name="ln577">  dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_colorchecker, 3, sizeof(int), (void *)&amp;height);</a>
+<a name="ln578">  dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_colorchecker, 4, sizeof(int), (void *)&amp;num_patches);</a>
+<a name="ln579">  dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_colorchecker, 5, sizeof(cl_mem), (void *)&amp;dev_params);</a>
+<a name="ln580">  err = dt_opencl_enqueue_kernel_2d(devid, gd-&gt;kernel_colorchecker, sizes);</a>
+<a name="ln581">  if(err != CL_SUCCESS) goto error;</a>
+<a name="ln582"> </a>
+<a name="ln583">  dt_opencl_release_mem_object(dev_params);</a>
+<a name="ln584">  free(params);</a>
+<a name="ln585">  return TRUE;</a>
+<a name="ln586"> </a>
+<a name="ln587">error:</a>
+<a name="ln588">  free(params);</a>
+<a name="ln589">  dt_opencl_release_mem_object(dev_params);</a>
+<a name="ln590">  dt_print(DT_DEBUG_OPENCL, &quot;[opencl_colorchecker] couldn't enqueue kernel! %d\n&quot;, err);</a>
+<a name="ln591">  return FALSE;</a>
+<a name="ln592">}</a>
+<a name="ln593">#endif</a>
+<a name="ln594"> </a>
+<a name="ln595"> </a>
+<a name="ln596">void commit_params(struct dt_iop_module_t *self, dt_iop_params_t *p1, dt_dev_pixelpipe_t *pipe,</a>
+<a name="ln597">                   dt_dev_pixelpipe_iop_t *piece)</a>
+<a name="ln598">{</a>
+<a name="ln599">  dt_iop_colorchecker_params_t *p = (dt_iop_colorchecker_params_t *)p1;</a>
+<a name="ln600">  dt_iop_colorchecker_data_t *d = (dt_iop_colorchecker_data_t *)piece-&gt;data;</a>
+<a name="ln601"> </a>
+<a name="ln602">  d-&gt;num_patches = MIN(MAX_PATCHES, p-&gt;num_patches);</a>
+<a name="ln603">  const int N = d-&gt;num_patches, N4 = N + 4;</a>
+<a name="ln604">  for(int k = 0; k &lt; N; k++)</a>
+<a name="ln605">  {</a>
+<a name="ln606">    d-&gt;source_Lab[3*k+0] = p-&gt;source_L[k];</a>
+<a name="ln607">    d-&gt;source_Lab[3*k+1] = p-&gt;source_a[k];</a>
+<a name="ln608">    d-&gt;source_Lab[3*k+2] = p-&gt;source_b[k];</a>
+<a name="ln609">  }</a>
+<a name="ln610"> </a>
+<a name="ln611">  // initialize coefficients with default values that will be</a>
+<a name="ln612">  // used for N&lt;=4 and if coefficient matrix A is singular</a>
+<a name="ln613">  for(int i=0;i&lt;4+N;i++)</a>
+<a name="ln614">  {</a>
+<a name="ln615">    d-&gt;coeff_L[i] = 0;</a>
+<a name="ln616">    d-&gt;coeff_a[i] = 0;</a>
+<a name="ln617">    d-&gt;coeff_b[i] = 0;</a>
+<a name="ln618">  }</a>
+<a name="ln619">  d-&gt;coeff_L[N + 1] = 1;</a>
+<a name="ln620">  d-&gt;coeff_a[N + 2] = 1;</a>
+<a name="ln621">  d-&gt;coeff_b[N + 3] = 1;</a>
+<a name="ln622"> </a>
+<a name="ln623">  /*</a>
+<a name="ln624">      Following</a>
+<a name="ln625"> </a>
+<a name="ln626">      K. Anjyo, J. P. Lewis, and F. Pighin, &quot;Scattered data</a>
+<a name="ln627">      interpolation for computer graphics,&quot; ACM SIGGRAPH 2014 Courses</a>
+<a name="ln628">      on - SIGGRAPH ’14, 2014.</a>
+<a name="ln629">      http://dx.doi.org/10.1145/2614028.2615425</a>
+<a name="ln630">      http://scribblethink.org/Courses/ScatteredInterpolation/scatteredinterpcoursenotes.pdf</a>
+<a name="ln631"> </a>
+<a name="ln632">      construct the system matrix and the vector of function values and</a>
+<a name="ln633">      solve the set of linear equations</a>
+<a name="ln634"> </a>
+<a name="ln635">      / R   P \  / c \   / f \</a>
+<a name="ln636">      |       |  |   | = |   |</a>
+<a name="ln637">      \ P^t 0 /  \ d /   \ 0 /</a>
+<a name="ln638"> </a>
+<a name="ln639">      for the coefficient vector (c d)^t.</a>
+<a name="ln640"> </a>
+<a name="ln641">      By design of the interpolation scheme the interpolation</a>
+<a name="ln642">      coefficients c for radial non-linear basis functions (the kernel)</a>
+<a name="ln643">      must always vanish for N&lt;=4.  For N&lt;4 the (N+4)x(N+4) coefficient</a>
+<a name="ln644">      matrix A is singular, the linear system has non-unique solutions.</a>
+<a name="ln645">      Thus the cases with N&lt;=4 need special treatment, unique solutions</a>
+<a name="ln646">      are found by setting some of the unknown coefficients to zero and</a>
+<a name="ln647">      solving a smaller linear system.</a>
+<a name="ln648">  */</a>
+<a name="ln649">  switch(N)</a>
+<a name="ln650">  {</a>
+<a name="ln651">  case 0:</a>
+<a name="ln652">    break;</a>
+<a name="ln653">  case 1:</a>
+<a name="ln654">    // interpolation via constant function</a>
+<a name="ln655">    d-&gt;coeff_L[N + 1] = p-&gt;target_L[0] / p-&gt;source_L[0];</a>
+<a name="ln656">    d-&gt;coeff_a[N + 2] = p-&gt;target_a[0] / p-&gt;source_a[0];</a>
+<a name="ln657">    d-&gt;coeff_b[N + 3] = p-&gt;target_b[0] / p-&gt;source_b[0];</a>
+<a name="ln658">    break;</a>
+<a name="ln659">  case 2:</a>
+<a name="ln660">    // interpolation via single constant function and the linear</a>
+<a name="ln661">    // function of the corresponding color channel</a>
+<a name="ln662">    {</a>
+<a name="ln663">      double A[2 * 2] = { 1, p-&gt;source_L[0],</a>
+<a name="ln664">                          1, p-&gt;source_L[1] };</a>
+<a name="ln665">      double b[2] = { p-&gt;target_L[0], p-&gt;target_L[1] };</a>
+<a name="ln666">      if(!gauss_solve(A, b, 2)) break;</a>
+<a name="ln667">      d-&gt;coeff_L[N + 0] = b[0];</a>
+<a name="ln668">      d-&gt;coeff_L[N + 1] = b[1];</a>
+<a name="ln669">    }</a>
+<a name="ln670">    {</a>
+<a name="ln671">      double A[2 * 2] = { 1, p-&gt;source_a[0],</a>
+<a name="ln672">                          1, p-&gt;source_a[1] };</a>
+<a name="ln673">      double b[2] = { p-&gt;target_a[0], p-&gt;target_a[1] };</a>
+<a name="ln674">      if(!gauss_solve(A, b, 2)) break;</a>
+<a name="ln675">      d-&gt;coeff_a[N + 0] = b[0];</a>
+<a name="ln676">      d-&gt;coeff_a[N + 2] = b[1];</a>
+<a name="ln677">    }</a>
+<a name="ln678">    {</a>
+<a name="ln679">      double A[2 * 2] = { 1, p-&gt;source_b[0],</a>
+<a name="ln680">                          1, p-&gt;source_b[1] };</a>
+<a name="ln681">      double b[2] = { p-&gt;target_b[0], p-&gt;target_b[1] };</a>
+<a name="ln682">      if(!gauss_solve(A, b, 2)) break;</a>
+<a name="ln683">      d-&gt;coeff_b[N + 0] = b[0];</a>
+<a name="ln684">      d-&gt;coeff_b[N + 3] = b[1];</a>
+<a name="ln685">    }</a>
+<a name="ln686">    break;</a>
+<a name="ln687">  case 3:</a>
+<a name="ln688">    // interpolation via single constant function, the linear function</a>
+<a name="ln689">    // of the corresponding color channel and the linear functions</a>
+<a name="ln690">    // of the other two color channels having both the same weight</a>
+<a name="ln691">    {</a>
+<a name="ln692">      double A[3 * 3] = { 1, p-&gt;source_L[0], p-&gt;source_a[0] + p-&gt;source_b[0],</a>
+<a name="ln693">                          1, p-&gt;source_L[1], p-&gt;source_a[1] + p-&gt;source_b[1],</a>
+<a name="ln694">                          1, p-&gt;source_L[2], p-&gt;source_a[2] + p-&gt;source_b[2] };</a>
+<a name="ln695">      double b[3] = { p-&gt;target_L[0], p-&gt;target_L[1], p-&gt;target_L[2] };</a>
+<a name="ln696">      if(!gauss_solve(A, b, 3)) break;</a>
+<a name="ln697">      d-&gt;coeff_L[N + 0] = b[0];</a>
+<a name="ln698">      d-&gt;coeff_L[N + 1] = b[1];</a>
+<a name="ln699">      d-&gt;coeff_L[N + 2] = b[2];</a>
+<a name="ln700">      d-&gt;coeff_L[N + 3] = b[2];</a>
+<a name="ln701">    }</a>
+<a name="ln702">    {</a>
+<a name="ln703">      double A[3 * 3] = { 1, p-&gt;source_a[0], p-&gt;source_L[0] + p-&gt;source_b[0],</a>
+<a name="ln704">                          1, p-&gt;source_a[1], p-&gt;source_L[1] + p-&gt;source_b[1],</a>
+<a name="ln705">                          1, p-&gt;source_a[2], p-&gt;source_L[2] + p-&gt;source_b[2] };</a>
+<a name="ln706">      double b[3] = { p-&gt;target_a[0], p-&gt;target_a[1], p-&gt;target_a[2] };</a>
+<a name="ln707">      if(!gauss_solve(A, b, 3)) break;</a>
+<a name="ln708">      d-&gt;coeff_a[N + 0] = b[0];</a>
+<a name="ln709">      d-&gt;coeff_a[N + 1] = b[2];</a>
+<a name="ln710">      d-&gt;coeff_a[N + 2] = b[1];</a>
+<a name="ln711">      d-&gt;coeff_a[N + 3] = b[2];</a>
+<a name="ln712">    }</a>
+<a name="ln713">    {</a>
+<a name="ln714">      double A[3 * 3] = { 1, p-&gt;source_b[0], p-&gt;source_L[0] + p-&gt;source_a[0],</a>
+<a name="ln715">                          1, p-&gt;source_b[1], p-&gt;source_L[1] + p-&gt;source_a[1],</a>
+<a name="ln716">                          1, p-&gt;source_b[2], p-&gt;source_L[2] + p-&gt;source_a[2] };</a>
+<a name="ln717">      double b[3] = { p-&gt;target_b[0], p-&gt;target_b[1], p-&gt;target_b[2] };</a>
+<a name="ln718">      if(!gauss_solve(A, b, 3)) break;</a>
+<a name="ln719">      d-&gt;coeff_b[N + 0] = b[0];</a>
+<a name="ln720">      d-&gt;coeff_b[N + 1] = b[2];</a>
+<a name="ln721">      d-&gt;coeff_b[N + 2] = b[2];</a>
+<a name="ln722">      d-&gt;coeff_b[N + 3] = b[1];</a>
+<a name="ln723">    }</a>
+<a name="ln724">    break;</a>
+<a name="ln725">  case 4:</a>
+<a name="ln726">  {</a>
+<a name="ln727">    // interpolation via constant function and 3 linear functions</a>
+<a name="ln728">    double A[4 * 4] = { 1, p-&gt;source_L[0], p-&gt;source_a[0], p-&gt;source_b[0],</a>
+<a name="ln729">                        1, p-&gt;source_L[1], p-&gt;source_a[1], p-&gt;source_b[1],</a>
+<a name="ln730">                        1, p-&gt;source_L[2], p-&gt;source_a[2], p-&gt;source_b[2],</a>
+<a name="ln731">                        1, p-&gt;source_L[3], p-&gt;source_a[3], p-&gt;source_b[3] };</a>
+<a name="ln732">    int pivot[4];</a>
+<a name="ln733">    if(!gauss_make_triangular(A, pivot, 4)) break;</a>
+<a name="ln734">    {</a>
+<a name="ln735">      double b[4] = { p-&gt;target_L[0], p-&gt;target_L[1], p-&gt;target_L[2], p-&gt;target_L[3] };</a>
+<a name="ln736">      gauss_solve_triangular(A, pivot, b, 4);</a>
+<a name="ln737">      d-&gt;coeff_L[N + 0] = b[0];</a>
+<a name="ln738">      d-&gt;coeff_L[N + 1] = b[1];</a>
+<a name="ln739">      d-&gt;coeff_L[N + 2] = b[2];</a>
+<a name="ln740">      d-&gt;coeff_L[N + 3] = b[3];</a>
+<a name="ln741">    }</a>
+<a name="ln742">    {</a>
+<a name="ln743">      double b[4] = { p-&gt;target_a[0], p-&gt;target_a[1], p-&gt;target_a[2], p-&gt;target_a[3] };</a>
+<a name="ln744">      gauss_solve_triangular(A, pivot, b, 4);</a>
+<a name="ln745">      d-&gt;coeff_a[N + 0] = b[0];</a>
+<a name="ln746">      d-&gt;coeff_a[N + 1] = b[1];</a>
+<a name="ln747">      d-&gt;coeff_a[N + 2] = b[2];</a>
+<a name="ln748">      d-&gt;coeff_a[N + 3] = b[3];</a>
+<a name="ln749">    }</a>
+<a name="ln750">    {</a>
+<a name="ln751">      double b[4] = { p-&gt;target_b[0], p-&gt;target_b[1], p-&gt;target_b[2], p-&gt;target_b[3] };</a>
+<a name="ln752">      gauss_solve_triangular(A, pivot, b, 4);</a>
+<a name="ln753">      d-&gt;coeff_b[N + 0] = b[0];</a>
+<a name="ln754">      d-&gt;coeff_b[N + 1] = b[1];</a>
+<a name="ln755">      d-&gt;coeff_b[N + 2] = b[2];</a>
+<a name="ln756">      d-&gt;coeff_b[N + 3] = b[3];</a>
+<a name="ln757">    }</a>
+<a name="ln758">    break;</a>
+<a name="ln759">  }</a>
+<a name="ln760">  default:</a>
+<a name="ln761">  {</a>
+<a name="ln762">    // setup linear system of equations</a>
+<a name="ln763">    double *A = malloc(N4 * N4 * sizeof(*A));</a>
+<a name="ln764">    double *b = malloc(N4 * sizeof(*b));</a>
+<a name="ln765">    // coefficients from nonlinear radial kernel functions</a>
+<a name="ln766">    for(int j=0;j&lt;N;j++)</a>
+<a name="ln767">      for(int i=j;i&lt;N;i++)</a>
+<a name="ln768">        A[j*N4+i] = A[i*N4+j] = kernel(d-&gt;source_Lab+3*i, d-&gt;source_Lab+3*j);</a>
+<a name="ln769">    // coefficients from constant and linear functions</a>
+<a name="ln770">    for(int i=0;i&lt;N;i++) A[i*N4+N+0] = A[(N+0)*N4+i] = 1;</a>
+<a name="ln771">    for(int i=0;i&lt;N;i++) A[i*N4+N+1] = A[(N+1)*N4+i] = d-&gt;source_Lab[3*i+0];</a>
+<a name="ln772">    for(int i=0;i&lt;N;i++) A[i*N4+N+2] = A[(N+2)*N4+i] = d-&gt;source_Lab[3*i+1];</a>
+<a name="ln773">    for(int i=0;i&lt;N;i++) A[i*N4+N+3] = A[(N+3)*N4+i] = d-&gt;source_Lab[3*i+2];</a>
+<a name="ln774">    // lower-right zero block</a>
+<a name="ln775">    for(int j=N;j&lt;N4;j++)</a>
+<a name="ln776">      for(int i=N;i&lt;N4;i++)</a>
+<a name="ln777">        A[j*N4+i] = 0;</a>
+<a name="ln778">    // make coefficient matrix triangular</a>
+<a name="ln779">    int *pivot = malloc(N4 * sizeof(*pivot));</a>
+<a name="ln780">    if (gauss_make_triangular(A, pivot, N4))</a>
+<a name="ln781">    {</a>
+<a name="ln782">      // calculate coefficients for L channel</a>
+<a name="ln783">      for(int i=0;i&lt;N;i++) b[i] = p-&gt;target_L[i];</a>
+<a name="ln784">      for(int i=N;i&lt;N+4;i++) b[i] = 0;</a>
+<a name="ln785">      gauss_solve_triangular(A, pivot, b, N4);</a>
+<a name="ln786">      for(int i=0;i&lt;N+4;i++) d-&gt;coeff_L[i] = b[i];</a>
+<a name="ln787">      // calculate coefficients for a channel</a>
+<a name="ln788">      for(int i=0;i&lt;N;i++) b[i] = p-&gt;target_a[i];</a>
+<a name="ln789">      for(int i=N;i&lt;N+4;i++) b[i] = 0;</a>
+<a name="ln790">      gauss_solve_triangular(A, pivot, b, N4);</a>
+<a name="ln791">      for(int i=0;i&lt;N+4;i++) d-&gt;coeff_a[i] = b[i];</a>
+<a name="ln792">      // calculate coefficients for b channel</a>
+<a name="ln793">      for(int i=0;i&lt;N;i++) b[i] = p-&gt;target_b[i];</a>
+<a name="ln794">      for(int i=N;i&lt;N+4;i++) b[i] = 0;</a>
+<a name="ln795">      gauss_solve_triangular(A, pivot, b, N4);</a>
+<a name="ln796">      for(int i=0;i&lt;N+4;i++) d-&gt;coeff_b[i] = b[i];</a>
+<a name="ln797">    }</a>
+<a name="ln798">    // free resources</a>
+<a name="ln799">    free(pivot);</a>
+<a name="ln800">    free(b);</a>
+<a name="ln801">    free(A);</a>
+<a name="ln802">  }</a>
+<a name="ln803">  }</a>
+<a name="ln804">}</a>
+<a name="ln805"> </a>
+<a name="ln806">void init_pipe(struct dt_iop_module_t *self, dt_dev_pixelpipe_t *pipe, dt_dev_pixelpipe_iop_t *piece)</a>
+<a name="ln807">{</a>
+<a name="ln808">  piece-&gt;data = malloc(sizeof(dt_iop_colorchecker_data_t));</a>
+<a name="ln809">  self-&gt;commit_params(self, self-&gt;default_params, pipe, piece);</a>
+<a name="ln810">}</a>
+<a name="ln811"> </a>
+<a name="ln812">void cleanup_pipe(struct dt_iop_module_t *self, dt_dev_pixelpipe_t *pipe, dt_dev_pixelpipe_iop_t *piece)</a>
+<a name="ln813">{</a>
+<a name="ln814">  free(piece-&gt;data);</a>
+<a name="ln815">  piece-&gt;data = NULL;</a>
+<a name="ln816">}</a>
+<a name="ln817"> </a>
+<a name="ln818">void gui_reset(struct dt_iop_module_t *self)</a>
+<a name="ln819">{</a>
+<a name="ln820">  dt_iop_colorchecker_gui_data_t *g = (dt_iop_colorchecker_gui_data_t *)self-&gt;gui_data;</a>
+<a name="ln821">  self-&gt;request_color_pick = DT_REQUEST_COLORPICK_OFF;</a>
+<a name="ln822">  dt_bauhaus_widget_set_quad_active(g-&gt;combobox_patch, 0);</a>
+<a name="ln823">}</a>
+<a name="ln824"> </a>
+<a name="ln825">void gui_update(struct dt_iop_module_t *self)</a>
+<a name="ln826">{</a>
+<a name="ln827">  dt_iop_module_t *module = (dt_iop_module_t *)self;</a>
+<a name="ln828">  dt_iop_colorchecker_gui_data_t *g = (dt_iop_colorchecker_gui_data_t *)self-&gt;gui_data;</a>
+<a name="ln829">  dt_iop_colorchecker_params_t *p = (dt_iop_colorchecker_params_t *)module-&gt;params;</a>
+<a name="ln830">  if(g-&gt;patch &gt;= p-&gt;num_patches || g-&gt;patch &lt; 0) return;</a>
+<a name="ln831">  if(dt_bauhaus_combobox_length(g-&gt;combobox_patch) != p-&gt;num_patches)</a>
+<a name="ln832">  {</a>
+<a name="ln833">    dt_bauhaus_combobox_clear(g-&gt;combobox_patch);</a>
+<a name="ln834">    char cboxentry[1024];</a>
+<a name="ln835">    for(int k=0;k&lt;p-&gt;num_patches;k++)</a>
+<a name="ln836">    {</a>
+<a name="ln837">      snprintf(cboxentry, sizeof(cboxentry), _(&quot;patch #%d&quot;), k);</a>
+<a name="ln838">      dt_bauhaus_combobox_add(g-&gt;combobox_patch, cboxentry);</a>
+<a name="ln839">    }</a>
+<a name="ln840">    if(p-&gt;num_patches &lt;= 24)</a>
+<a name="ln841">      dtgtk_drawing_area_set_aspect_ratio(g-&gt;area, 2.0/3.0);</a>
+<a name="ln842">    else</a>
+<a name="ln843">      dtgtk_drawing_area_set_aspect_ratio(g-&gt;area, 1.0);</a>
+<a name="ln844">  }</a>
+<a name="ln845">  if(g-&gt;absolute_target)</a>
+<a name="ln846">  {</a>
+<a name="ln847">    dt_bauhaus_slider_set(g-&gt;scale_L, p-&gt;target_L[g-&gt;patch]);</a>
+<a name="ln848">    dt_bauhaus_slider_set(g-&gt;scale_a, p-&gt;target_a[g-&gt;patch]);</a>
+<a name="ln849">    dt_bauhaus_slider_set(g-&gt;scale_b, p-&gt;target_b[g-&gt;patch]);</a>
+<a name="ln850">    const float Cout = sqrtf(</a>
+<a name="ln851">        p-&gt;target_a[g-&gt;patch]*p-&gt;target_a[g-&gt;patch]+</a>
+<a name="ln852">        p-&gt;target_b[g-&gt;patch]*p-&gt;target_b[g-&gt;patch]);</a>
+<a name="ln853">    dt_bauhaus_slider_set(g-&gt;scale_C, Cout);</a>
+<a name="ln854">  }</a>
+<a name="ln855">  else</a>
+<a name="ln856">  {</a>
+<a name="ln857">    dt_bauhaus_slider_set(g-&gt;scale_L, p-&gt;target_L[g-&gt;patch] - p-&gt;source_L[g-&gt;patch]);</a>
+<a name="ln858">    dt_bauhaus_slider_set(g-&gt;scale_a, p-&gt;target_a[g-&gt;patch] - p-&gt;source_a[g-&gt;patch]);</a>
+<a name="ln859">    dt_bauhaus_slider_set(g-&gt;scale_b, p-&gt;target_b[g-&gt;patch] - p-&gt;source_b[g-&gt;patch]);</a>
+<a name="ln860">    const float Cin = sqrtf(</a>
+<a name="ln861">        p-&gt;source_a[g-&gt;patch]*p-&gt;source_a[g-&gt;patch] +</a>
+<a name="ln862">        p-&gt;source_b[g-&gt;patch]*p-&gt;source_b[g-&gt;patch]);</a>
+<a name="ln863">    const float Cout = sqrtf(</a>
+<a name="ln864">        p-&gt;target_a[g-&gt;patch]*p-&gt;target_a[g-&gt;patch]+</a>
+<a name="ln865">        p-&gt;target_b[g-&gt;patch]*p-&gt;target_b[g-&gt;patch]);</a>
+<a name="ln866">    dt_bauhaus_slider_set(g-&gt;scale_C, Cout-Cin);</a>
+<a name="ln867">  }</a>
+<a name="ln868">  gtk_widget_queue_draw(g-&gt;area);</a>
+<a name="ln869"> </a>
+<a name="ln870">  if (self-&gt;request_color_pick == DT_REQUEST_COLORPICK_OFF)</a>
+<a name="ln871">    dt_bauhaus_widget_set_quad_active(g-&gt;combobox_patch, 0);</a>
+<a name="ln872">}</a>
+<a name="ln873"> </a>
+<a name="ln874">void init(dt_iop_module_t *module)</a>
+<a name="ln875">{</a>
+<a name="ln876">  module-&gt;params = calloc(1, sizeof(dt_iop_colorchecker_params_t));</a>
+<a name="ln877">  module-&gt;default_params = calloc(1, sizeof(dt_iop_colorchecker_params_t));</a>
+<a name="ln878">  module-&gt;default_enabled = 0;</a>
+<a name="ln879">  module-&gt;priority = 399; // module order created by iop_dependencies.py, do not edit!</a>
+<a name="ln880">  module-&gt;params_size = sizeof(dt_iop_colorchecker_params_t);</a>
+<a name="ln881">  module-&gt;gui_data = NULL;</a>
+<a name="ln882">  dt_iop_colorchecker_params_t tmp;</a>
+<a name="ln883">  tmp.num_patches = 24;</a>
+<a name="ln884">  for(int k=0;k&lt;tmp.num_patches;k++) tmp.source_L[k] = colorchecker_Lab[3*k+0];</a>
+<a name="ln885">  for(int k=0;k&lt;tmp.num_patches;k++) tmp.source_a[k] = colorchecker_Lab[3*k+1];</a>
+<a name="ln886">  for(int k=0;k&lt;tmp.num_patches;k++) tmp.source_b[k] = colorchecker_Lab[3*k+2];</a>
+<a name="ln887">  for(int k=0;k&lt;tmp.num_patches;k++) tmp.target_L[k] = colorchecker_Lab[3*k+0];</a>
+<a name="ln888">  for(int k=0;k&lt;tmp.num_patches;k++) tmp.target_a[k] = colorchecker_Lab[3*k+1];</a>
+<a name="ln889">  for(int k=0;k&lt;tmp.num_patches;k++) tmp.target_b[k] = colorchecker_Lab[3*k+2];</a>
+<a name="ln890">  memcpy(module-&gt;params, &amp;tmp, sizeof(dt_iop_colorchecker_params_t));</a>
+<a name="ln891">  memcpy(module-&gt;default_params, &amp;tmp, sizeof(dt_iop_colorchecker_params_t));</a>
+<a name="ln892">}</a>
+<a name="ln893"> </a>
+<a name="ln894">void cleanup(dt_iop_module_t *module)</a>
+<a name="ln895">{</a>
+<a name="ln896">  free(module-&gt;params);</a>
+<a name="ln897">  module-&gt;params = NULL;</a>
+<a name="ln898">}</a>
+<a name="ln899"> </a>
+<a name="ln900">void init_global(dt_iop_module_so_t *module)</a>
+<a name="ln901">{</a>
+<a name="ln902">  dt_iop_colorchecker_global_data_t *gd</a>
+<a name="ln903">      = (dt_iop_colorchecker_global_data_t *)malloc(sizeof(dt_iop_colorchecker_global_data_t));</a>
+<a name="ln904">  module-&gt;data = gd;</a>
+<a name="ln905"> </a>
+<a name="ln906">  const int program = 8; // extended.cl, from programs.conf</a>
+<a name="ln907">  gd-&gt;kernel_colorchecker = dt_opencl_create_kernel(program, &quot;colorchecker&quot;);</a>
+<a name="ln908">}</a>
+<a name="ln909"> </a>
+<a name="ln910">void cleanup_global(dt_iop_module_so_t *module)</a>
+<a name="ln911">{</a>
+<a name="ln912">  dt_iop_colorchecker_global_data_t *gd = (dt_iop_colorchecker_global_data_t *)module-&gt;data;</a>
+<a name="ln913">  dt_opencl_free_kernel(gd-&gt;kernel_colorchecker);</a>
+<a name="ln914">  free(module-&gt;data);</a>
+<a name="ln915">  module-&gt;data = NULL;</a>
+<a name="ln916">}</a>
+<a name="ln917"> </a>
+<a name="ln918">static void picker_callback(GtkWidget *button, gpointer user_data)</a>
+<a name="ln919">{</a>
+<a name="ln920">  dt_iop_module_t *self = (dt_iop_module_t *)user_data;</a>
+<a name="ln921">  if(darktable.gui-&gt;reset) return;</a>
+<a name="ln922"> </a>
+<a name="ln923">  if(self-&gt;request_color_pick != DT_REQUEST_COLORPICK_MODULE)</a>
+<a name="ln924">    self-&gt;request_color_pick = DT_REQUEST_COLORPICK_MODULE;</a>
+<a name="ln925">  else</a>
+<a name="ln926">    self-&gt;request_color_pick = DT_REQUEST_COLORPICK_OFF;</a>
+<a name="ln927"> </a>
+<a name="ln928">  dt_iop_request_focus(self);</a>
+<a name="ln929"> </a>
+<a name="ln930">  if(self-&gt;request_color_pick != DT_REQUEST_COLORPICK_OFF)</a>
+<a name="ln931">    dt_dev_reprocess_all(self-&gt;dev);</a>
+<a name="ln932">  else</a>
+<a name="ln933">    dt_control_queue_redraw();</a>
+<a name="ln934"> </a>
+<a name="ln935">  if(self-&gt;off) gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(self-&gt;off), 1);</a>
+<a name="ln936">}</a>
+<a name="ln937"> </a>
+<a name="ln938">static void target_L_callback(GtkWidget *slider, gpointer user_data)</a>
+<a name="ln939">{</a>
+<a name="ln940">  dt_iop_module_t *self = (dt_iop_module_t *)user_data;</a>
+<a name="ln941">  dt_iop_colorchecker_params_t *p = (dt_iop_colorchecker_params_t *)self-&gt;params;</a>
+<a name="ln942">  dt_iop_colorchecker_gui_data_t *g = (dt_iop_colorchecker_gui_data_t *)self-&gt;gui_data;</a>
+<a name="ln943">  if(g-&gt;patch &gt;= p-&gt;num_patches || g-&gt;patch &lt; 0) return;</a>
+<a name="ln944">  if(g-&gt;absolute_target)</a>
+<a name="ln945">    p-&gt;target_L[g-&gt;patch] = dt_bauhaus_slider_get(slider);</a>
+<a name="ln946">  else</a>
+<a name="ln947">    p-&gt;target_L[g-&gt;patch] = p-&gt;source_L[g-&gt;patch] + dt_bauhaus_slider_get(slider);</a>
+<a name="ln948">  dt_dev_add_history_item(darktable.develop, self, TRUE);</a>
+<a name="ln949">}</a>
+<a name="ln950"> </a>
+<a name="ln951">static void target_a_callback(GtkWidget *slider, gpointer user_data)</a>
+<a name="ln952">{</a>
+<a name="ln953">  dt_iop_module_t *self = (dt_iop_module_t *)user_data;</a>
+<a name="ln954">  dt_iop_colorchecker_params_t *p = (dt_iop_colorchecker_params_t *)self-&gt;params;</a>
+<a name="ln955">  dt_iop_colorchecker_gui_data_t *g = (dt_iop_colorchecker_gui_data_t *)self-&gt;gui_data;</a>
+<a name="ln956">  if(g-&gt;patch &gt;= p-&gt;num_patches || g-&gt;patch &lt; 0) return;</a>
+<a name="ln957">  if(g-&gt;absolute_target)</a>
+<a name="ln958">  {</a>
+<a name="ln959">    p-&gt;target_a[g-&gt;patch] = CLAMP(dt_bauhaus_slider_get(slider), -128.0, 128.0);</a>
+<a name="ln960">    const float Cout = sqrtf(</a>
+<a name="ln961">        p-&gt;target_a[g-&gt;patch]*p-&gt;target_a[g-&gt;patch]+</a>
+<a name="ln962">        p-&gt;target_b[g-&gt;patch]*p-&gt;target_b[g-&gt;patch]);</a>
+<a name="ln963">    const int reset = darktable.gui-&gt;reset;</a>
+<a name="ln964">    darktable.gui-&gt;reset = 1; // avoid history item</a>
+<a name="ln965">    dt_bauhaus_slider_set(g-&gt;scale_C, Cout);</a>
+<a name="ln966">    darktable.gui-&gt;reset = reset;</a>
+<a name="ln967">  }</a>
+<a name="ln968">  else</a>
+<a name="ln969">  {</a>
+<a name="ln970">    p-&gt;target_a[g-&gt;patch] = CLAMP(p-&gt;source_a[g-&gt;patch] + dt_bauhaus_slider_get(slider), -128.0, 128.0);</a>
+<a name="ln971">    const float Cin = sqrtf(</a>
+<a name="ln972">        p-&gt;source_a[g-&gt;patch]*p-&gt;source_a[g-&gt;patch] +</a>
+<a name="ln973">        p-&gt;source_b[g-&gt;patch]*p-&gt;source_b[g-&gt;patch]);</a>
+<a name="ln974">    const float Cout = sqrtf(</a>
+<a name="ln975">        p-&gt;target_a[g-&gt;patch]*p-&gt;target_a[g-&gt;patch]+</a>
+<a name="ln976">        p-&gt;target_b[g-&gt;patch]*p-&gt;target_b[g-&gt;patch]);</a>
+<a name="ln977">    const int reset = darktable.gui-&gt;reset;</a>
+<a name="ln978">    darktable.gui-&gt;reset = 1; // avoid history item</a>
+<a name="ln979">    dt_bauhaus_slider_set(g-&gt;scale_C, Cout-Cin);</a>
+<a name="ln980">    darktable.gui-&gt;reset = reset;</a>
+<a name="ln981">  }</a>
+<a name="ln982">  dt_dev_add_history_item(darktable.develop, self, TRUE);</a>
+<a name="ln983">}</a>
+<a name="ln984"> </a>
+<a name="ln985">static void target_b_callback(GtkWidget *slider, gpointer user_data)</a>
+<a name="ln986">{</a>
+<a name="ln987">  dt_iop_module_t *self = (dt_iop_module_t *)user_data;</a>
+<a name="ln988">  dt_iop_colorchecker_params_t *p = (dt_iop_colorchecker_params_t *)self-&gt;params;</a>
+<a name="ln989">  dt_iop_colorchecker_gui_data_t *g = (dt_iop_colorchecker_gui_data_t *)self-&gt;gui_data;</a>
+<a name="ln990">  if(g-&gt;patch &gt;= p-&gt;num_patches || g-&gt;patch &lt; 0) return;</a>
+<a name="ln991">  if(g-&gt;absolute_target)</a>
+<a name="ln992">  {</a>
+<a name="ln993">    p-&gt;target_b[g-&gt;patch] = CLAMP(dt_bauhaus_slider_get(slider), -128.0, 128.0);</a>
+<a name="ln994">    const float Cout = sqrtf(</a>
+<a name="ln995">        p-&gt;target_a[g-&gt;patch]*p-&gt;target_a[g-&gt;patch]+</a>
+<a name="ln996">        p-&gt;target_b[g-&gt;patch]*p-&gt;target_b[g-&gt;patch]);</a>
+<a name="ln997">    const int reset = darktable.gui-&gt;reset;</a>
+<a name="ln998">    darktable.gui-&gt;reset = 1; // avoid history item</a>
+<a name="ln999">    dt_bauhaus_slider_set(g-&gt;scale_C, Cout);</a>
+<a name="ln1000">    darktable.gui-&gt;reset = reset;</a>
+<a name="ln1001">  }</a>
+<a name="ln1002">  else</a>
+<a name="ln1003">  {</a>
+<a name="ln1004">    p-&gt;target_b[g-&gt;patch] = CLAMP(p-&gt;source_b[g-&gt;patch] + dt_bauhaus_slider_get(slider), -128.0, 128.0);</a>
+<a name="ln1005">    const float Cin = sqrtf(</a>
+<a name="ln1006">        p-&gt;source_a[g-&gt;patch]*p-&gt;source_a[g-&gt;patch] +</a>
+<a name="ln1007">        p-&gt;source_b[g-&gt;patch]*p-&gt;source_b[g-&gt;patch]);</a>
+<a name="ln1008">    const float Cout = sqrtf(</a>
+<a name="ln1009">        p-&gt;target_a[g-&gt;patch]*p-&gt;target_a[g-&gt;patch]+</a>
+<a name="ln1010">        p-&gt;target_b[g-&gt;patch]*p-&gt;target_b[g-&gt;patch]);</a>
+<a name="ln1011">    const int reset = darktable.gui-&gt;reset;</a>
+<a name="ln1012">    darktable.gui-&gt;reset = 1; // avoid history item</a>
+<a name="ln1013">    dt_bauhaus_slider_set(g-&gt;scale_C, Cout-Cin);</a>
+<a name="ln1014">    darktable.gui-&gt;reset = reset;</a>
+<a name="ln1015">  }</a>
+<a name="ln1016">  dt_dev_add_history_item(darktable.develop, self, TRUE);</a>
+<a name="ln1017">}</a>
+<a name="ln1018"> </a>
+<a name="ln1019">static void target_C_callback(GtkWidget *slider, gpointer user_data)</a>
+<a name="ln1020">{</a>
+<a name="ln1021">  dt_iop_module_t *self = (dt_iop_module_t *)user_data;</a>
+<a name="ln1022">  dt_iop_colorchecker_params_t *p = (dt_iop_colorchecker_params_t *)self-&gt;params;</a>
+<a name="ln1023">  dt_iop_colorchecker_gui_data_t *g = (dt_iop_colorchecker_gui_data_t *)self-&gt;gui_data;</a>
+<a name="ln1024">  if(g-&gt;patch &gt;= p-&gt;num_patches || g-&gt;patch &lt; 0) return;</a>
+<a name="ln1025">  const float Cin = sqrtf(</a>
+<a name="ln1026">      p-&gt;source_a[g-&gt;patch]*p-&gt;source_a[g-&gt;patch] +</a>
+<a name="ln1027">      p-&gt;source_b[g-&gt;patch]*p-&gt;source_b[g-&gt;patch]);</a>
+<a name="ln1028">  const float Cout = MAX(1e-4f, sqrtf(</a>
+<a name="ln1029">      p-&gt;target_a[g-&gt;patch]*p-&gt;target_a[g-&gt;patch]+</a>
+<a name="ln1030">      p-&gt;target_b[g-&gt;patch]*p-&gt;target_b[g-&gt;patch]));</a>
+<a name="ln1031"> </a>
+<a name="ln1032">  if(g-&gt;absolute_target)</a>
+<a name="ln1033">  {</a>
+<a name="ln1034">    const float Cnew = CLAMP(dt_bauhaus_slider_get(slider), 0.01, 128.0);</a>
+<a name="ln1035">    p-&gt;target_a[g-&gt;patch] = CLAMP(p-&gt;target_a[g-&gt;patch]*Cnew/Cout, -128.0, 128.0);</a>
+<a name="ln1036">    p-&gt;target_b[g-&gt;patch] = CLAMP(p-&gt;target_b[g-&gt;patch]*Cnew/Cout, -128.0, 128.0);</a>
+<a name="ln1037">    const int reset = darktable.gui-&gt;reset;</a>
+<a name="ln1038">    darktable.gui-&gt;reset = 1; // avoid history item</a>
+<a name="ln1039">    dt_bauhaus_slider_set(g-&gt;scale_a, p-&gt;target_a[g-&gt;patch]);</a>
+<a name="ln1040">    dt_bauhaus_slider_set(g-&gt;scale_b, p-&gt;target_b[g-&gt;patch]);</a>
+<a name="ln1041">    darktable.gui-&gt;reset = reset;</a>
+<a name="ln1042">  }</a>
+<a name="ln1043">  else</a>
+<a name="ln1044">  {</a>
+<a name="ln1045">    const float Cnew = CLAMP(Cin + dt_bauhaus_slider_get(slider), 0.01, 128.0);</a>
+<a name="ln1046">    p-&gt;target_a[g-&gt;patch] = CLAMP(p-&gt;target_a[g-&gt;patch]*Cnew/Cout, -128.0, 128.0);</a>
+<a name="ln1047">    p-&gt;target_b[g-&gt;patch] = CLAMP(p-&gt;target_b[g-&gt;patch]*Cnew/Cout, -128.0, 128.0);</a>
+<a name="ln1048">    const int reset = darktable.gui-&gt;reset;</a>
+<a name="ln1049">    darktable.gui-&gt;reset = 1; // avoid history item</a>
+<a name="ln1050">    dt_bauhaus_slider_set(g-&gt;scale_a, p-&gt;target_a[g-&gt;patch] - p-&gt;source_a[g-&gt;patch]);</a>
+<a name="ln1051">    dt_bauhaus_slider_set(g-&gt;scale_b, p-&gt;target_b[g-&gt;patch] - p-&gt;source_b[g-&gt;patch]);</a>
+<a name="ln1052">    darktable.gui-&gt;reset = reset;</a>
+<a name="ln1053">  }</a>
+<a name="ln1054">  dt_dev_add_history_item(darktable.develop, self, TRUE);</a>
+<a name="ln1055">}</a>
+<a name="ln1056"> </a>
+<a name="ln1057">static void target_callback(GtkWidget *combo, gpointer user_data)</a>
+<a name="ln1058">{</a>
+<a name="ln1059">  dt_iop_module_t *self = (dt_iop_module_t *)user_data;</a>
+<a name="ln1060">  dt_iop_colorchecker_gui_data_t *g = (dt_iop_colorchecker_gui_data_t *)self-&gt;gui_data;</a>
+<a name="ln1061">  g-&gt;absolute_target = dt_bauhaus_combobox_get(combo);</a>
+<a name="ln1062">  // switch off colour picker, it'll interfere with other changes of the patch:</a>
+<a name="ln1063">  self-&gt;request_color_pick = DT_REQUEST_COLORPICK_OFF;</a>
+<a name="ln1064">  self-&gt;gui_update(self);</a>
+<a name="ln1065">}</a>
+<a name="ln1066"> </a>
+<a name="ln1067">static void patch_callback(GtkWidget *combo, gpointer user_data)</a>
+<a name="ln1068">{</a>
+<a name="ln1069">  dt_iop_module_t *self = (dt_iop_module_t *)user_data;</a>
+<a name="ln1070">  dt_iop_colorchecker_gui_data_t *g = (dt_iop_colorchecker_gui_data_t *)self-&gt;gui_data;</a>
+<a name="ln1071">  g-&gt;patch = dt_bauhaus_combobox_get(combo);</a>
+<a name="ln1072">  // switch off colour picker, it'll interfere with other changes of the patch:</a>
+<a name="ln1073">  self-&gt;request_color_pick = DT_REQUEST_COLORPICK_OFF;</a>
+<a name="ln1074">  self-&gt;gui_update(self);</a>
+<a name="ln1075">}</a>
+<a name="ln1076"> </a>
+<a name="ln1077">static gboolean checker_draw(GtkWidget *widget, cairo_t *crf, gpointer user_data)</a>
+<a name="ln1078">{</a>
+<a name="ln1079">  dt_iop_module_t *self = (dt_iop_module_t *)user_data;</a>
+<a name="ln1080">  dt_iop_colorchecker_gui_data_t *g = (dt_iop_colorchecker_gui_data_t *)self-&gt;gui_data;</a>
+<a name="ln1081">  dt_iop_colorchecker_params_t *p = (dt_iop_colorchecker_params_t *)self-&gt;params;</a>
+<a name="ln1082"> </a>
+<a name="ln1083">  GtkAllocation allocation;</a>
+<a name="ln1084">  gtk_widget_get_allocation(widget, &amp;allocation);</a>
+<a name="ln1085">  int width = allocation.width, height = allocation.height;</a>
+<a name="ln1086">  cairo_surface_t *cst = dt_cairo_image_surface_create(CAIRO_FORMAT_ARGB32, width, height);</a>
+<a name="ln1087">  cairo_t *cr = cairo_create(cst);</a>
+<a name="ln1088">  // clear bg</a>
+<a name="ln1089">  cairo_set_source_rgb(cr, .2, .2, .2);</a>
+<a name="ln1090">  cairo_paint(cr);</a>
+<a name="ln1091"> </a>
+<a name="ln1092">  const float *picked_mean = self-&gt;picked_color;</a>
+<a name="ln1093">  int besti = 0, bestj = 0;</a>
+<a name="ln1094">  cairo_set_antialias(cr, CAIRO_ANTIALIAS_NONE);</a>
+<a name="ln1095">  int cells_x = 6, cells_y = 4;</a>
+<a name="ln1096">  if(p-&gt;num_patches &gt; 24)</a>
+<a name="ln1097">  {</a>
+<a name="ln1098">    cells_x = 7;</a>
+<a name="ln1099">    cells_y = 7;</a>
+<a name="ln1100">  }</a>
+<a name="ln1101">  for(int j = 0; j &lt; cells_y; j++)</a>
+<a name="ln1102">  {</a>
+<a name="ln1103">    for(int i = 0; i &lt; cells_x; i++)</a>
+<a name="ln1104">    {</a>
+<a name="ln1105">      double rgb[3] = { 0.5, 0.5, 0.5 }; // Lab: rgb grey converted to Lab</a>
+<a name="ln1106">      cmsCIELab Lab;</a>
+<a name="ln1107">      const int patch = i + j*cells_x;</a>
+<a name="ln1108">      if(patch &gt;= p-&gt;num_patches) continue;</a>
+<a name="ln1109">      Lab.L = p-&gt;source_L[patch];</a>
+<a name="ln1110">      Lab.a = p-&gt;source_a[patch];</a>
+<a name="ln1111">      Lab.b = p-&gt;source_b[patch];</a>
+<a name="ln1112">      if((self-&gt;request_color_pick == DT_REQUEST_COLORPICK_MODULE)</a>
+<a name="ln1113">         &amp;&amp; ((picked_mean[0] - Lab.L) * (picked_mean[0] - Lab.L)</a>
+<a name="ln1114">                 + (picked_mean[1] - Lab.a) * (picked_mean[1] - Lab.a)</a>
+<a name="ln1115">                 + (picked_mean[2] - Lab.b) * (picked_mean[2] - Lab.b)</a>
+<a name="ln1116">             &lt; (picked_mean[0] - p-&gt;source_L[cells_x * bestj + besti])</a>
+<a name="ln1117">                       * (picked_mean[0] - p-&gt;source_L[cells_x * bestj + besti])</a>
+<a name="ln1118">                   + (picked_mean[1] - p-&gt;source_a[cells_x * bestj + besti])</a>
+<a name="ln1119">                         * (picked_mean[1] - p-&gt;source_a[cells_x * bestj + besti])</a>
+<a name="ln1120">                   + (picked_mean[2] - p-&gt;source_b[cells_x * bestj + besti])</a>
+<a name="ln1121">                         * (picked_mean[2] - p-&gt;source_b[cells_x * bestj + besti])))</a>
+<a name="ln1122">      {</a>
+<a name="ln1123">        besti = i;</a>
+<a name="ln1124">        bestj = j;</a>
+<a name="ln1125">      }</a>
+<a name="ln1126">      cmsDoTransform(g-&gt;xform, &amp;Lab, rgb, 1);</a>
+<a name="ln1127">      cairo_set_source_rgb(cr, rgb[0], rgb[1], rgb[2]);</a>
+<a name="ln1128">      cairo_rectangle(cr, width * i / (float)cells_x, height * j / (float)cells_y,</a>
+<a name="ln1129">          width / (float)cells_x - DT_PIXEL_APPLY_DPI(1),</a>
+<a name="ln1130">          height / (float)cells_y - DT_PIXEL_APPLY_DPI(1));</a>
+<a name="ln1131">      cairo_fill(cr);</a>
+<a name="ln1132">      if(fabsf(p-&gt;target_L[patch] - p-&gt;source_L[patch]) &gt; 1e-5f ||</a>
+<a name="ln1133">         fabsf(p-&gt;target_a[patch] - p-&gt;source_a[patch]) &gt; 1e-5f ||</a>
+<a name="ln1134">         fabsf(p-&gt;target_b[patch] - p-&gt;source_b[patch]) &gt; 1e-5f)</a>
+<a name="ln1135">      {</a>
+<a name="ln1136">        cairo_set_line_width(cr, DT_PIXEL_APPLY_DPI(2.));</a>
+<a name="ln1137">        cairo_set_source_rgb(cr, 0.8, 0.8, 0.8);</a>
+<a name="ln1138">        cairo_rectangle(cr,</a>
+<a name="ln1139">            width * i / (float)cells_x + DT_PIXEL_APPLY_DPI(1),</a>
+<a name="ln1140">            height * j / (float)cells_y + DT_PIXEL_APPLY_DPI(1),</a>
+<a name="ln1141">            width / (float)cells_x - DT_PIXEL_APPLY_DPI(3),</a>
+<a name="ln1142">            height / (float)cells_y - DT_PIXEL_APPLY_DPI(3));</a>
+<a name="ln1143">        cairo_stroke(cr);</a>
+<a name="ln1144">        cairo_set_line_width(cr, DT_PIXEL_APPLY_DPI(1.));</a>
+<a name="ln1145">        cairo_set_source_rgb(cr, 0.2, 0.2, 0.2);</a>
+<a name="ln1146">        cairo_rectangle(cr,</a>
+<a name="ln1147">            width * i / (float)cells_x + DT_PIXEL_APPLY_DPI(2),</a>
+<a name="ln1148">            height * j / (float)cells_y + DT_PIXEL_APPLY_DPI(2),</a>
+<a name="ln1149">            width / (float)cells_x - DT_PIXEL_APPLY_DPI(5),</a>
+<a name="ln1150">            height / (float)cells_y - DT_PIXEL_APPLY_DPI(5));</a>
+<a name="ln1151">        cairo_stroke(cr);</a>
+<a name="ln1152">      }</a>
+<a name="ln1153">    }</a>
+<a name="ln1154">  }</a>
+<a name="ln1155"> </a>
+<a name="ln1156">  dt_bauhaus_widget_set_quad_paint(</a>
+<a name="ln1157">      g-&gt;combobox_patch, dtgtk_cairo_paint_colorpicker,</a>
+<a name="ln1158">      (self-&gt;request_color_pick == DT_REQUEST_COLORPICK_MODULE ? CPF_ACTIVE : CPF_NONE), NULL);</a>
+<a name="ln1159"> </a>
+<a name="ln1160">  // highlight patch that is closest to picked colour,</a>
+<a name="ln1161">  // or the one selected in the combobox.</a>
+<a name="ln1162">  if(self-&gt;request_color_pick != DT_REQUEST_COLORPICK_MODULE)</a>
+<a name="ln1163">  {</a>
+<a name="ln1164">    int i = dt_bauhaus_combobox_get(g-&gt;combobox_patch);</a>
+<a name="ln1165">    besti = i % cells_x;</a>
+<a name="ln1166">    bestj = i / cells_x;</a>
+<a name="ln1167">    g-&gt;drawn_patch = cells_x * bestj + besti;</a>
+<a name="ln1168">  }</a>
+<a name="ln1169">  else if(self-&gt;request_color_pick == DT_REQUEST_COLORPICK_MODULE)</a>
+<a name="ln1170">  {</a>
+<a name="ln1171">    // freshly picked, also select it in gui:</a>
+<a name="ln1172">    int pick = self-&gt;request_color_pick;</a>
+<a name="ln1173">    g-&gt;drawn_patch = cells_x * bestj + besti;</a>
+<a name="ln1174">    darktable.gui-&gt;reset = 1;</a>
+<a name="ln1175">    dt_bauhaus_combobox_set(g-&gt;combobox_patch, g-&gt;drawn_patch);</a>
+<a name="ln1176">    g-&gt;patch = g-&gt;drawn_patch;</a>
+<a name="ln1177">    self-&gt;gui_update(self);</a>
+<a name="ln1178">    darktable.gui-&gt;reset = 0;</a>
+<a name="ln1179">    self-&gt;request_color_pick = pick; // restore, the combobox will kill it</a>
+<a name="ln1180">  }</a>
+<a name="ln1181">  cairo_set_line_width(cr, DT_PIXEL_APPLY_DPI(2.));</a>
+<a name="ln1182">  cairo_set_source_rgb(cr, 1.0, 1.0, 1.0);</a>
+<a name="ln1183">  cairo_rectangle(cr,</a>
+<a name="ln1184">      width * besti / (float)cells_x + DT_PIXEL_APPLY_DPI(5),</a>
+<a name="ln1185">      height * bestj / (float)cells_y + DT_PIXEL_APPLY_DPI(5),</a>
+<a name="ln1186">      width / (float)cells_x - DT_PIXEL_APPLY_DPI(11),</a>
+<a name="ln1187">      height / (float)cells_y - DT_PIXEL_APPLY_DPI(11));</a>
+<a name="ln1188">  cairo_stroke(cr);</a>
+<a name="ln1189"> </a>
+<a name="ln1190">  cairo_destroy(cr);</a>
+<a name="ln1191">  cairo_set_source_surface(crf, cst, 0, 0);</a>
+<a name="ln1192">  cairo_paint(crf);</a>
+<a name="ln1193">  cairo_surface_destroy(cst);</a>
+<a name="ln1194">  return TRUE;</a>
+<a name="ln1195">}</a>
+<a name="ln1196"> </a>
+<a name="ln1197">static gboolean checker_motion_notify(GtkWidget *widget, GdkEventMotion *event,</a>
+<a name="ln1198">    gpointer user_data)</a>
+<a name="ln1199">{</a>
+<a name="ln1200">  // highlight?</a>
+<a name="ln1201">  dt_iop_module_t *self = (dt_iop_module_t *)user_data;</a>
+<a name="ln1202">  dt_iop_colorchecker_gui_data_t *g = (dt_iop_colorchecker_gui_data_t *)self-&gt;gui_data;</a>
+<a name="ln1203">  dt_iop_colorchecker_params_t *p = (dt_iop_colorchecker_params_t *)self-&gt;params;</a>
+<a name="ln1204">  GtkAllocation allocation;</a>
+<a name="ln1205">  gtk_widget_get_allocation(widget, &amp;allocation);</a>
+<a name="ln1206">  int width = allocation.width, height = allocation.height;</a>
+<a name="ln1207">  const float mouse_x = CLAMP(event-&gt;x, 0, width);</a>
+<a name="ln1208">  const float mouse_y = CLAMP(event-&gt;y, 0, height);</a>
+<a name="ln1209">  int cells_x = 6, cells_y = 4;</a>
+<a name="ln1210">  if(p-&gt;num_patches &gt; 24)</a>
+<a name="ln1211">  {</a>
+<a name="ln1212">    cells_x = 7;</a>
+<a name="ln1213">    cells_y = 7;</a>
+<a name="ln1214">  }</a>
+<a name="ln1215">  const float mx = mouse_x * cells_x / (float)width;</a>
+<a name="ln1216">  const float my = mouse_y * cells_y / (float)height;</a>
+<a name="ln1217">  const int patch = (int)mx + cells_x * (int)my;</a>
+<a name="ln1218">  if(patch &lt; 0 || patch &gt;= p-&gt;num_patches) return FALSE;</a>
+<a name="ln1219">  char tooltip[1024];</a>
+<a name="ln1220">  snprintf(tooltip, sizeof(tooltip),</a>
+<a name="ln1221">      _(&quot;(%2.2f %2.2f %2.2f)\n&quot;</a>
+<a name="ln1222">        &quot;altered patches are marked with an outline\n&quot;</a>
+<a name="ln1223">        &quot;click to select\n&quot;</a>
+<a name="ln1224">        &quot;double click to reset\n&quot;</a>
+<a name="ln1225">        &quot;right click to delete patch\n&quot;</a>
+<a name="ln1226">        &quot;shift-click while color picking to replace patch&quot;),</a>
+<a name="ln1227">      p-&gt;source_L[patch], p-&gt;source_a[patch], p-&gt;source_b[patch]);</a>
+<a name="ln1228">  gtk_widget_set_tooltip_text(g-&gt;area, tooltip);</a>
+<a name="ln1229">  return TRUE;</a>
+<a name="ln1230">}</a>
+<a name="ln1231"> </a>
+<a name="ln1232">static gboolean checker_button_press(GtkWidget *widget, GdkEventButton *event,</a>
+<a name="ln1233">                                                    gpointer user_data)</a>
+<a name="ln1234">{</a>
+<a name="ln1235">  dt_iop_module_t *self = (dt_iop_module_t *)user_data;</a>
+<a name="ln1236">  dt_iop_colorchecker_gui_data_t *g = (dt_iop_colorchecker_gui_data_t *)self-&gt;gui_data;</a>
+<a name="ln1237">  dt_iop_colorchecker_params_t *p = (dt_iop_colorchecker_params_t *)self-&gt;params;</a>
+<a name="ln1238">  GtkAllocation allocation;</a>
+<a name="ln1239">  gtk_widget_get_allocation(widget, &amp;allocation);</a>
+<a name="ln1240">  int width = allocation.width, height = allocation.height;</a>
+<a name="ln1241">  const float mouse_x = CLAMP(event-&gt;x, 0, width);</a>
+<a name="ln1242">  const float mouse_y = CLAMP(event-&gt;y, 0, height);</a>
+<a name="ln1243">  int cells_x = 6, cells_y = 4;</a>
+<a name="ln1244">  if(p-&gt;num_patches &gt; 24)</a>
+<a name="ln1245">  {</a>
+<a name="ln1246">    cells_x = 7;</a>
+<a name="ln1247">    cells_y = 7;</a>
+<a name="ln1248">  }</a>
+<a name="ln1249">  const float mx = mouse_x * cells_x / (float)width;</a>
+<a name="ln1250">  const float my = mouse_y * cells_y / (float)height;</a>
+<a name="ln1251">  int patch = (int)mx + cells_x*(int)my;</a>
+<a name="ln1252">  if(event-&gt;button == 1 &amp;&amp; event-&gt;type == GDK_2BUTTON_PRESS)</a>
+<a name="ln1253">  { // reset on double click</a>
+<a name="ln1254">    if(patch &lt; 0 || patch &gt;= p-&gt;num_patches) return FALSE;</a>
+<a name="ln1255">    p-&gt;target_L[patch] = p-&gt;source_L[patch];</a>
+<a name="ln1256">    p-&gt;target_a[patch] = p-&gt;source_a[patch];</a>
+<a name="ln1257">    p-&gt;target_b[patch] = p-&gt;source_b[patch];</a>
+<a name="ln1258">    dt_dev_add_history_item(darktable.develop, self, TRUE);</a>
+<a name="ln1259">    self-&gt;gui_update(self);</a>
+<a name="ln1260">    return TRUE;</a>
+<a name="ln1261">  }</a>
+<a name="ln1262">  else if(event-&gt;button == 3 &amp;&amp; (patch &lt; p-&gt;num_patches))</a>
+<a name="ln1263">  {</a>
+<a name="ln1264">    // right click: delete patch, move others up</a>
+<a name="ln1265">    if(patch &lt; 0 || patch &gt;= p-&gt;num_patches) return FALSE;</a>
+<a name="ln1266">    memmove(p-&gt;target_L+patch, p-&gt;target_L+patch+1, sizeof(float)*(p-&gt;num_patches-1-patch));</a>
+<a name="ln1267">    memmove(p-&gt;target_a+patch, p-&gt;target_a+patch+1, sizeof(float)*(p-&gt;num_patches-1-patch));</a>
+<a name="ln1268">    memmove(p-&gt;target_b+patch, p-&gt;target_b+patch+1, sizeof(float)*(p-&gt;num_patches-1-patch));</a>
+<a name="ln1269">    memmove(p-&gt;source_L+patch, p-&gt;source_L+patch+1, sizeof(float)*(p-&gt;num_patches-1-patch));</a>
+<a name="ln1270">    memmove(p-&gt;source_a+patch, p-&gt;source_a+patch+1, sizeof(float)*(p-&gt;num_patches-1-patch));</a>
+<a name="ln1271">    memmove(p-&gt;source_b+patch, p-&gt;source_b+patch+1, sizeof(float)*(p-&gt;num_patches-1-patch));</a>
+<a name="ln1272">    p-&gt;num_patches--;</a>
+<a name="ln1273">    dt_dev_add_history_item(darktable.develop, self, TRUE);</a>
+<a name="ln1274">    self-&gt;gui_update(self);</a>
+<a name="ln1275">    return TRUE;</a>
+<a name="ln1276">  }</a>
+<a name="ln1277">  else if((event-&gt;button == 1) &amp;&amp;</a>
+<a name="ln1278">          ((event-&gt;state &amp; GDK_SHIFT_MASK) == GDK_SHIFT_MASK) &amp;&amp;</a>
+<a name="ln1279">          (self-&gt;request_color_pick == DT_REQUEST_COLORPICK_MODULE))</a>
+<a name="ln1280">  {</a>
+<a name="ln1281">    // shift-left while colour picking: replace source colour</a>
+<a name="ln1282">    // if clicked outside the valid patches: add new one</a>
+<a name="ln1283"> </a>
+<a name="ln1284">    // color channels should be nonzero to avoid numerical issues</a>
+<a name="ln1285">    int new_color_valid = fabsf(self-&gt;picked_color[0]) &gt; 1.e-3f &amp;&amp;</a>
+<a name="ln1286">                          fabsf(self-&gt;picked_color[1]) &gt; 1.e-3f &amp;&amp;</a>
+<a name="ln1287">                          fabsf(self-&gt;picked_color[2]) &gt; 1.e-3f;</a>
+<a name="ln1288">    // check if the new color is very close to some color already in the colorchecker</a>
+<a name="ln1289">    for(int i=0;i&lt;p-&gt;num_patches;++i)</a>
+<a name="ln1290">    {</a>
+<a name="ln1291">      float color[] = { p-&gt;source_L[i], p-&gt;source_a[i], p-&gt;source_b[i] };</a>
+<a name="ln1292">      if(fabsf(self-&gt;picked_color[0] - color[0]) &lt; 1.e-3f &amp;&amp; fabsf(self-&gt;picked_color[1] - color[1]) &lt; 1.e-3f</a>
+<a name="ln1293">         &amp;&amp; fabsf(self-&gt;picked_color[2] - color[2]) &lt; 1.e-3f)</a>
+<a name="ln1294">        new_color_valid = FALSE;</a>
+<a name="ln1295">    }</a>
+<a name="ln1296">    if(new_color_valid)</a>
+<a name="ln1297">    {</a>
+<a name="ln1298">      if(p-&gt;num_patches &lt; 24 &amp;&amp; (patch &lt; 0 || patch &gt;= p-&gt;num_patches))</a>
+<a name="ln1299">      {</a>
+<a name="ln1300">        p-&gt;num_patches = MIN(MAX_PATCHES, p-&gt;num_patches + 1);</a>
+<a name="ln1301">        patch = p-&gt;num_patches - 1;</a>
+<a name="ln1302">      }</a>
+<a name="ln1303">      p-&gt;target_L[patch] = p-&gt;source_L[patch] = self-&gt;picked_color[0];</a>
+<a name="ln1304">      p-&gt;target_a[patch] = p-&gt;source_a[patch] = self-&gt;picked_color[1];</a>
+<a name="ln1305">      p-&gt;target_b[patch] = p-&gt;source_b[patch] = self-&gt;picked_color[2];</a>
+<a name="ln1306">      dt_dev_add_history_item(darktable.develop, self, TRUE);</a>
+<a name="ln1307">      self-&gt;gui_update(self);</a>
+<a name="ln1308">    }</a>
+<a name="ln1309">    return TRUE;</a>
+<a name="ln1310">  }</a>
+<a name="ln1311">  if(patch &gt;= p-&gt;num_patches) patch = p-&gt;num_patches-1;</a>
+<a name="ln1312">  dt_bauhaus_combobox_set(g-&gt;combobox_patch, patch);</a>
+<a name="ln1313">  return FALSE;</a>
+<a name="ln1314">}</a>
+<a name="ln1315"> </a>
+<a name="ln1316">static gboolean checker_leave_notify(GtkWidget *widget, GdkEventCrossing *event,</a>
+<a name="ln1317">                                                    gpointer user_data)</a>
+<a name="ln1318">{</a>
+<a name="ln1319">  return FALSE; // ?</a>
+<a name="ln1320">}</a>
+<a name="ln1321"> </a>
+<a name="ln1322">void gui_init(struct dt_iop_module_t *self)</a>
+<a name="ln1323">{</a>
+<a name="ln1324">  self-&gt;gui_data = malloc(sizeof(dt_iop_colorchecker_gui_data_t));</a>
+<a name="ln1325">  dt_iop_colorchecker_gui_data_t *g = (dt_iop_colorchecker_gui_data_t *)self-&gt;gui_data;</a>
+<a name="ln1326">  dt_iop_colorchecker_params_t *p = (dt_iop_colorchecker_params_t *)self-&gt;params;</a>
+<a name="ln1327"> </a>
+<a name="ln1328">  self-&gt;widget = gtk_box_new(GTK_ORIENTATION_VERTICAL, DT_BAUHAUS_SPACE);</a>
+<a name="ln1329">  dt_gui_add_help_link(self-&gt;widget, dt_get_help_url(self-&gt;op));</a>
+<a name="ln1330"> </a>
+<a name="ln1331">  // custom 24-patch widget in addition to combo box</a>
+<a name="ln1332">  g-&gt;area = dtgtk_drawing_area_new_with_aspect_ratio(4.0/6.0);</a>
+<a name="ln1333">  gtk_box_pack_start(GTK_BOX(self-&gt;widget), g-&gt;area, TRUE, TRUE, 0);</a>
+<a name="ln1334"> </a>
+<a name="ln1335">  gtk_widget_add_events(GTK_WIDGET(g-&gt;area), GDK_POINTER_MOTION_MASK | GDK_POINTER_MOTION_HINT_MASK</a>
+<a name="ln1336">                                             | GDK_BUTTON_PRESS_MASK | GDK_BUTTON_RELEASE_MASK</a>
+<a name="ln1337">                                             | GDK_LEAVE_NOTIFY_MASK | GDK_SCROLL_MASK);</a>
+<a name="ln1338">  g_signal_connect(G_OBJECT(g-&gt;area), &quot;draw&quot;, G_CALLBACK(checker_draw), self);</a>
+<a name="ln1339">  g_signal_connect(G_OBJECT(g-&gt;area), &quot;button-press-event&quot;, G_CALLBACK(checker_button_press), self);</a>
+<a name="ln1340">  g_signal_connect(G_OBJECT(g-&gt;area), &quot;motion-notify-event&quot;, G_CALLBACK(checker_motion_notify), self);</a>
+<a name="ln1341">  g_signal_connect(G_OBJECT(g-&gt;area), &quot;leave-notify-event&quot;, G_CALLBACK(checker_leave_notify), self);</a>
+<a name="ln1342"> </a>
+<a name="ln1343">  g-&gt;patch = 0;</a>
+<a name="ln1344">  g-&gt;drawn_patch = -1;</a>
+<a name="ln1345">  g-&gt;combobox_patch = dt_bauhaus_combobox_new(self);</a>
+<a name="ln1346">  dt_bauhaus_widget_set_label(g-&gt;combobox_patch, NULL, _(&quot;patch&quot;));</a>
+<a name="ln1347">  gtk_widget_set_tooltip_text(g-&gt;combobox_patch, _(&quot;color checker patch&quot;));</a>
+<a name="ln1348">  char cboxentry[1024];</a>
+<a name="ln1349">  for(int k=0;k&lt;p-&gt;num_patches;k++)</a>
+<a name="ln1350">  {</a>
+<a name="ln1351">    snprintf(cboxentry, sizeof(cboxentry), _(&quot;patch #%d&quot;), k);</a>
+<a name="ln1352">    dt_bauhaus_combobox_add(g-&gt;combobox_patch, cboxentry);</a>
+<a name="ln1353">  }</a>
+<a name="ln1354">  self-&gt;request_color_pick = DT_REQUEST_COLORPICK_OFF;</a>
+<a name="ln1355">  dt_bauhaus_widget_set_quad_paint(g-&gt;combobox_patch, dtgtk_cairo_paint_colorpicker, CPF_NONE, NULL);</a>
+<a name="ln1356"> </a>
+<a name="ln1357">  g-&gt;scale_L = dt_bauhaus_slider_new_with_range(self, -100.0, 200.0, 1.0, 0.0f, 2);</a>
+<a name="ln1358">  gtk_widget_set_tooltip_text(g-&gt;scale_L, _(&quot;lightness offset&quot;));</a>
+<a name="ln1359">  dt_bauhaus_widget_set_label(g-&gt;scale_L, NULL, _(&quot;lightness&quot;));</a>
+<a name="ln1360"> </a>
+<a name="ln1361">  g-&gt;scale_a = dt_bauhaus_slider_new_with_range(self, -256.0, 256.0, 1.0, 0.0f, 2);</a>
+<a name="ln1362">  gtk_widget_set_tooltip_text(g-&gt;scale_a, _(&quot;chroma offset green/red&quot;));</a>
+<a name="ln1363">  dt_bauhaus_widget_set_label(g-&gt;scale_a, NULL, _(&quot;green/red&quot;));</a>
+<a name="ln1364">  dt_bauhaus_slider_set_stop(g-&gt;scale_a, 0.0, 0.0, 1.0, 0.2);</a>
+<a name="ln1365">  dt_bauhaus_slider_set_stop(g-&gt;scale_a, 0.5, 1.0, 1.0, 1.0);</a>
+<a name="ln1366">  dt_bauhaus_slider_set_stop(g-&gt;scale_a, 1.0, 1.0, 0.0, 0.2);</a>
+<a name="ln1367"> </a>
+<a name="ln1368">  g-&gt;scale_b = dt_bauhaus_slider_new_with_range(self, -256.0, 256.0, 1.0, 0.0f, 2);</a>
+<a name="ln1369">  gtk_widget_set_tooltip_text(g-&gt;scale_b, _(&quot;chroma offset blue/yellow&quot;));</a>
+<a name="ln1370">  dt_bauhaus_widget_set_label(g-&gt;scale_b, NULL, _(&quot;blue/yellow&quot;));</a>
+<a name="ln1371">  dt_bauhaus_slider_set_stop(g-&gt;scale_b, 0.0, 0.0, 0.0, 1.0);</a>
+<a name="ln1372">  dt_bauhaus_slider_set_stop(g-&gt;scale_b, 0.5, 1.0, 1.0, 1.0);</a>
+<a name="ln1373">  dt_bauhaus_slider_set_stop(g-&gt;scale_b, 1.0, 1.0, 1.0, 0.0);</a>
+<a name="ln1374"> </a>
+<a name="ln1375">  g-&gt;scale_C = dt_bauhaus_slider_new_with_range(self, -128.0, 128.0, 1.0f, 0.0f, 2);</a>
+<a name="ln1376">  gtk_widget_set_tooltip_text(g-&gt;scale_C, _(&quot;saturation offset&quot;));</a>
+<a name="ln1377">  dt_bauhaus_widget_set_label(g-&gt;scale_C, NULL, _(&quot;saturation&quot;));</a>
+<a name="ln1378"> </a>
+<a name="ln1379">  g-&gt;absolute_target = 0;</a>
+<a name="ln1380">  g-&gt;combobox_target = dt_bauhaus_combobox_new(self);</a>
+<a name="ln1381">  dt_bauhaus_widget_set_label(g-&gt;combobox_target, 0, _(&quot;target color&quot;));</a>
+<a name="ln1382">  gtk_widget_set_tooltip_text(g-&gt;combobox_target, _(&quot;control target color of the patches via relative offsets or via absolute Lab values&quot;));</a>
+<a name="ln1383">  dt_bauhaus_combobox_add(g-&gt;combobox_target, _(&quot;relative&quot;));</a>
+<a name="ln1384">  dt_bauhaus_combobox_add(g-&gt;combobox_target, _(&quot;absolute&quot;));</a>
+<a name="ln1385"> </a>
+<a name="ln1386">  gtk_box_pack_start(GTK_BOX(self-&gt;widget), g-&gt;combobox_patch, TRUE, TRUE, 0);</a>
+<a name="ln1387">  gtk_box_pack_start(GTK_BOX(self-&gt;widget), g-&gt;scale_L, TRUE, TRUE, 0);</a>
+<a name="ln1388">  gtk_box_pack_start(GTK_BOX(self-&gt;widget), g-&gt;scale_a, TRUE, TRUE, 0);</a>
+<a name="ln1389">  gtk_box_pack_start(GTK_BOX(self-&gt;widget), g-&gt;scale_b, TRUE, TRUE, 0);</a>
+<a name="ln1390">  gtk_box_pack_start(GTK_BOX(self-&gt;widget), g-&gt;scale_C, TRUE, TRUE, 0);</a>
+<a name="ln1391">  gtk_box_pack_start(GTK_BOX(self-&gt;widget), g-&gt;combobox_target, TRUE, TRUE, 0);</a>
+<a name="ln1392"> </a>
+<a name="ln1393">  g_signal_connect(G_OBJECT(g-&gt;combobox_patch), &quot;value-changed&quot;, G_CALLBACK(patch_callback), self);</a>
+<a name="ln1394">  g_signal_connect(G_OBJECT(g-&gt;combobox_patch), &quot;quad-pressed&quot;, G_CALLBACK(picker_callback), self);</a>
+<a name="ln1395">  g_signal_connect(G_OBJECT(g-&gt;scale_L), &quot;value-changed&quot;, G_CALLBACK(target_L_callback), self);</a>
+<a name="ln1396">  g_signal_connect(G_OBJECT(g-&gt;scale_a), &quot;value-changed&quot;, G_CALLBACK(target_a_callback), self);</a>
+<a name="ln1397">  g_signal_connect(G_OBJECT(g-&gt;scale_b), &quot;value-changed&quot;, G_CALLBACK(target_b_callback), self);</a>
+<a name="ln1398">  g_signal_connect(G_OBJECT(g-&gt;scale_C), &quot;value-changed&quot;, G_CALLBACK(target_C_callback), self);</a>
+<a name="ln1399">  g_signal_connect(G_OBJECT(g-&gt;combobox_target), &quot;value-changed&quot;, G_CALLBACK(target_callback), self);</a>
+<a name="ln1400"> </a>
+<a name="ln1401">  cmsHPROFILE hsRGB = dt_colorspaces_get_profile(DT_COLORSPACE_SRGB, &quot;&quot;, DT_PROFILE_DIRECTION_IN)-&gt;profile;</a>
+<a name="ln1402">  cmsHPROFILE hLab = dt_colorspaces_get_profile(DT_COLORSPACE_LAB, &quot;&quot;, DT_PROFILE_DIRECTION_ANY)-&gt;profile;</a>
+<a name="ln1403">  g-&gt;xform = cmsCreateTransform(hLab, TYPE_Lab_DBL, hsRGB, TYPE_RGB_DBL, INTENT_PERCEPTUAL,</a>
+<a name="ln1404">                                0); // cmsFLAGS_NOTPRECALC);</a>
+<a name="ln1405">}</a>
+<a name="ln1406"> </a>
+<a name="ln1407">void gui_cleanup(struct dt_iop_module_t *self)</a>
+<a name="ln1408">{</a>
+<a name="ln1409">  dt_iop_colorchecker_gui_data_t *g = (dt_iop_colorchecker_gui_data_t *)self-&gt;gui_data;</a>
+<a name="ln1410">  cmsDeleteTransform(g-&gt;xform);</a>
+<a name="ln1411">  free(self-&gt;gui_data);</a>
+<a name="ln1412">  self-&gt;gui_data = NULL;</a>
+<a name="ln1413">}</a>
+<a name="ln1414"> </a>
+<a name="ln1415">#undef MAX_PATCHES</a>
+<a name="ln1416"> </a>
+<a name="ln1417">// modelines: These editor modelines have been set for all relevant files by tools/update_modelines.sh</a>
+<a name="ln1418">// vim: shiftwidth=2 expandtab tabstop=2 cindent</a>
+<a name="ln1419">// kate: tab-indents: off; indent-width 2; replace-tabs on; indent-mode cstyle; remove-trailing-spaces modified;</a>
+
+</code></pre>
+<div class="balloon" rel="549"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v1028/" target="_blank">V1028</a> Possible overflow. Consider casting operands of the '4 * (2 * num_patches + 4)' operator to the 'size_t' type, not the result.</p></div>
+<div class="balloon" rel="556"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v522/" target="_blank">V522</a> There might be dereferencing of a potential null pointer 'idx'. Check lines: 556, 550.</p></div>
+<div class="balloon" rel="768"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v522/" target="_blank">V522</a> There might be dereferencing of a potential null pointer 'A'. Check lines: 768, 763.</p></div>
+<div class="balloon" rel="783"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v522/" target="_blank">V522</a> There might be dereferencing of a potential null pointer 'b'. Check lines: 783, 764.</p></div>
+<div class="balloon" rel="890"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v575/" target="_blank">V575</a> The potential null pointer is passed into 'memcpy' function. Inspect the first argument. Check lines: 890, 876.</p></div>
+<div class="balloon" rel="891"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v575/" target="_blank">V575</a> The potential null pointer is passed into 'memcpy' function. Inspect the first argument. Check lines: 891, 877.</p></div>
+<div class="balloon" rel="907"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v522/" target="_blank">V522</a> There might be dereferencing of a potential null pointer 'gd'. Check lines: 907, 903.</p></div>
+<div class="balloon" rel="1265"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v560/" target="_blank">V560</a> A part of conditional expression is always false: patch >= p->num_patches.</p></div>
+<div class="balloon" rel="1332"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v522/" target="_blank">V522</a> There might be dereferencing of a potential null pointer 'g'. Check lines: 1332, 1324.</p></div>
+
+<link rel="stylesheet" href="highlight.css">
+<script src="highlight.pack.js"></script>
+<script src="highlightjs-line-numbers.js"></script>
+<script>hljs.initHighlightingOnLoad();</script>
+<script>hljs.initLineNumbersOnLoad();</script>
+<script>
+  $(document).ready(function() {
+      $('.balloon').each(function () {
+          var bl = $(this);
+          var line = bl.attr('rel');
+          var text = $('a[name="ln'+line+'"]').text();
+
+          var space_count = 0;
+          for(var i = 0; i<text.length; i++){
+              var char = text[i];
+              if((char !== ' ')&&(char !== '\t'))break;
+              if(char === '\t')space_count++;
+              space_count++;
+          }
+
+          bl.css('margin-left', space_count*8);
+          $('a[name="ln'+line+'"]').after(bl);
+      });
+
+      window.location = window.location;
+  });
+</script>
+</body>
+</html>

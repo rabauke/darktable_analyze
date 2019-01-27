@@ -1,0 +1,1212 @@
+
+<html>
+<head>
+  <link rel="stylesheet" href="../style.css"/>
+  <script src="../jquery-3.2.1.min.js"></script>
+</head>
+<body>
+<pre><code class = "cpp">
+<a name="ln1">/*</a>
+<a name="ln2">    This file is part of darktable,</a>
+<a name="ln3">    copyright (c) 2009--2010 johannes hanika.</a>
+<a name="ln4">    copyright (c) 2015 johannes hanika</a>
+<a name="ln5"> </a>
+<a name="ln6">    darktable is free software: you can redistribute it and/or modify</a>
+<a name="ln7">    it under the terms of the GNU General Public License as published by</a>
+<a name="ln8">    the Free Software Foundation, either version 3 of the License, or</a>
+<a name="ln9">    (at your option) any later version.</a>
+<a name="ln10"> </a>
+<a name="ln11">    darktable is distributed in the hope that it will be useful,</a>
+<a name="ln12">    but WITHOUT ANY WARRANTY; without even the implied warranty of</a>
+<a name="ln13">    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the</a>
+<a name="ln14">    GNU General Public License for more details.</a>
+<a name="ln15"> </a>
+<a name="ln16">    You should have received a copy of the GNU General Public License</a>
+<a name="ln17">    along with darktable.  If not, see &lt;http://www.gnu.org/licenses/&gt;.</a>
+<a name="ln18">*/</a>
+<a name="ln19"> </a>
+<a name="ln20">#pragma once</a>
+<a name="ln21"> </a>
+<a name="ln22">#ifndef __SSE2__</a>
+<a name="ln23"> </a>
+<a name="ln24">#if !defined _XOPEN_SOURCE &amp;&amp; !defined(__DragonFly__) &amp;&amp; !defined(__FreeBSD__) &amp;&amp; !defined(__NetBSD__)       \</a>
+<a name="ln25">    &amp;&amp; !defined(__OpenBSD__) &amp;&amp; !defined(_WIN32)</a>
+<a name="ln26">#define _XOPEN_SOURCE</a>
+<a name="ln27">#endif</a>
+<a name="ln28"> </a>
+<a name="ln29">#include &lt;stdlib.h&gt;</a>
+<a name="ln30"> </a>
+<a name="ln31">// xorshift128+, period 2^128-1, apparently passes all TestU01 suite tests.</a>
+<a name="ln32">typedef struct dt_points_state_t</a>
+<a name="ln33">{</a>
+<a name="ln34">  uint64_t state0;</a>
+<a name="ln35">  uint64_t state1;</a>
+<a name="ln36">} dt_points_state_t;</a>
+<a name="ln37"> </a>
+<a name="ln38">typedef struct dt_points_t</a>
+<a name="ln39">{</a>
+<a name="ln40">  dt_points_state_t *s;</a>
+<a name="ln41">} dt_points_t;</a>
+<a name="ln42"> </a>
+<a name="ln43">static inline void dt_points_init(dt_points_t *p, const unsigned int num_threads)</a>
+<a name="ln44">{</a>
+<a name="ln45">  p-&gt;s = (dt_points_state_t *)malloc(sizeof(dt_points_state_t) * num_threads);</a>
+<a name="ln46">  for(int k = 0; k &lt; num_threads; k++)</a>
+<a name="ln47">  {</a>
+<a name="ln48">    p-&gt;s[k].state0 = 1 + k;</a>
+<a name="ln49">    p-&gt;s[k].state1 = 2 + k;</a>
+<a name="ln50">  }</a>
+<a name="ln51">}</a>
+<a name="ln52"> </a>
+<a name="ln53">static inline void dt_points_cleanup(dt_points_t *p)</a>
+<a name="ln54">{</a>
+<a name="ln55">  free(p-&gt;s);</a>
+<a name="ln56">}</a>
+<a name="ln57"> </a>
+<a name="ln58">static inline float dt_points_get_for(dt_points_t *p, const unsigned int thread_num)</a>
+<a name="ln59">{</a>
+<a name="ln60">  uint64_t s1 = p-&gt;s[thread_num].state0;</a>
+<a name="ln61">  uint64_t s0 = p-&gt;s[thread_num].state1;</a>
+<a name="ln62">  p-&gt;s[thread_num].state0 = s0;</a>
+<a name="ln63">  s1 ^= s1 &lt;&lt; 23;</a>
+<a name="ln64">  s1 ^= s1 &gt;&gt; 17;</a>
+<a name="ln65">  s1 ^= s0;</a>
+<a name="ln66">  s1 ^= s0 &gt;&gt; 26;</a>
+<a name="ln67">  p-&gt;s[thread_num].state1 = s1;</a>
+<a name="ln68">  // return (state0 + state1) / ((double)((uint64_t)-1) + 1.0);</a>
+<a name="ln69">  uint32_t v = 0x3f800000</a>
+<a name="ln70">               | ((p-&gt;s[thread_num].state0 + p-&gt;s[thread_num].state1) &gt;&gt; 41); // faster than double version.</a>
+<a name="ln71">  return (*(float *)&amp;v) - 1.0f;</a>
+<a name="ln72">}</a>
+<a name="ln73"> </a>
+<a name="ln74">static inline float dt_points_get()</a>
+<a name="ln75">{</a>
+<a name="ln76">  return dt_points_get_for(darktable.points, dt_get_thread_num());</a>
+<a name="ln77">}</a>
+<a name="ln78"> </a>
+<a name="ln79">#else</a>
+<a name="ln80"> </a>
+<a name="ln81">#if defined(__SSE__)</a>
+<a name="ln82">#include &lt;xmmintrin.h&gt;</a>
+<a name="ln83">#endif</a>
+<a name="ln84">#include &lt;inttypes.h&gt;</a>
+<a name="ln85"> </a>
+<a name="ln86">#define MEXP 19937</a>
+<a name="ln87"> </a>
+<a name="ln88">#ifndef SFMT_PARAMS_H</a>
+<a name="ln89">#define SFMT_PARAMS_H</a>
+<a name="ln90"> </a>
+<a name="ln91">#if !defined(MEXP)</a>
+<a name="ln92">#ifdef __GNUC__</a>
+<a name="ln93">#warning &quot;MEXP is not defined. I assume MEXP is 19937.&quot;</a>
+<a name="ln94">#endif</a>
+<a name="ln95">#define MEXP 19937</a>
+<a name="ln96">#endif</a>
+<a name="ln97">/*-----------------</a>
+<a name="ln98">  BASIC DEFINITIONS</a>
+<a name="ln99">  -----------------*/</a>
+<a name="ln100">/** Mersenne Exponent. The period of the sequence</a>
+<a name="ln101"> *  is a multiple of 2^MEXP-1.</a>
+<a name="ln102"> * #define MEXP 19937 */</a>
+<a name="ln103">/** SFMT generator has an internal state array of 128-bit integers,</a>
+<a name="ln104"> * and N is its size. */</a>
+<a name="ln105">#define N (MEXP / 128 + 1)</a>
+<a name="ln106">/** N32 is the size of internal state array when regarded as an array</a>
+<a name="ln107"> * of 32-bit integers.*/</a>
+<a name="ln108">#define N32 (N * 4)</a>
+<a name="ln109">/** N64 is the size of internal state array when regarded as an array</a>
+<a name="ln110"> * of 64-bit integers.*/</a>
+<a name="ln111">#define N64 (N * 2)</a>
+<a name="ln112"> </a>
+<a name="ln113">/*----------------------</a>
+<a name="ln114">  the parameters of SFMT</a>
+<a name="ln115">  following definitions are in paramsXXXX.h file.</a>
+<a name="ln116">  ----------------------*/</a>
+<a name="ln117">/** the pick up position of the array.</a>
+<a name="ln118">#define POS1 122</a>
+<a name="ln119">*/</a>
+<a name="ln120"> </a>
+<a name="ln121">/** the parameter of shift left as four 32-bit registers.</a>
+<a name="ln122">#define SL1 18</a>
+<a name="ln123"> */</a>
+<a name="ln124"> </a>
+<a name="ln125">/** the parameter of shift left as one 128-bit register.</a>
+<a name="ln126"> * The 128-bit integer is shifted by (SL2 * 8) bits.</a>
+<a name="ln127">#define SL2 1</a>
+<a name="ln128">*/</a>
+<a name="ln129"> </a>
+<a name="ln130">/** the parameter of shift right as four 32-bit registers.</a>
+<a name="ln131">#define SR1 11</a>
+<a name="ln132">*/</a>
+<a name="ln133"> </a>
+<a name="ln134">/** the parameter of shift right as one 128-bit register.</a>
+<a name="ln135"> * The 128-bit integer is shifted by (SL2 * 8) bits.</a>
+<a name="ln136">#define SR2 1</a>
+<a name="ln137">*/</a>
+<a name="ln138"> </a>
+<a name="ln139">/** A bitmask, used in the recursion.  These parameters are introduced</a>
+<a name="ln140"> * to break symmetry of SIMD.</a>
+<a name="ln141">#define MSK1 0xdfffffefU</a>
+<a name="ln142">#define MSK2 0xddfecb7fU</a>
+<a name="ln143">#define MSK3 0xbffaffffU</a>
+<a name="ln144">#define MSK4 0xbffffff6U</a>
+<a name="ln145">*/</a>
+<a name="ln146"> </a>
+<a name="ln147">/** These definitions are part of a 128-bit period certification vector.</a>
+<a name="ln148">#define PARITY1	0x00000001U</a>
+<a name="ln149">#define PARITY2	0x00000000U</a>
+<a name="ln150">#define PARITY3	0x00000000U</a>
+<a name="ln151">#define PARITY4	0xc98e126aU</a>
+<a name="ln152">*/</a>
+<a name="ln153"> </a>
+<a name="ln154">#if 0</a>
+<a name="ln155">#if MEXP == 607</a>
+<a name="ln156">#include &quot;SFMT-params607.h&quot;</a>
+<a name="ln157">#elif MEXP == 1279</a>
+<a name="ln158">#include &quot;SFMT-params1279.h&quot;</a>
+<a name="ln159">#elif MEXP == 2281</a>
+<a name="ln160">#include &quot;SFMT-params2281.h&quot;</a>
+<a name="ln161">#elif MEXP == 4253</a>
+<a name="ln162">#include &quot;SFMT-params4253.h&quot;</a>
+<a name="ln163">#elif MEXP == 11213</a>
+<a name="ln164">#include &quot;SFMT-params11213.h&quot;</a>
+<a name="ln165">#elif MEXP == 19937</a>
+<a name="ln166">#include &quot;SFMT-params19937.h&quot;</a>
+<a name="ln167">#elif MEXP == 44497</a>
+<a name="ln168">#include &quot;SFMT-params44497.h&quot;</a>
+<a name="ln169">#elif MEXP == 86243</a>
+<a name="ln170">#include &quot;SFMT-params86243.h&quot;</a>
+<a name="ln171">#elif MEXP == 132049</a>
+<a name="ln172">#include &quot;SFMT-params132049.h&quot;</a>
+<a name="ln173">#elif MEXP == 216091</a>
+<a name="ln174">#include &quot;SFMT-params216091.h&quot;</a>
+<a name="ln175">#else</a>
+<a name="ln176">#ifdef __GNUC__</a>
+<a name="ln177">#error &quot;MEXP is not valid.&quot;</a>
+<a name="ln178">#undef MEXP</a>
+<a name="ln179">#else</a>
+<a name="ln180">#undef MEXP</a>
+<a name="ln181">#endif</a>
+<a name="ln182">#endif</a>
+<a name="ln183"> </a>
+<a name="ln184">#endif</a>
+<a name="ln185"> </a>
+<a name="ln186">#endif /* SFMT_PARAMS_H */</a>
+<a name="ln187"> </a>
+<a name="ln188">#ifndef SFMT_PARAMS19937_H</a>
+<a name="ln189">#define SFMT_PARAMS19937_H</a>
+<a name="ln190"> </a>
+<a name="ln191">#define POS1 122</a>
+<a name="ln192">#define SL1 18</a>
+<a name="ln193">#define SL2 1</a>
+<a name="ln194">#define SR1 11</a>
+<a name="ln195">#define SR2 1</a>
+<a name="ln196">#define MSK1 0xdfffffefU</a>
+<a name="ln197">#define MSK2 0xddfecb7fU</a>
+<a name="ln198">#define MSK3 0xbffaffffU</a>
+<a name="ln199">#define MSK4 0xbffffff6U</a>
+<a name="ln200">#define PARITY1 0x00000001U</a>
+<a name="ln201">#define PARITY2 0x00000000U</a>
+<a name="ln202">#define PARITY3 0x00000000U</a>
+<a name="ln203">#define PARITY4 0x13c9e684U</a>
+<a name="ln204"> </a>
+<a name="ln205"> </a>
+<a name="ln206">#define ALTI_SL1                                                                                             \</a>
+<a name="ln207">  {                                                                                                          \</a>
+<a name="ln208">    SL1, SL1, SL1, SL1                                                                                       \</a>
+<a name="ln209">  }</a>
+<a name="ln210">#define ALTI_SR1                                                                                             \</a>
+<a name="ln211">  {                                                                                                          \</a>
+<a name="ln212">    SR1, SR1, SR1, SR1                                                                                       \</a>
+<a name="ln213">  }</a>
+<a name="ln214">#define ALTI_MSK                                                                                             \</a>
+<a name="ln215">  {                                                                                                          \</a>
+<a name="ln216">    MSK1, MSK2, MSK3, MSK4                                                                                   \</a>
+<a name="ln217">  }</a>
+<a name="ln218">#define ALTI_MSK64                                                                                           \</a>
+<a name="ln219">  {                                                                                                          \</a>
+<a name="ln220">    MSK2, MSK1, MSK4, MSK3                                                                                   \</a>
+<a name="ln221">  }</a>
+<a name="ln222">#define ALTI_SL2_PERM                                                                                        \</a>
+<a name="ln223">  {                                                                                                          \</a>
+<a name="ln224">    1, 2, 3, 23, 5, 6, 7, 0, 9, 10, 11, 4, 13, 14, 15, 8                                                     \</a>
+<a name="ln225">  }</a>
+<a name="ln226">#define ALTI_SL2_PERM64                                                                                      \</a>
+<a name="ln227">  {                                                                                                          \</a>
+<a name="ln228">    1, 2, 3, 4, 5, 6, 7, 31, 9, 10, 11, 12, 13, 14, 15, 0                                                    \</a>
+<a name="ln229">  }</a>
+<a name="ln230">#define ALTI_SR2_PERM                                                                                        \</a>
+<a name="ln231">  {                                                                                                          \</a>
+<a name="ln232">    7, 0, 1, 2, 11, 4, 5, 6, 15, 8, 9, 10, 17, 12, 13, 14                                                    \</a>
+<a name="ln233">  }</a>
+<a name="ln234">#define ALTI_SR2_PERM64                                                                                      \</a>
+<a name="ln235">  {                                                                                                          \</a>
+<a name="ln236">    15, 0, 1, 2, 3, 4, 5, 6, 17, 8, 9, 10, 11, 12, 13, 14                                                    \</a>
+<a name="ln237">  }</a>
+<a name="ln238">#define IDSTR &quot;SFMT-19937:122-18-1-11-1:dfffffef-ddfecb7f-bffaffff-bffffff6&quot;</a>
+<a name="ln239"> </a>
+<a name="ln240">#endif /* SFMT_PARAMS19937_H */</a>
+<a name="ln241"> </a>
+<a name="ln242">/** 128-bit data structure */</a>
+<a name="ln243">typedef union w128_t</a>
+<a name="ln244">{</a>
+<a name="ln245">  __m128i si;</a>
+<a name="ln246">  uint32_t u[4];</a>
+<a name="ln247">} w128_t;</a>
+<a name="ln248"> </a>
+<a name="ln249">typedef struct sfmt_state_t</a>
+<a name="ln250">{</a>
+<a name="ln251">  /** the 128-bit internal state array */</a>
+<a name="ln252">  w128_t sfmt[N];</a>
+<a name="ln253">  /** the 32bit integer pointer to the 128-bit internal state array */</a>
+<a name="ln254">  uint32_t *psfmt32;</a>
+<a name="ln255">#if !defined(BIG_ENDIAN64) || defined(ONLY64)</a>
+<a name="ln256">  /** the 64bit integer pointer to the 128-bit internal state array */</a>
+<a name="ln257">  uint64_t *psfmt64;</a>
+<a name="ln258">#endif</a>
+<a name="ln259">  /** index counter to the 32-bit internal state array */</a>
+<a name="ln260">  int idx;</a>
+<a name="ln261">  /** a flag: it is 0 if and only if the internal state is not yet</a>
+<a name="ln262">   * initialized. */</a>
+<a name="ln263">  int initialized;</a>
+<a name="ln264">  /** a parity check vector which certificate the period of 2^{MEXP} */</a>
+<a name="ln265">  uint32_t parity[4];</a>
+<a name="ln266">} sfmt_state_t;</a>
+<a name="ln267"> </a>
+<a name="ln268">/**</a>
+<a name="ln269"> * @file SFMT.h</a>
+<a name="ln270"> *</a>
+<a name="ln271"> * @brief SIMD oriented Fast Mersenne Twister(SFMT) pseudorandom</a>
+<a name="ln272"> * number generator</a>
+<a name="ln273"> *</a>
+<a name="ln274"> * @author Mutsuo Saito (Hiroshima University)</a>
+<a name="ln275"> * @author Makoto Matsumoto (Hiroshima University)</a>
+<a name="ln276"> *</a>
+<a name="ln277"> * Copyright (C) 2006, 2007 Mutsuo Saito, Makoto Matsumoto and Hiroshima</a>
+<a name="ln278"> * University. All rights reserved.</a>
+<a name="ln279"> *</a>
+<a name="ln280"> * The new BSD License is applied to this software.</a>
+<a name="ln281"> * see LICENSE.txt</a>
+<a name="ln282"> *</a>
+<a name="ln283"> * @note We assume that your system has inttypes.h.  If your system</a>
+<a name="ln284"> * doesn't have inttypes.h, you have to typedef uint32_t and uint64_t,</a>
+<a name="ln285"> * and you have to define PRIu64 and PRIx64 in this file as follows:</a>
+<a name="ln286"> * @verbatim</a>
+<a name="ln287"> typedef unsigned int uint32_t</a>
+<a name="ln288"> typedef unsigned long long uint64_t</a>
+<a name="ln289">#define PRIu64 &quot;llu&quot;</a>
+<a name="ln290">#define PRIx64 &quot;llx&quot;</a>
+<a name="ln291">@endverbatim</a>
+<a name="ln292"> * uint32_t must be exactly 32-bit unsigned integer type (no more, no</a>
+<a name="ln293"> * less), and uint64_t must be exactly 64-bit unsigned integer type.</a>
+<a name="ln294"> * PRIu64 and PRIx64 are used for printf function to print 64-bit</a>
+<a name="ln295"> * unsigned int and 64-bit unsigned int in hexadecimal format.</a>
+<a name="ln296"> */</a>
+<a name="ln297"> </a>
+<a name="ln298">#ifndef SFMT_H</a>
+<a name="ln299">#define SFMT_H</a>
+<a name="ln300"> </a>
+<a name="ln301">#include &lt;stdio.h&gt;</a>
+<a name="ln302"> </a>
+<a name="ln303">#if defined(__STDC_VERSION__) &amp;&amp; (__STDC_VERSION__ &gt;= 199901L)</a>
+<a name="ln304">#include &lt;inttypes.h&gt;</a>
+<a name="ln305">#elif defined(_MSC_VER) || defined(__BORLANDC__)</a>
+<a name="ln306">typedef unsigned int uint32_t;</a>
+<a name="ln307">typedef unsigned __int64 uint64_t;</a>
+<a name="ln308">#define inline __inline</a>
+<a name="ln309">#else</a>
+<a name="ln310">#include &lt;inttypes.h&gt;</a>
+<a name="ln311">#if defined(__GNUC__)</a>
+<a name="ln312">#define inline __inline__</a>
+<a name="ln313">#endif</a>
+<a name="ln314">#endif</a>
+<a name="ln315"> </a>
+<a name="ln316">#ifndef PRIu64</a>
+<a name="ln317">#if defined(_MSC_VER) || defined(__BORLANDC__)</a>
+<a name="ln318">#define PRIu64 &quot;I64u&quot;</a>
+<a name="ln319">#define PRIx64 &quot;I64x&quot;</a>
+<a name="ln320">#else</a>
+<a name="ln321">#define PRIu64 &quot;llu&quot;</a>
+<a name="ln322">#define PRIx64 &quot;llx&quot;</a>
+<a name="ln323">#endif</a>
+<a name="ln324">#endif</a>
+<a name="ln325"> </a>
+<a name="ln326">#if defined(__GNUC__)</a>
+<a name="ln327">#define ALWAYSINLINE __attribute__((always_inline))</a>
+<a name="ln328">#else</a>
+<a name="ln329">#define ALWAYSINLINE</a>
+<a name="ln330">#endif</a>
+<a name="ln331"> </a>
+<a name="ln332">#if defined(_MSC_VER)</a>
+<a name="ln333">#if _MSC_VER &gt;= 1200</a>
+<a name="ln334">#define PRE_ALWAYS __forceinline</a>
+<a name="ln335">#else</a>
+<a name="ln336">#define PRE_ALWAYS inline</a>
+<a name="ln337">#endif</a>
+<a name="ln338">#else</a>
+<a name="ln339">#define PRE_ALWAYS inline</a>
+<a name="ln340">#endif</a>
+<a name="ln341"> </a>
+<a name="ln342">static inline uint32_t gen_rand32(struct sfmt_state_t *s);</a>
+<a name="ln343">static inline uint64_t gen_rand64(struct sfmt_state_t *s);</a>
+<a name="ln344">static inline void fill_array32(struct sfmt_state_t *s, uint32_t *array, int size) __attribute__((unused));</a>
+<a name="ln345">static inline void fill_array64(struct sfmt_state_t *s, uint64_t *array, int size) __attribute__((unused));</a>
+<a name="ln346">static inline void init_gen_rand(struct sfmt_state_t *s, uint32_t seed) __attribute__((unused));</a>
+<a name="ln347">static inline void init_by_array(struct sfmt_state_t *s, uint32_t *init_key, int key_length)</a>
+<a name="ln348">    __attribute__((unused));</a>
+<a name="ln349">static inline const char *get_idstring(void) __attribute__((unused));</a>
+<a name="ln350">static inline int get_min_array_size32(void) __attribute__((unused));</a>
+<a name="ln351">static inline int get_min_array_size64(void) __attribute__((unused));</a>
+<a name="ln352"> </a>
+<a name="ln353">/* These real versions are due to Isaku Wada */</a>
+<a name="ln354">/** generates a random number on [0,1]-real-interval */</a>
+<a name="ln355">inline static double to_real1(uint32_t v)</a>
+<a name="ln356">{</a>
+<a name="ln357">  return v * (1.0 / 4294967295.0);</a>
+<a name="ln358">  /* divided by 2^32-1 */</a>
+<a name="ln359">}</a>
+<a name="ln360"> </a>
+<a name="ln361">/** generates a random number on [0,1]-real-interval */</a>
+<a name="ln362">inline static double genrand_real1(struct sfmt_state_t *s)</a>
+<a name="ln363">{</a>
+<a name="ln364">  return to_real1(gen_rand32(s));</a>
+<a name="ln365">}</a>
+<a name="ln366"> </a>
+<a name="ln367">/** generates a random number on [0,1)-real-interval */</a>
+<a name="ln368">inline static double to_real2(uint32_t v)</a>
+<a name="ln369">{</a>
+<a name="ln370">  return v * (1.0 / 4294967296.0);</a>
+<a name="ln371">  /* divided by 2^32 */</a>
+<a name="ln372">}</a>
+<a name="ln373"> </a>
+<a name="ln374">/** generates a random number on [0,1)-real-interval (float) */</a>
+<a name="ln375">inline static float to_real2f(uint32_t v)</a>
+<a name="ln376">{</a>
+<a name="ln377">  v = 0x3f800000 | (v &gt;&gt; 9); // faster than double version.</a>
+<a name="ln378">  return (*(float *)&amp;v) - 1.0f;</a>
+<a name="ln379">  /* divided by 2^32 */</a>
+<a name="ln380">}</a>
+<a name="ln381"> </a>
+<a name="ln382">/** generates a random number on [0,1)-real-interval */</a>
+<a name="ln383">inline static double genrand_real2(struct sfmt_state_t *s)</a>
+<a name="ln384">{</a>
+<a name="ln385">  return to_real2(gen_rand32(s));</a>
+<a name="ln386">}</a>
+<a name="ln387"> </a>
+<a name="ln388">inline static float genrand_real2f(struct sfmt_state_t *s)</a>
+<a name="ln389">{</a>
+<a name="ln390">  return to_real2f(gen_rand32(s));</a>
+<a name="ln391">}</a>
+<a name="ln392"> </a>
+<a name="ln393">/** generates a random number on (0,1)-real-interval */</a>
+<a name="ln394">inline static double to_real3(uint32_t v)</a>
+<a name="ln395">{</a>
+<a name="ln396">  return (((double)v) + 0.5) * (1.0 / 4294967296.0);</a>
+<a name="ln397">  /* divided by 2^32 */</a>
+<a name="ln398">}</a>
+<a name="ln399"> </a>
+<a name="ln400">/** generates a random number on (0,1)-real-interval */</a>
+<a name="ln401">inline static double genrand_real3(struct sfmt_state_t *s)</a>
+<a name="ln402">{</a>
+<a name="ln403">  return to_real3(gen_rand32(s));</a>
+<a name="ln404">}</a>
+<a name="ln405">/** These real versions are due to Isaku Wada */</a>
+<a name="ln406"> </a>
+<a name="ln407">/** generates a random number on [0,1) with 53-bit resolution*/</a>
+<a name="ln408">inline static double to_res53(uint64_t v)</a>
+<a name="ln409">{</a>
+<a name="ln410">  return v * (1.0 / 18446744073709551616.0L);</a>
+<a name="ln411">}</a>
+<a name="ln412"> </a>
+<a name="ln413">/** generates a random number on [0,1) with 53-bit resolution from two</a>
+<a name="ln414"> * 32 bit integers */</a>
+<a name="ln415">inline static double to_res53_mix(uint32_t x, uint32_t y)</a>
+<a name="ln416">{</a>
+<a name="ln417">  return to_res53(x | ((uint64_t)y &lt;&lt; 32));</a>
+<a name="ln418">}</a>
+<a name="ln419"> </a>
+<a name="ln420">/** generates a random number on [0,1) with 53-bit resolution</a>
+<a name="ln421">*/</a>
+<a name="ln422">inline static double genrand_res53(struct sfmt_state_t *s)</a>
+<a name="ln423">{</a>
+<a name="ln424">  return to_res53(gen_rand64(s));</a>
+<a name="ln425">}</a>
+<a name="ln426"> </a>
+<a name="ln427">/** generates a random number on [0,1) with 53-bit resolution</a>
+<a name="ln428">  using 32bit integer.</a>
+<a name="ln429">  */</a>
+<a name="ln430">inline static double genrand_res53_mix(struct sfmt_state_t *s)</a>
+<a name="ln431">{</a>
+<a name="ln432">  uint32_t x, y;</a>
+<a name="ln433"> </a>
+<a name="ln434">  x = gen_rand32(s);</a>
+<a name="ln435">  y = gen_rand32(s);</a>
+<a name="ln436">  return to_res53_mix(x, y);</a>
+<a name="ln437">}</a>
+<a name="ln438">#endif</a>
+<a name="ln439">/**</a>
+<a name="ln440"> * @file  SFMT-sse2.h</a>
+<a name="ln441"> * @brief SIMD oriented Fast Mersenne Twister(SFMT) for Intel SSE2</a>
+<a name="ln442"> *</a>
+<a name="ln443"> * @author Mutsuo Saito (Hiroshima University)</a>
+<a name="ln444"> * @author Makoto Matsumoto (Hiroshima University)</a>
+<a name="ln445"> *</a>
+<a name="ln446"> * @note We assume LITTLE ENDIAN in this file</a>
+<a name="ln447"> *</a>
+<a name="ln448"> * Copyright (C) 2006, 2007 Mutsuo Saito, Makoto Matsumoto and Hiroshima</a>
+<a name="ln449"> * University. All rights reserved.</a>
+<a name="ln450"> *</a>
+<a name="ln451"> * The new BSD License is applied to this software, see LICENSE.txt</a>
+<a name="ln452"> */</a>
+<a name="ln453"> </a>
+<a name="ln454">#ifndef SFMT_SSE2_H</a>
+<a name="ln455">#define SFMT_SSE2_H</a>
+<a name="ln456"> </a>
+<a name="ln457">PRE_ALWAYS static __m128i mm_recursion(__m128i *a, __m128i *b, __m128i c, __m128i d,</a>
+<a name="ln458">                                       __m128i mask) ALWAYSINLINE;</a>
+<a name="ln459"> </a>
+<a name="ln460">/**</a>
+<a name="ln461"> * This function represents the recursion formula.</a>
+<a name="ln462"> * @param a a 128-bit part of the internal state array</a>
+<a name="ln463"> * @param b a 128-bit part of the internal state array</a>
+<a name="ln464"> * @param c a 128-bit part of the internal state array</a>
+<a name="ln465"> * @param d a 128-bit part of the internal state array</a>
+<a name="ln466"> * @param mask 128-bit mask</a>
+<a name="ln467"> * @return output</a>
+<a name="ln468"> */</a>
+<a name="ln469">PRE_ALWAYS static __m128i mm_recursion(__m128i *a, __m128i *b, __m128i c, __m128i d, __m128i mask)</a>
+<a name="ln470">{</a>
+<a name="ln471">  __m128i v, x, y, z;</a>
+<a name="ln472"> </a>
+<a name="ln473">  x = _mm_load_si128(a);</a>
+<a name="ln474">  y = _mm_srli_epi32(*b, SR1);</a>
+<a name="ln475">  z = _mm_srli_si128(c, SR2);</a>
+<a name="ln476">  v = _mm_slli_epi32(d, SL1);</a>
+<a name="ln477">  z = _mm_xor_si128(z, x);</a>
+<a name="ln478">  z = _mm_xor_si128(z, v);</a>
+<a name="ln479">  x = _mm_slli_si128(x, SL2);</a>
+<a name="ln480">  y = _mm_and_si128(y, mask);</a>
+<a name="ln481">  z = _mm_xor_si128(z, x);</a>
+<a name="ln482">  z = _mm_xor_si128(z, y);</a>
+<a name="ln483">  return z;</a>
+<a name="ln484">}</a>
+<a name="ln485"> </a>
+<a name="ln486">/**</a>
+<a name="ln487"> * This function fills the internal state array with pseudorandom</a>
+<a name="ln488"> * integers.</a>
+<a name="ln489"> */</a>
+<a name="ln490">inline static void gen_rand_all(struct sfmt_state_t *s)</a>
+<a name="ln491">{</a>
+<a name="ln492">  int i;</a>
+<a name="ln493">  __m128i r, r1, r2, mask;</a>
+<a name="ln494">  mask = _mm_set_epi32(MSK4, MSK3, MSK2, MSK1);</a>
+<a name="ln495"> </a>
+<a name="ln496">  r1 = _mm_load_si128(&amp;(s-&gt;sfmt[N - 2].si));</a>
+<a name="ln497">  r2 = _mm_load_si128(&amp;(s-&gt;sfmt[N - 1].si));</a>
+<a name="ln498">  for(i = 0; i &lt; N - POS1; i++)</a>
+<a name="ln499">  {</a>
+<a name="ln500">    r = mm_recursion(&amp;(s-&gt;sfmt[i].si), &amp;(s-&gt;sfmt[i + POS1].si), r1, r2, mask);</a>
+<a name="ln501">    _mm_store_si128(&amp;(s-&gt;sfmt[i].si), r);</a>
+<a name="ln502">    r1 = r2;</a>
+<a name="ln503">    r2 = r;</a>
+<a name="ln504">  }</a>
+<a name="ln505">  for(; i &lt; N; i++)</a>
+<a name="ln506">  {</a>
+<a name="ln507">    r = mm_recursion(&amp;(s-&gt;sfmt[i].si), &amp;(s-&gt;sfmt[i + POS1 - N].si), r1, r2, mask);</a>
+<a name="ln508">    _mm_store_si128(&amp;(s-&gt;sfmt[i].si), r);</a>
+<a name="ln509">    r1 = r2;</a>
+<a name="ln510">    r2 = r;</a>
+<a name="ln511">  }</a>
+<a name="ln512">}</a>
+<a name="ln513"> </a>
+<a name="ln514">/**</a>
+<a name="ln515"> * This function fills the user-specified array with pseudorandom</a>
+<a name="ln516"> * integers.</a>
+<a name="ln517"> *</a>
+<a name="ln518"> * @param array an 128-bit array to be filled by pseudorandom numbers.</a>
+<a name="ln519"> * @param size number of 128-bit pesudorandom numbers to be generated.</a>
+<a name="ln520"> */</a>
+<a name="ln521">inline static void gen_rand_array(struct sfmt_state_t *s, w128_t *array, int size)</a>
+<a name="ln522">{</a>
+<a name="ln523">  int i, j;</a>
+<a name="ln524">  __m128i r, r1, r2, mask;</a>
+<a name="ln525">  mask = _mm_set_epi32(MSK4, MSK3, MSK2, MSK1);</a>
+<a name="ln526"> </a>
+<a name="ln527">  r1 = _mm_load_si128(&amp;(s-&gt;sfmt[N - 2].si));</a>
+<a name="ln528">  r2 = _mm_load_si128(&amp;(s-&gt;sfmt[N - 1].si));</a>
+<a name="ln529">  for(i = 0; i &lt; N - POS1; i++)</a>
+<a name="ln530">  {</a>
+<a name="ln531">    r = mm_recursion(&amp;(s-&gt;sfmt[i].si), &amp;(s-&gt;sfmt[i + POS1].si), r1, r2, mask);</a>
+<a name="ln532">    _mm_store_si128(&amp;array[i].si, r);</a>
+<a name="ln533">    r1 = r2;</a>
+<a name="ln534">    r2 = r;</a>
+<a name="ln535">  }</a>
+<a name="ln536">  for(; i &lt; N; i++)</a>
+<a name="ln537">  {</a>
+<a name="ln538">    r = mm_recursion(&amp;(s-&gt;sfmt[i].si), &amp;array[i + POS1 - N].si, r1, r2, mask);</a>
+<a name="ln539">    _mm_store_si128(&amp;array[i].si, r);</a>
+<a name="ln540">    r1 = r2;</a>
+<a name="ln541">    r2 = r;</a>
+<a name="ln542">  }</a>
+<a name="ln543">  /* main loop */</a>
+<a name="ln544">  for(; i &lt; size - N; i++)</a>
+<a name="ln545">  {</a>
+<a name="ln546">    r = mm_recursion(&amp;array[i - N].si, &amp;array[i + POS1 - N].si, r1, r2, mask);</a>
+<a name="ln547">    _mm_store_si128(&amp;array[i].si, r);</a>
+<a name="ln548">    r1 = r2;</a>
+<a name="ln549">    r2 = r;</a>
+<a name="ln550">  }</a>
+<a name="ln551">  for(j = 0; j &lt; 2 * N - size; j++)</a>
+<a name="ln552">  {</a>
+<a name="ln553">    r = _mm_load_si128(&amp;array[j + size - N].si);</a>
+<a name="ln554">    _mm_store_si128(&amp;(s-&gt;sfmt[j].si), r);</a>
+<a name="ln555">  }</a>
+<a name="ln556">  for(; i &lt; size; i++)</a>
+<a name="ln557">  {</a>
+<a name="ln558">    r = mm_recursion(&amp;array[i - N].si, &amp;array[i + POS1 - N].si, r1, r2, mask);</a>
+<a name="ln559">    _mm_store_si128(&amp;array[i].si, r);</a>
+<a name="ln560">    _mm_store_si128(&amp;(s-&gt;sfmt[j++].si), r);</a>
+<a name="ln561">    r1 = r2;</a>
+<a name="ln562">    r2 = r;</a>
+<a name="ln563">  }</a>
+<a name="ln564">}</a>
+<a name="ln565"> </a>
+<a name="ln566">#endif</a>
+<a name="ln567">/**</a>
+<a name="ln568"> * @file  SFMT.c</a>
+<a name="ln569"> * @brief SIMD oriented Fast Mersenne Twister(SFMT)</a>
+<a name="ln570"> *</a>
+<a name="ln571"> * @author Mutsuo Saito (Hiroshima University)</a>
+<a name="ln572"> * @author Makoto Matsumoto (Hiroshima University)</a>
+<a name="ln573"> *</a>
+<a name="ln574"> * Copyright (C) 2006,2007 Mutsuo Saito, Makoto Matsumoto and Hiroshima</a>
+<a name="ln575"> * University. All rights reserved.</a>
+<a name="ln576"> *</a>
+<a name="ln577"> * The new BSD License is applied to this software, see LICENSE.txt</a>
+<a name="ln578"> */</a>
+<a name="ln579">#include &lt;assert.h&gt;</a>
+<a name="ln580">#include &lt;string.h&gt;</a>
+<a name="ln581">//#include &quot;SFMT.h&quot;</a>
+<a name="ln582">//#include &quot;SFMT-params.h&quot;</a>
+<a name="ln583"> </a>
+<a name="ln584">#if defined(__BIG_ENDIAN__) &amp;&amp; !defined(__amd64) &amp;&amp; !defined(BIG_ENDIAN64)</a>
+<a name="ln585">#define BIG_ENDIAN64 1</a>
+<a name="ln586">#endif</a>
+<a name="ln587">#if defined(HAVE_ALTIVEC) &amp;&amp; !defined(BIG_ENDIAN64)</a>
+<a name="ln588">#define BIG_ENDIAN64 1</a>
+<a name="ln589">#endif</a>
+<a name="ln590">#if defined(ONLY64) &amp;&amp; !defined(BIG_ENDIAN64)</a>
+<a name="ln591">#if defined(__GNUC__)</a>
+<a name="ln592">#error &quot;-DONLY64 must be specified with -DBIG_ENDIAN64&quot;</a>
+<a name="ln593">#endif</a>
+<a name="ln594">#undef ONLY64</a>
+<a name="ln595">#endif</a>
+<a name="ln596"> </a>
+<a name="ln597"> </a>
+<a name="ln598">typedef struct dt_points_t</a>
+<a name="ln599">{</a>
+<a name="ln600">  sfmt_state_t **s;</a>
+<a name="ln601">  unsigned int num;</a>
+<a name="ln602">} dt_points_t;</a>
+<a name="ln603"> </a>
+<a name="ln604">#if 0</a>
+<a name="ln605">/*--------------------------------------</a>
+<a name="ln606">  FILE GLOBAL VARIABLES</a>
+<a name="ln607">  internal state, index counter and flag</a>
+<a name="ln608">  --------------------------------------*/</a>
+<a name="ln609">/** the 128-bit internal state array */</a>
+<a name="ln610">static w128_t sfmt[N];</a>
+<a name="ln611">/** the 32bit integer pointer to the 128-bit internal state array */</a>
+<a name="ln612">static uint32_t *psfmt32 = &amp;sfmt[0].u[0];</a>
+<a name="ln613">#if !defined(BIG_ENDIAN64) || defined(ONLY64)</a>
+<a name="ln614">/** the 64bit integer pointer to the 128-bit internal state array */</a>
+<a name="ln615">static uint64_t *psfmt64 = (uint64_t *)&amp;sfmt[0].u[0];</a>
+<a name="ln616">#endif</a>
+<a name="ln617">/** index counter to the 32-bit internal state array */</a>
+<a name="ln618">static int idx;</a>
+<a name="ln619">/** a flag: it is 0 if and only if the internal state is not yet</a>
+<a name="ln620"> * initialized. */</a>
+<a name="ln621">static int initialized = 0;</a>
+<a name="ln622">/** a parity check vector which certificate the period of 2^{MEXP} */</a>
+<a name="ln623">static uint32_t parity[4] = {PARITY1, PARITY2, PARITY3, PARITY4};</a>
+<a name="ln624">#endif</a>
+<a name="ln625"> </a>
+<a name="ln626">/*----------------</a>
+<a name="ln627">  STATIC FUNCTIONS</a>
+<a name="ln628">  ----------------*/</a>
+<a name="ln629">inline static int idxof(int i);</a>
+<a name="ln630">inline static void rshift128(w128_t *out, w128_t const *in, int shift);</a>
+<a name="ln631">inline static void lshift128(w128_t *out, w128_t const *in, int shift);</a>
+<a name="ln632">inline static void gen_rand_all(sfmt_state_t *s);</a>
+<a name="ln633">inline static void gen_rand_array(sfmt_state_t *s, w128_t *array, int size);</a>
+<a name="ln634">inline static uint32_t func1(uint32_t x);</a>
+<a name="ln635">inline static uint32_t func2(uint32_t x);</a>
+<a name="ln636">static void period_certification(sfmt_state_t *s);</a>
+<a name="ln637">#if defined(BIG_ENDIAN64) &amp;&amp; !defined(ONLY64)</a>
+<a name="ln638">inline static void swap(w128_t *array, int size);</a>
+<a name="ln639">#endif</a>
+<a name="ln640"> </a>
+<a name="ln641">/*#if defined(HAVE_ALTIVEC)</a>
+<a name="ln642">#include &quot;SFMT-alti.h&quot;</a>
+<a name="ln643">#elif defined(HAVE_SSE2)</a>
+<a name="ln644">#include &quot;SFMT-sse2.h&quot;</a>
+<a name="ln645">#endif*/</a>
+<a name="ln646"> </a>
+<a name="ln647">/**</a>
+<a name="ln648"> * This function simulate a 64-bit index of LITTLE ENDIAN</a>
+<a name="ln649"> * in BIG ENDIAN machine.</a>
+<a name="ln650"> */</a>
+<a name="ln651">#ifdef ONLY64</a>
+<a name="ln652">inline static int idxof(int i)</a>
+<a name="ln653">{</a>
+<a name="ln654">  return i ^ 1;</a>
+<a name="ln655">}</a>
+<a name="ln656">#else</a>
+<a name="ln657">inline static int idxof(int i)</a>
+<a name="ln658">{</a>
+<a name="ln659">  return i;</a>
+<a name="ln660">}</a>
+<a name="ln661">#endif</a>
+<a name="ln662">/**</a>
+<a name="ln663"> * This function simulates SIMD 128-bit right shift by the standard C.</a>
+<a name="ln664"> * The 128-bit integer given in in is shifted by (shift * 8) bits.</a>
+<a name="ln665"> * This function simulates the LITTLE ENDIAN SIMD.</a>
+<a name="ln666"> * @param out the output of this function</a>
+<a name="ln667"> * @param in the 128-bit data to be shifted</a>
+<a name="ln668"> * @param shift the shift value</a>
+<a name="ln669"> */</a>
+<a name="ln670">#ifdef ONLY64</a>
+<a name="ln671">inline static void rshift128(w128_t *out, w128_t const *in, int shift)</a>
+<a name="ln672">{</a>
+<a name="ln673">  uint64_t th, tl, oh, ol;</a>
+<a name="ln674"> </a>
+<a name="ln675">  th = ((uint64_t)in-&gt;u[2] &lt;&lt; 32) | ((uint64_t)in-&gt;u[3]);</a>
+<a name="ln676">  tl = ((uint64_t)in-&gt;u[0] &lt;&lt; 32) | ((uint64_t)in-&gt;u[1]);</a>
+<a name="ln677"> </a>
+<a name="ln678">  oh = th &gt;&gt; (shift * 8);</a>
+<a name="ln679">  ol = tl &gt;&gt; (shift * 8);</a>
+<a name="ln680">  ol |= th &lt;&lt; (64 - shift * 8);</a>
+<a name="ln681">  out-&gt;u[0] = (uint32_t)(ol &gt;&gt; 32);</a>
+<a name="ln682">  out-&gt;u[1] = (uint32_t)ol;</a>
+<a name="ln683">  out-&gt;u[2] = (uint32_t)(oh &gt;&gt; 32);</a>
+<a name="ln684">  out-&gt;u[3] = (uint32_t)oh;</a>
+<a name="ln685">}</a>
+<a name="ln686">#else</a>
+<a name="ln687">inline static void rshift128(w128_t *out, w128_t const *in, int shift)</a>
+<a name="ln688">{</a>
+<a name="ln689">  uint64_t th, tl, oh, ol;</a>
+<a name="ln690"> </a>
+<a name="ln691">  th = ((uint64_t)in-&gt;u[3] &lt;&lt; 32) | ((uint64_t)in-&gt;u[2]);</a>
+<a name="ln692">  tl = ((uint64_t)in-&gt;u[1] &lt;&lt; 32) | ((uint64_t)in-&gt;u[0]);</a>
+<a name="ln693"> </a>
+<a name="ln694">  oh = th &gt;&gt; (shift * 8);</a>
+<a name="ln695">  ol = tl &gt;&gt; (shift * 8);</a>
+<a name="ln696">  ol |= th &lt;&lt; (64 - shift * 8);</a>
+<a name="ln697">  out-&gt;u[1] = (uint32_t)(ol &gt;&gt; 32);</a>
+<a name="ln698">  out-&gt;u[0] = (uint32_t)ol;</a>
+<a name="ln699">  out-&gt;u[3] = (uint32_t)(oh &gt;&gt; 32);</a>
+<a name="ln700">  out-&gt;u[2] = (uint32_t)oh;</a>
+<a name="ln701">}</a>
+<a name="ln702">#endif</a>
+<a name="ln703">/**</a>
+<a name="ln704"> * This function simulates SIMD 128-bit left shift by the standard C.</a>
+<a name="ln705"> * The 128-bit integer given in in is shifted by (shift * 8) bits.</a>
+<a name="ln706"> * This function simulates the LITTLE ENDIAN SIMD.</a>
+<a name="ln707"> * @param out the output of this function</a>
+<a name="ln708"> * @param in the 128-bit data to be shifted</a>
+<a name="ln709"> * @param shift the shift value</a>
+<a name="ln710"> */</a>
+<a name="ln711">#ifdef ONLY64</a>
+<a name="ln712">inline static void lshift128(w128_t *out, w128_t const *in, int shift)</a>
+<a name="ln713">{</a>
+<a name="ln714">  uint64_t th, tl, oh, ol;</a>
+<a name="ln715"> </a>
+<a name="ln716">  th = ((uint64_t)in-&gt;u[2] &lt;&lt; 32) | ((uint64_t)in-&gt;u[3]);</a>
+<a name="ln717">  tl = ((uint64_t)in-&gt;u[0] &lt;&lt; 32) | ((uint64_t)in-&gt;u[1]);</a>
+<a name="ln718"> </a>
+<a name="ln719">  oh = th &lt;&lt; (shift * 8);</a>
+<a name="ln720">  ol = tl &lt;&lt; (shift * 8);</a>
+<a name="ln721">  oh |= tl &gt;&gt; (64 - shift * 8);</a>
+<a name="ln722">  out-&gt;u[0] = (uint32_t)(ol &gt;&gt; 32);</a>
+<a name="ln723">  out-&gt;u[1] = (uint32_t)ol;</a>
+<a name="ln724">  out-&gt;u[2] = (uint32_t)(oh &gt;&gt; 32);</a>
+<a name="ln725">  out-&gt;u[3] = (uint32_t)oh;</a>
+<a name="ln726">}</a>
+<a name="ln727">#else</a>
+<a name="ln728">inline static void lshift128(w128_t *out, w128_t const *in, int shift)</a>
+<a name="ln729">{</a>
+<a name="ln730">  uint64_t th, tl, oh, ol;</a>
+<a name="ln731"> </a>
+<a name="ln732">  th = ((uint64_t)in-&gt;u[3] &lt;&lt; 32) | ((uint64_t)in-&gt;u[2]);</a>
+<a name="ln733">  tl = ((uint64_t)in-&gt;u[1] &lt;&lt; 32) | ((uint64_t)in-&gt;u[0]);</a>
+<a name="ln734"> </a>
+<a name="ln735">  oh = th &lt;&lt; (shift * 8);</a>
+<a name="ln736">  ol = tl &lt;&lt; (shift * 8);</a>
+<a name="ln737">  oh |= tl &gt;&gt; (64 - shift * 8);</a>
+<a name="ln738">  out-&gt;u[1] = (uint32_t)(ol &gt;&gt; 32);</a>
+<a name="ln739">  out-&gt;u[0] = (uint32_t)ol;</a>
+<a name="ln740">  out-&gt;u[3] = (uint32_t)(oh &gt;&gt; 32);</a>
+<a name="ln741">  out-&gt;u[2] = (uint32_t)oh;</a>
+<a name="ln742">}</a>
+<a name="ln743">#endif</a>
+<a name="ln744"> </a>
+<a name="ln745">/**</a>
+<a name="ln746"> * This function represents the recursion formula.</a>
+<a name="ln747"> * @param r output</a>
+<a name="ln748"> * @param a a 128-bit part of the internal state array</a>
+<a name="ln749"> * @param b a 128-bit part of the internal state array</a>
+<a name="ln750"> * @param c a 128-bit part of the internal state array</a>
+<a name="ln751"> * @param d a 128-bit part of the internal state array</a>
+<a name="ln752"> */</a>
+<a name="ln753">#if(!defined(HAVE_ALTIVEC)) &amp;&amp; (!defined(HAVE_SSE2))</a>
+<a name="ln754">#ifdef ONLY64</a>
+<a name="ln755">inline static void do_recursion(w128_t *r, w128_t *a, w128_t *b, w128_t *c, w128_t *d)</a>
+<a name="ln756">{</a>
+<a name="ln757">  w128_t x;</a>
+<a name="ln758">  w128_t y;</a>
+<a name="ln759"> </a>
+<a name="ln760">  lshift128(&amp;x, a, SL2);</a>
+<a name="ln761">  rshift128(&amp;y, c, SR2);</a>
+<a name="ln762">  r-&gt;u[0] = a-&gt;u[0] ^ x.u[0] ^ ((b-&gt;u[0] &gt;&gt; SR1) &amp; MSK2) ^ y.u[0] ^ (d-&gt;u[0] &lt;&lt; SL1);</a>
+<a name="ln763">  r-&gt;u[1] = a-&gt;u[1] ^ x.u[1] ^ ((b-&gt;u[1] &gt;&gt; SR1) &amp; MSK1) ^ y.u[1] ^ (d-&gt;u[1] &lt;&lt; SL1);</a>
+<a name="ln764">  r-&gt;u[2] = a-&gt;u[2] ^ x.u[2] ^ ((b-&gt;u[2] &gt;&gt; SR1) &amp; MSK4) ^ y.u[2] ^ (d-&gt;u[2] &lt;&lt; SL1);</a>
+<a name="ln765">  r-&gt;u[3] = a-&gt;u[3] ^ x.u[3] ^ ((b-&gt;u[3] &gt;&gt; SR1) &amp; MSK3) ^ y.u[3] ^ (d-&gt;u[3] &lt;&lt; SL1);</a>
+<a name="ln766">}</a>
+<a name="ln767">#else</a>
+<a name="ln768">inline static void do_recursion(w128_t *r, w128_t *a, w128_t *b, w128_t *c, w128_t *d)</a>
+<a name="ln769">{</a>
+<a name="ln770">  w128_t x;</a>
+<a name="ln771">  w128_t y;</a>
+<a name="ln772"> </a>
+<a name="ln773">  lshift128(&amp;x, a, SL2);</a>
+<a name="ln774">  rshift128(&amp;y, c, SR2);</a>
+<a name="ln775">  r-&gt;u[0] = a-&gt;u[0] ^ x.u[0] ^ ((b-&gt;u[0] &gt;&gt; SR1) &amp; MSK1) ^ y.u[0] ^ (d-&gt;u[0] &lt;&lt; SL1);</a>
+<a name="ln776">  r-&gt;u[1] = a-&gt;u[1] ^ x.u[1] ^ ((b-&gt;u[1] &gt;&gt; SR1) &amp; MSK2) ^ y.u[1] ^ (d-&gt;u[1] &lt;&lt; SL1);</a>
+<a name="ln777">  r-&gt;u[2] = a-&gt;u[2] ^ x.u[2] ^ ((b-&gt;u[2] &gt;&gt; SR1) &amp; MSK3) ^ y.u[2] ^ (d-&gt;u[2] &lt;&lt; SL1);</a>
+<a name="ln778">  r-&gt;u[3] = a-&gt;u[3] ^ x.u[3] ^ ((b-&gt;u[3] &gt;&gt; SR1) &amp; MSK4) ^ y.u[3] ^ (d-&gt;u[3] &lt;&lt; SL1);</a>
+<a name="ln779">}</a>
+<a name="ln780">#endif</a>
+<a name="ln781">#endif</a>
+<a name="ln782"> </a>
+<a name="ln783">#if defined(BIG_ENDIAN64) &amp;&amp; !defined(ONLY64) &amp;&amp; !defined(HAVE_ALTIVEC)</a>
+<a name="ln784">inline static void swap(w128_t *array, int size)</a>
+<a name="ln785">{</a>
+<a name="ln786">  int i;</a>
+<a name="ln787">  uint32_t x, y;</a>
+<a name="ln788"> </a>
+<a name="ln789">  for(i = 0; i &lt; size; i++)</a>
+<a name="ln790">  {</a>
+<a name="ln791">    x = array[i].u[0];</a>
+<a name="ln792">    y = array[i].u[2];</a>
+<a name="ln793">    array[i].u[0] = array[i].u[1];</a>
+<a name="ln794">    array[i].u[2] = array[i].u[3];</a>
+<a name="ln795">    array[i].u[1] = x;</a>
+<a name="ln796">    array[i].u[3] = y;</a>
+<a name="ln797">  }</a>
+<a name="ln798">}</a>
+<a name="ln799">#endif</a>
+<a name="ln800">/**</a>
+<a name="ln801"> * This function represents a function used in the initialization</a>
+<a name="ln802"> * by init_by_array</a>
+<a name="ln803"> * @param x 32-bit integer</a>
+<a name="ln804"> * @return 32-bit integer</a>
+<a name="ln805"> */</a>
+<a name="ln806">static uint32_t func1(uint32_t x)</a>
+<a name="ln807">{</a>
+<a name="ln808">  return (x ^ (x &gt;&gt; 27)) * (uint32_t)1664525UL;</a>
+<a name="ln809">}</a>
+<a name="ln810"> </a>
+<a name="ln811">/**</a>
+<a name="ln812"> * This function represents a function used in the initialization</a>
+<a name="ln813"> * by init_by_array</a>
+<a name="ln814"> * @param x 32-bit integer</a>
+<a name="ln815"> * @return 32-bit integer</a>
+<a name="ln816"> */</a>
+<a name="ln817">static uint32_t func2(uint32_t x)</a>
+<a name="ln818">{</a>
+<a name="ln819">  return (x ^ (x &gt;&gt; 27)) * (uint32_t)1566083941UL;</a>
+<a name="ln820">}</a>
+<a name="ln821"> </a>
+<a name="ln822">/**</a>
+<a name="ln823"> * This function certificate the period of 2^{MEXP}</a>
+<a name="ln824"> */</a>
+<a name="ln825">static void period_certification(sfmt_state_t *s)</a>
+<a name="ln826">{</a>
+<a name="ln827">  int inner = 0;</a>
+<a name="ln828">  int i, j;</a>
+<a name="ln829">  uint32_t work;</a>
+<a name="ln830"> </a>
+<a name="ln831">  for(i = 0; i &lt; 4; i++) inner ^= s-&gt;psfmt32[idxof(i)] &amp; s-&gt;parity[i];</a>
+<a name="ln832">  for(i = 16; i &gt; 0; i &gt;&gt;= 1) inner ^= inner &gt;&gt; i;</a>
+<a name="ln833">  inner &amp;= 1;</a>
+<a name="ln834">  /* check OK */</a>
+<a name="ln835">  if(inner == 1)</a>
+<a name="ln836">  {</a>
+<a name="ln837">    return;</a>
+<a name="ln838">  }</a>
+<a name="ln839">  /* check NG, and modification */</a>
+<a name="ln840">  for(i = 0; i &lt; 4; i++)</a>
+<a name="ln841">  {</a>
+<a name="ln842">    work = 1;</a>
+<a name="ln843">    for(j = 0; j &lt; 32; j++)</a>
+<a name="ln844">    {</a>
+<a name="ln845">      if((work &amp; s-&gt;parity[i]) != 0)</a>
+<a name="ln846">      {</a>
+<a name="ln847">        s-&gt;psfmt32[idxof(i)] ^= work;</a>
+<a name="ln848">        return;</a>
+<a name="ln849">      }</a>
+<a name="ln850">      work = work &lt;&lt; 1;</a>
+<a name="ln851">    }</a>
+<a name="ln852">  }</a>
+<a name="ln853">}</a>
+<a name="ln854"> </a>
+<a name="ln855">/*----------------</a>
+<a name="ln856">  PUBLIC FUNCTIONS</a>
+<a name="ln857">  ----------------*/</a>
+<a name="ln858">/**</a>
+<a name="ln859"> * This function returns the identification string.</a>
+<a name="ln860"> * The string shows the word size, the Mersenne exponent,</a>
+<a name="ln861"> * and all parameters of this generator.</a>
+<a name="ln862"> */</a>
+<a name="ln863">const char *get_idstring(void)</a>
+<a name="ln864">{</a>
+<a name="ln865">  return IDSTR;</a>
+<a name="ln866">}</a>
+<a name="ln867"> </a>
+<a name="ln868">/**</a>
+<a name="ln869"> * This function returns the minimum size of array used for \b</a>
+<a name="ln870"> * fill_array32() function.</a>
+<a name="ln871"> * @return minimum size of array used for fill_array32() function.</a>
+<a name="ln872"> */</a>
+<a name="ln873">int get_min_array_size32(void)</a>
+<a name="ln874">{</a>
+<a name="ln875">  return N32;</a>
+<a name="ln876">}</a>
+<a name="ln877"> </a>
+<a name="ln878">/**</a>
+<a name="ln879"> * This function returns the minimum size of array used for \b</a>
+<a name="ln880"> * fill_array64() function.</a>
+<a name="ln881"> * @return minimum size of array used for fill_array64() function.</a>
+<a name="ln882"> */</a>
+<a name="ln883">int get_min_array_size64(void)</a>
+<a name="ln884">{</a>
+<a name="ln885">  return N64;</a>
+<a name="ln886">}</a>
+<a name="ln887"> </a>
+<a name="ln888">#ifndef ONLY64</a>
+<a name="ln889">/**</a>
+<a name="ln890"> * This function generates and returns 32-bit pseudorandom number.</a>
+<a name="ln891"> * init_gen_rand or init_by_array must be called before this function.</a>
+<a name="ln892"> * @return 32-bit pseudorandom number</a>
+<a name="ln893"> */</a>
+<a name="ln894">uint32_t gen_rand32(sfmt_state_t *s)</a>
+<a name="ln895">{</a>
+<a name="ln896">  uint32_t r;</a>
+<a name="ln897"> </a>
+<a name="ln898">  // assert(s-&gt;initialized);</a>
+<a name="ln899">  if(s-&gt;idx &gt;= N32)</a>
+<a name="ln900">  {</a>
+<a name="ln901">    gen_rand_all(s);</a>
+<a name="ln902">    s-&gt;idx = 0;</a>
+<a name="ln903">  }</a>
+<a name="ln904">  r = s-&gt;psfmt32[s-&gt;idx++];</a>
+<a name="ln905">  return r;</a>
+<a name="ln906">}</a>
+<a name="ln907">#endif</a>
+<a name="ln908">/**</a>
+<a name="ln909"> * This function generates and returns 64-bit pseudorandom number.</a>
+<a name="ln910"> * init_gen_rand or init_by_array must be called before this function.</a>
+<a name="ln911"> * The function gen_rand64 should not be called after gen_rand32,</a>
+<a name="ln912"> * unless an initialization is again executed.</a>
+<a name="ln913"> * @return 64-bit pseudorandom number</a>
+<a name="ln914"> */</a>
+<a name="ln915">uint64_t gen_rand64(sfmt_state_t *s)</a>
+<a name="ln916">{</a>
+<a name="ln917">#if defined(BIG_ENDIAN64) &amp;&amp; !defined(ONLY64)</a>
+<a name="ln918">  uint32_t r1, r2;</a>
+<a name="ln919">#else</a>
+<a name="ln920">  uint64_t r;</a>
+<a name="ln921">#endif</a>
+<a name="ln922"> </a>
+<a name="ln923">  // assert(s-&gt;initialized);</a>
+<a name="ln924">  // assert(s-&gt;idx % 2 == 0);</a>
+<a name="ln925"> </a>
+<a name="ln926">  if(s-&gt;idx &gt;= N32)</a>
+<a name="ln927">  {</a>
+<a name="ln928">    gen_rand_all(s);</a>
+<a name="ln929">    s-&gt;idx = 0;</a>
+<a name="ln930">  }</a>
+<a name="ln931">#if defined(BIG_ENDIAN64) &amp;&amp; !defined(ONLY64)</a>
+<a name="ln932">  r1 = s-&gt;psfmt32[s-&gt;idx];</a>
+<a name="ln933">  r2 = s-&gt;psfmt32[s-&gt;idx + 1];</a>
+<a name="ln934">  s-&gt;idx += 2;</a>
+<a name="ln935">  return ((uint64_t)r2 &lt;&lt; 32) | r1;</a>
+<a name="ln936">#else</a>
+<a name="ln937">  r = s-&gt;psfmt64[s-&gt;idx / 2];</a>
+<a name="ln938">  s-&gt;idx += 2;</a>
+<a name="ln939">  return r;</a>
+<a name="ln940">#endif</a>
+<a name="ln941">}</a>
+<a name="ln942"> </a>
+<a name="ln943">#ifndef ONLY64</a>
+<a name="ln944">/**</a>
+<a name="ln945"> * This function generates pseudorandom 32-bit integers in the</a>
+<a name="ln946"> * specified array[] by one call. The number of pseudorandom integers</a>
+<a name="ln947"> * is specified by the argument size, which must be at least 624 and a</a>
+<a name="ln948"> * multiple of four.  The generation by this function is much faster</a>
+<a name="ln949"> * than the following gen_rand function.</a>
+<a name="ln950"> *</a>
+<a name="ln951"> * For initialization, init_gen_rand or init_by_array must be called</a>
+<a name="ln952"> * before the first call of this function. This function can not be</a>
+<a name="ln953"> * used after calling gen_rand function, without initialization.</a>
+<a name="ln954"> *</a>
+<a name="ln955"> * @param array an array where pseudorandom 32-bit integers are filled</a>
+<a name="ln956"> * by this function.  The pointer to the array must be \b &quot;aligned&quot;</a>
+<a name="ln957"> * (namely, must be a multiple of 16) in the SIMD version, since it</a>
+<a name="ln958"> * refers to the address of a 128-bit integer.  In the standard C</a>
+<a name="ln959"> * version, the pointer is arbitrary.</a>
+<a name="ln960"> *</a>
+<a name="ln961"> * @param size the number of 32-bit pseudorandom integers to be</a>
+<a name="ln962"> * generated.  size must be a multiple of 4, and greater than or equal</a>
+<a name="ln963"> * to (MEXP / 128 + 1) * 4.</a>
+<a name="ln964"> *</a>
+<a name="ln965"> * @note \b memalign or \b posix_memalign is available to get aligned</a>
+<a name="ln966"> * memory. Mac OSX doesn't have these functions, but \b malloc of OSX</a>
+<a name="ln967"> * returns the pointer to the aligned memory block.</a>
+<a name="ln968"> */</a>
+<a name="ln969">void fill_array32(sfmt_state_t *s, uint32_t *array, int size)</a>
+<a name="ln970">{</a>
+<a name="ln971">  // assert(s-&gt;initialized);</a>
+<a name="ln972">  // assert(s-&gt;idx == N32);</a>
+<a name="ln973">  // assert(size % 4 == 0);</a>
+<a name="ln974">  // assert(size &gt;= N32);</a>
+<a name="ln975"> </a>
+<a name="ln976">  gen_rand_array(s, (w128_t *)array, size / 4);</a>
+<a name="ln977">  s-&gt;idx = N32;</a>
+<a name="ln978">}</a>
+<a name="ln979">#endif</a>
+<a name="ln980"> </a>
+<a name="ln981">/**</a>
+<a name="ln982"> * This function generates pseudorandom 64-bit integers in the</a>
+<a name="ln983"> * specified array[] by one call. The number of pseudorandom integers</a>
+<a name="ln984"> * is specified by the argument size, which must be at least 312 and a</a>
+<a name="ln985"> * multiple of two.  The generation by this function is much faster</a>
+<a name="ln986"> * than the following gen_rand function.</a>
+<a name="ln987"> *</a>
+<a name="ln988"> * For initialization, init_gen_rand or init_by_array must be called</a>
+<a name="ln989"> * before the first call of this function. This function can not be</a>
+<a name="ln990"> * used after calling gen_rand function, without initialization.</a>
+<a name="ln991"> *</a>
+<a name="ln992"> * @param array an array where pseudorandom 64-bit integers are filled</a>
+<a name="ln993"> * by this function.  The pointer to the array must be &quot;aligned&quot;</a>
+<a name="ln994"> * (namely, must be a multiple of 16) in the SIMD version, since it</a>
+<a name="ln995"> * refers to the address of a 128-bit integer.  In the standard C</a>
+<a name="ln996"> * version, the pointer is arbitrary.</a>
+<a name="ln997"> *</a>
+<a name="ln998"> * @param size the number of 64-bit pseudorandom integers to be</a>
+<a name="ln999"> * generated.  size must be a multiple of 2, and greater than or equal</a>
+<a name="ln1000"> * to (MEXP / 128 + 1) * 2</a>
+<a name="ln1001"> *</a>
+<a name="ln1002"> * @note \b memalign or \b posix_memalign is available to get aligned</a>
+<a name="ln1003"> * memory. Mac OSX doesn't have these functions, but \b malloc of OSX</a>
+<a name="ln1004"> * returns the pointer to the aligned memory block.</a>
+<a name="ln1005"> */</a>
+<a name="ln1006">void fill_array64(sfmt_state_t *s, uint64_t *array, int size)</a>
+<a name="ln1007">{</a>
+<a name="ln1008">  // assert(s-&gt;initialized);</a>
+<a name="ln1009">  // assert(s-&gt;idx == N32);</a>
+<a name="ln1010">  // assert(size % 2 == 0);</a>
+<a name="ln1011">  // assert(size &gt;= N64);</a>
+<a name="ln1012"> </a>
+<a name="ln1013">  gen_rand_array(s, (w128_t *)array, size / 2);</a>
+<a name="ln1014">  s-&gt;idx = N32;</a>
+<a name="ln1015"> </a>
+<a name="ln1016">#if defined(BIG_ENDIAN64) &amp;&amp; !defined(ONLY64)</a>
+<a name="ln1017">  swap((w128_t *)array, size / 2);</a>
+<a name="ln1018">#endif</a>
+<a name="ln1019">}</a>
+<a name="ln1020"> </a>
+<a name="ln1021">/**</a>
+<a name="ln1022"> * This function initializes the internal state array with a 32-bit</a>
+<a name="ln1023"> * integer seed.</a>
+<a name="ln1024"> *</a>
+<a name="ln1025"> * @param seed a 32-bit integer used as the seed.</a>
+<a name="ln1026"> */</a>
+<a name="ln1027">void init_gen_rand(sfmt_state_t *s, uint32_t seed)</a>
+<a name="ln1028">{</a>
+<a name="ln1029">  int i;</a>
+<a name="ln1030"> </a>
+<a name="ln1031">  s-&gt;psfmt32[idxof(0)] = seed;</a>
+<a name="ln1032">  for(i = 1; i &lt; N32; i++)</a>
+<a name="ln1033">  {</a>
+<a name="ln1034">    s-&gt;psfmt32[idxof(i)] = 1812433253UL * (s-&gt;psfmt32[idxof(i - 1)] ^ (s-&gt;psfmt32[idxof(i - 1)] &gt;&gt; 30)) + i;</a>
+<a name="ln1035">  }</a>
+<a name="ln1036">  s-&gt;idx = N32;</a>
+<a name="ln1037">  period_certification(s);</a>
+<a name="ln1038">  s-&gt;initialized = 1;</a>
+<a name="ln1039">}</a>
+<a name="ln1040"> </a>
+<a name="ln1041">/**</a>
+<a name="ln1042"> * This function initializes the internal state array,</a>
+<a name="ln1043"> * with an array of 32-bit integers used as the seeds</a>
+<a name="ln1044"> * @param init_key the array of 32-bit integers, used as a seed.</a>
+<a name="ln1045"> * @param key_length the length of init_key.</a>
+<a name="ln1046"> */</a>
+<a name="ln1047">void init_by_array(sfmt_state_t *s, uint32_t *init_key, int key_length)</a>
+<a name="ln1048">{</a>
+<a name="ln1049">  int i, j, count;</a>
+<a name="ln1050">  uint32_t r;</a>
+<a name="ln1051">  int lag;</a>
+<a name="ln1052">  int mid;</a>
+<a name="ln1053">  int size = N * 4;</a>
+<a name="ln1054"> </a>
+<a name="ln1055">  if(size &gt;= 623)</a>
+<a name="ln1056">  {</a>
+<a name="ln1057">    lag = 11;</a>
+<a name="ln1058">  }</a>
+<a name="ln1059">  else if(size &gt;= 68)</a>
+<a name="ln1060">  {</a>
+<a name="ln1061">    lag = 7;</a>
+<a name="ln1062">  }</a>
+<a name="ln1063">  else if(size &gt;= 39)</a>
+<a name="ln1064">  {</a>
+<a name="ln1065">    lag = 5;</a>
+<a name="ln1066">  }</a>
+<a name="ln1067">  else</a>
+<a name="ln1068">  {</a>
+<a name="ln1069">    lag = 3;</a>
+<a name="ln1070">  }</a>
+<a name="ln1071">  mid = (size - lag) / 2;</a>
+<a name="ln1072"> </a>
+<a name="ln1073">  memset(s-&gt;sfmt, 0x8b, sizeof(s-&gt;sfmt));</a>
+<a name="ln1074">  if(key_length + 1 &gt; N32)</a>
+<a name="ln1075">  {</a>
+<a name="ln1076">    count = key_length + 1;</a>
+<a name="ln1077">  }</a>
+<a name="ln1078">  else</a>
+<a name="ln1079">  {</a>
+<a name="ln1080">    count = N32;</a>
+<a name="ln1081">  }</a>
+<a name="ln1082">  r = func1(s-&gt;psfmt32[idxof(0)] ^ s-&gt;psfmt32[idxof(mid)] ^ s-&gt;psfmt32[idxof(N32 - 1)]);</a>
+<a name="ln1083">  s-&gt;psfmt32[idxof(mid)] += r;</a>
+<a name="ln1084">  r += key_length;</a>
+<a name="ln1085">  s-&gt;psfmt32[idxof(mid + lag)] += r;</a>
+<a name="ln1086">  s-&gt;psfmt32[idxof(0)] = r;</a>
+<a name="ln1087"> </a>
+<a name="ln1088">  count--;</a>
+<a name="ln1089">  for(i = 1, j = 0; (j &lt; count) &amp;&amp; (j &lt; key_length); j++)</a>
+<a name="ln1090">  {</a>
+<a name="ln1091">    r = func1(s-&gt;psfmt32[idxof(i)] ^ s-&gt;psfmt32[idxof((i + mid) % N32)]</a>
+<a name="ln1092">              ^ s-&gt;psfmt32[idxof((i + N32 - 1) % N32)]);</a>
+<a name="ln1093">    s-&gt;psfmt32[idxof((i + mid) % N32)] += r;</a>
+<a name="ln1094">    r += init_key[j] + i;</a>
+<a name="ln1095">    s-&gt;psfmt32[idxof((i + mid + lag) % N32)] += r;</a>
+<a name="ln1096">    s-&gt;psfmt32[idxof(i)] = r;</a>
+<a name="ln1097">    i = (i + 1) % N32;</a>
+<a name="ln1098">  }</a>
+<a name="ln1099">  for(; j &lt; count; j++)</a>
+<a name="ln1100">  {</a>
+<a name="ln1101">    r = func1(s-&gt;psfmt32[idxof(i)] ^ s-&gt;psfmt32[idxof((i + mid) % N32)]</a>
+<a name="ln1102">              ^ s-&gt;psfmt32[idxof((i + N32 - 1) % N32)]);</a>
+<a name="ln1103">    s-&gt;psfmt32[idxof((i + mid) % N32)] += r;</a>
+<a name="ln1104">    r += i;</a>
+<a name="ln1105">    s-&gt;psfmt32[idxof((i + mid + lag) % N32)] += r;</a>
+<a name="ln1106">    s-&gt;psfmt32[idxof(i)] = r;</a>
+<a name="ln1107">    i = (i + 1) % N32;</a>
+<a name="ln1108">  }</a>
+<a name="ln1109">  for(j = 0; j &lt; N32; j++)</a>
+<a name="ln1110">  {</a>
+<a name="ln1111">    r = func2(s-&gt;psfmt32[idxof(i)] + s-&gt;psfmt32[idxof((i + mid) % N32)]</a>
+<a name="ln1112">              + s-&gt;psfmt32[idxof((i + N32 - 1) % N32)]);</a>
+<a name="ln1113">    s-&gt;psfmt32[idxof((i + mid) % N32)] ^= r;</a>
+<a name="ln1114">    r -= i;</a>
+<a name="ln1115">    s-&gt;psfmt32[idxof((i + mid + lag) % N32)] ^= r;</a>
+<a name="ln1116">    s-&gt;psfmt32[idxof(i)] = r;</a>
+<a name="ln1117">    i = (i + 1) % N32;</a>
+<a name="ln1118">  }</a>
+<a name="ln1119"> </a>
+<a name="ln1120">  s-&gt;idx = N32;</a>
+<a name="ln1121">  period_certification(s);</a>
+<a name="ln1122">  s-&gt;initialized = 1;</a>
+<a name="ln1123">}</a>
+<a name="ln1124"> </a>
+<a name="ln1125"> </a>
+<a name="ln1126">static inline void dt_points_init(dt_points_t *p, const unsigned int num_threads)</a>
+<a name="ln1127">{</a>
+<a name="ln1128">  sfmt_state_t *states = (sfmt_state_t *)dt_alloc_align(16, sizeof(sfmt_state_t) * num_threads);</a>
+<a name="ln1129">  p-&gt;s = (sfmt_state_t **)calloc(num_threads, sizeof(sfmt_state_t *));</a>
+<a name="ln1130">  p-&gt;num = num_threads;</a>
+<a name="ln1131"> </a>
+<a name="ln1132">  int seed = 0xD71337;</a>
+<a name="ln1133">  for(int i = 0; i &lt; (int)num_threads; i++)</a>
+<a name="ln1134">  {</a>
+<a name="ln1135">    p-&gt;s[i] = states + i;</a>
+<a name="ln1136">#if !defined(BIG_ENDIAN64) || defined(ONLY64)</a>
+<a name="ln1137">    p-&gt;s[i]-&gt;psfmt64 = (uint64_t *)&amp;(p-&gt;s[i]-&gt;sfmt[0].u[0]);</a>
+<a name="ln1138">#endif</a>
+<a name="ln1139">    p-&gt;s[i]-&gt;psfmt32 = &amp;(p-&gt;s[i]-&gt;sfmt[0].u[0]);</a>
+<a name="ln1140">    p-&gt;s[i]-&gt;initialized = 0;</a>
+<a name="ln1141">    p-&gt;s[i]-&gt;parity[0] = PARITY1;</a>
+<a name="ln1142">    p-&gt;s[i]-&gt;parity[1] = PARITY2;</a>
+<a name="ln1143">    p-&gt;s[i]-&gt;parity[2] = PARITY3;</a>
+<a name="ln1144">    p-&gt;s[i]-&gt;parity[3] = PARITY4;</a>
+<a name="ln1145">    init_gen_rand(p-&gt;s[i], seed);</a>
+<a name="ln1146">    seed ^= seed &lt;&lt; 1;</a>
+<a name="ln1147">  }</a>
+<a name="ln1148">}</a>
+<a name="ln1149"> </a>
+<a name="ln1150">static inline void dt_points_cleanup(dt_points_t *p)</a>
+<a name="ln1151">{</a>
+<a name="ln1152">  dt_free_align(p-&gt;s[0]);</a>
+<a name="ln1153">  free(p-&gt;s);</a>
+<a name="ln1154">}</a>
+<a name="ln1155"> </a>
+<a name="ln1156">static inline float dt_points_get_for(dt_points_t *p, const unsigned int thread_num)</a>
+<a name="ln1157">{</a>
+<a name="ln1158">  return genrand_real2f(p-&gt;s[thread_num]);</a>
+<a name="ln1159">}</a>
+<a name="ln1160"> </a>
+<a name="ln1161">static inline float dt_points_get()</a>
+<a name="ln1162">{</a>
+<a name="ln1163">  return dt_points_get_for(darktable.points, dt_get_thread_num());</a>
+<a name="ln1164">}</a>
+<a name="ln1165"> </a>
+<a name="ln1166">#endif</a>
+<a name="ln1167">// modelines: These editor modelines have been set for all relevant files by tools/update_modelines.sh</a>
+<a name="ln1168">// vim: shiftwidth=2 expandtab tabstop=2 cindent</a>
+<a name="ln1169">// kate: tab-indents: off; indent-width 2; replace-tabs on; indent-mode cstyle; remove-trailing-spaces modified;</a>
+
+</code></pre>
+<div class="balloon" rel="840"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v756/" target="_blank">V756</a> The 'j' counter is not used inside a nested loop. Consider inspecting usage of 'i' counter.</p></div>
+<div class="balloon" rel="1055"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v547/" target="_blank">V547</a> Expression 'size >= 623' is always true.</p></div>
+<div class="balloon" rel="1135"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v522/" target="_blank">V522</a> There might be dereferencing of a potential null pointer 'p->s'. Check lines: 1135, 1129.</p></div>
+
+<link rel="stylesheet" href="highlight.css">
+<script src="highlight.pack.js"></script>
+<script src="highlightjs-line-numbers.js"></script>
+<script>hljs.initHighlightingOnLoad();</script>
+<script>hljs.initLineNumbersOnLoad();</script>
+<script>
+  $(document).ready(function() {
+      $('.balloon').each(function () {
+          var bl = $(this);
+          var line = bl.attr('rel');
+          var text = $('a[name="ln'+line+'"]').text();
+
+          var space_count = 0;
+          for(var i = 0; i<text.length; i++){
+              var char = text[i];
+              if((char !== ' ')&&(char !== '\t'))break;
+              if(char === '\t')space_count++;
+              space_count++;
+          }
+
+          bl.css('margin-left', space_count*8);
+          $('a[name="ln'+line+'"]').after(bl);
+      });
+
+      window.location = window.location;
+  });
+</script>
+</body>
+</html>

@@ -1,0 +1,812 @@
+
+<html>
+<head>
+  <link rel="stylesheet" href="../style.css"/>
+  <script src="../jquery-3.2.1.min.js"></script>
+</head>
+<body>
+<pre><code class = "cpp">
+<a name="ln1">/*</a>
+<a name="ln2">    This file is part of darktable,</a>
+<a name="ln3">    copyright (c) 2009--2010 johannes hanika.</a>
+<a name="ln4">    copyright (c) 2015 LebedevRI.</a>
+<a name="ln5"> </a>
+<a name="ln6">    darktable is free software: you can redistribute it and/or modify</a>
+<a name="ln7">    it under the terms of the GNU General Public License as published by</a>
+<a name="ln8">    the Free Software Foundation, either version 3 of the License, or</a>
+<a name="ln9">    (at your option) any later version.</a>
+<a name="ln10"> </a>
+<a name="ln11">    darktable is distributed in the hope that it will be useful,</a>
+<a name="ln12">    but WITHOUT ANY WARRANTY; without even the implied warranty of</a>
+<a name="ln13">    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the</a>
+<a name="ln14">    GNU General Public License for more details.</a>
+<a name="ln15"> </a>
+<a name="ln16">    You should have received a copy of the GNU General Public License</a>
+<a name="ln17">    along with darktable.  If not, see &lt;http://www.gnu.org/licenses/&gt;.</a>
+<a name="ln18">*/</a>
+<a name="ln19"> </a>
+<a name="ln20"> </a>
+<a name="ln21"> </a>
+<a name="ln22">#ifdef HAVE_CONFIG_H</a>
+<a name="ln23">#include &quot;config.h&quot;</a>
+<a name="ln24">#endif</a>
+<a name="ln25">#include &quot;common/exif.h&quot;</a>
+<a name="ln26">#include &quot;common/imageio.h&quot;</a>
+<a name="ln27">#include &quot;common/imageio_jpeg.h&quot;</a>
+<a name="ln28">#include &lt;setjmp.h&gt;</a>
+<a name="ln29"> </a>
+<a name="ln30">// error functions</a>
+<a name="ln31"> </a>
+<a name="ln32">struct dt_imageio_jpeg_error_mgr</a>
+<a name="ln33">{</a>
+<a name="ln34">  struct jpeg_error_mgr pub;</a>
+<a name="ln35">  jmp_buf setjmp_buffer;</a>
+<a name="ln36">} dt_imageio_jpeg_error_mgr;</a>
+<a name="ln37"> </a>
+<a name="ln38">typedef struct dt_imageio_jpeg_error_mgr *dt_imageio_jpeg_error_ptr;</a>
+<a name="ln39"> </a>
+<a name="ln40">static void dt_imageio_jpeg_error_exit(j_common_ptr cinfo)</a>
+<a name="ln41">{</a>
+<a name="ln42">  dt_imageio_jpeg_error_ptr myerr = (dt_imageio_jpeg_error_ptr)cinfo-&gt;err;</a>
+<a name="ln43">  (*cinfo-&gt;err-&gt;output_message)(cinfo);</a>
+<a name="ln44">  longjmp(myerr-&gt;setjmp_buffer, 1);</a>
+<a name="ln45">}</a>
+<a name="ln46"> </a>
+<a name="ln47">// destination functions</a>
+<a name="ln48">static void dt_imageio_jpeg_init_destination(j_compress_ptr cinfo)</a>
+<a name="ln49">{</a>
+<a name="ln50">}</a>
+<a name="ln51">static boolean dt_imageio_jpeg_empty_output_buffer(j_compress_ptr cinfo)</a>
+<a name="ln52">{</a>
+<a name="ln53">  fprintf(stderr, &quot;[imageio_jpeg] output buffer full!\n&quot;);</a>
+<a name="ln54">  return FALSE;</a>
+<a name="ln55">}</a>
+<a name="ln56">static void dt_imageio_jpeg_term_destination(j_compress_ptr cinfo)</a>
+<a name="ln57">{</a>
+<a name="ln58">}</a>
+<a name="ln59"> </a>
+<a name="ln60">// source functions</a>
+<a name="ln61">static void dt_imageio_jpeg_init_source(j_decompress_ptr cinfo)</a>
+<a name="ln62">{</a>
+<a name="ln63">}</a>
+<a name="ln64">static boolean dt_imageio_jpeg_fill_input_buffer(j_decompress_ptr cinfo)</a>
+<a name="ln65">{</a>
+<a name="ln66">  return 1;</a>
+<a name="ln67">}</a>
+<a name="ln68">static void dt_imageio_jpeg_skip_input_data(j_decompress_ptr cinfo, long num_bytes)</a>
+<a name="ln69">{</a>
+<a name="ln70">  ssize_t i = cinfo-&gt;src-&gt;bytes_in_buffer - num_bytes;</a>
+<a name="ln71">  if(i &lt; 0) i = 0;</a>
+<a name="ln72">  cinfo-&gt;src-&gt;bytes_in_buffer = i;</a>
+<a name="ln73">  cinfo-&gt;src-&gt;next_input_byte += num_bytes;</a>
+<a name="ln74">}</a>
+<a name="ln75">static void dt_imageio_jpeg_term_source(j_decompress_ptr cinfo)</a>
+<a name="ln76">{</a>
+<a name="ln77">}</a>
+<a name="ln78"> </a>
+<a name="ln79"> </a>
+<a name="ln80">/*</a>
+<a name="ln81"> * Since an ICC profile can be larger than the maximum size of a JPEG marker</a>
+<a name="ln82"> * (64K), we need provisions to split it into multiple markers.  The format</a>
+<a name="ln83"> * defined by the ICC specifies one or more APP2 markers containing the</a>
+<a name="ln84"> * following data:</a>
+<a name="ln85"> *	Identifying string	ASCII &quot;ICC_PROFILE\0&quot;  (12 bytes)</a>
+<a name="ln86"> *	Marker sequence number	1 for first APP2, 2 for next, etc (1 byte)</a>
+<a name="ln87"> *	Number of markers	Total number of APP2's used (1 byte)</a>
+<a name="ln88"> *      Profile data		(remainder of APP2 data)</a>
+<a name="ln89"> * Decoders should use the marker sequence numbers to reassemble the profile,</a>
+<a name="ln90"> * rather than assuming that the APP2 markers appear in the correct sequence.</a>
+<a name="ln91"> */</a>
+<a name="ln92"> </a>
+<a name="ln93">#define EXIF_MARKER (JPEG_APP0 + 1) /* JPEG marker code for Exif */</a>
+<a name="ln94">#define ICC_MARKER (JPEG_APP0 + 2)  /* JPEG marker code for ICC */</a>
+<a name="ln95">#define ICC_OVERHEAD_LEN 14         /* size of non-profile data in APP2 */</a>
+<a name="ln96">#define MAX_BYTES_IN_MARKER 65533   /* maximum data len of a JPEG marker */</a>
+<a name="ln97">#define MAX_DATA_BYTES_IN_MARKER (MAX_BYTES_IN_MARKER - ICC_OVERHEAD_LEN)</a>
+<a name="ln98"> </a>
+<a name="ln99"> </a>
+<a name="ln100">/*</a>
+<a name="ln101"> * Prepare for reading an ICC profile</a>
+<a name="ln102"> */</a>
+<a name="ln103"> </a>
+<a name="ln104">static void setup_read_icc_profile(j_decompress_ptr cinfo)</a>
+<a name="ln105">{</a>
+<a name="ln106">  /* Tell the library to keep any APP2 data it may find */</a>
+<a name="ln107">  jpeg_save_markers(cinfo, ICC_MARKER, 0xFFFF);</a>
+<a name="ln108">}</a>
+<a name="ln109"> </a>
+<a name="ln110">/*</a>
+<a name="ln111"> * Prepare for reading an Exif blob</a>
+<a name="ln112"> */</a>
+<a name="ln113"> </a>
+<a name="ln114">static void setup_read_exif(j_decompress_ptr cinfo)</a>
+<a name="ln115">{</a>
+<a name="ln116">  /* Tell the library to keep any APP1 data it may find */</a>
+<a name="ln117">  jpeg_save_markers(cinfo, EXIF_MARKER, 0xFFFF);</a>
+<a name="ln118">}</a>
+<a name="ln119"> </a>
+<a name="ln120"> </a>
+<a name="ln121">int dt_imageio_jpeg_decompress_header(const void *in, size_t length, dt_imageio_jpeg_t *jpg)</a>
+<a name="ln122">{</a>
+<a name="ln123">  jpeg_create_decompress(&amp;(jpg-&gt;dinfo));</a>
+<a name="ln124">  jpg-&gt;src.init_source = dt_imageio_jpeg_init_source;</a>
+<a name="ln125">  jpg-&gt;src.fill_input_buffer = dt_imageio_jpeg_fill_input_buffer;</a>
+<a name="ln126">  jpg-&gt;src.skip_input_data = dt_imageio_jpeg_skip_input_data;</a>
+<a name="ln127">  jpg-&gt;src.resync_to_restart = jpeg_resync_to_restart;</a>
+<a name="ln128">  jpg-&gt;src.term_source = dt_imageio_jpeg_term_source;</a>
+<a name="ln129">  jpg-&gt;src.next_input_byte = (JOCTET *)in;</a>
+<a name="ln130">  jpg-&gt;src.bytes_in_buffer = length;</a>
+<a name="ln131"> </a>
+<a name="ln132">  struct dt_imageio_jpeg_error_mgr jerr;</a>
+<a name="ln133">  jpg-&gt;dinfo.err = jpeg_std_error(&amp;jerr.pub);</a>
+<a name="ln134">  jerr.pub.error_exit = dt_imageio_jpeg_error_exit;</a>
+<a name="ln135">  if(setjmp(jerr.setjmp_buffer))</a>
+<a name="ln136">  {</a>
+<a name="ln137">    jpeg_destroy_decompress(&amp;(jpg-&gt;dinfo));</a>
+<a name="ln138">    return 1;</a>
+<a name="ln139">  }</a>
+<a name="ln140"> </a>
+<a name="ln141">  jpg-&gt;dinfo.src = &amp;(jpg-&gt;src);</a>
+<a name="ln142">  setup_read_exif(&amp;(jpg-&gt;dinfo));</a>
+<a name="ln143">  setup_read_icc_profile(&amp;(jpg-&gt;dinfo));</a>
+<a name="ln144">  jpeg_read_header(&amp;(jpg-&gt;dinfo), TRUE);</a>
+<a name="ln145">#ifdef JCS_EXTENSIONS</a>
+<a name="ln146">  jpg-&gt;dinfo.out_color_space = JCS_EXT_RGBX;</a>
+<a name="ln147">  jpg-&gt;dinfo.out_color_components = 4;</a>
+<a name="ln148">#else</a>
+<a name="ln149">  jpg-&gt;dinfo.out_color_space = JCS_RGB;</a>
+<a name="ln150">  jpg-&gt;dinfo.out_color_components = 3;</a>
+<a name="ln151">#endif</a>
+<a name="ln152">  // jpg-&gt;dinfo.buffered_image = TRUE;</a>
+<a name="ln153">  jpg-&gt;width = jpg-&gt;dinfo.image_width;</a>
+<a name="ln154">  jpg-&gt;height = jpg-&gt;dinfo.image_height;</a>
+<a name="ln155">  return 0;</a>
+<a name="ln156">}</a>
+<a name="ln157"> </a>
+<a name="ln158">#ifdef JCS_EXTENSIONS</a>
+<a name="ln159">static int decompress_jsc(dt_imageio_jpeg_t *jpg, uint8_t *out)</a>
+<a name="ln160">{</a>
+<a name="ln161">  uint8_t *tmp = out;</a>
+<a name="ln162">  while(jpg-&gt;dinfo.output_scanline &lt; jpg-&gt;dinfo.image_height)</a>
+<a name="ln163">  {</a>
+<a name="ln164">    if(jpeg_read_scanlines(&amp;(jpg-&gt;dinfo), &amp;tmp, 1) != 1)</a>
+<a name="ln165">    {</a>
+<a name="ln166">      return 1;</a>
+<a name="ln167">    }</a>
+<a name="ln168">    tmp += 4 * jpg-&gt;width;</a>
+<a name="ln169">  }</a>
+<a name="ln170">  return 0;</a>
+<a name="ln171">}</a>
+<a name="ln172">#endif</a>
+<a name="ln173"> </a>
+<a name="ln174">static int decompress_plain(dt_imageio_jpeg_t *jpg, uint8_t *out)</a>
+<a name="ln175">{</a>
+<a name="ln176">  JSAMPROW row_pointer[1];</a>
+<a name="ln177">  row_pointer[0] = (uint8_t *)malloc(jpg-&gt;dinfo.output_width * jpg-&gt;dinfo.num_components);</a>
+<a name="ln178">  uint8_t *tmp = out;</a>
+<a name="ln179">  while(jpg-&gt;dinfo.output_scanline &lt; jpg-&gt;dinfo.image_height)</a>
+<a name="ln180">  {</a>
+<a name="ln181">    if(jpeg_read_scanlines(&amp;(jpg-&gt;dinfo), row_pointer, 1) != 1)</a>
+<a name="ln182">    {</a>
+<a name="ln183">      free(row_pointer[0]);</a>
+<a name="ln184">      return 1;</a>
+<a name="ln185">    }</a>
+<a name="ln186">    for(unsigned int i = 0; i &lt; jpg-&gt;dinfo.image_width; i++)</a>
+<a name="ln187">    {</a>
+<a name="ln188">      for(int k = 0; k &lt; 3; k++) tmp[4 * i + k] = row_pointer[0][3 * i + k];</a>
+<a name="ln189">    }</a>
+<a name="ln190">    tmp += 4 * jpg-&gt;width;</a>
+<a name="ln191">  }</a>
+<a name="ln192">  free(row_pointer[0]);</a>
+<a name="ln193">  return 0;</a>
+<a name="ln194">}</a>
+<a name="ln195"> </a>
+<a name="ln196">int dt_imageio_jpeg_decompress(dt_imageio_jpeg_t *jpg, uint8_t *out)</a>
+<a name="ln197">{</a>
+<a name="ln198">  struct dt_imageio_jpeg_error_mgr jerr;</a>
+<a name="ln199">  jpg-&gt;dinfo.err = jpeg_std_error(&amp;jerr.pub);</a>
+<a name="ln200">  jerr.pub.error_exit = dt_imageio_jpeg_error_exit;</a>
+<a name="ln201">  if(setjmp(jerr.setjmp_buffer))</a>
+<a name="ln202">  {</a>
+<a name="ln203">    jpeg_destroy_decompress(&amp;(jpg-&gt;dinfo));</a>
+<a name="ln204">    return 1;</a>
+<a name="ln205">  }</a>
+<a name="ln206"> </a>
+<a name="ln207">#ifdef JCS_EXTENSIONS</a>
+<a name="ln208">  /*</a>
+<a name="ln209">   * Do a run-time detection for JCS_EXTENSIONS:</a>
+<a name="ln210">   * it might have been only available at build-time</a>
+<a name="ln211">   */</a>
+<a name="ln212">  int jcs_alpha_valid = 1;</a>
+<a name="ln213">  if(setjmp(jerr.setjmp_buffer))</a>
+<a name="ln214">  {</a>
+<a name="ln215">    if(jpg-&gt;dinfo.out_color_space == JCS_EXT_RGBX &amp;&amp; jpg-&gt;dinfo.out_color_components == 4)</a>
+<a name="ln216">    {</a>
+<a name="ln217">      // ok, no JCS_EXTENSIONS, fall-back to slow plain code.</a>
+<a name="ln218">      jpg-&gt;dinfo.out_color_components = 3;</a>
+<a name="ln219">      jpg-&gt;dinfo.out_color_space = JCS_RGB;</a>
+<a name="ln220">      jcs_alpha_valid = 0;</a>
+<a name="ln221">    }</a>
+<a name="ln222">    else</a>
+<a name="ln223">    {</a>
+<a name="ln224">      jpeg_destroy_decompress(&amp;(jpg-&gt;dinfo));</a>
+<a name="ln225">      return 1;</a>
+<a name="ln226">    }</a>
+<a name="ln227">  }</a>
+<a name="ln228">#endif</a>
+<a name="ln229"> </a>
+<a name="ln230">  (void)jpeg_start_decompress(&amp;(jpg-&gt;dinfo));</a>
+<a name="ln231"> </a>
+<a name="ln232">  if(setjmp(jerr.setjmp_buffer))</a>
+<a name="ln233">  {</a>
+<a name="ln234">    jpeg_destroy_decompress(&amp;(jpg-&gt;dinfo));</a>
+<a name="ln235">    return 1;</a>
+<a name="ln236">  }</a>
+<a name="ln237"> </a>
+<a name="ln238">#ifdef JCS_EXTENSIONS</a>
+<a name="ln239">  if(jcs_alpha_valid)</a>
+<a name="ln240">  {</a>
+<a name="ln241">    if(decompress_jsc(jpg, out)) return 1;</a>
+<a name="ln242">  }</a>
+<a name="ln243">  else</a>
+<a name="ln244">  {</a>
+<a name="ln245">    if(decompress_plain(jpg, out)) return 1;</a>
+<a name="ln246">  }</a>
+<a name="ln247">#else</a>
+<a name="ln248">  if(decompress_plain(jpg, out)) return 1;</a>
+<a name="ln249">#endif</a>
+<a name="ln250"> </a>
+<a name="ln251">  if(setjmp(jerr.setjmp_buffer))</a>
+<a name="ln252">  {</a>
+<a name="ln253">    jpeg_destroy_decompress(&amp;(jpg-&gt;dinfo));</a>
+<a name="ln254">    return 1;</a>
+<a name="ln255">  }</a>
+<a name="ln256"> </a>
+<a name="ln257">  // jpg-&gt;dinfo.src = NULL;</a>
+<a name="ln258">  (void)jpeg_finish_decompress(&amp;(jpg-&gt;dinfo));</a>
+<a name="ln259">  jpeg_destroy_decompress(&amp;(jpg-&gt;dinfo));</a>
+<a name="ln260">  return 0;</a>
+<a name="ln261">}</a>
+<a name="ln262"> </a>
+<a name="ln263">int dt_imageio_jpeg_compress(const uint8_t *in, uint8_t *out, const int width, const int height,</a>
+<a name="ln264">                             const int quality)</a>
+<a name="ln265">{</a>
+<a name="ln266">  struct dt_imageio_jpeg_error_mgr jerr;</a>
+<a name="ln267">  dt_imageio_jpeg_t jpg;</a>
+<a name="ln268">  jpg.dest.init_destination = dt_imageio_jpeg_init_destination;</a>
+<a name="ln269">  jpg.dest.empty_output_buffer = dt_imageio_jpeg_empty_output_buffer;</a>
+<a name="ln270">  jpg.dest.term_destination = dt_imageio_jpeg_term_destination;</a>
+<a name="ln271">  jpg.dest.next_output_byte = (JOCTET *)out;</a>
+<a name="ln272">  jpg.dest.free_in_buffer = 4 * width * height * sizeof(uint8_t);</a>
+<a name="ln273"> </a>
+<a name="ln274">  jpg.cinfo.err = jpeg_std_error(&amp;jerr.pub);</a>
+<a name="ln275">  jerr.pub.error_exit = dt_imageio_jpeg_error_exit;</a>
+<a name="ln276">  if(setjmp(jerr.setjmp_buffer))</a>
+<a name="ln277">  {</a>
+<a name="ln278">    jpeg_destroy_compress(&amp;(jpg.cinfo));</a>
+<a name="ln279">    return 1;</a>
+<a name="ln280">  }</a>
+<a name="ln281">  jpeg_create_compress(&amp;(jpg.cinfo));</a>
+<a name="ln282">  jpg.cinfo.dest = &amp;(jpg.dest);</a>
+<a name="ln283"> </a>
+<a name="ln284">  jpg.cinfo.image_width = width;</a>
+<a name="ln285">  jpg.cinfo.image_height = height;</a>
+<a name="ln286">  jpg.cinfo.input_components = 3;</a>
+<a name="ln287">  jpg.cinfo.in_color_space = JCS_RGB;</a>
+<a name="ln288">  jpeg_set_defaults(&amp;(jpg.cinfo));</a>
+<a name="ln289">  jpeg_set_quality(&amp;(jpg.cinfo), quality, TRUE);</a>
+<a name="ln290">  if(quality &gt; 90) jpg.cinfo.comp_info[0].v_samp_factor = 1;</a>
+<a name="ln291">  if(quality &gt; 92) jpg.cinfo.comp_info[0].h_samp_factor = 1;</a>
+<a name="ln292">  jpeg_start_compress(&amp;(jpg.cinfo), TRUE);</a>
+<a name="ln293">  uint8_t *row = malloc((size_t)3 * width * sizeof(uint8_t));</a>
+<a name="ln294">  const uint8_t *buf;</a>
+<a name="ln295">  while(jpg.cinfo.next_scanline &lt; jpg.cinfo.image_height)</a>
+<a name="ln296">  {</a>
+<a name="ln297">    JSAMPROW tmp[1];</a>
+<a name="ln298">    buf = in + jpg.cinfo.next_scanline * jpg.cinfo.image_width * 4;</a>
+<a name="ln299">    for(int i = 0; i &lt; width; i++)</a>
+<a name="ln300">      for(int k = 0; k &lt; 3; k++) row[3 * i + k] = buf[4 * i + k];</a>
+<a name="ln301">    tmp[0] = row;</a>
+<a name="ln302">    jpeg_write_scanlines(&amp;(jpg.cinfo), tmp, 1);</a>
+<a name="ln303">  }</a>
+<a name="ln304">  jpeg_finish_compress(&amp;(jpg.cinfo));</a>
+<a name="ln305">  free(row);</a>
+<a name="ln306">  jpeg_destroy_compress(&amp;(jpg.cinfo));</a>
+<a name="ln307">  return 4 * width * height * sizeof(uint8_t) - jpg.dest.free_in_buffer;</a>
+<a name="ln308">}</a>
+<a name="ln309"> </a>
+<a name="ln310"> </a>
+<a name="ln311">/*</a>
+<a name="ln312"> * This routine writes the given ICC profile data into a JPEG file.</a>
+<a name="ln313"> * It *must* be called AFTER calling jpeg_start_compress() and BEFORE</a>
+<a name="ln314"> * the first call to jpeg_write_scanlines().</a>
+<a name="ln315"> * (This ordering ensures that the APP2 marker(s) will appear after the</a>
+<a name="ln316"> * SOI and JFIF or Adobe markers, but before all else.)</a>
+<a name="ln317"> */</a>
+<a name="ln318"> </a>
+<a name="ln319">static void write_icc_profile(j_compress_ptr cinfo, const JOCTET *icc_data_ptr, unsigned int icc_data_len)</a>
+<a name="ln320">{</a>
+<a name="ln321">  unsigned int num_markers; /* total number of markers we'll write */</a>
+<a name="ln322">  int cur_marker = 1;       /* per spec, counting starts at 1 */</a>
+<a name="ln323">  unsigned int length;      /* number of bytes to write in this marker */</a>
+<a name="ln324"> </a>
+<a name="ln325">  /* Calculate the number of markers we'll need, rounding up of course */</a>
+<a name="ln326">  num_markers = icc_data_len / MAX_DATA_BYTES_IN_MARKER;</a>
+<a name="ln327">  if(num_markers * MAX_DATA_BYTES_IN_MARKER != icc_data_len) num_markers++;</a>
+<a name="ln328"> </a>
+<a name="ln329">  while(icc_data_len &gt; 0)</a>
+<a name="ln330">  {</a>
+<a name="ln331">    /* length of profile to put in this marker */</a>
+<a name="ln332">    length = icc_data_len;</a>
+<a name="ln333">    if(length &gt; MAX_DATA_BYTES_IN_MARKER) length = MAX_DATA_BYTES_IN_MARKER;</a>
+<a name="ln334">    icc_data_len -= length;</a>
+<a name="ln335"> </a>
+<a name="ln336">    /* Write the JPEG marker header (APP2 code and marker length) */</a>
+<a name="ln337">    jpeg_write_m_header(cinfo, ICC_MARKER, (unsigned int)(length + ICC_OVERHEAD_LEN));</a>
+<a name="ln338"> </a>
+<a name="ln339">    /* Write the marker identifying string &quot;ICC_PROFILE&quot; (null-terminated).</a>
+<a name="ln340">     * We code it in this less-than-transparent way so that the code works</a>
+<a name="ln341">     * even if the local character set is not ASCII.</a>
+<a name="ln342">     */</a>
+<a name="ln343">    jpeg_write_m_byte(cinfo, 0x49);</a>
+<a name="ln344">    jpeg_write_m_byte(cinfo, 0x43);</a>
+<a name="ln345">    jpeg_write_m_byte(cinfo, 0x43);</a>
+<a name="ln346">    jpeg_write_m_byte(cinfo, 0x5F);</a>
+<a name="ln347">    jpeg_write_m_byte(cinfo, 0x50);</a>
+<a name="ln348">    jpeg_write_m_byte(cinfo, 0x52);</a>
+<a name="ln349">    jpeg_write_m_byte(cinfo, 0x4F);</a>
+<a name="ln350">    jpeg_write_m_byte(cinfo, 0x46);</a>
+<a name="ln351">    jpeg_write_m_byte(cinfo, 0x49);</a>
+<a name="ln352">    jpeg_write_m_byte(cinfo, 0x4C);</a>
+<a name="ln353">    jpeg_write_m_byte(cinfo, 0x45);</a>
+<a name="ln354">    jpeg_write_m_byte(cinfo, 0x0);</a>
+<a name="ln355"> </a>
+<a name="ln356">    /* Add the sequencing info */</a>
+<a name="ln357">    jpeg_write_m_byte(cinfo, cur_marker);</a>
+<a name="ln358">    jpeg_write_m_byte(cinfo, (int)num_markers);</a>
+<a name="ln359"> </a>
+<a name="ln360">    /* Add the profile data */</a>
+<a name="ln361">    while(length--)</a>
+<a name="ln362">    {</a>
+<a name="ln363">      jpeg_write_m_byte(cinfo, *icc_data_ptr);</a>
+<a name="ln364">      icc_data_ptr++;</a>
+<a name="ln365">    }</a>
+<a name="ln366">    cur_marker++;</a>
+<a name="ln367">  }</a>
+<a name="ln368">}</a>
+<a name="ln369"> </a>
+<a name="ln370"> </a>
+<a name="ln371">/*</a>
+<a name="ln372"> * Handy subroutine to test whether a saved marker is an ICC profile marker.</a>
+<a name="ln373"> */</a>
+<a name="ln374"> </a>
+<a name="ln375">static boolean marker_is_icc(jpeg_saved_marker_ptr marker)</a>
+<a name="ln376">{</a>
+<a name="ln377">  return marker-&gt;marker == ICC_MARKER &amp;&amp; marker-&gt;data_length &gt;= ICC_OVERHEAD_LEN</a>
+<a name="ln378">         &amp;&amp;</a>
+<a name="ln379">         /* verify the identifying string */</a>
+<a name="ln380">         GETJOCTET(marker-&gt;data[0]) == 0x49 &amp;&amp; GETJOCTET(marker-&gt;data[1]) == 0x43</a>
+<a name="ln381">         &amp;&amp; GETJOCTET(marker-&gt;data[2]) == 0x43 &amp;&amp; GETJOCTET(marker-&gt;data[3]) == 0x5F</a>
+<a name="ln382">         &amp;&amp; GETJOCTET(marker-&gt;data[4]) == 0x50 &amp;&amp; GETJOCTET(marker-&gt;data[5]) == 0x52</a>
+<a name="ln383">         &amp;&amp; GETJOCTET(marker-&gt;data[6]) == 0x4F &amp;&amp; GETJOCTET(marker-&gt;data[7]) == 0x46</a>
+<a name="ln384">         &amp;&amp; GETJOCTET(marker-&gt;data[8]) == 0x49 &amp;&amp; GETJOCTET(marker-&gt;data[9]) == 0x4C</a>
+<a name="ln385">         &amp;&amp; GETJOCTET(marker-&gt;data[10]) == 0x45 &amp;&amp; GETJOCTET(marker-&gt;data[11]) == 0x0;</a>
+<a name="ln386">}</a>
+<a name="ln387"> </a>
+<a name="ln388"> </a>
+<a name="ln389">/*</a>
+<a name="ln390"> * See if there was an ICC profile in the JPEG file being read;</a>
+<a name="ln391"> * if so, reassemble and return the profile data.</a>
+<a name="ln392"> *</a>
+<a name="ln393"> * TRUE is returned if an ICC profile was found, FALSE if not.</a>
+<a name="ln394"> * If TRUE is returned, *icc_data_ptr is set to point to the</a>
+<a name="ln395"> * returned data, and *icc_data_len is set to its length.</a>
+<a name="ln396"> *</a>
+<a name="ln397"> * IMPORTANT: the data at **icc_data_ptr has been allocated with malloc()</a>
+<a name="ln398"> * and must be freed by the caller with free() when the caller no longer</a>
+<a name="ln399"> * needs it.  (Alternatively, we could write this routine to use the</a>
+<a name="ln400"> * IJG library's memory allocator, so that the data would be freed implicitly</a>
+<a name="ln401"> * at jpeg_finish_decompress() time.  But it seems likely that many apps</a>
+<a name="ln402"> * will prefer to have the data stick around after decompression finishes.)</a>
+<a name="ln403"> *</a>
+<a name="ln404"> * NOTE: if the file contains invalid ICC APP2 markers, we just silently</a>
+<a name="ln405"> * return FALSE.  You might want to issue an error message instead.</a>
+<a name="ln406"> */</a>
+<a name="ln407"> </a>
+<a name="ln408">static boolean read_icc_profile(j_decompress_ptr dinfo, JOCTET **icc_data_ptr, unsigned int *icc_data_len)</a>
+<a name="ln409">{</a>
+<a name="ln410">  jpeg_saved_marker_ptr marker;</a>
+<a name="ln411">  int num_markers = 0;</a>
+<a name="ln412">  int seq_no;</a>
+<a name="ln413">  JOCTET *icc_data;</a>
+<a name="ln414">  unsigned int total_length;</a>
+<a name="ln415">#define MAX_SEQ_NO 255                      /* sufficient since marker numbers are bytes */</a>
+<a name="ln416">  char marker_present[MAX_SEQ_NO + 1];      /* 1 if marker found */</a>
+<a name="ln417">  unsigned int data_length[MAX_SEQ_NO + 1]; /* size of profile data in marker */</a>
+<a name="ln418">  unsigned int data_offset[MAX_SEQ_NO + 1]; /* offset for data in marker */</a>
+<a name="ln419"> </a>
+<a name="ln420">  *icc_data_ptr = NULL; /* avoid confusion if FALSE return */</a>
+<a name="ln421">  *icc_data_len = 0;</a>
+<a name="ln422"> </a>
+<a name="ln423">  /* This first pass over the saved markers discovers whether there are</a>
+<a name="ln424">   * any ICC markers and verifies the consistency of the marker numbering.</a>
+<a name="ln425">   */</a>
+<a name="ln426"> </a>
+<a name="ln427">  for(seq_no = 1; seq_no &lt;= MAX_SEQ_NO; seq_no++) marker_present[seq_no] = 0;</a>
+<a name="ln428"> </a>
+<a name="ln429">  for(marker = dinfo-&gt;marker_list; marker != NULL; marker = marker-&gt;next)</a>
+<a name="ln430">  {</a>
+<a name="ln431">    if(marker_is_icc(marker))</a>
+<a name="ln432">    {</a>
+<a name="ln433">      if(num_markers == 0)</a>
+<a name="ln434">        num_markers = GETJOCTET(marker-&gt;data[13]);</a>
+<a name="ln435">      else if(num_markers != GETJOCTET(marker-&gt;data[13]))</a>
+<a name="ln436">        return FALSE; /* inconsistent num_markers fields */</a>
+<a name="ln437">      seq_no = GETJOCTET(marker-&gt;data[12]);</a>
+<a name="ln438">      if(seq_no &lt;= 0 || seq_no &gt; num_markers) return FALSE; /* bogus sequence number */</a>
+<a name="ln439">      if(marker_present[seq_no]) return FALSE;              /* duplicate sequence numbers */</a>
+<a name="ln440">      marker_present[seq_no] = 1;</a>
+<a name="ln441">      data_length[seq_no] = marker-&gt;data_length - ICC_OVERHEAD_LEN;</a>
+<a name="ln442">    }</a>
+<a name="ln443">  }</a>
+<a name="ln444"> </a>
+<a name="ln445">  if(num_markers == 0) return FALSE;</a>
+<a name="ln446"> </a>
+<a name="ln447">  /* Check for missing markers, count total space needed,</a>
+<a name="ln448">   * compute offset of each marker's part of the data.</a>
+<a name="ln449">   */</a>
+<a name="ln450"> </a>
+<a name="ln451">  total_length = 0;</a>
+<a name="ln452">  for(seq_no = 1; seq_no &lt;= num_markers; seq_no++)</a>
+<a name="ln453">  {</a>
+<a name="ln454">    if(marker_present[seq_no] == 0) return FALSE; /* missing sequence number */</a>
+<a name="ln455">    data_offset[seq_no] = total_length;</a>
+<a name="ln456">    total_length += data_length[seq_no];</a>
+<a name="ln457">  }</a>
+<a name="ln458"> </a>
+<a name="ln459">  if(total_length == 0) return FALSE; /* found only empty markers? */</a>
+<a name="ln460"> </a>
+<a name="ln461">  /* Allocate space for assembled data */</a>
+<a name="ln462">  icc_data = (JOCTET *)calloc(total_length, sizeof(JOCTET));</a>
+<a name="ln463">  if(icc_data == NULL) return FALSE; /* oops, out of memory */</a>
+<a name="ln464"> </a>
+<a name="ln465">  /* and fill it in */</a>
+<a name="ln466">  for(marker = dinfo-&gt;marker_list; marker != NULL; marker = marker-&gt;next)</a>
+<a name="ln467">  {</a>
+<a name="ln468">    if(marker_is_icc(marker))</a>
+<a name="ln469">    {</a>
+<a name="ln470">      JOCTET FAR *src_ptr;</a>
+<a name="ln471">      JOCTET *dst_ptr;</a>
+<a name="ln472">      unsigned int length;</a>
+<a name="ln473">      seq_no = GETJOCTET(marker-&gt;data[12]);</a>
+<a name="ln474">      dst_ptr = icc_data + data_offset[seq_no];</a>
+<a name="ln475">      src_ptr = marker-&gt;data + ICC_OVERHEAD_LEN;</a>
+<a name="ln476">      length = data_length[seq_no];</a>
+<a name="ln477">      while(length--)</a>
+<a name="ln478">      {</a>
+<a name="ln479">        *dst_ptr++ = *src_ptr++;</a>
+<a name="ln480">      }</a>
+<a name="ln481">    }</a>
+<a name="ln482">  }</a>
+<a name="ln483"> </a>
+<a name="ln484">  *icc_data_ptr = icc_data;</a>
+<a name="ln485">  *icc_data_len = total_length;</a>
+<a name="ln486"> </a>
+<a name="ln487">  return TRUE;</a>
+<a name="ln488">}</a>
+<a name="ln489">#undef ICC_MARKER</a>
+<a name="ln490">#undef ICC_OVERHEAD_LEN</a>
+<a name="ln491">#undef MAX_BYTES_IN_MARKER</a>
+<a name="ln492">#undef MAX_DATA_BYTES_IN_MARKER</a>
+<a name="ln493">#undef MAX_SEQ_NO</a>
+<a name="ln494"> </a>
+<a name="ln495"> </a>
+<a name="ln496">int dt_imageio_jpeg_write_with_icc_profile(const char *filename, const uint8_t *in, const int width,</a>
+<a name="ln497">                                           const int height, const int quality, const void *exif, int exif_len,</a>
+<a name="ln498">                                           int imgid)</a>
+<a name="ln499">{</a>
+<a name="ln500">  struct dt_imageio_jpeg_error_mgr jerr;</a>
+<a name="ln501">  dt_imageio_jpeg_t jpg;</a>
+<a name="ln502"> </a>
+<a name="ln503">  jpg.cinfo.err = jpeg_std_error(&amp;jerr.pub);</a>
+<a name="ln504">  jerr.pub.error_exit = dt_imageio_jpeg_error_exit;</a>
+<a name="ln505">  if(setjmp(jerr.setjmp_buffer))</a>
+<a name="ln506">  {</a>
+<a name="ln507">    jpeg_destroy_compress(&amp;(jpg.cinfo));</a>
+<a name="ln508">    return 1;</a>
+<a name="ln509">  }</a>
+<a name="ln510">  jpeg_create_compress(&amp;(jpg.cinfo));</a>
+<a name="ln511">  FILE *f = g_fopen(filename, &quot;wb&quot;);</a>
+<a name="ln512">  if(!f) return 1;</a>
+<a name="ln513">  jpeg_stdio_dest(&amp;(jpg.cinfo), f);</a>
+<a name="ln514"> </a>
+<a name="ln515">  jpg.cinfo.image_width = width;</a>
+<a name="ln516">  jpg.cinfo.image_height = height;</a>
+<a name="ln517">  jpg.cinfo.input_components = 3;</a>
+<a name="ln518">  jpg.cinfo.in_color_space = JCS_RGB;</a>
+<a name="ln519">  jpeg_set_defaults(&amp;(jpg.cinfo));</a>
+<a name="ln520">  jpeg_set_quality(&amp;(jpg.cinfo), quality, TRUE);</a>
+<a name="ln521">  if(quality &gt; 90) jpg.cinfo.comp_info[0].v_samp_factor = 1;</a>
+<a name="ln522">  if(quality &gt; 92) jpg.cinfo.comp_info[0].h_samp_factor = 1;</a>
+<a name="ln523">  jpeg_start_compress(&amp;(jpg.cinfo), TRUE);</a>
+<a name="ln524"> </a>
+<a name="ln525">  if(imgid &gt; 0)</a>
+<a name="ln526">  {</a>
+<a name="ln527">    // the code in this block is never being used. should that ever change make sure to honour the</a>
+<a name="ln528">    // color profile overwriting the one set in colorout, too. dt_colorspaces_get_output_profile() doesn't do that!</a>
+<a name="ln529">    cmsHPROFILE out_profile = dt_colorspaces_get_output_profile(imgid, DT_COLORSPACE_NONE, &quot;&quot;)-&gt;profile;</a>
+<a name="ln530">    uint32_t len = 0;</a>
+<a name="ln531">    cmsSaveProfileToMem(out_profile, 0, &amp;len);</a>
+<a name="ln532">    if(len &gt; 0)</a>
+<a name="ln533">    {</a>
+<a name="ln534">      unsigned char *buf = malloc((size_t)len * sizeof(unsigned char));</a>
+<a name="ln535">      cmsSaveProfileToMem(out_profile, buf, &amp;len);</a>
+<a name="ln536">      write_icc_profile(&amp;(jpg.cinfo), buf, len);</a>
+<a name="ln537">      free(buf);</a>
+<a name="ln538">    }</a>
+<a name="ln539">  }</a>
+<a name="ln540"> </a>
+<a name="ln541">  if(exif &amp;&amp; exif_len &gt; 0 &amp;&amp; exif_len &lt; 65534) jpeg_write_marker(&amp;(jpg.cinfo), JPEG_APP0 + 1, exif, exif_len);</a>
+<a name="ln542"> </a>
+<a name="ln543">  uint8_t *row = malloc((size_t)3 * width * sizeof(uint8_t));</a>
+<a name="ln544">  const uint8_t *buf;</a>
+<a name="ln545">  while(jpg.cinfo.next_scanline &lt; jpg.cinfo.image_height)</a>
+<a name="ln546">  {</a>
+<a name="ln547">    JSAMPROW tmp[1];</a>
+<a name="ln548">    buf = in + jpg.cinfo.next_scanline * jpg.cinfo.image_width * 4;</a>
+<a name="ln549">    for(int i = 0; i &lt; width; i++)</a>
+<a name="ln550">      for(int k = 0; k &lt; 3; k++) row[3 * i + k] = buf[4 * i + k];</a>
+<a name="ln551">    tmp[0] = row;</a>
+<a name="ln552">    jpeg_write_scanlines(&amp;(jpg.cinfo), tmp, 1);</a>
+<a name="ln553">  }</a>
+<a name="ln554">  jpeg_finish_compress(&amp;(jpg.cinfo));</a>
+<a name="ln555">  free(row);</a>
+<a name="ln556">  jpeg_destroy_compress(&amp;(jpg.cinfo));</a>
+<a name="ln557">  fclose(f);</a>
+<a name="ln558">  return 0;</a>
+<a name="ln559">}</a>
+<a name="ln560"> </a>
+<a name="ln561">int dt_imageio_jpeg_write(const char *filename, const uint8_t *in, const int width, const int height,</a>
+<a name="ln562">                          const int quality, const void *exif, int exif_len)</a>
+<a name="ln563">{</a>
+<a name="ln564">  return dt_imageio_jpeg_write_with_icc_profile(filename, in, width, height, quality, exif, exif_len, -1);</a>
+<a name="ln565">}</a>
+<a name="ln566"> </a>
+<a name="ln567">int dt_imageio_jpeg_read_header(const char *filename, dt_imageio_jpeg_t *jpg)</a>
+<a name="ln568">{</a>
+<a name="ln569">  jpg-&gt;f = g_fopen(filename, &quot;rb&quot;);</a>
+<a name="ln570">  if(!jpg-&gt;f) return 1;</a>
+<a name="ln571"> </a>
+<a name="ln572">  struct dt_imageio_jpeg_error_mgr jerr;</a>
+<a name="ln573">  jpg-&gt;dinfo.err = jpeg_std_error(&amp;jerr.pub);</a>
+<a name="ln574">  jerr.pub.error_exit = dt_imageio_jpeg_error_exit;</a>
+<a name="ln575">  if(setjmp(jerr.setjmp_buffer))</a>
+<a name="ln576">  {</a>
+<a name="ln577">    jpeg_destroy_decompress(&amp;(jpg-&gt;dinfo));</a>
+<a name="ln578">    fclose(jpg-&gt;f);</a>
+<a name="ln579">    return 1;</a>
+<a name="ln580">  }</a>
+<a name="ln581">  jpeg_create_decompress(&amp;(jpg-&gt;dinfo));</a>
+<a name="ln582">  jpeg_stdio_src(&amp;(jpg-&gt;dinfo), jpg-&gt;f);</a>
+<a name="ln583">  setup_read_exif(&amp;(jpg-&gt;dinfo));</a>
+<a name="ln584">  setup_read_icc_profile(&amp;(jpg-&gt;dinfo));</a>
+<a name="ln585">  // jpg-&gt;dinfo.buffered_image = TRUE;</a>
+<a name="ln586">  jpeg_read_header(&amp;(jpg-&gt;dinfo), TRUE);</a>
+<a name="ln587">#ifdef JCS_EXTENSIONS</a>
+<a name="ln588">  jpg-&gt;dinfo.out_color_space = JCS_EXT_RGBX;</a>
+<a name="ln589">  jpg-&gt;dinfo.out_color_components = 4;</a>
+<a name="ln590">#else</a>
+<a name="ln591">  jpg-&gt;dinfo.out_color_space = JCS_RGB;</a>
+<a name="ln592">  jpg-&gt;dinfo.out_color_components = 3;</a>
+<a name="ln593">#endif</a>
+<a name="ln594">  jpg-&gt;width = jpg-&gt;dinfo.image_width;</a>
+<a name="ln595">  jpg-&gt;height = jpg-&gt;dinfo.image_height;</a>
+<a name="ln596">  return 0;</a>
+<a name="ln597">}</a>
+<a name="ln598"> </a>
+<a name="ln599">#ifdef JCS_EXTENSIONS</a>
+<a name="ln600">static int read_jsc(dt_imageio_jpeg_t *jpg, uint8_t *out)</a>
+<a name="ln601">{</a>
+<a name="ln602">  uint8_t *tmp = out;</a>
+<a name="ln603">  while(jpg-&gt;dinfo.output_scanline &lt; jpg-&gt;dinfo.image_height)</a>
+<a name="ln604">  {</a>
+<a name="ln605">    if(jpeg_read_scanlines(&amp;(jpg-&gt;dinfo), &amp;tmp, 1) != 1)</a>
+<a name="ln606">    {</a>
+<a name="ln607">      return 1;</a>
+<a name="ln608">    }</a>
+<a name="ln609">    tmp += 4 * jpg-&gt;width;</a>
+<a name="ln610">  }</a>
+<a name="ln611">  return 0;</a>
+<a name="ln612">}</a>
+<a name="ln613">#endif</a>
+<a name="ln614"> </a>
+<a name="ln615">static int read_plain(dt_imageio_jpeg_t *jpg, uint8_t *out)</a>
+<a name="ln616">{</a>
+<a name="ln617">  JSAMPROW row_pointer[1];</a>
+<a name="ln618">  row_pointer[0] = (uint8_t *)malloc(jpg-&gt;dinfo.output_width * jpg-&gt;dinfo.num_components);</a>
+<a name="ln619">  uint8_t *tmp = out;</a>
+<a name="ln620">  while(jpg-&gt;dinfo.output_scanline &lt; jpg-&gt;dinfo.image_height)</a>
+<a name="ln621">  {</a>
+<a name="ln622">    if(jpeg_read_scanlines(&amp;(jpg-&gt;dinfo), row_pointer, 1) != 1)</a>
+<a name="ln623">    {</a>
+<a name="ln624">      jpeg_destroy_decompress(&amp;(jpg-&gt;dinfo));</a>
+<a name="ln625">      free(row_pointer[0]);</a>
+<a name="ln626">      fclose(jpg-&gt;f);</a>
+<a name="ln627">      return 1;</a>
+<a name="ln628">    }</a>
+<a name="ln629">    for(unsigned int i = 0; i &lt; jpg-&gt;dinfo.image_width; i++)</a>
+<a name="ln630">      for(int k = 0; k &lt; 3; k++) tmp[4 * i + k] = row_pointer[0][3 * i + k];</a>
+<a name="ln631">    tmp += 4 * jpg-&gt;width;</a>
+<a name="ln632">  }</a>
+<a name="ln633">  free(row_pointer[0]);</a>
+<a name="ln634">  return 0;</a>
+<a name="ln635">}</a>
+<a name="ln636"> </a>
+<a name="ln637">int dt_imageio_jpeg_read(dt_imageio_jpeg_t *jpg, uint8_t *out)</a>
+<a name="ln638">{</a>
+<a name="ln639">  struct dt_imageio_jpeg_error_mgr jerr;</a>
+<a name="ln640">  jpg-&gt;dinfo.err = jpeg_std_error(&amp;jerr.pub);</a>
+<a name="ln641">  jerr.pub.error_exit = dt_imageio_jpeg_error_exit;</a>
+<a name="ln642">  if(setjmp(jerr.setjmp_buffer))</a>
+<a name="ln643">  {</a>
+<a name="ln644">    jpeg_destroy_decompress(&amp;(jpg-&gt;dinfo));</a>
+<a name="ln645">    fclose(jpg-&gt;f);</a>
+<a name="ln646">    return 1;</a>
+<a name="ln647">  }</a>
+<a name="ln648"> </a>
+<a name="ln649">#ifdef JCS_EXTENSIONS</a>
+<a name="ln650">  /*</a>
+<a name="ln651">   * Do a run-time detection for JCS_EXTENSIONS:</a>
+<a name="ln652">   * it might have been only available at build-time</a>
+<a name="ln653">   */</a>
+<a name="ln654">  int jcs_alpha_valid = 1;</a>
+<a name="ln655">  if(setjmp(jerr.setjmp_buffer))</a>
+<a name="ln656">  {</a>
+<a name="ln657">    if(jpg-&gt;dinfo.out_color_space == JCS_EXT_RGBX &amp;&amp; jpg-&gt;dinfo.out_color_components == 4)</a>
+<a name="ln658">    {</a>
+<a name="ln659">      // ok, no JCS_EXTENSIONS, fall-back to slow plain code.</a>
+<a name="ln660">      jpg-&gt;dinfo.out_color_components = 3;</a>
+<a name="ln661">      jpg-&gt;dinfo.out_color_space = JCS_RGB;</a>
+<a name="ln662">      jcs_alpha_valid = 0;</a>
+<a name="ln663">    }</a>
+<a name="ln664">    else</a>
+<a name="ln665">    {</a>
+<a name="ln666">      jpeg_destroy_decompress(&amp;(jpg-&gt;dinfo));</a>
+<a name="ln667">      return 1;</a>
+<a name="ln668">    }</a>
+<a name="ln669">  }</a>
+<a name="ln670">#endif</a>
+<a name="ln671">  (void)jpeg_start_decompress(&amp;(jpg-&gt;dinfo));</a>
+<a name="ln672"> </a>
+<a name="ln673">  if(setjmp(jerr.setjmp_buffer))</a>
+<a name="ln674">  {</a>
+<a name="ln675">    jpeg_destroy_decompress(&amp;(jpg-&gt;dinfo));</a>
+<a name="ln676">    fclose(jpg-&gt;f);</a>
+<a name="ln677">    return 1;</a>
+<a name="ln678">  }</a>
+<a name="ln679"> </a>
+<a name="ln680">#ifdef JCS_EXTENSIONS</a>
+<a name="ln681">  if(jcs_alpha_valid)</a>
+<a name="ln682">  {</a>
+<a name="ln683">    read_jsc(jpg, out);</a>
+<a name="ln684">  }</a>
+<a name="ln685">  else</a>
+<a name="ln686">  {</a>
+<a name="ln687">    read_plain(jpg, out);</a>
+<a name="ln688">  }</a>
+<a name="ln689">#else</a>
+<a name="ln690">  read_plain(jpg, out);</a>
+<a name="ln691">#endif</a>
+<a name="ln692"> </a>
+<a name="ln693">  if(setjmp(jerr.setjmp_buffer))</a>
+<a name="ln694">  {</a>
+<a name="ln695">    jpeg_destroy_decompress(&amp;(jpg-&gt;dinfo));</a>
+<a name="ln696">    fclose(jpg-&gt;f);</a>
+<a name="ln697">    return 1;</a>
+<a name="ln698">  }</a>
+<a name="ln699"> </a>
+<a name="ln700">  (void)jpeg_finish_decompress(&amp;(jpg-&gt;dinfo));</a>
+<a name="ln701"> </a>
+<a name="ln702">  jpeg_destroy_decompress(&amp;(jpg-&gt;dinfo));</a>
+<a name="ln703">  fclose(jpg-&gt;f);</a>
+<a name="ln704">  return 0;</a>
+<a name="ln705">}</a>
+<a name="ln706"> </a>
+<a name="ln707">int dt_imageio_jpeg_read_profile(dt_imageio_jpeg_t *jpg, uint8_t **out)</a>
+<a name="ln708">{</a>
+<a name="ln709">  unsigned int length = 0;</a>
+<a name="ln710">  boolean res = read_icc_profile(&amp;(jpg-&gt;dinfo), out, &amp;length);</a>
+<a name="ln711">  jpeg_destroy_decompress(&amp;(jpg-&gt;dinfo));</a>
+<a name="ln712">  fclose(jpg-&gt;f);</a>
+<a name="ln713">  return res ? length : 0;</a>
+<a name="ln714">}</a>
+<a name="ln715"> </a>
+<a name="ln716">dt_colorspaces_color_profile_type_t dt_imageio_jpeg_read_color_space(dt_imageio_jpeg_t *jpg)</a>
+<a name="ln717">{</a>
+<a name="ln718">  for(jpeg_saved_marker_ptr marker = jpg-&gt;dinfo.marker_list; marker != NULL; marker = marker-&gt;next)</a>
+<a name="ln719">  {</a>
+<a name="ln720">    if(marker-&gt;marker == EXIF_MARKER &amp;&amp; marker-&gt;data_length &gt; 6)</a>
+<a name="ln721">      return dt_exif_get_color_space(marker-&gt;data + 6, marker-&gt;data_length - 6);</a>
+<a name="ln722">  }</a>
+<a name="ln723"> </a>
+<a name="ln724">  return DT_COLORSPACE_DISPLAY; // nothing embedded</a>
+<a name="ln725">}</a>
+<a name="ln726"> </a>
+<a name="ln727">dt_imageio_retval_t dt_imageio_open_jpeg(dt_image_t *img, const char *filename, dt_mipmap_buffer_t *mbuf)</a>
+<a name="ln728">{</a>
+<a name="ln729">  const char *ext = filename + strlen(filename);</a>
+<a name="ln730">  while(*ext != '.' &amp;&amp; ext &gt; filename) ext--;</a>
+<a name="ln731">  if(strncmp(ext, &quot;.jpg&quot;, 4) &amp;&amp; strncmp(ext, &quot;.JPG&quot;, 4) &amp;&amp; strncmp(ext, &quot;.jpeg&quot;, 5)</a>
+<a name="ln732">     &amp;&amp; strncmp(ext, &quot;.JPEG&quot;, 5))</a>
+<a name="ln733">    return DT_IMAGEIO_FILE_CORRUPTED;</a>
+<a name="ln734"> </a>
+<a name="ln735">  if(!img-&gt;exif_inited) (void)dt_exif_read(img, filename);</a>
+<a name="ln736"> </a>
+<a name="ln737">  dt_imageio_jpeg_t jpg;</a>
+<a name="ln738">  if(dt_imageio_jpeg_read_header(filename, &amp;jpg)) return DT_IMAGEIO_FILE_CORRUPTED;</a>
+<a name="ln739">  img-&gt;width = jpg.width;</a>
+<a name="ln740">  img-&gt;height = jpg.height;</a>
+<a name="ln741"> </a>
+<a name="ln742">  uint8_t *tmp = (uint8_t *)malloc(sizeof(uint8_t) * jpg.width * jpg.height * 4);</a>
+<a name="ln743">  if(dt_imageio_jpeg_read(&amp;jpg, tmp))</a>
+<a name="ln744">  {</a>
+<a name="ln745">    free(tmp);</a>
+<a name="ln746">    return DT_IMAGEIO_FILE_CORRUPTED;</a>
+<a name="ln747">  }</a>
+<a name="ln748"> </a>
+<a name="ln749">  img-&gt;buf_dsc.channels = 4;</a>
+<a name="ln750">  img-&gt;buf_dsc.datatype = TYPE_FLOAT;</a>
+<a name="ln751">  void *buf = dt_mipmap_cache_alloc(mbuf, img);</a>
+<a name="ln752">  if(!buf)</a>
+<a name="ln753">  {</a>
+<a name="ln754">    free(tmp);</a>
+<a name="ln755">    return DT_IMAGEIO_CACHE_FULL;</a>
+<a name="ln756">  }</a>
+<a name="ln757"> </a>
+<a name="ln758">  dt_imageio_flip_buffers_ui8_to_float((float *)buf, tmp, 0.0f, 255.0f, 4, jpg.width, jpg.height, jpg.width,</a>
+<a name="ln759">                                       jpg.height, 4 * jpg.width, 0);</a>
+<a name="ln760"> </a>
+<a name="ln761">  free(tmp);</a>
+<a name="ln762"> </a>
+<a name="ln763">  return DT_IMAGEIO_OK;</a>
+<a name="ln764">}</a>
+<a name="ln765"> </a>
+<a name="ln766"> </a>
+<a name="ln767"> </a>
+<a name="ln768">// modelines: These editor modelines have been set for all relevant files by tools/update_modelines.sh</a>
+<a name="ln769">// vim: shiftwidth=2 expandtab tabstop=2 cindent</a>
+<a name="ln770">// kate: tab-indents: off; indent-width 2; replace-tabs on; indent-mode cstyle; remove-trailing-spaces modified;</a>
+
+</code></pre>
+<div class="balloon" rel="300"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v522/" target="_blank">V522</a> There might be dereferencing of a potential null pointer 'row'. Check lines: 300, 293.</p></div>
+<div class="balloon" rel="550"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v522/" target="_blank">V522</a> There might be dereferencing of a potential null pointer 'row'. Check lines: 550, 543.</p></div>
+
+<link rel="stylesheet" href="highlight.css">
+<script src="highlight.pack.js"></script>
+<script src="highlightjs-line-numbers.js"></script>
+<script>hljs.initHighlightingOnLoad();</script>
+<script>hljs.initLineNumbersOnLoad();</script>
+<script>
+  $(document).ready(function() {
+      $('.balloon').each(function () {
+          var bl = $(this);
+          var line = bl.attr('rel');
+          var text = $('a[name="ln'+line+'"]').text();
+
+          var space_count = 0;
+          for(var i = 0; i<text.length; i++){
+              var char = text[i];
+              if((char !== ' ')&&(char !== '\t'))break;
+              if(char === '\t')space_count++;
+              space_count++;
+          }
+
+          bl.css('margin-left', space_count*8);
+          $('a[name="ln'+line+'"]').after(bl);
+      });
+
+      window.location = window.location;
+  });
+</script>
+</body>
+</html>

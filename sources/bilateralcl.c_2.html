@@ -1,0 +1,389 @@
+
+<html>
+<head>
+  <link rel="stylesheet" href="../style.css"/>
+  <script src="../jquery-3.2.1.min.js"></script>
+</head>
+<body>
+<pre><code class = "cpp">
+<a name="ln1">/*</a>
+<a name="ln2">    This file is part of darktable,</a>
+<a name="ln3">    copyright (c) 2012 johannes hanika.</a>
+<a name="ln4"> </a>
+<a name="ln5">    darktable is free software: you can redistribute it and/or modify</a>
+<a name="ln6">    it under the terms of the GNU General Public License as published by</a>
+<a name="ln7">    the Free Software Foundation, either version 3 of the License, or</a>
+<a name="ln8">    (at your option) any later version.</a>
+<a name="ln9"> </a>
+<a name="ln10">    darktable is distributed in the hope that it will be useful,</a>
+<a name="ln11">    but WITHOUT ANY WARRANTY; without even the implied warranty of</a>
+<a name="ln12">    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the</a>
+<a name="ln13">    GNU General Public License for more details.</a>
+<a name="ln14"> </a>
+<a name="ln15">    You should have received a copy of the GNU General Public License</a>
+<a name="ln16">    along with darktable.  If not, see &lt;http://www.gnu.org/licenses/&gt;.</a>
+<a name="ln17">*/</a>
+<a name="ln18"> </a>
+<a name="ln19">#ifdef HAVE_OPENCL</a>
+<a name="ln20"> </a>
+<a name="ln21">#include &quot;common/bilateralcl.h&quot;</a>
+<a name="ln22">#include &quot;CL/cl.h&quot;            // for _cl_mem, cl_mem, CL_SUCCESS</a>
+<a name="ln23">#include &quot;CL/cl_platform.h&quot;   // for cl_int</a>
+<a name="ln24">#include &quot;common/darktable.h&quot; // for CLAMPS, dt_print, darktable, darktable_t</a>
+<a name="ln25">#include &quot;common/opencl.h&quot;    // for dt_opencl_set_kernel_arg, dt_opencl_cr...</a>
+<a name="ln26">#include &lt;glib.h&gt;             // for MAX</a>
+<a name="ln27">#include &lt;math.h&gt;             // for roundf</a>
+<a name="ln28">#include &lt;stdlib.h&gt;           // for free, malloc</a>
+<a name="ln29"> </a>
+<a name="ln30">dt_bilateral_cl_global_t *dt_bilateral_init_cl_global()</a>
+<a name="ln31">{</a>
+<a name="ln32">  dt_bilateral_cl_global_t *b = (dt_bilateral_cl_global_t *)malloc(sizeof(dt_bilateral_cl_global_t));</a>
+<a name="ln33"> </a>
+<a name="ln34">  const int program = 10; // bilateral.cl, from programs.conf</a>
+<a name="ln35">  b-&gt;kernel_zero = dt_opencl_create_kernel(program, &quot;zero&quot;);</a>
+<a name="ln36">  b-&gt;kernel_splat = dt_opencl_create_kernel(program, &quot;splat&quot;);</a>
+<a name="ln37">  b-&gt;kernel_blur_line = dt_opencl_create_kernel(program, &quot;blur_line&quot;);</a>
+<a name="ln38">  b-&gt;kernel_blur_line_z = dt_opencl_create_kernel(program, &quot;blur_line_z&quot;);</a>
+<a name="ln39">  b-&gt;kernel_slice = dt_opencl_create_kernel(program, &quot;slice&quot;);</a>
+<a name="ln40">  b-&gt;kernel_slice2 = dt_opencl_create_kernel(program, &quot;slice_to_output&quot;);</a>
+<a name="ln41">  return b;</a>
+<a name="ln42">}</a>
+<a name="ln43"> </a>
+<a name="ln44">void dt_bilateral_free_cl(dt_bilateral_cl_t *b)</a>
+<a name="ln45">{</a>
+<a name="ln46">  if(!b) return;</a>
+<a name="ln47">  // be sure we're done with the memory:</a>
+<a name="ln48">  dt_opencl_finish(b-&gt;devid);</a>
+<a name="ln49">  // free device mem</a>
+<a name="ln50">  dt_opencl_release_mem_object(b-&gt;dev_grid);</a>
+<a name="ln51">  dt_opencl_release_mem_object(b-&gt;dev_grid_tmp);</a>
+<a name="ln52">  free(b);</a>
+<a name="ln53">}</a>
+<a name="ln54"> </a>
+<a name="ln55"> </a>
+<a name="ln56">size_t dt_bilateral_memory_use(const int width,     // width of input image</a>
+<a name="ln57">                               const int height,    // height of input image</a>
+<a name="ln58">                               const float sigma_s, // spatial sigma (blur pixel coords)</a>
+<a name="ln59">                               const float sigma_r) // range sigma (blur luma values)</a>
+<a name="ln60">{</a>
+<a name="ln61">  float _x = roundf(width / sigma_s);</a>
+<a name="ln62">  float _y = roundf(height / sigma_s);</a>
+<a name="ln63">  float _z = roundf(100.0f / sigma_r);</a>
+<a name="ln64">  size_t size_x = CLAMPS((int)_x, 4, 900) + 1;</a>
+<a name="ln65">  size_t size_y = CLAMPS((int)_y, 4, 900) + 1;</a>
+<a name="ln66">  size_t size_z = CLAMPS((int)_z, 4, 50) + 1;</a>
+<a name="ln67"> </a>
+<a name="ln68">  return size_x * size_y * size_z * sizeof(float) * 2;</a>
+<a name="ln69">}</a>
+<a name="ln70"> </a>
+<a name="ln71">// modules that want to use dt_bilateral_slice_to_output_cl() ought to take this one;</a>
+<a name="ln72">// takes account of an additional temp buffer needed in the OpenCL code path</a>
+<a name="ln73">size_t dt_bilateral_memory_use2(const int width,</a>
+<a name="ln74">                                const int height,</a>
+<a name="ln75">                                const float sigma_s,</a>
+<a name="ln76">                                const float sigma_r)</a>
+<a name="ln77">{</a>
+<a name="ln78">  return dt_bilateral_memory_use(width, height, sigma_s, sigma_r) + (size_t)width * height * 4 * sizeof(float);</a>
+<a name="ln79">}</a>
+<a name="ln80"> </a>
+<a name="ln81"> </a>
+<a name="ln82">size_t dt_bilateral_singlebuffer_size(const int width,     // width of input image</a>
+<a name="ln83">                                      const int height,    // height of input image</a>
+<a name="ln84">                                      const float sigma_s, // spatial sigma (blur pixel coords)</a>
+<a name="ln85">                                      const float sigma_r) // range sigma (blur luma values)</a>
+<a name="ln86">{</a>
+<a name="ln87">  float _x = roundf(width / sigma_s);</a>
+<a name="ln88">  float _y = roundf(height / sigma_s);</a>
+<a name="ln89">  float _z = roundf(100.0f / sigma_r);</a>
+<a name="ln90">  size_t size_x = CLAMPS((int)_x, 4, 900) + 1;</a>
+<a name="ln91">  size_t size_y = CLAMPS((int)_y, 4, 900) + 1;</a>
+<a name="ln92">  size_t size_z = CLAMPS((int)_z, 4, 50) + 1;</a>
+<a name="ln93"> </a>
+<a name="ln94">  return size_x * size_y * size_z * sizeof(float);</a>
+<a name="ln95">}</a>
+<a name="ln96"> </a>
+<a name="ln97">// modules that want to use dt_bilateral_slice_to_output_cl() ought to take this one;</a>
+<a name="ln98">// takes account of an additional temp buffer needed in the OpenCL code path</a>
+<a name="ln99">size_t dt_bilateral_singlebuffer_size2(const int width,</a>
+<a name="ln100">                                       const int height,</a>
+<a name="ln101">                                       const float sigma_s,</a>
+<a name="ln102">                                       const float sigma_r)</a>
+<a name="ln103">{</a>
+<a name="ln104">  return MAX(dt_bilateral_singlebuffer_size(width, height, sigma_s, sigma_r), (size_t)width * height * 4 * sizeof(float));</a>
+<a name="ln105">}</a>
+<a name="ln106"> </a>
+<a name="ln107"> </a>
+<a name="ln108">dt_bilateral_cl_t *dt_bilateral_init_cl(const int devid,</a>
+<a name="ln109">                                        const int width,     // width of input image</a>
+<a name="ln110">                                        const int height,    // height of input image</a>
+<a name="ln111">                                        const float sigma_s, // spatial sigma (blur pixel coords)</a>
+<a name="ln112">                                        const float sigma_r) // range sigma (blur luma values)</a>
+<a name="ln113">{</a>
+<a name="ln114">  dt_opencl_local_buffer_t locopt</a>
+<a name="ln115">    = (dt_opencl_local_buffer_t){ .xoffset = 0, .xfactor = 1, .yoffset = 0, .yfactor = 1,</a>
+<a name="ln116">                                  .cellsize = 8 * sizeof(float) + sizeof(int), .overhead = 0,</a>
+<a name="ln117">                                  .sizex = 1 &lt;&lt; 6, .sizey = 1 &lt;&lt; 6 };</a>
+<a name="ln118"> </a>
+<a name="ln119">  if(!dt_opencl_local_buffer_opt(devid, darktable.opencl-&gt;bilateral-&gt;kernel_splat, &amp;locopt))</a>
+<a name="ln120">  {</a>
+<a name="ln121">    dt_print(DT_DEBUG_OPENCL,</a>
+<a name="ln122">             &quot;[opencl_bilateral] can not identify resource limits for device %d in bilateral grid\n&quot;, devid);</a>
+<a name="ln123">    return NULL;</a>
+<a name="ln124">  }</a>
+<a name="ln125"> </a>
+<a name="ln126">  if(locopt.sizex * locopt.sizey &lt; 16 * 16)</a>
+<a name="ln127">  {</a>
+<a name="ln128">    dt_print(DT_DEBUG_OPENCL,</a>
+<a name="ln129">             &quot;[opencl_bilateral] device %d does not offer sufficient resources to run bilateral grid\n&quot;,</a>
+<a name="ln130">             devid);</a>
+<a name="ln131">    return NULL;</a>
+<a name="ln132">  }</a>
+<a name="ln133"> </a>
+<a name="ln134">  dt_bilateral_cl_t *b = (dt_bilateral_cl_t *)malloc(sizeof(dt_bilateral_cl_t));</a>
+<a name="ln135">  if(!b) return NULL;</a>
+<a name="ln136"> </a>
+<a name="ln137">  b-&gt;global = darktable.opencl-&gt;bilateral;</a>
+<a name="ln138">  float _x = roundf(width / sigma_s);</a>
+<a name="ln139">  float _y = roundf(height / sigma_s);</a>
+<a name="ln140">  float _z = roundf(100.0f / sigma_r);</a>
+<a name="ln141">  b-&gt;size_x = CLAMPS((int)_x, 4, 900) + 1;</a>
+<a name="ln142">  b-&gt;size_y = CLAMPS((int)_y, 4, 900) + 1;</a>
+<a name="ln143">  b-&gt;size_z = CLAMPS((int)_z, 4, 50) + 1;</a>
+<a name="ln144">  b-&gt;width = width;</a>
+<a name="ln145">  b-&gt;height = height;</a>
+<a name="ln146">  b-&gt;blocksizex = locopt.sizex;</a>
+<a name="ln147">  b-&gt;blocksizey = locopt.sizey;</a>
+<a name="ln148">  b-&gt;sigma_s = MAX(height / (b-&gt;size_y - 1.0f), width / (b-&gt;size_x - 1.0f));</a>
+<a name="ln149">  b-&gt;sigma_r = 100.0f / (b-&gt;size_z - 1.0f);</a>
+<a name="ln150">  b-&gt;devid = devid;</a>
+<a name="ln151">  b-&gt;dev_grid = NULL;</a>
+<a name="ln152">  b-&gt;dev_grid_tmp = NULL;</a>
+<a name="ln153"> </a>
+<a name="ln154">  // alloc grid buffer:</a>
+<a name="ln155">  b-&gt;dev_grid</a>
+<a name="ln156">      = dt_opencl_alloc_device_buffer(b-&gt;devid, (size_t)b-&gt;size_x * b-&gt;size_y * b-&gt;size_z * sizeof(float));</a>
+<a name="ln157">  if(!b-&gt;dev_grid)</a>
+<a name="ln158">  {</a>
+<a name="ln159">    dt_bilateral_free_cl(b);</a>
+<a name="ln160">    return NULL;</a>
+<a name="ln161">  }</a>
+<a name="ln162"> </a>
+<a name="ln163">  // alloc temporary grid buffer</a>
+<a name="ln164">  b-&gt;dev_grid_tmp</a>
+<a name="ln165">      = dt_opencl_alloc_device_buffer(b-&gt;devid, (size_t)b-&gt;size_x * b-&gt;size_y * b-&gt;size_z * sizeof(float));</a>
+<a name="ln166">  if(!b-&gt;dev_grid_tmp)</a>
+<a name="ln167">  {</a>
+<a name="ln168">    dt_bilateral_free_cl(b);</a>
+<a name="ln169">    return NULL;</a>
+<a name="ln170">  }</a>
+<a name="ln171"> </a>
+<a name="ln172">  // zero out grid</a>
+<a name="ln173">  int wd = b-&gt;size_x, ht = b-&gt;size_y * b-&gt;size_z;</a>
+<a name="ln174">  size_t sizes[] = { ROUNDUPWD(wd), ROUNDUPHT(ht), 1 };</a>
+<a name="ln175">  dt_opencl_set_kernel_arg(b-&gt;devid, b-&gt;global-&gt;kernel_zero, 0, sizeof(cl_mem), (void *)&amp;b-&gt;dev_grid);</a>
+<a name="ln176">  dt_opencl_set_kernel_arg(b-&gt;devid, b-&gt;global-&gt;kernel_zero, 1, sizeof(int), (void *)&amp;wd);</a>
+<a name="ln177">  dt_opencl_set_kernel_arg(b-&gt;devid, b-&gt;global-&gt;kernel_zero, 2, sizeof(int), (void *)&amp;ht);</a>
+<a name="ln178">  cl_int err = -666;</a>
+<a name="ln179">  err = dt_opencl_enqueue_kernel_2d(b-&gt;devid, b-&gt;global-&gt;kernel_zero, sizes);</a>
+<a name="ln180">  if(err != CL_SUCCESS)</a>
+<a name="ln181">  {</a>
+<a name="ln182">    dt_bilateral_free_cl(b);</a>
+<a name="ln183">    return NULL;</a>
+<a name="ln184">  }</a>
+<a name="ln185"> </a>
+<a name="ln186">#if 0</a>
+<a name="ln187">  fprintf(stderr, &quot;[bilateral] created grid [%d %d %d]&quot;</a>
+<a name="ln188">          &quot; with sigma (%f %f) (%f %f)\n&quot;, b-&gt;size_x, b-&gt;size_y, b-&gt;size_z,</a>
+<a name="ln189">          b-&gt;sigma_s, sigma_s, b-&gt;sigma_r, sigma_r);</a>
+<a name="ln190">#endif</a>
+<a name="ln191">  return b;</a>
+<a name="ln192">}</a>
+<a name="ln193"> </a>
+<a name="ln194">cl_int dt_bilateral_splat_cl(dt_bilateral_cl_t *b, cl_mem in)</a>
+<a name="ln195">{</a>
+<a name="ln196">  cl_int err = -666;</a>
+<a name="ln197">  size_t sizes[] = { ROUNDUP(b-&gt;width, b-&gt;blocksizex), ROUNDUP(b-&gt;height, b-&gt;blocksizey), 1 };</a>
+<a name="ln198">  size_t local[] = { b-&gt;blocksizex, b-&gt;blocksizey, 1 };</a>
+<a name="ln199">  dt_opencl_set_kernel_arg(b-&gt;devid, b-&gt;global-&gt;kernel_splat, 0, sizeof(cl_mem), (void *)&amp;in);</a>
+<a name="ln200">  dt_opencl_set_kernel_arg(b-&gt;devid, b-&gt;global-&gt;kernel_splat, 1, sizeof(cl_mem), (void *)&amp;b-&gt;dev_grid);</a>
+<a name="ln201">  dt_opencl_set_kernel_arg(b-&gt;devid, b-&gt;global-&gt;kernel_splat, 2, sizeof(int), (void *)&amp;b-&gt;width);</a>
+<a name="ln202">  dt_opencl_set_kernel_arg(b-&gt;devid, b-&gt;global-&gt;kernel_splat, 3, sizeof(int), (void *)&amp;b-&gt;height);</a>
+<a name="ln203">  dt_opencl_set_kernel_arg(b-&gt;devid, b-&gt;global-&gt;kernel_splat, 4, sizeof(int), (void *)&amp;b-&gt;size_x);</a>
+<a name="ln204">  dt_opencl_set_kernel_arg(b-&gt;devid, b-&gt;global-&gt;kernel_splat, 5, sizeof(int), (void *)&amp;b-&gt;size_y);</a>
+<a name="ln205">  dt_opencl_set_kernel_arg(b-&gt;devid, b-&gt;global-&gt;kernel_splat, 6, sizeof(int), (void *)&amp;b-&gt;size_z);</a>
+<a name="ln206">  dt_opencl_set_kernel_arg(b-&gt;devid, b-&gt;global-&gt;kernel_splat, 7, sizeof(float), (void *)&amp;b-&gt;sigma_s);</a>
+<a name="ln207">  dt_opencl_set_kernel_arg(b-&gt;devid, b-&gt;global-&gt;kernel_splat, 8, sizeof(float), (void *)&amp;b-&gt;sigma_r);</a>
+<a name="ln208">  dt_opencl_set_kernel_arg(b-&gt;devid, b-&gt;global-&gt;kernel_splat, 9, b-&gt;blocksizex * b-&gt;blocksizey * sizeof(int),</a>
+<a name="ln209">                           NULL);</a>
+<a name="ln210">  dt_opencl_set_kernel_arg(b-&gt;devid, b-&gt;global-&gt;kernel_splat, 10,</a>
+<a name="ln211">                           b-&gt;blocksizex * b-&gt;blocksizey * 8 * sizeof(float), NULL);</a>
+<a name="ln212">  err = dt_opencl_enqueue_kernel_2d_with_local(b-&gt;devid, b-&gt;global-&gt;kernel_splat, sizes, local);</a>
+<a name="ln213">  return err;</a>
+<a name="ln214">}</a>
+<a name="ln215"> </a>
+<a name="ln216">cl_int dt_bilateral_blur_cl(dt_bilateral_cl_t *b)</a>
+<a name="ln217">{</a>
+<a name="ln218">  cl_int err = -666;</a>
+<a name="ln219">  size_t sizes[3] = { 0, 0, 1 };</a>
+<a name="ln220"> </a>
+<a name="ln221">  err = dt_opencl_enqueue_copy_buffer_to_buffer(b-&gt;devid, b-&gt;dev_grid, b-&gt;dev_grid_tmp, 0, 0,</a>
+<a name="ln222">                                                b-&gt;size_x * b-&gt;size_y * b-&gt;size_z * sizeof(float));</a>
+<a name="ln223">  if(err != CL_SUCCESS) return err;</a>
+<a name="ln224"> </a>
+<a name="ln225">  sizes[0] = ROUNDUPWD(b-&gt;size_z);</a>
+<a name="ln226">  sizes[1] = ROUNDUPHT(b-&gt;size_y);</a>
+<a name="ln227">  int stride1, stride2, stride3;</a>
+<a name="ln228">  stride1 = b-&gt;size_x * b-&gt;size_y;</a>
+<a name="ln229">  stride2 = b-&gt;size_x;</a>
+<a name="ln230">  stride3 = 1;</a>
+<a name="ln231">  dt_opencl_set_kernel_arg(b-&gt;devid, b-&gt;global-&gt;kernel_blur_line, 0, sizeof(cl_mem), (void *)&amp;b-&gt;dev_grid_tmp);</a>
+<a name="ln232">  dt_opencl_set_kernel_arg(b-&gt;devid, b-&gt;global-&gt;kernel_blur_line, 1, sizeof(cl_mem), (void *)&amp;b-&gt;dev_grid);</a>
+<a name="ln233">  dt_opencl_set_kernel_arg(b-&gt;devid, b-&gt;global-&gt;kernel_blur_line, 2, sizeof(int), (void *)&amp;stride1);</a>
+<a name="ln234">  dt_opencl_set_kernel_arg(b-&gt;devid, b-&gt;global-&gt;kernel_blur_line, 3, sizeof(int), (void *)&amp;stride2);</a>
+<a name="ln235">  dt_opencl_set_kernel_arg(b-&gt;devid, b-&gt;global-&gt;kernel_blur_line, 4, sizeof(int), (void *)&amp;stride3);</a>
+<a name="ln236">  dt_opencl_set_kernel_arg(b-&gt;devid, b-&gt;global-&gt;kernel_blur_line, 5, sizeof(int), (void *)&amp;b-&gt;size_z);</a>
+<a name="ln237">  dt_opencl_set_kernel_arg(b-&gt;devid, b-&gt;global-&gt;kernel_blur_line, 6, sizeof(int), (void *)&amp;b-&gt;size_y);</a>
+<a name="ln238">  dt_opencl_set_kernel_arg(b-&gt;devid, b-&gt;global-&gt;kernel_blur_line, 7, sizeof(int), (void *)&amp;b-&gt;size_x);</a>
+<a name="ln239">  err = dt_opencl_enqueue_kernel_2d(b-&gt;devid, b-&gt;global-&gt;kernel_blur_line, sizes);</a>
+<a name="ln240">  if(err != CL_SUCCESS) return err;</a>
+<a name="ln241"> </a>
+<a name="ln242">  stride1 = b-&gt;size_x * b-&gt;size_y;</a>
+<a name="ln243">  stride2 = 1;</a>
+<a name="ln244">  stride3 = b-&gt;size_x;</a>
+<a name="ln245">  sizes[0] = ROUNDUPWD(b-&gt;size_z);</a>
+<a name="ln246">  sizes[1] = ROUNDUPHT(b-&gt;size_x);</a>
+<a name="ln247">  dt_opencl_set_kernel_arg(b-&gt;devid, b-&gt;global-&gt;kernel_blur_line, 0, sizeof(cl_mem), (void *)&amp;b-&gt;dev_grid);</a>
+<a name="ln248">  dt_opencl_set_kernel_arg(b-&gt;devid, b-&gt;global-&gt;kernel_blur_line, 1, sizeof(cl_mem), (void *)&amp;b-&gt;dev_grid_tmp);</a>
+<a name="ln249">  dt_opencl_set_kernel_arg(b-&gt;devid, b-&gt;global-&gt;kernel_blur_line, 2, sizeof(int), (void *)&amp;stride1);</a>
+<a name="ln250">  dt_opencl_set_kernel_arg(b-&gt;devid, b-&gt;global-&gt;kernel_blur_line, 3, sizeof(int), (void *)&amp;stride2);</a>
+<a name="ln251">  dt_opencl_set_kernel_arg(b-&gt;devid, b-&gt;global-&gt;kernel_blur_line, 4, sizeof(int), (void *)&amp;stride3);</a>
+<a name="ln252">  dt_opencl_set_kernel_arg(b-&gt;devid, b-&gt;global-&gt;kernel_blur_line, 5, sizeof(int), (void *)&amp;b-&gt;size_z);</a>
+<a name="ln253">  dt_opencl_set_kernel_arg(b-&gt;devid, b-&gt;global-&gt;kernel_blur_line, 6, sizeof(int), (void *)&amp;b-&gt;size_x);</a>
+<a name="ln254">  dt_opencl_set_kernel_arg(b-&gt;devid, b-&gt;global-&gt;kernel_blur_line, 7, sizeof(int), (void *)&amp;b-&gt;size_y);</a>
+<a name="ln255">  err = dt_opencl_enqueue_kernel_2d(b-&gt;devid, b-&gt;global-&gt;kernel_blur_line, sizes);</a>
+<a name="ln256">  if(err != CL_SUCCESS) return err;</a>
+<a name="ln257"> </a>
+<a name="ln258">  stride1 = 1;</a>
+<a name="ln259">  stride2 = b-&gt;size_x;</a>
+<a name="ln260">  stride3 = b-&gt;size_x * b-&gt;size_y;</a>
+<a name="ln261">  sizes[0] = ROUNDUPWD(b-&gt;size_x);</a>
+<a name="ln262">  sizes[1] = ROUNDUPHT(b-&gt;size_y);</a>
+<a name="ln263">  dt_opencl_set_kernel_arg(b-&gt;devid, b-&gt;global-&gt;kernel_blur_line_z, 0, sizeof(cl_mem),</a>
+<a name="ln264">                           (void *)&amp;b-&gt;dev_grid_tmp);</a>
+<a name="ln265">  dt_opencl_set_kernel_arg(b-&gt;devid, b-&gt;global-&gt;kernel_blur_line_z, 1, sizeof(cl_mem), (void *)&amp;b-&gt;dev_grid);</a>
+<a name="ln266">  dt_opencl_set_kernel_arg(b-&gt;devid, b-&gt;global-&gt;kernel_blur_line_z, 2, sizeof(int), (void *)&amp;stride1);</a>
+<a name="ln267">  dt_opencl_set_kernel_arg(b-&gt;devid, b-&gt;global-&gt;kernel_blur_line_z, 3, sizeof(int), (void *)&amp;stride2);</a>
+<a name="ln268">  dt_opencl_set_kernel_arg(b-&gt;devid, b-&gt;global-&gt;kernel_blur_line_z, 4, sizeof(int), (void *)&amp;stride3);</a>
+<a name="ln269">  dt_opencl_set_kernel_arg(b-&gt;devid, b-&gt;global-&gt;kernel_blur_line_z, 5, sizeof(int), (void *)&amp;b-&gt;size_x);</a>
+<a name="ln270">  dt_opencl_set_kernel_arg(b-&gt;devid, b-&gt;global-&gt;kernel_blur_line_z, 6, sizeof(int), (void *)&amp;b-&gt;size_y);</a>
+<a name="ln271">  dt_opencl_set_kernel_arg(b-&gt;devid, b-&gt;global-&gt;kernel_blur_line_z, 7, sizeof(int), (void *)&amp;b-&gt;size_z);</a>
+<a name="ln272">  err = dt_opencl_enqueue_kernel_2d(b-&gt;devid, b-&gt;global-&gt;kernel_blur_line_z, sizes);</a>
+<a name="ln273">  return err;</a>
+<a name="ln274">}</a>
+<a name="ln275"> </a>
+<a name="ln276">cl_int dt_bilateral_slice_to_output_cl(dt_bilateral_cl_t *b, cl_mem in, cl_mem out, const float detail)</a>
+<a name="ln277">{</a>
+<a name="ln278">  cl_int err = -666;</a>
+<a name="ln279">  cl_mem tmp = NULL;</a>
+<a name="ln280"> </a>
+<a name="ln281">  tmp = dt_opencl_alloc_device(b-&gt;devid, b-&gt;width, b-&gt;height, 4 * sizeof(float));</a>
+<a name="ln282">  if(tmp == NULL) goto error;</a>
+<a name="ln283"> </a>
+<a name="ln284">  size_t origin[] = { 0, 0, 0 };</a>
+<a name="ln285">  size_t region[] = { b-&gt;width, b-&gt;height, 1 };</a>
+<a name="ln286">  err = dt_opencl_enqueue_copy_image(b-&gt;devid, out, tmp, origin, origin, region);</a>
+<a name="ln287">  if(err != CL_SUCCESS) goto error;</a>
+<a name="ln288"> </a>
+<a name="ln289">  size_t sizes[] = { ROUNDUPWD(b-&gt;width), ROUNDUPHT(b-&gt;height), 1 };</a>
+<a name="ln290">  dt_opencl_set_kernel_arg(b-&gt;devid, b-&gt;global-&gt;kernel_slice2, 0, sizeof(cl_mem), (void *)&amp;in);</a>
+<a name="ln291">  dt_opencl_set_kernel_arg(b-&gt;devid, b-&gt;global-&gt;kernel_slice2, 1, sizeof(cl_mem), (void *)&amp;tmp);</a>
+<a name="ln292">  dt_opencl_set_kernel_arg(b-&gt;devid, b-&gt;global-&gt;kernel_slice2, 2, sizeof(cl_mem), (void *)&amp;out);</a>
+<a name="ln293">  dt_opencl_set_kernel_arg(b-&gt;devid, b-&gt;global-&gt;kernel_slice2, 3, sizeof(cl_mem), (void *)&amp;b-&gt;dev_grid);</a>
+<a name="ln294">  dt_opencl_set_kernel_arg(b-&gt;devid, b-&gt;global-&gt;kernel_slice2, 4, sizeof(int), (void *)&amp;b-&gt;width);</a>
+<a name="ln295">  dt_opencl_set_kernel_arg(b-&gt;devid, b-&gt;global-&gt;kernel_slice2, 5, sizeof(int), (void *)&amp;b-&gt;height);</a>
+<a name="ln296">  dt_opencl_set_kernel_arg(b-&gt;devid, b-&gt;global-&gt;kernel_slice2, 6, sizeof(int), (void *)&amp;b-&gt;size_x);</a>
+<a name="ln297">  dt_opencl_set_kernel_arg(b-&gt;devid, b-&gt;global-&gt;kernel_slice2, 7, sizeof(int), (void *)&amp;b-&gt;size_y);</a>
+<a name="ln298">  dt_opencl_set_kernel_arg(b-&gt;devid, b-&gt;global-&gt;kernel_slice2, 8, sizeof(int), (void *)&amp;b-&gt;size_z);</a>
+<a name="ln299">  dt_opencl_set_kernel_arg(b-&gt;devid, b-&gt;global-&gt;kernel_slice2, 9, sizeof(float), (void *)&amp;b-&gt;sigma_s);</a>
+<a name="ln300">  dt_opencl_set_kernel_arg(b-&gt;devid, b-&gt;global-&gt;kernel_slice2, 10, sizeof(float), (void *)&amp;b-&gt;sigma_r);</a>
+<a name="ln301">  dt_opencl_set_kernel_arg(b-&gt;devid, b-&gt;global-&gt;kernel_slice2, 11, sizeof(float), (void *)&amp;detail);</a>
+<a name="ln302">  err = dt_opencl_enqueue_kernel_2d(b-&gt;devid, b-&gt;global-&gt;kernel_slice2, sizes);</a>
+<a name="ln303"> </a>
+<a name="ln304">  dt_opencl_release_mem_object(tmp);</a>
+<a name="ln305">  return err;</a>
+<a name="ln306"> </a>
+<a name="ln307">error:</a>
+<a name="ln308">  dt_opencl_release_mem_object(tmp);</a>
+<a name="ln309">  return err;</a>
+<a name="ln310">}</a>
+<a name="ln311"> </a>
+<a name="ln312">cl_int dt_bilateral_slice_cl(dt_bilateral_cl_t *b, cl_mem in, cl_mem out, const float detail)</a>
+<a name="ln313">{</a>
+<a name="ln314">  cl_int err = -666;</a>
+<a name="ln315">  size_t sizes[] = { ROUNDUPWD(b-&gt;width), ROUNDUPHT(b-&gt;height), 1 };</a>
+<a name="ln316">  dt_opencl_set_kernel_arg(b-&gt;devid, b-&gt;global-&gt;kernel_slice, 0, sizeof(cl_mem), (void *)&amp;in);</a>
+<a name="ln317">  dt_opencl_set_kernel_arg(b-&gt;devid, b-&gt;global-&gt;kernel_slice, 1, sizeof(cl_mem), (void *)&amp;out);</a>
+<a name="ln318">  dt_opencl_set_kernel_arg(b-&gt;devid, b-&gt;global-&gt;kernel_slice, 2, sizeof(cl_mem), (void *)&amp;b-&gt;dev_grid);</a>
+<a name="ln319">  dt_opencl_set_kernel_arg(b-&gt;devid, b-&gt;global-&gt;kernel_slice, 3, sizeof(int), (void *)&amp;b-&gt;width);</a>
+<a name="ln320">  dt_opencl_set_kernel_arg(b-&gt;devid, b-&gt;global-&gt;kernel_slice, 4, sizeof(int), (void *)&amp;b-&gt;height);</a>
+<a name="ln321">  dt_opencl_set_kernel_arg(b-&gt;devid, b-&gt;global-&gt;kernel_slice, 5, sizeof(int), (void *)&amp;b-&gt;size_x);</a>
+<a name="ln322">  dt_opencl_set_kernel_arg(b-&gt;devid, b-&gt;global-&gt;kernel_slice, 6, sizeof(int), (void *)&amp;b-&gt;size_y);</a>
+<a name="ln323">  dt_opencl_set_kernel_arg(b-&gt;devid, b-&gt;global-&gt;kernel_slice, 7, sizeof(int), (void *)&amp;b-&gt;size_z);</a>
+<a name="ln324">  dt_opencl_set_kernel_arg(b-&gt;devid, b-&gt;global-&gt;kernel_slice, 8, sizeof(float), (void *)&amp;b-&gt;sigma_s);</a>
+<a name="ln325">  dt_opencl_set_kernel_arg(b-&gt;devid, b-&gt;global-&gt;kernel_slice, 9, sizeof(float), (void *)&amp;b-&gt;sigma_r);</a>
+<a name="ln326">  dt_opencl_set_kernel_arg(b-&gt;devid, b-&gt;global-&gt;kernel_slice, 10, sizeof(float), (void *)&amp;detail);</a>
+<a name="ln327">  err = dt_opencl_enqueue_kernel_2d(b-&gt;devid, b-&gt;global-&gt;kernel_slice, sizes);</a>
+<a name="ln328">  return err;</a>
+<a name="ln329">}</a>
+<a name="ln330"> </a>
+<a name="ln331">void dt_bilateral_free_cl_global(dt_bilateral_cl_global_t *b)</a>
+<a name="ln332">{</a>
+<a name="ln333">  if(!b) return;</a>
+<a name="ln334">  // destroy kernels</a>
+<a name="ln335">  dt_opencl_free_kernel(b-&gt;kernel_zero);</a>
+<a name="ln336">  dt_opencl_free_kernel(b-&gt;kernel_splat);</a>
+<a name="ln337">  dt_opencl_free_kernel(b-&gt;kernel_blur_line);</a>
+<a name="ln338">  dt_opencl_free_kernel(b-&gt;kernel_blur_line_z);</a>
+<a name="ln339">  dt_opencl_free_kernel(b-&gt;kernel_slice);</a>
+<a name="ln340">  dt_opencl_free_kernel(b-&gt;kernel_slice2);</a>
+<a name="ln341">  free(b);</a>
+<a name="ln342">}</a>
+<a name="ln343"> </a>
+<a name="ln344">#endif</a>
+<a name="ln345"> </a>
+<a name="ln346">// modelines: These editor modelines have been set for all relevant files by tools/update_modelines.sh</a>
+<a name="ln347">// vim: shiftwidth=2 expandtab tabstop=2 cindent</a>
+<a name="ln348">// kate: tab-indents: off; indent-width 2; replace-tabs on; indent-mode cstyle; remove-trailing-spaces modified;</a>
+
+</code></pre>
+<div class="balloon" rel="35"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v522/" target="_blank">V522</a> There might be dereferencing of a potential null pointer 'b'. Check lines: 35, 32.</p></div>
+
+<link rel="stylesheet" href="highlight.css">
+<script src="highlight.pack.js"></script>
+<script src="highlightjs-line-numbers.js"></script>
+<script>hljs.initHighlightingOnLoad();</script>
+<script>hljs.initLineNumbersOnLoad();</script>
+<script>
+  $(document).ready(function() {
+      $('.balloon').each(function () {
+          var bl = $(this);
+          var line = bl.attr('rel');
+          var text = $('a[name="ln'+line+'"]').text();
+
+          var space_count = 0;
+          for(var i = 0; i<text.length; i++){
+              var char = text[i];
+              if((char !== ' ')&&(char !== '\t'))break;
+              if(char === '\t')space_count++;
+              space_count++;
+          }
+
+          bl.css('margin-left', space_count*8);
+          $('a[name="ln'+line+'"]').after(bl);
+      });
+
+      window.location = window.location;
+  });
+</script>
+</body>
+</html>

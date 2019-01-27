@@ -1,0 +1,1005 @@
+
+<html>
+<head>
+  <link rel="stylesheet" href="../style.css"/>
+  <script src="../jquery-3.2.1.min.js"></script>
+</head>
+<body>
+<pre><code class = "cpp">
+<a name="ln1">/*</a>
+<a name="ln2"> *    This file is part of darktable,</a>
+<a name="ln3"> *    copyright (c) 2015 tobias ellinghaus.</a>
+<a name="ln4"> *</a>
+<a name="ln5"> *    darktable is free software: you can redistribute it and/or modify</a>
+<a name="ln6"> *    it under the terms of the GNU General Public License as published by</a>
+<a name="ln7"> *    the Free Software Foundation, either version 3 of the License, or</a>
+<a name="ln8"> *    (at your option) any later version.</a>
+<a name="ln9"> *</a>
+<a name="ln10"> *    darktable is distributed in the hope that it will be useful,</a>
+<a name="ln11"> *    but WITHOUT ANY WARRANTY; without even the implied warranty of</a>
+<a name="ln12"> *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the</a>
+<a name="ln13"> *    GNU General Public License for more details.</a>
+<a name="ln14"> *</a>
+<a name="ln15"> *    You should have received a copy of the GNU General Public License</a>
+<a name="ln16"> *    along with darktable.  If not, see &lt;http://www.gnu.org/licenses/&gt;.</a>
+<a name="ln17"> */</a>
+<a name="ln18"> </a>
+<a name="ln19">/*</a>
+<a name="ln20"> *  this is a simple PDF writer, capable of creating multi page PDFs with embedded images.</a>
+<a name="ln21"> *  it is NOT meant to be a full fledged PDF library, and shall never turn into something like that!</a>
+<a name="ln22"> */</a>
+<a name="ln23"> </a>
+<a name="ln24">// add the following define to compile this into a standalone test program:</a>
+<a name="ln25">// #define STANDALONE</a>
+<a name="ln26">// or use</a>
+<a name="ln27">// gcc -W -Wall -std=c99 -lz -lm `pkg-config --cflags --libs glib-2.0` -g -O3 -fopenmp -DSTANDALONE -o darktable-pdf pdf.c</a>
+<a name="ln28"> </a>
+<a name="ln29">#ifdef HAVE_CONFIG_H</a>
+<a name="ln30">#include &quot;config.h&quot;</a>
+<a name="ln31">#endif</a>
+<a name="ln32"> </a>
+<a name="ln33">#define _XOPEN_SOURCE 700</a>
+<a name="ln34">#include &lt;errno.h&gt;</a>
+<a name="ln35">#include &lt;math.h&gt;</a>
+<a name="ln36">#include &lt;stdio.h&gt;</a>
+<a name="ln37">#include &lt;stdlib.h&gt;</a>
+<a name="ln38">#include &lt;string.h&gt;</a>
+<a name="ln39">#include &lt;strings.h&gt;</a>
+<a name="ln40">#include &lt;time.h&gt;</a>
+<a name="ln41">#include &lt;zlib.h&gt;</a>
+<a name="ln42"> </a>
+<a name="ln43">#include &lt;glib/gstdio.h&gt;</a>
+<a name="ln44"> </a>
+<a name="ln45">#ifdef STANDALONE</a>
+<a name="ln46">#define PACKAGE_STRING &quot;darktable pdf library&quot;</a>
+<a name="ln47">#else</a>
+<a name="ln48">#define PACKAGE_STRING darktable_package_string</a>
+<a name="ln49">#endif</a>
+<a name="ln50"> </a>
+<a name="ln51">#include &quot;pdf.h&quot;</a>
+<a name="ln52"> </a>
+<a name="ln53">#define CLAMP_FLT(A) ((A) &gt; (0.0f) ? ((A) &lt; (1.0f) ? (A) : (1.0f)) : (0.0f))</a>
+<a name="ln54"> </a>
+<a name="ln55">#define SKIP_SPACES(s)  {while(*(s) == ' ')(s)++;}</a>
+<a name="ln56"> </a>
+<a name="ln57">// puts the length as described in str as pdf points into *length</a>
+<a name="ln58">// returns 0 on error</a>
+<a name="ln59">// a length has a number, followed by a unit if it's != 0.0</a>
+<a name="ln60">int dt_pdf_parse_length(const char *str, float *length)</a>
+<a name="ln61">{</a>
+<a name="ln62">  int res = 0;</a>
+<a name="ln63">  char *nptr, *endptr;</a>
+<a name="ln64"> </a>
+<a name="ln65">  if(str == NULL || length == NULL)</a>
+<a name="ln66">    return 0;</a>
+<a name="ln67"> </a>
+<a name="ln68">  SKIP_SPACES(str);</a>
+<a name="ln69"> </a>
+<a name="ln70">  nptr = g_strdelimit(g_strdup(str), &quot;,&quot;, '.');</a>
+<a name="ln71"> </a>
+<a name="ln72">  *length =  g_ascii_strtod(nptr, &amp;endptr);</a>
+<a name="ln73"> </a>
+<a name="ln74">  if(endptr == NULL || errno == ERANGE)</a>
+<a name="ln75">    goto end;</a>
+<a name="ln76"> </a>
+<a name="ln77">  // 0 is 0 is 0, why should we care about the unit?</a>
+<a name="ln78">  if(*length == 0.0 &amp;&amp; nptr != endptr)</a>
+<a name="ln79">  {</a>
+<a name="ln80">    res = 1;</a>
+<a name="ln81">    goto end;</a>
+<a name="ln82">  }</a>
+<a name="ln83"> </a>
+<a name="ln84">  // we don't want NAN, INF or parse errors (== 0.0)</a>
+<a name="ln85">  if(!isnormal(*length))</a>
+<a name="ln86">    goto end;</a>
+<a name="ln87"> </a>
+<a name="ln88">  SKIP_SPACES(endptr);</a>
+<a name="ln89"> </a>
+<a name="ln90">  for(int i = 0; dt_pdf_units[i].name; i++)</a>
+<a name="ln91">  {</a>
+<a name="ln92">    if(!g_strcmp0(endptr, dt_pdf_units[i].name))</a>
+<a name="ln93">    {</a>
+<a name="ln94">      *length *= dt_pdf_units[i].factor;</a>
+<a name="ln95">      res = 1;</a>
+<a name="ln96">      break;</a>
+<a name="ln97">    }</a>
+<a name="ln98">  }</a>
+<a name="ln99"> </a>
+<a name="ln100">end:</a>
+<a name="ln101">  g_free(nptr);</a>
+<a name="ln102">  return res;</a>
+<a name="ln103">}</a>
+<a name="ln104"> </a>
+<a name="ln105">// a paper size has 2 numbers, separated by 'x' or '*' and a unit, either one per number or one in the end (for both)</a>
+<a name="ln106">// &lt;n&gt; &lt;u&gt;? [x|*] &lt;n&gt; &lt;u&gt;</a>
+<a name="ln107">// alternatively it could be a well defined format</a>
+<a name="ln108">int dt_pdf_parse_paper_size(const char *str, float *width, float *height)</a>
+<a name="ln109">{</a>
+<a name="ln110">  int res = 0;</a>
+<a name="ln111">  gboolean width_has_unit = FALSE;</a>
+<a name="ln112">  char *ptr, *nptr, *endptr;</a>
+<a name="ln113"> </a>
+<a name="ln114">  if(str == NULL || width == NULL || height == NULL)</a>
+<a name="ln115">    return 0;</a>
+<a name="ln116"> </a>
+<a name="ln117">  // first check if this is a well known size</a>
+<a name="ln118">  for(int i = 0; dt_pdf_paper_sizes[i].name; i++)</a>
+<a name="ln119">  {</a>
+<a name="ln120">    if(!strcasecmp(str, dt_pdf_paper_sizes[i].name))</a>
+<a name="ln121">    {</a>
+<a name="ln122">      *width = dt_pdf_paper_sizes[i].width;</a>
+<a name="ln123">      *height = dt_pdf_paper_sizes[i].height;</a>
+<a name="ln124">      return 1;</a>
+<a name="ln125">    }</a>
+<a name="ln126">  }</a>
+<a name="ln127"> </a>
+<a name="ln128">  ptr = nptr = g_strdelimit(g_strdup(str), &quot;,&quot;, '.');</a>
+<a name="ln129"> </a>
+<a name="ln130">  // width</a>
+<a name="ln131">  SKIP_SPACES(nptr);</a>
+<a name="ln132"> </a>
+<a name="ln133">  *width =  g_ascii_strtod(nptr, &amp;endptr);</a>
+<a name="ln134"> </a>
+<a name="ln135">  if(endptr == NULL || *endptr == '\0' || errno == ERANGE || !isnormal(*width))</a>
+<a name="ln136">    goto end;</a>
+<a name="ln137"> </a>
+<a name="ln138">  nptr = endptr;</a>
+<a name="ln139"> </a>
+<a name="ln140">  // unit?</a>
+<a name="ln141">  SKIP_SPACES(nptr);</a>
+<a name="ln142"> </a>
+<a name="ln143">  for(int i = 0; dt_pdf_units[i].name; i++)</a>
+<a name="ln144">  {</a>
+<a name="ln145">    if(g_str_has_prefix(nptr, dt_pdf_units[i].name))</a>
+<a name="ln146">    {</a>
+<a name="ln147">      *width *= dt_pdf_units[i].factor;</a>
+<a name="ln148">      width_has_unit = TRUE;</a>
+<a name="ln149">      nptr += strlen(dt_pdf_units[i].name);</a>
+<a name="ln150">      break;</a>
+<a name="ln151">    }</a>
+<a name="ln152">  }</a>
+<a name="ln153"> </a>
+<a name="ln154">  // x</a>
+<a name="ln155">  SKIP_SPACES(nptr);</a>
+<a name="ln156"> </a>
+<a name="ln157">  if(*nptr != 'x' &amp;&amp; *nptr != '*')</a>
+<a name="ln158">    goto end;</a>
+<a name="ln159"> </a>
+<a name="ln160">  nptr++;</a>
+<a name="ln161"> </a>
+<a name="ln162">  // height</a>
+<a name="ln163">  SKIP_SPACES(nptr);</a>
+<a name="ln164"> </a>
+<a name="ln165">  *height =  g_ascii_strtod(nptr, &amp;endptr);</a>
+<a name="ln166"> </a>
+<a name="ln167">  if(endptr == NULL || *endptr == '\0' || errno == ERANGE || !isnormal(*height))</a>
+<a name="ln168">    goto end;</a>
+<a name="ln169"> </a>
+<a name="ln170">  nptr = endptr;</a>
+<a name="ln171"> </a>
+<a name="ln172">  // unit</a>
+<a name="ln173">  SKIP_SPACES(nptr);</a>
+<a name="ln174"> </a>
+<a name="ln175">  for(int i = 0; dt_pdf_units[i].name; i++)</a>
+<a name="ln176">  {</a>
+<a name="ln177">    if(!g_strcmp0(nptr, dt_pdf_units[i].name))</a>
+<a name="ln178">    {</a>
+<a name="ln179">      *height *= dt_pdf_units[i].factor;</a>
+<a name="ln180">      if(width_has_unit == FALSE)</a>
+<a name="ln181">        *width *= dt_pdf_units[i].factor;</a>
+<a name="ln182">      res = 1;</a>
+<a name="ln183">      break;</a>
+<a name="ln184">    }</a>
+<a name="ln185">  }</a>
+<a name="ln186"> </a>
+<a name="ln187">end:</a>
+<a name="ln188">  g_free(ptr);</a>
+<a name="ln189">  return res;</a>
+<a name="ln190">}</a>
+<a name="ln191"> </a>
+<a name="ln192">#undef SKIP_SPACES</a>
+<a name="ln193"> </a>
+<a name="ln194"> </a>
+<a name="ln195">static const char *stream_encoder_filters[] = {&quot;/ASCIIHexDecode&quot;, &quot;/FlateDecode&quot;};</a>
+<a name="ln196"> </a>
+<a name="ln197">static void _pdf_set_offset(dt_pdf_t *pdf, int id, size_t offset)</a>
+<a name="ln198">{</a>
+<a name="ln199">  id--; // object ids start at 1</a>
+<a name="ln200">  if(id &gt;= pdf-&gt;n_offsets)</a>
+<a name="ln201">  {</a>
+<a name="ln202">    pdf-&gt;n_offsets = MAX(pdf-&gt;n_offsets * 2, id);</a>
+<a name="ln203">    pdf-&gt;offsets = realloc(pdf-&gt;offsets, pdf-&gt;n_offsets * sizeof(size_t));</a>
+<a name="ln204">  }</a>
+<a name="ln205">  pdf-&gt;offsets[id] = offset;</a>
+<a name="ln206">}</a>
+<a name="ln207"> </a>
+<a name="ln208">dt_pdf_t *dt_pdf_start(const char *filename, float width, float height, float dpi, dt_pdf_stream_encoder_t default_encoder)</a>
+<a name="ln209">{</a>
+<a name="ln210">  dt_pdf_t *pdf = calloc(1, sizeof(dt_pdf_t));</a>
+<a name="ln211">  if(!pdf) return NULL;</a>
+<a name="ln212"> </a>
+<a name="ln213">  pdf-&gt;fd = g_fopen(filename, &quot;wb&quot;);</a>
+<a name="ln214">  if(!pdf-&gt;fd)</a>
+<a name="ln215">  {</a>
+<a name="ln216">    free(pdf);</a>
+<a name="ln217">    return NULL;</a>
+<a name="ln218">  }</a>
+<a name="ln219"> </a>
+<a name="ln220">  pdf-&gt;page_width = width;</a>
+<a name="ln221">  pdf-&gt;page_height = height;</a>
+<a name="ln222">  pdf-&gt;dpi = dpi;</a>
+<a name="ln223">  pdf-&gt;default_encoder = default_encoder;</a>
+<a name="ln224">  // object counting starts at 1, and the first 2 are reserved for the document catalog + pages dictionary</a>
+<a name="ln225">  pdf-&gt;next_id = 3;</a>
+<a name="ln226">  pdf-&gt;next_image = 0;</a>
+<a name="ln227"> </a>
+<a name="ln228">  pdf-&gt;n_offsets = 4;</a>
+<a name="ln229">  pdf-&gt;offsets = calloc(pdf-&gt;n_offsets, sizeof(size_t));</a>
+<a name="ln230"> </a>
+<a name="ln231">  size_t bytes_written = 0;</a>
+<a name="ln232"> </a>
+<a name="ln233">  // file header</a>
+<a name="ln234">  // pdf specs encourage to put 4 binary bytes in a comment</a>
+<a name="ln235">  bytes_written += fprintf(pdf-&gt;fd, &quot;%%PDF-1.3\n\xde\xad\xbe\xef\n&quot;);</a>
+<a name="ln236"> </a>
+<a name="ln237">  // document catalog</a>
+<a name="ln238">  _pdf_set_offset(pdf, 1, bytes_written);</a>
+<a name="ln239">  bytes_written += fprintf(pdf-&gt;fd,</a>
+<a name="ln240">    &quot;1 0 obj\n&quot;</a>
+<a name="ln241">    &quot;&lt;&lt;\n&quot;</a>
+<a name="ln242">    &quot;/Pages 2 0 R\n&quot;</a>
+<a name="ln243">    &quot;/Type /Catalog\n&quot;</a>
+<a name="ln244">    &quot;&gt;&gt;\n&quot;</a>
+<a name="ln245">    &quot;endobj\n&quot;</a>
+<a name="ln246">  );</a>
+<a name="ln247"> </a>
+<a name="ln248">  pdf-&gt;bytes_written += bytes_written;</a>
+<a name="ln249"> </a>
+<a name="ln250">  return pdf;</a>
+<a name="ln251">}</a>
+<a name="ln252"> </a>
+<a name="ln253">// TODO: maybe OpenMP-ify, it's quite fast already (the fwrite is the slowest part), but wouldn't hurt</a>
+<a name="ln254">static size_t _pdf_stream_encoder_ASCIIHex(dt_pdf_t *pdf, const unsigned char *data, size_t len)</a>
+<a name="ln255">{</a>
+<a name="ln256">  const char hex[16] = { '0', '1', '2', '3', '4', '5', '6', '7', '8', '9', 'a', 'b', 'c', 'd', 'e', 'f' };</a>
+<a name="ln257"> </a>
+<a name="ln258">  char buf[512]; // keep this a multiple of 2!</a>
+<a name="ln259"> </a>
+<a name="ln260">  for(size_t i = 0; i &lt; len; i++)</a>
+<a name="ln261">  {</a>
+<a name="ln262">    const int hi = data[i] &gt;&gt; 4;</a>
+<a name="ln263">    const int lo = data[i] &amp; 15;</a>
+<a name="ln264">    buf[(2 * i) % sizeof(buf)] = hex[hi];</a>
+<a name="ln265">    buf[(2 * i + 1) % sizeof(buf)] = hex[lo];</a>
+<a name="ln266">    if((i + 1) % (sizeof(buf) / 2) == 0 || (i + 1) == len)</a>
+<a name="ln267">      fwrite(buf, 1, (i % (sizeof(buf) / 2) + 1) * 2, pdf-&gt;fd);</a>
+<a name="ln268">  }</a>
+<a name="ln269">  return len * 2;</a>
+<a name="ln270">}</a>
+<a name="ln271"> </a>
+<a name="ln272">// using zlib we get quite small files, but it's slow</a>
+<a name="ln273">static size_t _pdf_stream_encoder_Flate(dt_pdf_t *pdf, const unsigned char *data, size_t len)</a>
+<a name="ln274">{</a>
+<a name="ln275">  int result;</a>
+<a name="ln276">  uLongf destLen = compressBound(len);</a>
+<a name="ln277">  unsigned char *buffer = (unsigned char *)malloc(destLen);</a>
+<a name="ln278"> </a>
+<a name="ln279">  result = compress(buffer, &amp;destLen, data, len);</a>
+<a name="ln280"> </a>
+<a name="ln281">  if(result != Z_OK)</a>
+<a name="ln282">  {</a>
+<a name="ln283">    free(buffer);</a>
+<a name="ln284">    return 0;</a>
+<a name="ln285">  }</a>
+<a name="ln286"> </a>
+<a name="ln287">  fwrite(buffer, 1, destLen, pdf-&gt;fd);</a>
+<a name="ln288"> </a>
+<a name="ln289">  free(buffer);</a>
+<a name="ln290">  return destLen;</a>
+<a name="ln291">}</a>
+<a name="ln292"> </a>
+<a name="ln293">static size_t _pdf_write_stream(dt_pdf_t *pdf, dt_pdf_stream_encoder_t encoder, const unsigned char *data, size_t len)</a>
+<a name="ln294">{</a>
+<a name="ln295">  size_t stream_size = 0;</a>
+<a name="ln296">  switch(encoder)</a>
+<a name="ln297">  {</a>
+<a name="ln298">    case DT_PDF_STREAM_ENCODER_ASCII_HEX:</a>
+<a name="ln299">      stream_size = _pdf_stream_encoder_ASCIIHex(pdf, data, len);</a>
+<a name="ln300">      break;</a>
+<a name="ln301">    case DT_PDF_STREAM_ENCODER_FLATE:</a>
+<a name="ln302">      stream_size = _pdf_stream_encoder_Flate(pdf, data, len);</a>
+<a name="ln303">      break;</a>
+<a name="ln304">  }</a>
+<a name="ln305">  pdf-&gt;bytes_written += stream_size;</a>
+<a name="ln306">  return stream_size;</a>
+<a name="ln307">}</a>
+<a name="ln308"> </a>
+<a name="ln309">int dt_pdf_add_icc(dt_pdf_t *pdf, const char *filename)</a>
+<a name="ln310">{</a>
+<a name="ln311">  FILE *in = g_fopen(filename, &quot;rb&quot;);</a>
+<a name="ln312">  if(!in) return 0;</a>
+<a name="ln313"> </a>
+<a name="ln314">  fseek(in, 0, SEEK_END);</a>
+<a name="ln315">  ssize_t file_size = ftell(in);</a>
+<a name="ln316">  fseek(in, 0, SEEK_SET);</a>
+<a name="ln317"> </a>
+<a name="ln318">  if(file_size &lt; 0)</a>
+<a name="ln319">  {</a>
+<a name="ln320">    fclose(in);</a>
+<a name="ln321">    return 0;</a>
+<a name="ln322">  }</a>
+<a name="ln323"> </a>
+<a name="ln324">  unsigned char *data = (unsigned char *)malloc(file_size);</a>
+<a name="ln325">  size_t len = fread(data, 1, file_size, in);</a>
+<a name="ln326">  fclose(in);</a>
+<a name="ln327">  if(len != file_size)</a>
+<a name="ln328">  {</a>
+<a name="ln329">    free(data);</a>
+<a name="ln330">    return 0;</a>
+<a name="ln331">  }</a>
+<a name="ln332"> </a>
+<a name="ln333">  int icc_id = dt_pdf_add_icc_from_data(pdf, data, len);</a>
+<a name="ln334"> </a>
+<a name="ln335">  free(data);</a>
+<a name="ln336"> </a>
+<a name="ln337">  return icc_id;</a>
+<a name="ln338">}</a>
+<a name="ln339"> </a>
+<a name="ln340">int dt_pdf_add_icc_from_data(dt_pdf_t *pdf, const unsigned char *data, size_t size)</a>
+<a name="ln341">{</a>
+<a name="ln342">  int icc_id = pdf-&gt;next_id++;</a>
+<a name="ln343">  int length_id = pdf-&gt;next_id++;</a>
+<a name="ln344">  size_t bytes_written = 0;</a>
+<a name="ln345"> </a>
+<a name="ln346">  // length of the stream</a>
+<a name="ln347">  _pdf_set_offset(pdf, icc_id, pdf-&gt;bytes_written + bytes_written);</a>
+<a name="ln348">  bytes_written += fprintf(pdf-&gt;fd,</a>
+<a name="ln349">                           &quot;%d 0 obj\n&quot;</a>
+<a name="ln350">                           &quot;&lt;&lt;\n&quot;</a>
+<a name="ln351">                           &quot;/N 3\n&quot; // should we ever support CMYK profiles then this has to be set to 4 for those</a>
+<a name="ln352">                           &quot;/Alternate /DeviceRGB\n&quot;</a>
+<a name="ln353">                           &quot;/Length %d 0 R\n&quot;</a>
+<a name="ln354">                           &quot;/Filter [ /ASCIIHexDecode ]\n&quot;</a>
+<a name="ln355">                           &quot;&gt;&gt;\n&quot;</a>
+<a name="ln356">                           &quot;stream\n&quot;,</a>
+<a name="ln357">                           icc_id, length_id</a>
+<a name="ln358">  );</a>
+<a name="ln359"> </a>
+<a name="ln360">  size_t stream_size = _pdf_stream_encoder_ASCIIHex(pdf, data, size);</a>
+<a name="ln361">  bytes_written += stream_size;</a>
+<a name="ln362"> </a>
+<a name="ln363">  bytes_written += fprintf(pdf-&gt;fd,</a>
+<a name="ln364">                           &quot;\n&quot;</a>
+<a name="ln365">                           &quot;endstream\n&quot;</a>
+<a name="ln366">                           &quot;endobj\n&quot;</a>
+<a name="ln367">  );</a>
+<a name="ln368"> </a>
+<a name="ln369">  // length of the stream</a>
+<a name="ln370">  _pdf_set_offset(pdf, length_id, pdf-&gt;bytes_written + bytes_written);</a>
+<a name="ln371">  bytes_written += fprintf(pdf-&gt;fd, &quot;%d 0 obj\n&quot;</a>
+<a name="ln372">                                    &quot;%zu\n&quot;</a>
+<a name="ln373">                                    &quot;endobj\n&quot;,</a>
+<a name="ln374">                           length_id, stream_size);</a>
+<a name="ln375"> </a>
+<a name="ln376">  pdf-&gt;bytes_written += bytes_written;</a>
+<a name="ln377"> </a>
+<a name="ln378">  return icc_id;</a>
+<a name="ln379">}</a>
+<a name="ln380"> </a>
+<a name="ln381">// this adds an image to the pdf file and returns the info needed to reference it later.</a>
+<a name="ln382">// if icc_id is 0 then we suppose the pixel data to be in output device space, otherwise the ICC profile object is referenced.</a>
+<a name="ln383">// if image == NULL only the outline can be shown later</a>
+<a name="ln384">dt_pdf_image_t *dt_pdf_add_image(dt_pdf_t *pdf, const unsigned char *image, int width, int height, int bpp, int icc_id, float border)</a>
+<a name="ln385">{</a>
+<a name="ln386">  size_t stream_size = 0;</a>
+<a name="ln387">  size_t bytes_written = 0;</a>
+<a name="ln388"> </a>
+<a name="ln389">  dt_pdf_image_t *pdf_image = calloc(1, sizeof(dt_pdf_image_t));</a>
+<a name="ln390">  if(!pdf_image) return NULL;</a>
+<a name="ln391"> </a>
+<a name="ln392">  pdf_image-&gt;width = width;</a>
+<a name="ln393">  pdf_image-&gt;height = height;</a>
+<a name="ln394">  pdf_image-&gt;outline_mode = (image == NULL);</a>
+<a name="ln395">  // no need to do fancy math here:</a>
+<a name="ln396">  pdf_image-&gt;bb_x = border;</a>
+<a name="ln397">  pdf_image-&gt;bb_y = border;</a>
+<a name="ln398">  pdf_image-&gt;bb_width = pdf-&gt;page_width - (2 * border);</a>
+<a name="ln399">  pdf_image-&gt;bb_height = pdf-&gt;page_height - (2 * border);</a>
+<a name="ln400"> </a>
+<a name="ln401">  // just draw outlines if the image is missing</a>
+<a name="ln402">  if(pdf_image-&gt;outline_mode) return pdf_image;</a>
+<a name="ln403"> </a>
+<a name="ln404">  pdf_image-&gt;object_id = pdf-&gt;next_id++;</a>
+<a name="ln405">  pdf_image-&gt;name_id = pdf-&gt;next_image++;</a>
+<a name="ln406"> </a>
+<a name="ln407">  int length_id = pdf-&gt;next_id++;</a>
+<a name="ln408"> </a>
+<a name="ln409">  // the image</a>
+<a name="ln410">  //start</a>
+<a name="ln411">  _pdf_set_offset(pdf, pdf_image-&gt;object_id, pdf-&gt;bytes_written + bytes_written);</a>
+<a name="ln412">  bytes_written += fprintf(pdf-&gt;fd,</a>
+<a name="ln413">    &quot;%d 0 obj\n&quot;</a>
+<a name="ln414">    &quot;&lt;&lt;\n&quot;</a>
+<a name="ln415">    &quot;/Type /XObject\n&quot;</a>
+<a name="ln416">    &quot;/Subtype /Image\n&quot;</a>
+<a name="ln417">    &quot;/Name /Im%d\n&quot;</a>
+<a name="ln418">    &quot;/Filter [ %s ]\n&quot;</a>
+<a name="ln419">    &quot;/Width %d\n&quot;</a>
+<a name="ln420">    &quot;/Height %d\n&quot;,</a>
+<a name="ln421">    pdf_image-&gt;object_id, pdf_image-&gt;name_id, stream_encoder_filters[pdf-&gt;default_encoder], width, height</a>
+<a name="ln422">  );</a>
+<a name="ln423">  // As I understand it in the printing case DeviceRGB (==&gt; icc_id = 0) is enough since the pixel data is in the device space then.</a>
+<a name="ln424">  if(icc_id &gt; 0)</a>
+<a name="ln425">    bytes_written += fprintf(pdf-&gt;fd, &quot;/ColorSpace [ /ICCBased %d 0 R ]\n&quot;, icc_id);</a>
+<a name="ln426">  else</a>
+<a name="ln427">    bytes_written += fprintf(pdf-&gt;fd, &quot;/ColorSpace /DeviceRGB\n&quot;);</a>
+<a name="ln428">  bytes_written += fprintf(pdf-&gt;fd,</a>
+<a name="ln429">    &quot;/BitsPerComponent %d\n&quot;</a>
+<a name="ln430">    &quot;/Intent /Perceptual\n&quot; // TODO: allow setting it from the outside</a>
+<a name="ln431">    &quot;/Length %d 0 R\n&quot;</a>
+<a name="ln432">    &quot;&gt;&gt;\n&quot;</a>
+<a name="ln433">    &quot;stream\n&quot;,</a>
+<a name="ln434">    bpp, length_id</a>
+<a name="ln435">  );</a>
+<a name="ln436"> </a>
+<a name="ln437">  // the stream</a>
+<a name="ln438">  stream_size = _pdf_write_stream(pdf, pdf-&gt;default_encoder, image, width * height * 3 * (bpp / 8));</a>
+<a name="ln439">  if(stream_size == 0)</a>
+<a name="ln440">  {</a>
+<a name="ln441">    free(pdf_image);</a>
+<a name="ln442">    return NULL;</a>
+<a name="ln443">  }</a>
+<a name="ln444">  bytes_written += stream_size;</a>
+<a name="ln445"> </a>
+<a name="ln446">  //end</a>
+<a name="ln447">  bytes_written += fprintf(pdf-&gt;fd,</a>
+<a name="ln448">    &quot;\n&quot;</a>
+<a name="ln449">    &quot;endstream\n&quot;</a>
+<a name="ln450">    &quot;endobj\n&quot;</a>
+<a name="ln451">  );</a>
+<a name="ln452"> </a>
+<a name="ln453">  // length of the last stream</a>
+<a name="ln454">  _pdf_set_offset(pdf, length_id, pdf-&gt;bytes_written + bytes_written);</a>
+<a name="ln455">  bytes_written += fprintf(pdf-&gt;fd, &quot;%d 0 obj\n&quot;</a>
+<a name="ln456">                                    &quot;%zu\n&quot;</a>
+<a name="ln457">                                    &quot;endobj\n&quot;,</a>
+<a name="ln458">                           length_id, stream_size);</a>
+<a name="ln459"> </a>
+<a name="ln460">  pdf-&gt;bytes_written += bytes_written;</a>
+<a name="ln461">  pdf_image-&gt;size = bytes_written;</a>
+<a name="ln462"> </a>
+<a name="ln463">  return pdf_image;</a>
+<a name="ln464">}</a>
+<a name="ln465"> </a>
+<a name="ln466">dt_pdf_page_t *dt_pdf_add_page(dt_pdf_t *pdf, dt_pdf_image_t **images, int n_images)</a>
+<a name="ln467">{</a>
+<a name="ln468">  dt_pdf_page_t *pdf_page = calloc(1, sizeof(dt_pdf_page_t));</a>
+<a name="ln469">  if(!pdf_page) return NULL;</a>
+<a name="ln470">  pdf_page-&gt;object_id = pdf-&gt;next_id++;</a>
+<a name="ln471">  int content_id = pdf-&gt;next_id++;</a>
+<a name="ln472">  int length_id = pdf-&gt;next_id++;</a>
+<a name="ln473">  size_t stream_size = 0, bytes_written = 0;</a>
+<a name="ln474"> </a>
+<a name="ln475">  // the page object</a>
+<a name="ln476">  _pdf_set_offset(pdf, pdf_page-&gt;object_id, pdf-&gt;bytes_written + bytes_written);</a>
+<a name="ln477">  bytes_written += fprintf(pdf-&gt;fd,</a>
+<a name="ln478">    &quot;%d 0 obj\n&quot;</a>
+<a name="ln479">    &quot;&lt;&lt;\n&quot;</a>
+<a name="ln480">    &quot;/Type /Page\n&quot;</a>
+<a name="ln481">    &quot;/Parent 2 0 R\n&quot;</a>
+<a name="ln482">    &quot;/Resources &lt;&lt;\n&quot;</a>
+<a name="ln483">    &quot;/XObject &lt;&lt;&quot;,</a>
+<a name="ln484">    pdf_page-&gt;object_id</a>
+<a name="ln485">  );</a>
+<a name="ln486">  for(int i = 0; i &lt; n_images; i++)</a>
+<a name="ln487">    bytes_written += fprintf(pdf-&gt;fd, &quot;/Im%d %d 0 R\n&quot;, images[i]-&gt;name_id, images[i]-&gt;object_id);</a>
+<a name="ln488">  bytes_written += fprintf(pdf-&gt;fd,</a>
+<a name="ln489">    &quot;&gt;&gt;\n&quot;</a>
+<a name="ln490">    &quot;/ProcSet [ /PDF /Text /ImageC ] &gt;&gt;\n&quot;</a>
+<a name="ln491">    &quot;/MediaBox [0 0 %d %d]\n&quot;</a>
+<a name="ln492">    &quot;/Contents %d 0 R\n&quot;</a>
+<a name="ln493">    &quot;&gt;&gt;\n&quot;</a>
+<a name="ln494">    &quot;endobj\n&quot;,</a>
+<a name="ln495">    (int)(pdf-&gt;page_width + 0.5), (int)(pdf-&gt;page_height + 0.5), content_id</a>
+<a name="ln496">  );</a>
+<a name="ln497"> </a>
+<a name="ln498">  // page content</a>
+<a name="ln499">  _pdf_set_offset(pdf, content_id, pdf-&gt;bytes_written + bytes_written);</a>
+<a name="ln500">  bytes_written += fprintf(pdf-&gt;fd,</a>
+<a name="ln501">    &quot;%d 0 obj\n&quot;</a>
+<a name="ln502">    &quot;&lt;&lt;\n&quot;</a>
+<a name="ln503">    &quot;/Length %d 0 R\n&quot;</a>
+<a name="ln504">    &quot;&gt;&gt;\n&quot;</a>
+<a name="ln505">    &quot;stream\n&quot;,</a>
+<a name="ln506">    content_id, length_id</a>
+<a name="ln507">  );</a>
+<a name="ln508"> </a>
+<a name="ln509">  // the stream -- we need its size in the length object</a>
+<a name="ln510">  // we want the image printed with at least the given DPI, scaling it down to fit the page if it is too big</a>
+<a name="ln511">  gboolean portrait_page = pdf-&gt;page_width &lt; pdf-&gt;page_height;</a>
+<a name="ln512"> </a>
+<a name="ln513">  for(int i = 0; i &lt; n_images; i++)</a>
+<a name="ln514">  {</a>
+<a name="ln515">    // fit the image into the bounding box that comes with the image</a>
+<a name="ln516">    float scale_x, scale_y, translate_x, translate_y;</a>
+<a name="ln517">    float width, height;</a>
+<a name="ln518">    gboolean portrait_image = images[i]-&gt;width &lt; images[i]-&gt;height;</a>
+<a name="ln519">    gboolean rotate_to_fit = images[i]-&gt;rotate_to_fit &amp;&amp; (portrait_page != portrait_image);</a>
+<a name="ln520">    if(rotate_to_fit)</a>
+<a name="ln521">    {</a>
+<a name="ln522">      width = images[i]-&gt;height;</a>
+<a name="ln523">      height = images[i]-&gt;width;</a>
+<a name="ln524">    }</a>
+<a name="ln525">    else</a>
+<a name="ln526">    {</a>
+<a name="ln527">      width = images[i]-&gt;width;</a>
+<a name="ln528">      height = images[i]-&gt;height;</a>
+<a name="ln529">    }</a>
+<a name="ln530"> </a>
+<a name="ln531">    float image_aspect_ratio = width / height;</a>
+<a name="ln532">    float bb_aspect_ratio = images[i]-&gt;bb_width / images[i]-&gt;bb_height;</a>
+<a name="ln533"> </a>
+<a name="ln534">    if(image_aspect_ratio &lt;= bb_aspect_ratio)</a>
+<a name="ln535">    {</a>
+<a name="ln536">      // scale to fit height</a>
+<a name="ln537">      float height_in_point = (height / pdf-&gt;dpi) * 72.0;</a>
+<a name="ln538">      scale_y = MIN(images[i]-&gt;bb_height, height_in_point);</a>
+<a name="ln539">      scale_x = scale_y * image_aspect_ratio;</a>
+<a name="ln540">    }</a>
+<a name="ln541">    else</a>
+<a name="ln542">    {</a>
+<a name="ln543">      // scale to fit width</a>
+<a name="ln544">      float width_in_point = (width / pdf-&gt;dpi) * 72.0;</a>
+<a name="ln545">      scale_x = MIN(images[i]-&gt;bb_width, width_in_point);</a>
+<a name="ln546">      scale_y = scale_x / image_aspect_ratio;</a>
+<a name="ln547">    }</a>
+<a name="ln548"> </a>
+<a name="ln549">    // center inside image's bounding box</a>
+<a name="ln550">    translate_x = images[i]-&gt;bb_x + 0.5 * (images[i]-&gt;bb_width - scale_x);</a>
+<a name="ln551">    translate_y = images[i]-&gt;bb_y + 0.5 * (images[i]-&gt;bb_height - scale_y);</a>
+<a name="ln552"> </a>
+<a name="ln553">    if(rotate_to_fit &amp;&amp; !images[i]-&gt;outline_mode)</a>
+<a name="ln554">    {</a>
+<a name="ln555">      float tmp = scale_x;</a>
+<a name="ln556">      scale_x = scale_y;</a>
+<a name="ln557">      scale_y = tmp;</a>
+<a name="ln558">      translate_x += scale_y;</a>
+<a name="ln559">    }</a>
+<a name="ln560"> </a>
+<a name="ln561">    // unfortunately regular fprintf honours the decimal separator as set by the current locale,</a>
+<a name="ln562">    // we want '.' in all cases though.</a>
+<a name="ln563">    char translate_x_str[G_ASCII_DTOSTR_BUF_SIZE];</a>
+<a name="ln564">    char translate_y_str[G_ASCII_DTOSTR_BUF_SIZE];</a>
+<a name="ln565">    char scale_x_str[G_ASCII_DTOSTR_BUF_SIZE];</a>
+<a name="ln566">    char scale_y_str[G_ASCII_DTOSTR_BUF_SIZE];</a>
+<a name="ln567"> </a>
+<a name="ln568">    g_ascii_dtostr(translate_x_str, G_ASCII_DTOSTR_BUF_SIZE, translate_x);</a>
+<a name="ln569">    g_ascii_dtostr(translate_y_str, G_ASCII_DTOSTR_BUF_SIZE, translate_y);</a>
+<a name="ln570">    g_ascii_dtostr(scale_x_str, G_ASCII_DTOSTR_BUF_SIZE, scale_x);</a>
+<a name="ln571">    g_ascii_dtostr(scale_y_str, G_ASCII_DTOSTR_BUF_SIZE, scale_y);</a>
+<a name="ln572"> </a>
+<a name="ln573">    if(images[i]-&gt;outline_mode)</a>
+<a name="ln574">    {</a>
+<a name="ln575">      // instead of drawign the image we just draw the outlines</a>
+<a name="ln576">      stream_size += fprintf(pdf-&gt;fd,</a>
+<a name="ln577">        &quot;q\n&quot;</a>
+<a name="ln578">        &quot;[4 6] 0 d\n&quot;</a>
+<a name="ln579">        &quot;%s %s %s %s re\n&quot;</a>
+<a name="ln580">        &quot;S\n&quot;</a>
+<a name="ln581">        &quot;Q\n&quot;,</a>
+<a name="ln582">        translate_x_str, translate_y_str, scale_x_str, scale_y_str</a>
+<a name="ln583">      );</a>
+<a name="ln584">    }</a>
+<a name="ln585">    else</a>
+<a name="ln586">    {</a>
+<a name="ln587">      stream_size += fprintf(pdf-&gt;fd,</a>
+<a name="ln588">        &quot;q\n&quot;</a>
+<a name="ln589">        &quot;1 0 0 1 %s %s cm\n&quot;, // translate</a>
+<a name="ln590">        translate_x_str, translate_y_str</a>
+<a name="ln591">      );</a>
+<a name="ln592">      if(rotate_to_fit)</a>
+<a name="ln593">        stream_size += fprintf(pdf-&gt;fd,</a>
+<a name="ln594">          &quot;0 1 -1 0 0 0 cm\n&quot; // rotate</a>
+<a name="ln595">        );</a>
+<a name="ln596">      stream_size += fprintf(pdf-&gt;fd,</a>
+<a name="ln597">        &quot;%s 0 0 %s 0 0 cm\n&quot; // scale</a>
+<a name="ln598">        &quot;/Im%d Do\n&quot;</a>
+<a name="ln599">        &quot;Q\n&quot;,</a>
+<a name="ln600">        scale_x_str, scale_y_str, images[i]-&gt;name_id</a>
+<a name="ln601">      );</a>
+<a name="ln602">    }</a>
+<a name="ln603"> </a>
+<a name="ln604">    // DEBUG: draw the bounding box</a>
+<a name="ln605">    if(images[i]-&gt;show_bb)</a>
+<a name="ln606">    {</a>
+<a name="ln607">      char bb_x_str[G_ASCII_DTOSTR_BUF_SIZE];</a>
+<a name="ln608">      char bb_y_str[G_ASCII_DTOSTR_BUF_SIZE];</a>
+<a name="ln609">      char bb_w_str[G_ASCII_DTOSTR_BUF_SIZE];</a>
+<a name="ln610">      char bb_h_str[G_ASCII_DTOSTR_BUF_SIZE];</a>
+<a name="ln611"> </a>
+<a name="ln612">      g_ascii_dtostr(bb_x_str, G_ASCII_DTOSTR_BUF_SIZE, images[i]-&gt;bb_x);</a>
+<a name="ln613">      g_ascii_dtostr(bb_y_str, G_ASCII_DTOSTR_BUF_SIZE, images[i]-&gt;bb_y);</a>
+<a name="ln614">      g_ascii_dtostr(bb_w_str, G_ASCII_DTOSTR_BUF_SIZE, images[i]-&gt;bb_width);</a>
+<a name="ln615">      g_ascii_dtostr(bb_h_str, G_ASCII_DTOSTR_BUF_SIZE, images[i]-&gt;bb_height);</a>
+<a name="ln616"> </a>
+<a name="ln617">      stream_size += fprintf(pdf-&gt;fd,</a>
+<a name="ln618">        &quot;q\n&quot;</a>
+<a name="ln619">        &quot;%s %s %s %s re\n&quot;</a>
+<a name="ln620">        &quot;S\n&quot;</a>
+<a name="ln621">        &quot;Q\n&quot;,</a>
+<a name="ln622">        bb_x_str, bb_y_str, bb_w_str, bb_h_str</a>
+<a name="ln623">      );</a>
+<a name="ln624">    }</a>
+<a name="ln625">  }</a>
+<a name="ln626"> </a>
+<a name="ln627">  bytes_written += fprintf(pdf-&gt;fd,</a>
+<a name="ln628">    &quot;endstream\n&quot;</a>
+<a name="ln629">    &quot;endobj\n&quot;</a>
+<a name="ln630">  );</a>
+<a name="ln631">  bytes_written += stream_size;</a>
+<a name="ln632"> </a>
+<a name="ln633">  // length of the last stream</a>
+<a name="ln634">  _pdf_set_offset(pdf, length_id, pdf-&gt;bytes_written + bytes_written);</a>
+<a name="ln635">  bytes_written += fprintf(pdf-&gt;fd, &quot;%d 0 obj\n&quot;</a>
+<a name="ln636">                                    &quot;%zu\n&quot;</a>
+<a name="ln637">                                    &quot;endobj\n&quot;,</a>
+<a name="ln638">                           length_id, stream_size);</a>
+<a name="ln639"> </a>
+<a name="ln640">  pdf_page-&gt;size = bytes_written;</a>
+<a name="ln641">  pdf-&gt;bytes_written += bytes_written;</a>
+<a name="ln642"> </a>
+<a name="ln643">  return pdf_page;</a>
+<a name="ln644">}</a>
+<a name="ln645"> </a>
+<a name="ln646">// our writing order is a little strange since we write object 2 (the pages dictionary) at the end of the file</a>
+<a name="ln647">// because we don't know the number of pages / objects in advance (due to lazy coding)</a>
+<a name="ln648">void dt_pdf_finish(dt_pdf_t *pdf, dt_pdf_page_t **pages, int n_pages)</a>
+<a name="ln649">{</a>
+<a name="ln650">  int info_id = pdf-&gt;next_id++;</a>
+<a name="ln651">  size_t bytes_written = 0;</a>
+<a name="ln652"> </a>
+<a name="ln653">  // the pages dictionary</a>
+<a name="ln654">  _pdf_set_offset(pdf, 2, pdf-&gt;bytes_written + bytes_written);</a>
+<a name="ln655">  bytes_written += fprintf(pdf-&gt;fd,</a>
+<a name="ln656">    &quot;2 0 obj\n&quot; // yes, this is hardcoded to be object 2, even if written in the end</a>
+<a name="ln657">    &quot;&lt;&lt;\n&quot;</a>
+<a name="ln658">    &quot;/Type /Pages\n&quot;</a>
+<a name="ln659">    &quot;/Kids [\n&quot;</a>
+<a name="ln660">  );</a>
+<a name="ln661">  for(int i = 0; i &lt; n_pages; i++)</a>
+<a name="ln662">    bytes_written += fprintf(pdf-&gt;fd, &quot;%d 0 R\n&quot;, pages[i]-&gt;object_id);</a>
+<a name="ln663">  bytes_written += fprintf(pdf-&gt;fd,</a>
+<a name="ln664">    &quot;]\n&quot;</a>
+<a name="ln665">    &quot;/Count %d\n&quot;</a>
+<a name="ln666">    &quot;&gt;&gt;\n&quot;</a>
+<a name="ln667">    &quot;endobj\n&quot;,</a>
+<a name="ln668">    n_pages</a>
+<a name="ln669">  );</a>
+<a name="ln670"> </a>
+<a name="ln671">  // the info</a>
+<a name="ln672"> </a>
+<a name="ln673">  // the method to get the time_str is taken from pdftex</a>
+<a name="ln674">  char time_str[30];</a>
+<a name="ln675">  time_t t;</a>
+<a name="ln676">  struct tm lt, gmt;</a>
+<a name="ln677">  size_t size;</a>
+<a name="ln678">  int off, off_hours, off_mins;</a>
+<a name="ln679"> </a>
+<a name="ln680">  /* get the time */</a>
+<a name="ln681">  t = time(NULL);</a>
+<a name="ln682">  localtime_r(&amp;t, &amp;lt);</a>
+<a name="ln683">  size = strftime(time_str, sizeof(time_str), &quot;D:%Y%m%d%H%M%S&quot;, &amp;lt);</a>
+<a name="ln684">  /* expected format: &quot;YYYYmmddHHMMSS&quot; */</a>
+<a name="ln685">  if(size == 0)</a>
+<a name="ln686">  {</a>
+<a name="ln687">    /* unexpected, contents of time_str is undefined */</a>
+<a name="ln688">    time_str[0] = '\0';</a>
+<a name="ln689">    goto time_error;</a>
+<a name="ln690">  }</a>
+<a name="ln691"> </a>
+<a name="ln692">  /* correction for seconds: %S can be in range 00..61,</a>
+<a name="ln693">   *  the PDF reference expects 00..59,</a>
+<a name="ln694">   *  therefore we map &quot;60&quot; and &quot;61&quot; to &quot;59&quot; */</a>
+<a name="ln695">  if(time_str[14] == '6')</a>
+<a name="ln696">  {</a>
+<a name="ln697">    time_str[14] = '5';</a>
+<a name="ln698">    time_str[15] = '9';</a>
+<a name="ln699">    time_str[16] = '\0';    /* for safety */</a>
+<a name="ln700">  }</a>
+<a name="ln701"> </a>
+<a name="ln702">  /* get the time zone offset */</a>
+<a name="ln703">  gmtime_r(&amp;t, &amp;gmt);</a>
+<a name="ln704"> </a>
+<a name="ln705">  /* this calculation method was found in exim's tod.c */</a>
+<a name="ln706">  off = 60 * (lt.tm_hour - gmt.tm_hour) + lt.tm_min - gmt.tm_min;</a>
+<a name="ln707">  if(lt.tm_year != gmt.tm_year)</a>
+<a name="ln708">    off += (lt.tm_year &gt; gmt.tm_year) ? 1440 : -1440;</a>
+<a name="ln709">  else if(lt.tm_yday != gmt.tm_yday)</a>
+<a name="ln710">    off += (lt.tm_yday &gt; gmt.tm_yday) ? 1440 : -1440;</a>
+<a name="ln711"> </a>
+<a name="ln712">  if(off == 0)</a>
+<a name="ln713">  {</a>
+<a name="ln714">    time_str[size++] = 'Z';</a>
+<a name="ln715">    time_str[size] = 0;</a>
+<a name="ln716">  }</a>
+<a name="ln717">  else</a>
+<a name="ln718">  {</a>
+<a name="ln719">    off_hours = off / 60;</a>
+<a name="ln720">    off_mins = abs(off - off_hours * 60);</a>
+<a name="ln721">    snprintf(&amp;time_str[size], 9, &quot;%+03d'%02d'&quot;, off_hours, off_mins);</a>
+<a name="ln722">  }</a>
+<a name="ln723"> </a>
+<a name="ln724">time_error:</a>
+<a name="ln725"> </a>
+<a name="ln726">  _pdf_set_offset(pdf, info_id, pdf-&gt;bytes_written + bytes_written);</a>
+<a name="ln727">  bytes_written += fprintf(pdf-&gt;fd,</a>
+<a name="ln728">    &quot;%d 0 obj\n&quot;</a>
+<a name="ln729">    &quot;&lt;&lt;\n&quot;</a>
+<a name="ln730">    &quot;/Title (%s)\n&quot;,</a>
+<a name="ln731">    info_id, pdf-&gt;title ? pdf-&gt;title : &quot;untitled&quot;</a>
+<a name="ln732">  );</a>
+<a name="ln733">  if(*time_str)</a>
+<a name="ln734">  {</a>
+<a name="ln735">    bytes_written += fprintf(pdf-&gt;fd,</a>
+<a name="ln736">      &quot;/CreationDate (%1$s)\n&quot;</a>
+<a name="ln737">      &quot;/ModDate (%1$s)\n&quot;,</a>
+<a name="ln738">      time_str</a>
+<a name="ln739">    );</a>
+<a name="ln740">  }</a>
+<a name="ln741">  bytes_written += fprintf(pdf-&gt;fd, &quot;/Producer (%s https://www.darktable.org)\n&quot;</a>
+<a name="ln742">                                    &quot;&gt;&gt;\n&quot;</a>
+<a name="ln743">                                    &quot;endobj\n&quot;,</a>
+<a name="ln744">                           PACKAGE_STRING);</a>
+<a name="ln745"> </a>
+<a name="ln746">  pdf-&gt;bytes_written += bytes_written;</a>
+<a name="ln747"> </a>
+<a name="ln748">  // the cross reference table</a>
+<a name="ln749">  fprintf(pdf-&gt;fd,</a>
+<a name="ln750">    &quot;xref\n&quot;</a>
+<a name="ln751">    &quot;0 %d\n&quot;</a>
+<a name="ln752">    &quot;0000000000 65535 f \n&quot;,</a>
+<a name="ln753">    pdf-&gt;next_id</a>
+<a name="ln754">  );</a>
+<a name="ln755">  for(int i = 0; i &lt; pdf-&gt;next_id - 1; i++) fprintf(pdf-&gt;fd, &quot;%010zu 00000 n \n&quot;, pdf-&gt;offsets[i]);</a>
+<a name="ln756"> </a>
+<a name="ln757">  // the trailer</a>
+<a name="ln758">  fprintf(pdf-&gt;fd,</a>
+<a name="ln759">    &quot;trailer\n&quot;</a>
+<a name="ln760">    &quot;&lt;&lt;\n&quot;</a>
+<a name="ln761">    &quot;/Size %d\n&quot;</a>
+<a name="ln762">    &quot;/Info %d 0 R\n&quot; // we want to have the Info last in the file, so this is /Size - 1</a>
+<a name="ln763">    &quot;/Root 1 0 R\n&quot;</a>
+<a name="ln764">    &quot;/ID [&lt;dead&gt; &lt;babe&gt;]\n&quot; // TODO find something less necrophilic, maybe hash of image + history? or just of filename + date :)</a>
+<a name="ln765">    &quot;&gt;&gt;\n&quot;,</a>
+<a name="ln766">    pdf-&gt;next_id, info_id</a>
+<a name="ln767">  );</a>
+<a name="ln768"> </a>
+<a name="ln769">  // and finally the file footer with the offset of the xref section</a>
+<a name="ln770">  fprintf(pdf-&gt;fd, &quot;startxref\n&quot;</a>
+<a name="ln771">                   &quot;%zu\n&quot;</a>
+<a name="ln772">                   &quot;%%%%EOF\n&quot;,</a>
+<a name="ln773">          pdf-&gt;bytes_written);</a>
+<a name="ln774"> </a>
+<a name="ln775">  fclose(pdf-&gt;fd);</a>
+<a name="ln776">  free(pdf-&gt;offsets);</a>
+<a name="ln777">  free(pdf);</a>
+<a name="ln778">}</a>
+<a name="ln779"> </a>
+<a name="ln780">#ifdef STANDALONE</a>
+<a name="ln781"> </a>
+<a name="ln782">// just for debugging to read a ppm file</a>
+<a name="ln783">float * read_ppm(const char * filename, int * wd, int * ht)</a>
+<a name="ln784">{</a>
+<a name="ln785">  FILE *f = g_fopen(filename, &quot;rb&quot;);</a>
+<a name="ln786"> </a>
+<a name="ln787">  if(!f)</a>
+<a name="ln788">  {</a>
+<a name="ln789">    fprintf(stderr, &quot;can't open input file\n&quot;);</a>
+<a name="ln790">    return NULL;</a>
+<a name="ln791">  }</a>
+<a name="ln792"> </a>
+<a name="ln793">  char magic[3];</a>
+<a name="ln794">  int width, height, max;</a>
+<a name="ln795">  fscanf(f, &quot;%c%c %d %d %d &quot;, &amp;magic[0], &amp;magic[1], &amp;width, &amp;height, &amp;max);</a>
+<a name="ln796">  if(magic[0] != 'P' || magic[1] != '6')</a>
+<a name="ln797">  {</a>
+<a name="ln798">    fprintf(stderr, &quot;wrong input file format\n&quot;);</a>
+<a name="ln799">    fclose(f);</a>
+<a name="ln800">    return NULL;</a>
+<a name="ln801">  }</a>
+<a name="ln802"> </a>
+<a name="ln803">  float *image = (float*)malloc(sizeof(float) * width * height * 3);</a>
+<a name="ln804"> </a>
+<a name="ln805">  if(max &lt;= 255)</a>
+<a name="ln806">  {</a>
+<a name="ln807">    // read a 8 bit PPM</a>
+<a name="ln808">    uint8_t *tmp = (uint8_t *)malloc(sizeof(uint8_t) * width * height * 3);</a>
+<a name="ln809">    int res = fread(tmp, sizeof(uint8_t) * 3, width * height, f);</a>
+<a name="ln810">    if(res != width * height)</a>
+<a name="ln811">    {</a>
+<a name="ln812">      fprintf(stderr, &quot;error reading 8 bit PPM\n&quot;);</a>
+<a name="ln813">      free(tmp);</a>
+<a name="ln814">      free(image);</a>
+<a name="ln815">      fclose(f);</a>
+<a name="ln816">      return NULL;</a>
+<a name="ln817">    }</a>
+<a name="ln818">    // and transform it into 0..1 range</a>
+<a name="ln819">    #ifdef _OPENMP</a>
+<a name="ln820">    #pragma omp parallel for schedule(static) default(none) shared(image, tmp, width, height, max)</a>
+<a name="ln821">    #endif</a>
+<a name="ln822">    for(int i = 0; i &lt; width * height * 3; i++)</a>
+<a name="ln823">      image[i] = (float)tmp[i] / max;</a>
+<a name="ln824">    free(tmp);</a>
+<a name="ln825">  }</a>
+<a name="ln826">  else</a>
+<a name="ln827">  {</a>
+<a name="ln828">    // read a 16 bit PPM</a>
+<a name="ln829">    uint16_t *tmp = (uint16_t *)malloc(sizeof(uint16_t) * width * height * 3);</a>
+<a name="ln830">    int res = fread(tmp, sizeof(uint16_t) * 3, width * height, f);</a>
+<a name="ln831">    if(res != width * height)</a>
+<a name="ln832">    {</a>
+<a name="ln833">      fprintf(stderr, &quot;error reading 16 bit PPM\n&quot;);</a>
+<a name="ln834">      free(tmp);</a>
+<a name="ln835">      free(image);</a>
+<a name="ln836">      fclose(f);</a>
+<a name="ln837">      return NULL;</a>
+<a name="ln838">    }</a>
+<a name="ln839">    // swap byte order</a>
+<a name="ln840">    #ifdef _OPENMP</a>
+<a name="ln841">    #pragma omp parallel for schedule(static) default(none) shared(tmp, width, height)</a>
+<a name="ln842">    #endif</a>
+<a name="ln843">    for(int k = 0; k &lt; 3 * width * height; k++)</a>
+<a name="ln844">      tmp[k] = ((tmp[k] &amp; 0xff) &lt;&lt; 8) | (tmp[k] &gt;&gt; 8);</a>
+<a name="ln845">    // and transform it into 0..1 range</a>
+<a name="ln846">    #ifdef _OPENMP</a>
+<a name="ln847">    #pragma omp parallel for schedule(static) default(none) shared(image, tmp, max, width, height)</a>
+<a name="ln848">    #endif</a>
+<a name="ln849">    for(int i = 0; i &lt; width * height * 3; i++)</a>
+<a name="ln850">      image[i] = (float)tmp[i] / max;</a>
+<a name="ln851">    free(tmp);</a>
+<a name="ln852">  }</a>
+<a name="ln853">  fclose(f);</a>
+<a name="ln854"> </a>
+<a name="ln855">  if(wd) *wd = width;</a>
+<a name="ln856">  if(ht) *ht = height;</a>
+<a name="ln857">  return image;</a>
+<a name="ln858">}</a>
+<a name="ln859"> </a>
+<a name="ln860">int main(int argc, char *argv[])</a>
+<a name="ln861">{</a>
+<a name="ln862">  if(argc &lt; 3)</a>
+<a name="ln863">  {</a>
+<a name="ln864">    fprintf(stderr, &quot;usage: %s &lt;input PPM&gt; [&lt;input PPM&gt; ...] &lt;output PDF&gt;\n&quot;, argv[0]);</a>
+<a name="ln865">    exit(1);</a>
+<a name="ln866">  }</a>
+<a name="ln867"> </a>
+<a name="ln868">  // example for A4 portrait, which is 210 mm x 297 mm.</a>
+<a name="ln869">  float page_width, page_height, border;</a>
+<a name="ln870">  dt_pdf_parse_length(&quot;10 mm&quot;, &amp;border); // add an empty space of 1 cm for the sake of demonstration</a>
+<a name="ln871">  dt_pdf_parse_paper_size(&quot;a4&quot;, &amp;page_width, &amp;page_height);</a>
+<a name="ln872"> </a>
+<a name="ln873">  // since this is just stupid example code we are going to put the images into the pdf twice:</a>
+<a name="ln874">  // I am not 100% sure if image objects may be reused like that in PDFs, but it seems to work</a>
+<a name="ln875"> </a>
+<a name="ln876">  dt_pdf_t *pdf = dt_pdf_start(argv[argc - 1], page_width, page_height, 360, DT_PDF_STREAM_ENCODER_FLATE);</a>
+<a name="ln877"> </a>
+<a name="ln878">  // we can load icc profiles and assign them to images. For testing something like</a>
+<a name="ln879">  // https://github.com/boxerab/graphicsmagick/raw/master/profiles/BRG.icc works really good</a>
+<a name="ln880">  int icc_id = dt_pdf_add_icc(pdf, &quot;BRG.icc&quot;);</a>
+<a name="ln881"> </a>
+<a name="ln882">  const int n_images = argc - 2;</a>
+<a name="ln883">  const int n_pages = argc - 1;</a>
+<a name="ln884"> </a>
+<a name="ln885">  dt_pdf_image_t *images[n_images];</a>
+<a name="ln886">  dt_pdf_page_t *pages[n_pages]; // one extra page for the stupid image dump</a>
+<a name="ln887"> </a>
+<a name="ln888">  // load all the images. it doesn't matter when we do it, as long as they are loaded before</a>
+<a name="ln889">  // creating the page they should appear on (and even that is just a constraint of this code)</a>
+<a name="ln890">  for(int i = 0; i &lt; n_images; i++)</a>
+<a name="ln891">  {</a>
+<a name="ln892">    int width, height;</a>
+<a name="ln893">    float *image = read_ppm(argv[i + 1], &amp;width, &amp;height);</a>
+<a name="ln894">    if(!image) exit(1);</a>
+<a name="ln895">    uint16_t *data = (uint16_t *)malloc(width * height * 3 * sizeof(uint16_t));</a>
+<a name="ln896">    if(!data)</a>
+<a name="ln897">    {</a>
+<a name="ln898">      free(image);</a>
+<a name="ln899">      exit(1);</a>
+<a name="ln900">    }</a>
+<a name="ln901"> </a>
+<a name="ln902">#ifdef _OPENMP</a>
+<a name="ln903">  #pragma omp parallel for schedule(static) default(none) shared(image, data, width, height)</a>
+<a name="ln904">#endif</a>
+<a name="ln905">    for(int i = 0; i &lt; width * height * 3; i++)</a>
+<a name="ln906">      data[i] = CLAMP_FLT(image[i]) * 65535;</a>
+<a name="ln907"> </a>
+<a name="ln908">    images[i] = dt_pdf_add_image(pdf, (unsigned char *)data, width, height, 16, icc_id, border);</a>
+<a name="ln909">    free(image);</a>
+<a name="ln910">    free(data);</a>
+<a name="ln911">  }</a>
+<a name="ln912"> </a>
+<a name="ln913">  // add pages with one image each, filling the page minus borders</a>
+<a name="ln914">  for(int i = 0; i &lt; n_images; i++)</a>
+<a name="ln915">    pages[i] = dt_pdf_add_page(pdf, &amp;images[i], 1);</a>
+<a name="ln916"> </a>
+<a name="ln917">  // add the whole bunch of images to the last page</a>
+<a name="ln918">  // images' default bounding boxen span the whole page, so set them a little smaller first, also enable bounding box drawing.</a>
+<a name="ln919">  // we can also set outline mode afterwards. note that it is NOT safe to load images with outline_mode = 1 and then set it to 0 later!</a>
+<a name="ln920">  {</a>
+<a name="ln921">    // TODO: use border and add new pages when we filled one up</a>
+<a name="ln922">    float bb_size = dt_pdf_mm_to_point(60);</a>
+<a name="ln923">    int n_x = page_width / bb_size;</a>
+<a name="ln924">    float bb_empty = (page_width - (n_x * bb_size)) / n_x;</a>
+<a name="ln925">    float bb_step = bb_empty + bb_size;</a>
+<a name="ln926"> </a>
+<a name="ln927">    float x = bb_empty * 0.5, y = bb_empty * 0.5;</a>
+<a name="ln928"> </a>
+<a name="ln929">    for(int i = 0; i &lt; n_images; i++)</a>
+<a name="ln930">    {</a>
+<a name="ln931">      images[i]-&gt;outline_mode = TRUE;</a>
+<a name="ln932">      images[i]-&gt;show_bb = TRUE;</a>
+<a name="ln933">      images[i]-&gt;bb_width = bb_size;</a>
+<a name="ln934">      images[i]-&gt;bb_height = bb_size;</a>
+<a name="ln935">      images[i]-&gt;bb_x = x;</a>
+<a name="ln936">      images[i]-&gt;bb_y = y;</a>
+<a name="ln937">      x += bb_step;</a>
+<a name="ln938">      if((i+1) % n_x == 0)</a>
+<a name="ln939">      {</a>
+<a name="ln940">        x = bb_empty * 0.5;</a>
+<a name="ln941">        y += bb_step;</a>
+<a name="ln942">      }</a>
+<a name="ln943">    }</a>
+<a name="ln944">  }</a>
+<a name="ln945"> </a>
+<a name="ln946">  pages[n_images] = dt_pdf_add_page(pdf, images, n_images);</a>
+<a name="ln947"> </a>
+<a name="ln948">  dt_pdf_finish(pdf, pages, n_pages);</a>
+<a name="ln949"> </a>
+<a name="ln950">  for(int i = 0; i &lt; n_images; i++)</a>
+<a name="ln951">    free(images[i]);</a>
+<a name="ln952">  for(int i = 0; i &lt; n_pages; i++)</a>
+<a name="ln953">    free(pages[i]);</a>
+<a name="ln954"> </a>
+<a name="ln955">  return 0;</a>
+<a name="ln956">}</a>
+<a name="ln957"> </a>
+<a name="ln958">#endif // STANDALONE</a>
+<a name="ln959"> </a>
+<a name="ln960">// modelines: These editor modelines have been set for all relevant files by tools/update_modelines.sh</a>
+<a name="ln961">// vim: shiftwidth=2 expandtab tabstop=2 cindent</a>
+<a name="ln962">// kate: tab-indents: off; indent-width 2; replace-tabs on; indent-mode cstyle; remove-trailing-spaces modified;</a>
+
+</code></pre>
+<div class="balloon" rel="203"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v701/" target="_blank">V701</a> realloc() possible leak: when realloc() fails in allocating memory, original pointer 'pdf->offsets' is lost. Consider assigning realloc() to a temporary pointer.</p></div>
+<div class="balloon" rel="279"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v575/" target="_blank">V575</a> The potential null pointer is passed into 'compress' function. Inspect the first argument. Check lines: 279, 277.</p></div>
+<div class="balloon" rel="325"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v575/" target="_blank">V575</a> The potential null pointer is passed into 'fread' function. Inspect the first argument. Check lines: 325, 324.</p></div>
+
+<link rel="stylesheet" href="highlight.css">
+<script src="highlight.pack.js"></script>
+<script src="highlightjs-line-numbers.js"></script>
+<script>hljs.initHighlightingOnLoad();</script>
+<script>hljs.initLineNumbersOnLoad();</script>
+<script>
+  $(document).ready(function() {
+      $('.balloon').each(function () {
+          var bl = $(this);
+          var line = bl.attr('rel');
+          var text = $('a[name="ln'+line+'"]').text();
+
+          var space_count = 0;
+          for(var i = 0; i<text.length; i++){
+              var char = text[i];
+              if((char !== ' ')&&(char !== '\t'))break;
+              if(char === '\t')space_count++;
+              space_count++;
+          }
+
+          bl.css('margin-left', space_count*8);
+          $('a[name="ln'+line+'"]').after(bl);
+      });
+
+      window.location = window.location;
+  });
+</script>
+</body>
+</html>

@@ -1,0 +1,355 @@
+
+<html>
+<head>
+  <link rel="stylesheet" href="../style.css"/>
+  <script src="../jquery-3.2.1.min.js"></script>
+</head>
+<body>
+<pre><code class = "cpp">
+<a name="ln1">/*</a>
+<a name="ln2">    This file is part of darktable,</a>
+<a name="ln3">    copyright (c) 2011 henrik andersson</a>
+<a name="ln4"> </a>
+<a name="ln5">    darktable is free software: you can redistribute it and/or modify</a>
+<a name="ln6">    it under the terms of the GNU General Public License as published by</a>
+<a name="ln7">    the Free Software Foundation, either version 3 of the License, or</a>
+<a name="ln8">    (at your option) any later version.</a>
+<a name="ln9"> </a>
+<a name="ln10">    darktable is distributed in the hope that it will be useful,</a>
+<a name="ln11">    but WITHOUT ANY WARRANTY; without even the implied warranty of</a>
+<a name="ln12">    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the</a>
+<a name="ln13">    GNU General Public License for more details.</a>
+<a name="ln14"> </a>
+<a name="ln15">    You should have received a copy of the GNU General Public License</a>
+<a name="ln16">    along with darktable.  If not, see &lt;http://www.gnu.org/licenses/&gt;.</a>
+<a name="ln17">*/</a>
+<a name="ln18">#include &quot;common/gpx.h&quot;</a>
+<a name="ln19">#include &quot;common/darktable.h&quot;</a>
+<a name="ln20">#include &lt;glib.h&gt;</a>
+<a name="ln21">#include &lt;inttypes.h&gt;</a>
+<a name="ln22"> </a>
+<a name="ln23">typedef struct _gpx_track_point_t</a>
+<a name="ln24">{</a>
+<a name="ln25">  gdouble longitude, latitude, elevation;</a>
+<a name="ln26">  GTimeVal time;</a>
+<a name="ln27">} _gpx_track_point_t;</a>
+<a name="ln28"> </a>
+<a name="ln29">/* GPX XML parser */</a>
+<a name="ln30">typedef enum _gpx_parser_element_t</a>
+<a name="ln31">{</a>
+<a name="ln32">  GPX_PARSER_ELEMENT_NONE = 0,</a>
+<a name="ln33">  GPX_PARSER_ELEMENT_TRKPT = 1 &lt;&lt; 0,</a>
+<a name="ln34">  GPX_PARSER_ELEMENT_TIME = 1 &lt;&lt; 1,</a>
+<a name="ln35">  GPX_PARSER_ELEMENT_ELE = 1 &lt;&lt; 2</a>
+<a name="ln36">} _gpx_parser_element_t;</a>
+<a name="ln37"> </a>
+<a name="ln38">typedef struct dt_gpx_t</a>
+<a name="ln39">{</a>
+<a name="ln40">  /* the list of track records parsed */</a>
+<a name="ln41">  GList *track;</a>
+<a name="ln42"> </a>
+<a name="ln43">  /* currently parsed track point */</a>
+<a name="ln44">  _gpx_track_point_t *current_track_point;</a>
+<a name="ln45">  _gpx_parser_element_t current_parser_element;</a>
+<a name="ln46">  gboolean invalid_track_point;</a>
+<a name="ln47">  gboolean parsing_trk;</a>
+<a name="ln48"> </a>
+<a name="ln49">} dt_gpx_t;</a>
+<a name="ln50"> </a>
+<a name="ln51">static void _gpx_parser_start_element(GMarkupParseContext *ctx, const gchar *element_name,</a>
+<a name="ln52">                                      const gchar **attribute_names, const gchar **attribute_values,</a>
+<a name="ln53">                                      gpointer ueer_data, GError **error);</a>
+<a name="ln54">static void _gpx_parser_end_element(GMarkupParseContext *context, const gchar *element_name,</a>
+<a name="ln55">                                    gpointer user_data, GError **error);</a>
+<a name="ln56">static void _gpx_parser_text(GMarkupParseContext *context, const gchar *text, gsize text_len,</a>
+<a name="ln57">                             gpointer user_data, GError **error);</a>
+<a name="ln58"> </a>
+<a name="ln59">static GMarkupParser _gpx_parser</a>
+<a name="ln60">    = { _gpx_parser_start_element, _gpx_parser_end_element, _gpx_parser_text, NULL, NULL };</a>
+<a name="ln61"> </a>
+<a name="ln62"> </a>
+<a name="ln63">static gint _sort_track(gconstpointer a, gconstpointer b)</a>
+<a name="ln64">{</a>
+<a name="ln65">  const _gpx_track_point_t *pa = (const _gpx_track_point_t *)a;</a>
+<a name="ln66">  const _gpx_track_point_t *pb = (const _gpx_track_point_t *)b;</a>
+<a name="ln67">  glong diff = pa-&gt;time.tv_sec - pb-&gt;time.tv_sec;</a>
+<a name="ln68">  return diff != 0 ? diff : pa-&gt;time.tv_usec - pb-&gt;time.tv_usec;</a>
+<a name="ln69">}</a>
+<a name="ln70"> </a>
+<a name="ln71">dt_gpx_t *dt_gpx_new(const gchar *filename)</a>
+<a name="ln72">{</a>
+<a name="ln73">  dt_gpx_t *gpx = NULL;</a>
+<a name="ln74">  GMarkupParseContext *ctx = NULL;</a>
+<a name="ln75">  GError *err = NULL;</a>
+<a name="ln76">  GMappedFile *gpxmf = NULL;</a>
+<a name="ln77">  gchar *gpxmf_content = NULL;</a>
+<a name="ln78">  gint gpxmf_size = 0;</a>
+<a name="ln79">  gint bom_offset = 0;</a>
+<a name="ln80"> </a>
+<a name="ln81"> </a>
+<a name="ln82">  /* map gpx file to parse into memory */</a>
+<a name="ln83">  gpxmf = g_mapped_file_new(filename, FALSE, &amp;err);</a>
+<a name="ln84">  if(err) goto error;</a>
+<a name="ln85"> </a>
+<a name="ln86">  gpxmf_content = g_mapped_file_get_contents(gpxmf);</a>
+<a name="ln87">  gpxmf_size = g_mapped_file_get_length(gpxmf);</a>
+<a name="ln88">  if(!gpxmf_content || gpxmf_size &lt; 10) goto error;</a>
+<a name="ln89"> </a>
+<a name="ln90">  /* allocate new dt_gpx_t context */</a>
+<a name="ln91">  gpx = g_malloc0(sizeof(dt_gpx_t));</a>
+<a name="ln92"> </a>
+<a name="ln93">  /* skip UTF-8 BOM */</a>
+<a name="ln94">  if(gpxmf_size &gt; 3 &amp;&amp; gpxmf_content[0] == '\xef' &amp;&amp; gpxmf_content[1] == '\xbb' &amp;&amp; gpxmf_content[2] == '\xbf')</a>
+<a name="ln95">    bom_offset = 3;</a>
+<a name="ln96"> </a>
+<a name="ln97">  /* initialize the parser and start parse gpx xml data */</a>
+<a name="ln98">  ctx = g_markup_parse_context_new(&amp;_gpx_parser, 0, gpx, NULL);</a>
+<a name="ln99">  g_markup_parse_context_parse(ctx, gpxmf_content + bom_offset, gpxmf_size - bom_offset, &amp;err);</a>
+<a name="ln100">  if(err) goto error;</a>
+<a name="ln101"> </a>
+<a name="ln102"> </a>
+<a name="ln103">  /* cleanup and return gpx context */</a>
+<a name="ln104">  g_markup_parse_context_free(ctx);</a>
+<a name="ln105">  g_mapped_file_unref(gpxmf);</a>
+<a name="ln106"> </a>
+<a name="ln107">  /* safeguard against corrupt gpx files that have the points not ordered by time */</a>
+<a name="ln108">  gpx-&gt;track = g_list_sort(gpx-&gt;track, _sort_track);</a>
+<a name="ln109"> </a>
+<a name="ln110">  return gpx;</a>
+<a name="ln111"> </a>
+<a name="ln112">error:</a>
+<a name="ln113">  if(err)</a>
+<a name="ln114">  {</a>
+<a name="ln115">    fprintf(stderr, &quot;dt_gpx_new: %s\n&quot;, err-&gt;message);</a>
+<a name="ln116">    g_error_free(err);</a>
+<a name="ln117">  }</a>
+<a name="ln118"> </a>
+<a name="ln119">  if(ctx) g_markup_parse_context_free(ctx);</a>
+<a name="ln120"> </a>
+<a name="ln121">  g_free(gpx);</a>
+<a name="ln122"> </a>
+<a name="ln123">  if(gpxmf) g_mapped_file_unref(gpxmf);</a>
+<a name="ln124"> </a>
+<a name="ln125">  return NULL;</a>
+<a name="ln126">}</a>
+<a name="ln127"> </a>
+<a name="ln128">void dt_gpx_destroy(struct dt_gpx_t *gpx)</a>
+<a name="ln129">{</a>
+<a name="ln130">  g_assert(gpx != NULL);</a>
+<a name="ln131"> </a>
+<a name="ln132">  if(gpx-&gt;track) g_list_free_full(gpx-&gt;track, g_free);</a>
+<a name="ln133"> </a>
+<a name="ln134">  g_free(gpx);</a>
+<a name="ln135">}</a>
+<a name="ln136"> </a>
+<a name="ln137">gboolean dt_gpx_get_location(struct dt_gpx_t *gpx, GTimeVal *timestamp, gdouble *lon, gdouble *lat,</a>
+<a name="ln138">                             gdouble *ele)</a>
+<a name="ln139">{</a>
+<a name="ln140">  g_assert(gpx != NULL);</a>
+<a name="ln141"> </a>
+<a name="ln142">  GList *item = g_list_first(gpx-&gt;track);</a>
+<a name="ln143"> </a>
+<a name="ln144">  /* verify that we got at least 2 trackpoints */</a>
+<a name="ln145">  if(!item || !item-&gt;next) return FALSE;</a>
+<a name="ln146"> </a>
+<a name="ln147">  do</a>
+<a name="ln148">  {</a>
+<a name="ln149"> </a>
+<a name="ln150">    _gpx_track_point_t *tp = (_gpx_track_point_t *)item-&gt;data;</a>
+<a name="ln151"> </a>
+<a name="ln152">    /* if timestamp is out of time range return false but fill</a>
+<a name="ln153">       closest location value start or end point */</a>
+<a name="ln154">    if((!item-&gt;next &amp;&amp; timestamp-&gt;tv_sec &gt;= tp-&gt;time.tv_sec) || (timestamp-&gt;tv_sec &lt;= tp-&gt;time.tv_sec))</a>
+<a name="ln155">    {</a>
+<a name="ln156">      *lon = tp-&gt;longitude;</a>
+<a name="ln157">      *lat = tp-&gt;latitude;</a>
+<a name="ln158">      *ele = tp-&gt;elevation;</a>
+<a name="ln159">      return FALSE;</a>
+<a name="ln160">    }</a>
+<a name="ln161"> </a>
+<a name="ln162">    /* check if timestamp is within current and next trackpoint */</a>
+<a name="ln163">    if(timestamp-&gt;tv_sec &gt;= tp-&gt;time.tv_sec</a>
+<a name="ln164">       &amp;&amp; timestamp-&gt;tv_sec &lt;= ((_gpx_track_point_t *)item-&gt;next-&gt;data)-&gt;time.tv_sec)</a>
+<a name="ln165">    {</a>
+<a name="ln166">      *lon = tp-&gt;longitude;</a>
+<a name="ln167">      *lat = tp-&gt;latitude;</a>
+<a name="ln168">      *ele = tp-&gt;elevation;</a>
+<a name="ln169">      return TRUE;</a>
+<a name="ln170">    }</a>
+<a name="ln171"> </a>
+<a name="ln172">  } while((item = g_list_next(item)) != NULL);</a>
+<a name="ln173"> </a>
+<a name="ln174">  /* should not reach this point */</a>
+<a name="ln175">  return FALSE;</a>
+<a name="ln176">}</a>
+<a name="ln177"> </a>
+<a name="ln178">/*</a>
+<a name="ln179"> * GPX XML parser code</a>
+<a name="ln180"> */</a>
+<a name="ln181">void _gpx_parser_start_element(GMarkupParseContext *ctx, const gchar *element_name,</a>
+<a name="ln182">                               const gchar **attribute_names, const gchar **attribute_values,</a>
+<a name="ln183">                               gpointer user_data, GError **error)</a>
+<a name="ln184">{</a>
+<a name="ln185">  dt_gpx_t *gpx = (dt_gpx_t *)user_data;</a>
+<a name="ln186"> </a>
+<a name="ln187">  if(gpx-&gt;parsing_trk == FALSE)</a>
+<a name="ln188">  {</a>
+<a name="ln189">    // we only parse tracks and its points, nothing else</a>
+<a name="ln190">    if(strcmp(element_name, &quot;trk&quot;) == 0)</a>
+<a name="ln191">    {</a>
+<a name="ln192">      gpx-&gt;parsing_trk = TRUE;</a>
+<a name="ln193">    }</a>
+<a name="ln194">    goto end;</a>
+<a name="ln195">  }</a>
+<a name="ln196"> </a>
+<a name="ln197">  /* from here on, parse wpType data from track points */</a>
+<a name="ln198">  if(strcmp(element_name, &quot;trkpt&quot;) == 0)</a>
+<a name="ln199">  {</a>
+<a name="ln200">    if(gpx-&gt;current_track_point)</a>
+<a name="ln201">    {</a>
+<a name="ln202">      fprintf(stderr, &quot;broken gpx file, new trkpt element before the previous ended.\n&quot;);</a>
+<a name="ln203">      g_free(gpx-&gt;current_track_point);</a>
+<a name="ln204">    }</a>
+<a name="ln205"> </a>
+<a name="ln206">    const gchar **attribute_name = attribute_names;</a>
+<a name="ln207">    const gchar **attribute_value = attribute_values;</a>
+<a name="ln208"> </a>
+<a name="ln209">    gpx-&gt;invalid_track_point = FALSE;</a>
+<a name="ln210"> </a>
+<a name="ln211">    if(*attribute_name)</a>
+<a name="ln212">    {</a>
+<a name="ln213">      gpx-&gt;current_track_point = g_malloc0(sizeof(_gpx_track_point_t));</a>
+<a name="ln214"> </a>
+<a name="ln215">      /* initialize with NAN for validation check */</a>
+<a name="ln216">      gpx-&gt;current_track_point-&gt;longitude = NAN;</a>
+<a name="ln217">      gpx-&gt;current_track_point-&gt;latitude = NAN;</a>
+<a name="ln218">      gpx-&gt;current_track_point-&gt;elevation = NAN;</a>
+<a name="ln219"> </a>
+<a name="ln220">      /* go thru the attributes to find and get values of lon / lat*/</a>
+<a name="ln221">      while(*attribute_name)</a>
+<a name="ln222">      {</a>
+<a name="ln223">        if(strcmp(*attribute_name, &quot;lon&quot;) == 0)</a>
+<a name="ln224">          gpx-&gt;current_track_point-&gt;longitude = g_ascii_strtod(*attribute_value, NULL);</a>
+<a name="ln225">        else if(strcmp(*attribute_name, &quot;lat&quot;) == 0)</a>
+<a name="ln226">          gpx-&gt;current_track_point-&gt;latitude = g_ascii_strtod(*attribute_value, NULL);</a>
+<a name="ln227"> </a>
+<a name="ln228">        attribute_name++;</a>
+<a name="ln229">        attribute_value++;</a>
+<a name="ln230">      }</a>
+<a name="ln231"> </a>
+<a name="ln232">      /* validate that we actually got lon / lat attribute values */</a>
+<a name="ln233">      if(isnan(gpx-&gt;current_track_point-&gt;longitude) || isnan(gpx-&gt;current_track_point-&gt;latitude))</a>
+<a name="ln234">      {</a>
+<a name="ln235">        fprintf(stderr, &quot;broken gpx file, failed to get lon/lat attribute values for trkpt\n&quot;);</a>
+<a name="ln236">        gpx-&gt;invalid_track_point = TRUE;</a>
+<a name="ln237">      }</a>
+<a name="ln238">    }</a>
+<a name="ln239">    else</a>
+<a name="ln240">      fprintf(stderr, &quot;broken gpx file, trkpt element doesn't have lon/lat attributes\n&quot;);</a>
+<a name="ln241"> </a>
+<a name="ln242">    gpx-&gt;current_parser_element = GPX_PARSER_ELEMENT_TRKPT;</a>
+<a name="ln243">  }</a>
+<a name="ln244">  else if(strcmp(element_name, &quot;time&quot;) == 0)</a>
+<a name="ln245">  {</a>
+<a name="ln246">    if(!gpx-&gt;current_track_point) goto element_error;</a>
+<a name="ln247"> </a>
+<a name="ln248">    gpx-&gt;current_parser_element = GPX_PARSER_ELEMENT_TIME;</a>
+<a name="ln249">  }</a>
+<a name="ln250">  else if(strcmp(element_name, &quot;ele&quot;) == 0)</a>
+<a name="ln251">  {</a>
+<a name="ln252">    if(!gpx-&gt;current_track_point) goto element_error;</a>
+<a name="ln253"> </a>
+<a name="ln254">    gpx-&gt;current_parser_element = GPX_PARSER_ELEMENT_ELE;</a>
+<a name="ln255">  }</a>
+<a name="ln256"> </a>
+<a name="ln257">end:</a>
+<a name="ln258"> </a>
+<a name="ln259">  return;</a>
+<a name="ln260"> </a>
+<a name="ln261">element_error:</a>
+<a name="ln262">  fprintf(stderr, &quot;broken gpx file, element '%s' found outside of trkpt.\n&quot;, element_name);</a>
+<a name="ln263">}</a>
+<a name="ln264"> </a>
+<a name="ln265">void _gpx_parser_end_element(GMarkupParseContext *context, const gchar *element_name, gpointer user_data,</a>
+<a name="ln266">                             GError **error)</a>
+<a name="ln267">{</a>
+<a name="ln268">  dt_gpx_t *gpx = (dt_gpx_t *)user_data;</a>
+<a name="ln269"> </a>
+<a name="ln270">  /* closing trackpoint lets take care of data parsed */</a>
+<a name="ln271">  if(gpx-&gt;parsing_trk == TRUE)</a>
+<a name="ln272">  {</a>
+<a name="ln273">    if(strcmp(element_name, &quot;trk&quot;) == 0)</a>
+<a name="ln274">    {</a>
+<a name="ln275">      gpx-&gt;parsing_trk = FALSE;</a>
+<a name="ln276">    }</a>
+<a name="ln277">    else if(strcmp(element_name, &quot;trkpt&quot;) == 0)</a>
+<a name="ln278">    {</a>
+<a name="ln279">      if(!gpx-&gt;invalid_track_point)</a>
+<a name="ln280">        gpx-&gt;track = g_list_append(gpx-&gt;track, gpx-&gt;current_track_point);</a>
+<a name="ln281">      else</a>
+<a name="ln282">        g_free(gpx-&gt;current_track_point);</a>
+<a name="ln283"> </a>
+<a name="ln284">      gpx-&gt;current_track_point = NULL;</a>
+<a name="ln285">    }</a>
+<a name="ln286"> </a>
+<a name="ln287">    /* clear current parser element */</a>
+<a name="ln288">    gpx-&gt;current_parser_element = GPX_PARSER_ELEMENT_NONE;</a>
+<a name="ln289">  }</a>
+<a name="ln290">}</a>
+<a name="ln291"> </a>
+<a name="ln292">void _gpx_parser_text(GMarkupParseContext *context, const gchar *text, gsize text_len, gpointer user_data,</a>
+<a name="ln293">                      GError **error)</a>
+<a name="ln294">{</a>
+<a name="ln295">  dt_gpx_t *gpx = (dt_gpx_t *)user_data;</a>
+<a name="ln296"> </a>
+<a name="ln297">  if(!gpx-&gt;current_track_point) return;</a>
+<a name="ln298"> </a>
+<a name="ln299">  if(gpx-&gt;current_parser_element == GPX_PARSER_ELEMENT_TIME)</a>
+<a name="ln300">  {</a>
+<a name="ln301"> </a>
+<a name="ln302">    if(!g_time_val_from_iso8601(text, &amp;gpx-&gt;current_track_point-&gt;time))</a>
+<a name="ln303">    {</a>
+<a name="ln304">      gpx-&gt;invalid_track_point = TRUE;</a>
+<a name="ln305">      fprintf(stderr, &quot;broken gpx file, failed to pars is8601 time '%s' for trackpoint\n&quot;, text);</a>
+<a name="ln306">    }</a>
+<a name="ln307">  }</a>
+<a name="ln308">  else if(gpx-&gt;current_parser_element == GPX_PARSER_ELEMENT_ELE)</a>
+<a name="ln309">    gpx-&gt;current_track_point-&gt;elevation = g_ascii_strtod(text, NULL);</a>
+<a name="ln310">}</a>
+<a name="ln311"> </a>
+<a name="ln312">// modelines: These editor modelines have been set for all relevant files by tools/update_modelines.sh</a>
+<a name="ln313">// vim: shiftwidth=2 expandtab tabstop=2 cindent</a>
+<a name="ln314">// kate: tab-indents: off; indent-width 2; replace-tabs on; indent-mode cstyle; remove-trailing-spaces modified;</a>
+
+</code></pre>
+<div class="balloon" rel="94"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v560/" target="_blank">V560</a> A part of conditional expression is always true: gpxmf_size > 3.</p></div>
+
+<link rel="stylesheet" href="highlight.css">
+<script src="highlight.pack.js"></script>
+<script src="highlightjs-line-numbers.js"></script>
+<script>hljs.initHighlightingOnLoad();</script>
+<script>hljs.initLineNumbersOnLoad();</script>
+<script>
+  $(document).ready(function() {
+      $('.balloon').each(function () {
+          var bl = $(this);
+          var line = bl.attr('rel');
+          var text = $('a[name="ln'+line+'"]').text();
+
+          var space_count = 0;
+          for(var i = 0; i<text.length; i++){
+              var char = text[i];
+              if((char !== ' ')&&(char !== '\t'))break;
+              if(char === '\t')space_count++;
+              space_count++;
+          }
+
+          bl.css('margin-left', space_count*8);
+          $('a[name="ln'+line+'"]').after(bl);
+      });
+
+      window.location = window.location;
+  });
+</script>
+</body>
+</html>

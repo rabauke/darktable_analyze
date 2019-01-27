@@ -1,0 +1,185 @@
+
+<html>
+<head>
+  <link rel="stylesheet" href="../style.css"/>
+  <script src="../jquery-3.2.1.min.js"></script>
+</head>
+<body>
+<pre><code class = "cpp">
+<a name="ln1">/*</a>
+<a name="ln2">    RawSpeed - RAW file decoder.</a>
+<a name="ln3"> </a>
+<a name="ln4">    Copyright (C) 2009-2014 Klaus Post</a>
+<a name="ln5">    Copyright (C) 2014 Pedro Côrte-Real</a>
+<a name="ln6">    Copyright (C) 2017-2019 Roman Lebedev</a>
+<a name="ln7"> </a>
+<a name="ln8">    This library is free software; you can redistribute it and/or</a>
+<a name="ln9">    modify it under the terms of the GNU Lesser General Public</a>
+<a name="ln10">    License as published by the Free Software Foundation; either</a>
+<a name="ln11">    version 2 of the License, or (at your option) any later version.</a>
+<a name="ln12"> </a>
+<a name="ln13">    This library is distributed in the hope that it will be useful,</a>
+<a name="ln14">    but WITHOUT ANY WARRANTY; without even the implied warranty of</a>
+<a name="ln15">    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU</a>
+<a name="ln16">    Lesser General Public License for more details.</a>
+<a name="ln17"> </a>
+<a name="ln18">    You should have received a copy of the GNU Lesser General Public</a>
+<a name="ln19">    License along with this library; if not, write to the Free Software</a>
+<a name="ln20">    Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA</a>
+<a name="ln21">*/</a>
+<a name="ln22"> </a>
+<a name="ln23">#include &quot;rawspeedconfig.h&quot;</a>
+<a name="ln24">#include &quot;decompressors/SonyArw2Decompressor.h&quot;</a>
+<a name="ln25">#include &quot;common/Common.h&quot;                // for uint32</a>
+<a name="ln26">#include &quot;common/Point.h&quot;                 // for iPoint2D</a>
+<a name="ln27">#include &quot;common/RawImage.h&quot;              // for RawImage</a>
+<a name="ln28">#include &quot;decoders/RawDecoderException.h&quot; // for ThrowRDE</a>
+<a name="ln29">#include &quot;io/BitPumpLSB.h&quot;                // for BitPumpLSB</a>
+<a name="ln30">#include &lt;cassert&gt;                        // for assert</a>
+<a name="ln31"> </a>
+<a name="ln32">namespace rawspeed {</a>
+<a name="ln33"> </a>
+<a name="ln34">SonyArw2Decompressor::SonyArw2Decompressor(const RawImage&amp; img,</a>
+<a name="ln35">                                           const ByteStream&amp; input_)</a>
+<a name="ln36">    : mRaw(img) {</a>
+<a name="ln37">  if (mRaw-&gt;getCpp() != 1 || mRaw-&gt;getDataType() != TYPE_USHORT16 ||</a>
+<a name="ln38">      mRaw-&gt;getBpp() != 2)</a>
+<a name="ln39">    ThrowRDE(&quot;Unexpected component count / data type&quot;);</a>
+<a name="ln40"> </a>
+<a name="ln41">  const uint32 w = mRaw-&gt;dim.x;</a>
+<a name="ln42">  const uint32 h = mRaw-&gt;dim.y;</a>
+<a name="ln43"> </a>
+<a name="ln44">  if (w == 0 || h == 0 || w % 32 != 0 || w &gt; 8000 || h &gt; 5320)</a>
+<a name="ln45">    ThrowRDE(&quot;Unexpected image dimensions found: (%u; %u)&quot;, w, h);</a>
+<a name="ln46"> </a>
+<a name="ln47">  // 1 byte per pixel</a>
+<a name="ln48">  input = input_.peekStream(mRaw-&gt;dim.x * mRaw-&gt;dim.y);</a>
+<a name="ln49">}</a>
+<a name="ln50"> </a>
+<a name="ln51">void SonyArw2Decompressor::decompressRow(int row) const {</a>
+<a name="ln52">  uchar8* data = mRaw-&gt;getData();</a>
+<a name="ln53">  uint32 pitch = mRaw-&gt;pitch;</a>
+<a name="ln54">  int32 w = mRaw-&gt;dim.x;</a>
+<a name="ln55"> </a>
+<a name="ln56">  assert(mRaw-&gt;dim.x &gt; 0);</a>
+<a name="ln57">  assert(mRaw-&gt;dim.x % 32 == 0);</a>
+<a name="ln58"> </a>
+<a name="ln59">  auto* dest = reinterpret_cast&lt;ushort16*&gt;(&amp;data[row * pitch]);</a>
+<a name="ln60"> </a>
+<a name="ln61">  ByteStream rowBs = input;</a>
+<a name="ln62">  rowBs.skipBytes(row * mRaw-&gt;dim.x);</a>
+<a name="ln63">  rowBs = rowBs.peekStream(mRaw-&gt;dim.x);</a>
+<a name="ln64"> </a>
+<a name="ln65">  BitPumpLSB bits(rowBs);</a>
+<a name="ln66"> </a>
+<a name="ln67">  uint32 random = bits.peekBits(24);</a>
+<a name="ln68"> </a>
+<a name="ln69">  // Each loop iteration processes 16 pixels, consuming 128 bits of input.</a>
+<a name="ln70">  for (int32 x = 0; x &lt; w;) {</a>
+<a name="ln71">    // 30 bits.</a>
+<a name="ln72">    int _max = bits.getBits(11);</a>
+<a name="ln73">    int _min = bits.getBits(11);</a>
+<a name="ln74">    int _imax = bits.getBits(4);</a>
+<a name="ln75">    int _imin = bits.getBits(4);</a>
+<a name="ln76"> </a>
+<a name="ln77">    // 128-30 = 98 bits remaining, still need to decode 16 pixels...</a>
+<a name="ln78">    // Each full pixel consumes 7 bits, thus we can only have 14 full pixels.</a>
+<a name="ln79">    // So we lack 2 pixels. That is where _imin and _imax come into play,</a>
+<a name="ln80">    // values of those pixels were already specified in _min and _max.</a>
+<a name="ln81">    // But what that means is, _imin and _imax must not be equal!</a>
+<a name="ln82">    if (_imax == _imin)</a>
+<a name="ln83">      ThrowRDE(&quot;ARW2 invariant failed, same pixel is both min and max&quot;);</a>
+<a name="ln84"> </a>
+<a name="ln85">    int sh = 0;</a>
+<a name="ln86">    while ((sh &lt; 4) &amp;&amp; ((0x80 &lt;&lt; sh) &lt;= (_max - _min)))</a>
+<a name="ln87">      sh++;</a>
+<a name="ln88"> </a>
+<a name="ln89">    for (int i = 0; i &lt; 16; i++) {</a>
+<a name="ln90">      int p;</a>
+<a name="ln91">      if (i == _imax)</a>
+<a name="ln92">        p = _max;</a>
+<a name="ln93">      else {</a>
+<a name="ln94">        if (i == _imin)</a>
+<a name="ln95">          p = _min;</a>
+<a name="ln96">        else {</a>
+<a name="ln97">          p = (bits.getBits(7) &lt;&lt; sh) + _min;</a>
+<a name="ln98">          if (p &gt; 0x7ff)</a>
+<a name="ln99">            p = 0x7ff;</a>
+<a name="ln100">        }</a>
+<a name="ln101">      }</a>
+<a name="ln102">      mRaw-&gt;setWithLookUp(p &lt;&lt; 1, reinterpret_cast&lt;uchar8*&gt;(&amp;dest[x + i * 2]),</a>
+<a name="ln103">                          &amp;random);</a>
+<a name="ln104">    }</a>
+<a name="ln105">    x += ((x &amp; 1) != 0) ? 31 : 1; // Skip to next 32 pixels</a>
+<a name="ln106">  }</a>
+<a name="ln107">}</a>
+<a name="ln108"> </a>
+<a name="ln109">void SonyArw2Decompressor::decompressThread() const noexcept {</a>
+<a name="ln110">  assert(mRaw-&gt;dim.x &gt; 0);</a>
+<a name="ln111">  assert(mRaw-&gt;dim.x % 32 == 0);</a>
+<a name="ln112">  assert(mRaw-&gt;dim.y &gt; 0);</a>
+<a name="ln113"> </a>
+<a name="ln114">#ifdef HAVE_OPENMP</a>
+<a name="ln115">#pragma omp for schedule(static)</a>
+<a name="ln116">#endif</a>
+<a name="ln117">  for (int y = 0; y &lt; mRaw-&gt;dim.y; y++) {</a>
+<a name="ln118">    try {</a>
+<a name="ln119">      decompressRow(y);</a>
+<a name="ln120">    } catch (RawspeedException&amp; err) {</a>
+<a name="ln121">      // Propagate the exception out of OpenMP magic.</a>
+<a name="ln122">      mRaw-&gt;setError(err.what());</a>
+<a name="ln123">#ifdef HAVE_OPENMP</a>
+<a name="ln124">#pragma omp cancel for</a>
+<a name="ln125">#endif</a>
+<a name="ln126">    }</a>
+<a name="ln127">  }</a>
+<a name="ln128">}</a>
+<a name="ln129"> </a>
+<a name="ln130">void SonyArw2Decompressor::decompress() const {</a>
+<a name="ln131">#ifdef HAVE_OPENMP</a>
+<a name="ln132">#pragma omp parallel default(none)                                             \</a>
+<a name="ln133">    num_threads(rawspeed_get_number_of_processor_cores())</a>
+<a name="ln134">#endif</a>
+<a name="ln135">  decompressThread();</a>
+<a name="ln136"> </a>
+<a name="ln137">  std::string firstErr;</a>
+<a name="ln138">  if (mRaw-&gt;isTooManyErrors(1, &amp;firstErr)) {</a>
+<a name="ln139">    ThrowRDE(&quot;Too many errors encountered. Giving up. First Error:\n%s&quot;,</a>
+<a name="ln140">             firstErr.c_str());</a>
+<a name="ln141">  }</a>
+<a name="ln142">}</a>
+<a name="ln143"> </a>
+<a name="ln144">} // namespace rawspeed</a>
+
+</code></pre>
+<div class="balloon" rel="1"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v002/" target="_blank">V002</a> Some diagnostic messages may contain incorrect line number in this file.</p></div>
+
+<link rel="stylesheet" href="highlight.css">
+<script src="highlight.pack.js"></script>
+<script src="highlightjs-line-numbers.js"></script>
+<script>hljs.initHighlightingOnLoad();</script>
+<script>hljs.initLineNumbersOnLoad();</script>
+<script>
+  $(document).ready(function() {
+      $('.balloon').each(function () {
+          var bl = $(this);
+          var line = bl.attr('rel');
+          var text = $('a[name="ln'+line+'"]').text();
+
+          var space_count = 0;
+          for(var i = 0; i<text.length; i++){
+              var char = text[i];
+              if((char !== ' ')&&(char !== '\t'))break;
+              if(char === '\t')space_count++;
+              space_count++;
+          }
+
+          bl.css('margin-left', space_count*8);
+          $('a[name="ln'+line+'"]').after(bl);
+      });
+
+      window.location = window.location;
+  });
+</script>
+</body>
+</html>

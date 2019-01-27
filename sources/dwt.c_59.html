@@ -1,0 +1,921 @@
+
+<html>
+<head>
+  <link rel="stylesheet" href="../style.css"/>
+  <script src="../jquery-3.2.1.min.js"></script>
+</head>
+<body>
+<pre><code class = "cpp">
+<a name="ln1">/*</a>
+<a name="ln2">    This file is part of darktable,</a>
+<a name="ln3">    copyright (c) 2017 edgardo hoszowski.</a>
+<a name="ln4"> </a>
+<a name="ln5">    darktable is free software: you can redistribute it and/or modify</a>
+<a name="ln6">    it under the terms of the GNU General Public License as published by</a>
+<a name="ln7">    the Free Software Foundation, either version 3 of the License, or</a>
+<a name="ln8">    (at your option) any later version.</a>
+<a name="ln9"> </a>
+<a name="ln10">    darktable is distributed in the hope that it will be useful,</a>
+<a name="ln11">    but WITHOUT ANY WARRANTY; without even the implied warranty of</a>
+<a name="ln12">    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the</a>
+<a name="ln13">    GNU General Public License for more details.</a>
+<a name="ln14"> </a>
+<a name="ln15">    You should have received a copy of the GNU General Public License</a>
+<a name="ln16">    along with darktable.  If not, see &lt;http://www.gnu.org/licenses/&gt;.</a>
+<a name="ln17">*/</a>
+<a name="ln18"> </a>
+<a name="ln19">#include &quot;control/control.h&quot;</a>
+<a name="ln20">#include &quot;develop/imageop.h&quot;</a>
+<a name="ln21">#include &quot;dwt.h&quot;</a>
+<a name="ln22">#if defined(__SSE__)</a>
+<a name="ln23">#include &lt;xmmintrin.h&gt;</a>
+<a name="ln24">#endif</a>
+<a name="ln25"> </a>
+<a name="ln26">/* Based on the original source code of GIMP's Wavelet Decompose plugin, by Marco Rossini</a>
+<a name="ln27"> *</a>
+<a name="ln28"> * http://registry.gimp.org/node/11742</a>
+<a name="ln29"> *</a>
+<a name="ln30">*/</a>
+<a name="ln31"> </a>
+<a name="ln32">dwt_params_t *dt_dwt_init(float *image, const int width, const int height, const int ch, const int scales,</a>
+<a name="ln33">                          const int return_layer, const int merge_from_scale, void *user_data,</a>
+<a name="ln34">                          const float preview_scale, const int use_sse)</a>
+<a name="ln35">{</a>
+<a name="ln36">  dwt_params_t *p = (dwt_params_t *)malloc(sizeof(dwt_params_t));</a>
+<a name="ln37">  if(!p) return NULL;</a>
+<a name="ln38"> </a>
+<a name="ln39">  p-&gt;image = image;</a>
+<a name="ln40">  p-&gt;ch = ch;</a>
+<a name="ln41">  p-&gt;width = width;</a>
+<a name="ln42">  p-&gt;height = height;</a>
+<a name="ln43">  p-&gt;scales = scales;</a>
+<a name="ln44">  p-&gt;return_layer = return_layer;</a>
+<a name="ln45">  p-&gt;merge_from_scale = merge_from_scale;</a>
+<a name="ln46">  p-&gt;user_data = user_data;</a>
+<a name="ln47">  p-&gt;preview_scale = preview_scale;</a>
+<a name="ln48">  p-&gt;use_sse = use_sse;</a>
+<a name="ln49"> </a>
+<a name="ln50">  return p;</a>
+<a name="ln51">}</a>
+<a name="ln52"> </a>
+<a name="ln53">void dt_dwt_free(dwt_params_t *p)</a>
+<a name="ln54">{</a>
+<a name="ln55">  if(!p) return;</a>
+<a name="ln56"> </a>
+<a name="ln57">  free(p);</a>
+<a name="ln58">}</a>
+<a name="ln59"> </a>
+<a name="ln60">static int _get_max_scale(const int width, const int height, const float preview_scale)</a>
+<a name="ln61">{</a>
+<a name="ln62">  int maxscale = 0;</a>
+<a name="ln63"> </a>
+<a name="ln64">  // smallest edge must be higher than or equal to 2^scales</a>
+<a name="ln65">  unsigned int size = MIN(width, height);</a>
+<a name="ln66">  float size_tmp = ((size &gt;&gt;= 1) * preview_scale);</a>
+<a name="ln67">  while(size_tmp &gt; 0.f)</a>
+<a name="ln68">  {</a>
+<a name="ln69">    size_tmp = ((size &gt;&gt;= 1) * preview_scale);</a>
+<a name="ln70">    maxscale++;</a>
+<a name="ln71">  }</a>
+<a name="ln72"> </a>
+<a name="ln73">  // avoid rounding issues...</a>
+<a name="ln74">  size = MIN(width, height);</a>
+<a name="ln75">  while((maxscale &gt; 0) &amp;&amp; ((1 &lt;&lt; maxscale) * preview_scale &gt;= size)) maxscale--;</a>
+<a name="ln76"> </a>
+<a name="ln77">  return maxscale;</a>
+<a name="ln78">}</a>
+<a name="ln79"> </a>
+<a name="ln80">int dwt_get_max_scale(dwt_params_t *p)</a>
+<a name="ln81">{</a>
+<a name="ln82">  return _get_max_scale(p-&gt;width / p-&gt;preview_scale, p-&gt;height / p-&gt;preview_scale, p-&gt;preview_scale);</a>
+<a name="ln83">}</a>
+<a name="ln84"> </a>
+<a name="ln85">int _first_scale_visible(const int num_scales, const float preview_scale)</a>
+<a name="ln86">{</a>
+<a name="ln87">  int first_scale = 0;</a>
+<a name="ln88"> </a>
+<a name="ln89">  for(unsigned int lev = 0; lev &lt; num_scales; lev++)</a>
+<a name="ln90">  {</a>
+<a name="ln91">    int sc = 1 &lt;&lt; lev;</a>
+<a name="ln92">    sc *= preview_scale;</a>
+<a name="ln93">    if(sc &gt; 0)</a>
+<a name="ln94">    {</a>
+<a name="ln95">      first_scale = lev + 1;</a>
+<a name="ln96">      break;</a>
+<a name="ln97">    }</a>
+<a name="ln98">  }</a>
+<a name="ln99"> </a>
+<a name="ln100">  return first_scale;</a>
+<a name="ln101">}</a>
+<a name="ln102"> </a>
+<a name="ln103">int dt_dwt_first_scale_visible(dwt_params_t *p)</a>
+<a name="ln104">{</a>
+<a name="ln105">  return _first_scale_visible(p-&gt;scales, p-&gt;preview_scale);</a>
+<a name="ln106">}</a>
+<a name="ln107"> </a>
+<a name="ln108">#define INDEX_WT_IMAGE(index, num_channels, channel) (((index) * (num_channels)) + (channel))</a>
+<a name="ln109">#define INDEX_WT_IMAGE_SSE(index, num_channels) ((index) * (num_channels))</a>
+<a name="ln110"> </a>
+<a name="ln111">/* code copied from UFRaw (which originates from dcraw) */</a>
+<a name="ln112">#if defined(__SSE__)</a>
+<a name="ln113">static void dwt_hat_transform_sse(float *temp, const float *const base, const int st, const int size, int sc,</a>
+<a name="ln114">                                  const dwt_params_t *const p)</a>
+<a name="ln115">{</a>
+<a name="ln116">  int i;</a>
+<a name="ln117">  const __m128 hat_mult = _mm_set1_ps(2.f);</a>
+<a name="ln118">  __m128 valb_1, valb_2, valb_3;</a>
+<a name="ln119">  sc = (int)(sc * p-&gt;preview_scale);</a>
+<a name="ln120">  if(sc &gt; size) sc = size;</a>
+<a name="ln121"> </a>
+<a name="ln122">  for(i = 0; i &lt; sc; i++, temp += 4)</a>
+<a name="ln123">  {</a>
+<a name="ln124">    valb_1 = _mm_load_ps(&amp;base[INDEX_WT_IMAGE_SSE(st * i, p-&gt;ch)]);</a>
+<a name="ln125">    valb_2 = _mm_load_ps(&amp;base[INDEX_WT_IMAGE_SSE(st * (sc - i), p-&gt;ch)]);</a>
+<a name="ln126">    valb_3 = _mm_load_ps(&amp;base[INDEX_WT_IMAGE_SSE(st * (i + sc), p-&gt;ch)]);</a>
+<a name="ln127"> </a>
+<a name="ln128">    _mm_store_ps(temp, _mm_add_ps(_mm_add_ps(_mm_mul_ps(hat_mult, valb_1), valb_2), valb_3));</a>
+<a name="ln129">  }</a>
+<a name="ln130">  for(; i + sc &lt; size; i++, temp += 4)</a>
+<a name="ln131">  {</a>
+<a name="ln132">    valb_1 = _mm_load_ps(&amp;base[INDEX_WT_IMAGE_SSE(st * i, p-&gt;ch)]);</a>
+<a name="ln133">    valb_2 = _mm_load_ps(&amp;base[INDEX_WT_IMAGE_SSE(st * (i - sc), p-&gt;ch)]);</a>
+<a name="ln134">    valb_3 = _mm_load_ps(&amp;base[INDEX_WT_IMAGE_SSE(st * (i + sc), p-&gt;ch)]);</a>
+<a name="ln135"> </a>
+<a name="ln136">    _mm_store_ps(temp, _mm_add_ps(_mm_add_ps(_mm_mul_ps(hat_mult, valb_1), valb_2), valb_3));</a>
+<a name="ln137">  }</a>
+<a name="ln138">  for(; i &lt; size; i++, temp += 4)</a>
+<a name="ln139">  {</a>
+<a name="ln140">    valb_1 = _mm_load_ps(&amp;base[INDEX_WT_IMAGE_SSE(st * i, p-&gt;ch)]);</a>
+<a name="ln141">    valb_2 = _mm_load_ps(&amp;base[INDEX_WT_IMAGE_SSE(st * (i - sc), p-&gt;ch)]);</a>
+<a name="ln142">    valb_3 = _mm_load_ps(&amp;base[INDEX_WT_IMAGE_SSE(st * (2 * size - 2 - (i + sc)), p-&gt;ch)]);</a>
+<a name="ln143"> </a>
+<a name="ln144">    _mm_store_ps(temp, _mm_add_ps(_mm_add_ps(_mm_mul_ps(hat_mult, valb_1), valb_2), valb_3));</a>
+<a name="ln145">  }</a>
+<a name="ln146">}</a>
+<a name="ln147">#endif</a>
+<a name="ln148"> </a>
+<a name="ln149">static void dwt_hat_transform(float *temp, const float *const base, const int st, const int size, int sc,</a>
+<a name="ln150">                              dwt_params_t *const p)</a>
+<a name="ln151">{</a>
+<a name="ln152">#if defined(__SSE__)</a>
+<a name="ln153">  if(p-&gt;ch == 4 &amp;&amp; p-&gt;use_sse)</a>
+<a name="ln154">  {</a>
+<a name="ln155">    dwt_hat_transform_sse(temp, base, st, size, sc, p);</a>
+<a name="ln156">    return;</a>
+<a name="ln157">  }</a>
+<a name="ln158">#endif</a>
+<a name="ln159"> </a>
+<a name="ln160">  int i, c;</a>
+<a name="ln161">  const float hat_mult = 2.f;</a>
+<a name="ln162">  sc = (int)(sc * p-&gt;preview_scale);</a>
+<a name="ln163">  if(sc &gt; size) sc = size;</a>
+<a name="ln164"> </a>
+<a name="ln165">  for(i = 0; i &lt; sc; i++)</a>
+<a name="ln166">  {</a>
+<a name="ln167">    for(c = 0; c &lt; p-&gt;ch; c++, temp++)</a>
+<a name="ln168">    {</a>
+<a name="ln169">      *temp = hat_mult * base[INDEX_WT_IMAGE(st * i, p-&gt;ch, c)] + base[INDEX_WT_IMAGE(st * (sc - i), p-&gt;ch, c)]</a>
+<a name="ln170">              + base[INDEX_WT_IMAGE(st * (i + sc), p-&gt;ch, c)];</a>
+<a name="ln171">    }</a>
+<a name="ln172">  }</a>
+<a name="ln173">  for(; i + sc &lt; size; i++)</a>
+<a name="ln174">  {</a>
+<a name="ln175">    for(c = 0; c &lt; p-&gt;ch; c++, temp++)</a>
+<a name="ln176">    {</a>
+<a name="ln177">      *temp = hat_mult * base[INDEX_WT_IMAGE(st * i, p-&gt;ch, c)] + base[INDEX_WT_IMAGE(st * (i - sc), p-&gt;ch, c)]</a>
+<a name="ln178">              + base[INDEX_WT_IMAGE(st * (i + sc), p-&gt;ch, c)];</a>
+<a name="ln179">    }</a>
+<a name="ln180">  }</a>
+<a name="ln181">  for(; i &lt; size; i++)</a>
+<a name="ln182">  {</a>
+<a name="ln183">    for(c = 0; c &lt; p-&gt;ch; c++, temp++)</a>
+<a name="ln184">    {</a>
+<a name="ln185">      *temp = hat_mult * base[INDEX_WT_IMAGE(st * i, p-&gt;ch, c)] + base[INDEX_WT_IMAGE(st * (i - sc), p-&gt;ch, c)]</a>
+<a name="ln186">              + base[INDEX_WT_IMAGE(st * (2 * size - 2 - (i + sc)), p-&gt;ch, c)];</a>
+<a name="ln187">    }</a>
+<a name="ln188">  }</a>
+<a name="ln189">}</a>
+<a name="ln190"> </a>
+<a name="ln191">#if defined(__SSE__)</a>
+<a name="ln192">static void dwt_add_layer_sse(float *const img, float *layers, dwt_params_t *const p, const int n_scale)</a>
+<a name="ln193">{</a>
+<a name="ln194">  const int i_size = p-&gt;width * p-&gt;height * 4;</a>
+<a name="ln195"> </a>
+<a name="ln196">#ifdef _OPENMP</a>
+<a name="ln197">#pragma omp parallel for default(none) shared(layers) schedule(static)</a>
+<a name="ln198">#endif</a>
+<a name="ln199">  for(int i = 0; i &lt; i_size; i += 4)</a>
+<a name="ln200">  {</a>
+<a name="ln201">    _mm_store_ps(&amp;(layers[i]), _mm_add_ps(_mm_load_ps(&amp;(layers[i])), _mm_load_ps(&amp;(img[i]))));</a>
+<a name="ln202">  }</a>
+<a name="ln203">}</a>
+<a name="ln204">#endif</a>
+<a name="ln205"> </a>
+<a name="ln206">static void dwt_add_layer(float *const img, float *layers, dwt_params_t *const p, const int n_scale)</a>
+<a name="ln207">{</a>
+<a name="ln208">#if defined(__SSE__)</a>
+<a name="ln209">  if(p-&gt;ch == 4 &amp;&amp; p-&gt;use_sse)</a>
+<a name="ln210">  {</a>
+<a name="ln211">    dwt_add_layer_sse(img, layers, p, n_scale);</a>
+<a name="ln212">    return;</a>
+<a name="ln213">  }</a>
+<a name="ln214">#endif</a>
+<a name="ln215"> </a>
+<a name="ln216">  const int i_size = p-&gt;width * p-&gt;height * p-&gt;ch;</a>
+<a name="ln217"> </a>
+<a name="ln218">#ifdef _OPENMP</a>
+<a name="ln219">#pragma omp parallel for default(none) shared(layers) schedule(static)</a>
+<a name="ln220">#endif</a>
+<a name="ln221">  for(int i = 0; i &lt; i_size; i++) layers[i] += img[i];</a>
+<a name="ln222">}</a>
+<a name="ln223"> </a>
+<a name="ln224">static void dwt_get_image_layer(float *const layer, dwt_params_t *const p)</a>
+<a name="ln225">{</a>
+<a name="ln226">  if(p-&gt;image != layer) memcpy(p-&gt;image, layer, p-&gt;width * p-&gt;height * p-&gt;ch * sizeof(float));</a>
+<a name="ln227">}</a>
+<a name="ln228"> </a>
+<a name="ln229">#if defined(__SSE__)</a>
+<a name="ln230">static void dwt_subtract_layer_sse(float *bl, float *bh, dwt_params_t *const p)</a>
+<a name="ln231">{</a>
+<a name="ln232">  const __m128 v4_lpass_mult = _mm_set1_ps((1.f / 16.f));</a>
+<a name="ln233">  const int size = p-&gt;width * p-&gt;height * 4;</a>
+<a name="ln234"> </a>
+<a name="ln235">#ifdef _OPENMP</a>
+<a name="ln236">#pragma omp parallel for default(none) shared(bl, bh) schedule(static)</a>
+<a name="ln237">#endif</a>
+<a name="ln238">  for(int i = 0; i &lt; size; i += 4)</a>
+<a name="ln239">  {</a>
+<a name="ln240">    // rounding errors introduced here (division by 16)</a>
+<a name="ln241">    _mm_store_ps(&amp;(bl[i]), _mm_mul_ps(_mm_load_ps(&amp;(bl[i])), v4_lpass_mult));</a>
+<a name="ln242">    _mm_store_ps(&amp;(bh[i]), _mm_sub_ps(_mm_load_ps(&amp;(bh[i])), _mm_load_ps(&amp;(bl[i]))));</a>
+<a name="ln243">  }</a>
+<a name="ln244">}</a>
+<a name="ln245">#endif</a>
+<a name="ln246"> </a>
+<a name="ln247">static void dwt_subtract_layer(float *bl, float *bh, dwt_params_t *const p)</a>
+<a name="ln248">{</a>
+<a name="ln249">#if defined(__SSE__)</a>
+<a name="ln250">  if(p-&gt;ch == 4 &amp;&amp; p-&gt;use_sse)</a>
+<a name="ln251">  {</a>
+<a name="ln252">    dwt_subtract_layer_sse(bl, bh, p);</a>
+<a name="ln253">    return;</a>
+<a name="ln254">  }</a>
+<a name="ln255">#endif</a>
+<a name="ln256"> </a>
+<a name="ln257">  const float lpass_mult = (1.f / 16.f);</a>
+<a name="ln258">  const int size = p-&gt;width * p-&gt;height * p-&gt;ch;</a>
+<a name="ln259"> </a>
+<a name="ln260">#ifdef _OPENMP</a>
+<a name="ln261">#pragma omp parallel for default(none) shared(bl, bh) schedule(static)</a>
+<a name="ln262">#endif</a>
+<a name="ln263">  for(int i = 0; i &lt; size; i++)</a>
+<a name="ln264">  {</a>
+<a name="ln265">    // rounding errors introduced here (division by 16)</a>
+<a name="ln266">    bl[i] = bl[i] * lpass_mult;</a>
+<a name="ln267">    bh[i] -= bl[i];</a>
+<a name="ln268">  }</a>
+<a name="ln269">}</a>
+<a name="ln270"> </a>
+<a name="ln271">/* actual decomposing algorithm */</a>
+<a name="ln272">static void dwt_wavelet_decompose(float *img, dwt_params_t *const p, _dwt_layer_func layer_func)</a>
+<a name="ln273">{</a>
+<a name="ln274">  float *temp = NULL;</a>
+<a name="ln275">  float *layers = NULL;</a>
+<a name="ln276">  float *merged_layers = NULL;</a>
+<a name="ln277">  unsigned int lpass, hpass;</a>
+<a name="ln278">  float *buffer[2] = { 0, 0 };</a>
+<a name="ln279">  int bcontinue = 1;</a>
+<a name="ln280">  const int size = p-&gt;width * p-&gt;height * p-&gt;ch;</a>
+<a name="ln281"> </a>
+<a name="ln282">  if(layer_func) layer_func(img, p, 0);</a>
+<a name="ln283"> </a>
+<a name="ln284">  if(p-&gt;scales &lt;= 0) goto cleanup;</a>
+<a name="ln285"> </a>
+<a name="ln286">  /* image buffers */</a>
+<a name="ln287">  buffer[0] = img;</a>
+<a name="ln288">  /* temporary storage */</a>
+<a name="ln289">  buffer[1] = dt_alloc_align(64, size * sizeof(float));</a>
+<a name="ln290">  if(buffer[1] == NULL)</a>
+<a name="ln291">  {</a>
+<a name="ln292">    printf(&quot;not enough memory for wavelet decomposition&quot;);</a>
+<a name="ln293">    goto cleanup;</a>
+<a name="ln294">  }</a>
+<a name="ln295">  memset(buffer[1], 0, size * sizeof(float));</a>
+<a name="ln296"> </a>
+<a name="ln297">  // setup a temp buffer</a>
+<a name="ln298">  temp = dt_alloc_align(64, MAX(p-&gt;width, p-&gt;height) * p-&gt;ch * sizeof(float));</a>
+<a name="ln299">  if(temp == NULL)</a>
+<a name="ln300">  {</a>
+<a name="ln301">    printf(&quot;not enough memory for wavelet decomposition&quot;);</a>
+<a name="ln302">    goto cleanup;</a>
+<a name="ln303">  }</a>
+<a name="ln304">  memset(temp, 0, MAX(p-&gt;width, p-&gt;height) * p-&gt;ch * sizeof(float));</a>
+<a name="ln305"> </a>
+<a name="ln306">  // buffer to reconstruct the image</a>
+<a name="ln307">  layers = dt_alloc_align(64, p-&gt;width * p-&gt;height * p-&gt;ch * sizeof(float));</a>
+<a name="ln308">  if(layers == NULL)</a>
+<a name="ln309">  {</a>
+<a name="ln310">    printf(&quot;not enough memory for wavelet decomposition&quot;);</a>
+<a name="ln311">    goto cleanup;</a>
+<a name="ln312">  }</a>
+<a name="ln313">  memset(layers, 0, p-&gt;width * p-&gt;height * p-&gt;ch * sizeof(float));</a>
+<a name="ln314"> </a>
+<a name="ln315">  if(p-&gt;merge_from_scale &gt; 0)</a>
+<a name="ln316">  {</a>
+<a name="ln317">    merged_layers = dt_alloc_align(64, p-&gt;width * p-&gt;height * p-&gt;ch * sizeof(float));</a>
+<a name="ln318">    if(merged_layers == NULL)</a>
+<a name="ln319">    {</a>
+<a name="ln320">      printf(&quot;not enough memory for wavelet decomposition&quot;);</a>
+<a name="ln321">      goto cleanup;</a>
+<a name="ln322">    }</a>
+<a name="ln323">    memset(merged_layers, 0, p-&gt;width * p-&gt;height * p-&gt;ch * sizeof(float));</a>
+<a name="ln324">  }</a>
+<a name="ln325"> </a>
+<a name="ln326">  // iterate over wavelet scales</a>
+<a name="ln327">  lpass = 1;</a>
+<a name="ln328">  hpass = 0;</a>
+<a name="ln329">  for(unsigned int lev = 0; lev &lt; p-&gt;scales &amp;&amp; bcontinue; lev++)</a>
+<a name="ln330">  {</a>
+<a name="ln331">    lpass = (1 - (lev &amp; 1));</a>
+<a name="ln332"> </a>
+<a name="ln333">    for(int row = 0; row &lt; p-&gt;height; row++)</a>
+<a name="ln334">    {</a>
+<a name="ln335">      dwt_hat_transform(temp, buffer[hpass] + (row * p-&gt;width * p-&gt;ch), 1, p-&gt;width, 1 &lt;&lt; lev, p);</a>
+<a name="ln336">      memcpy(&amp;(buffer[lpass][row * p-&gt;width * p-&gt;ch]), temp, p-&gt;width * p-&gt;ch * sizeof(float));</a>
+<a name="ln337">    }</a>
+<a name="ln338"> </a>
+<a name="ln339">    for(int col = 0; col &lt; p-&gt;width; col++)</a>
+<a name="ln340">    {</a>
+<a name="ln341">      dwt_hat_transform(temp, buffer[lpass] + col * p-&gt;ch, p-&gt;width, p-&gt;height, 1 &lt;&lt; lev, p);</a>
+<a name="ln342">      for(int row = 0; row &lt; p-&gt;height; row++)</a>
+<a name="ln343">      {</a>
+<a name="ln344">        for(int c = 0; c &lt; p-&gt;ch; c++)</a>
+<a name="ln345">          buffer[lpass][INDEX_WT_IMAGE(row * p-&gt;width + col, p-&gt;ch, c)] = temp[INDEX_WT_IMAGE(row, p-&gt;ch, c)];</a>
+<a name="ln346">      }</a>
+<a name="ln347">    }</a>
+<a name="ln348"> </a>
+<a name="ln349">    dwt_subtract_layer(buffer[lpass], buffer[hpass], p);</a>
+<a name="ln350"> </a>
+<a name="ln351">    // no merge scales or we didn't reach the merge scale from yet</a>
+<a name="ln352">    if(p-&gt;merge_from_scale == 0 || p-&gt;merge_from_scale &gt; lev + 1)</a>
+<a name="ln353">    {</a>
+<a name="ln354">      // allow to process this detail scale</a>
+<a name="ln355">      if(layer_func) layer_func(buffer[hpass], p, lev + 1);</a>
+<a name="ln356"> </a>
+<a name="ln357">      // user wants to preview this detail scale</a>
+<a name="ln358">      if(p-&gt;return_layer == lev + 1)</a>
+<a name="ln359">      {</a>
+<a name="ln360">        // return this detail scale</a>
+<a name="ln361">        dwt_get_image_layer(buffer[hpass], p);</a>
+<a name="ln362"> </a>
+<a name="ln363">        bcontinue = 0;</a>
+<a name="ln364">      }</a>
+<a name="ln365">      // user wants the entire reconstructed image</a>
+<a name="ln366">      else if(p-&gt;return_layer == 0)</a>
+<a name="ln367">      {</a>
+<a name="ln368">        // add this detail scale to the final image</a>
+<a name="ln369">        dwt_add_layer(buffer[hpass], layers, p, lev + 1);</a>
+<a name="ln370">      }</a>
+<a name="ln371">    }</a>
+<a name="ln372">    // we are on the merge scales range</a>
+<a name="ln373">    else</a>
+<a name="ln374">    {</a>
+<a name="ln375">      // add this detail scale to the merged ones</a>
+<a name="ln376">      dwt_add_layer(buffer[hpass], merged_layers, p, lev + 1);</a>
+<a name="ln377"> </a>
+<a name="ln378">      // allow to process this merged scale</a>
+<a name="ln379">      if(layer_func) layer_func(merged_layers, p, lev + 1);</a>
+<a name="ln380"> </a>
+<a name="ln381">      // user wants to preview this merged scale</a>
+<a name="ln382">      if(p-&gt;return_layer == lev + 1)</a>
+<a name="ln383">      {</a>
+<a name="ln384">        // return this merged scale</a>
+<a name="ln385">        dwt_get_image_layer(merged_layers, p);</a>
+<a name="ln386"> </a>
+<a name="ln387">        bcontinue = 0;</a>
+<a name="ln388">      }</a>
+<a name="ln389">    }</a>
+<a name="ln390"> </a>
+<a name="ln391">    hpass = lpass;</a>
+<a name="ln392">  }</a>
+<a name="ln393"> </a>
+<a name="ln394">  // all scales have been processed</a>
+<a name="ln395">  if(bcontinue)</a>
+<a name="ln396">  {</a>
+<a name="ln397">    // allow to process residual image</a>
+<a name="ln398">    if(layer_func) layer_func(buffer[hpass], p, p-&gt;scales + 1);</a>
+<a name="ln399"> </a>
+<a name="ln400">    // user wants to preview residual image</a>
+<a name="ln401">    if(p-&gt;return_layer == p-&gt;scales + 1)</a>
+<a name="ln402">    {</a>
+<a name="ln403">      // return residual image</a>
+<a name="ln404">      dwt_get_image_layer(buffer[hpass], p);</a>
+<a name="ln405">    }</a>
+<a name="ln406">    // return reconstructed image</a>
+<a name="ln407">    else if(p-&gt;return_layer == 0)</a>
+<a name="ln408">    {</a>
+<a name="ln409">      // some of the detail scales are on the merged layers</a>
+<a name="ln410">      if(p-&gt;merge_from_scale &gt; 0)</a>
+<a name="ln411">      {</a>
+<a name="ln412">        // add merged layers to final image</a>
+<a name="ln413">        dwt_add_layer(merged_layers, layers, p, p-&gt;scales + 1);</a>
+<a name="ln414">      }</a>
+<a name="ln415"> </a>
+<a name="ln416">      // add residual image to final image</a>
+<a name="ln417">      dwt_add_layer(buffer[hpass], layers, p, p-&gt;scales + 1);</a>
+<a name="ln418"> </a>
+<a name="ln419">      // allow to process reconstructed image</a>
+<a name="ln420">      if(layer_func) layer_func(layers, p, p-&gt;scales + 2);</a>
+<a name="ln421"> </a>
+<a name="ln422">      // return reconstructed image</a>
+<a name="ln423">      dwt_get_image_layer(layers, p);</a>
+<a name="ln424">    }</a>
+<a name="ln425">  }</a>
+<a name="ln426"> </a>
+<a name="ln427">cleanup:</a>
+<a name="ln428">  if(layers) dt_free_align(layers);</a>
+<a name="ln429">  if(merged_layers) dt_free_align(merged_layers);</a>
+<a name="ln430">  if(temp) dt_free_align(temp);</a>
+<a name="ln431">  if(buffer[1]) dt_free_align(buffer[1]);</a>
+<a name="ln432">}</a>
+<a name="ln433"> </a>
+<a name="ln434">#undef INDEX_WT_IMAGE</a>
+<a name="ln435">#undef INDEX_WT_IMAGE_SSE</a>
+<a name="ln436"> </a>
+<a name="ln437">/* this function prepares for decomposing, which is done in the function dwt_wavelet_decompose() */</a>
+<a name="ln438">void dwt_decompose(dwt_params_t *p, _dwt_layer_func layer_func)</a>
+<a name="ln439">{</a>
+<a name="ln440">  // this is a zoom scale, not a wavelet scale</a>
+<a name="ln441">  if(p-&gt;preview_scale &lt;= 0.f) p-&gt;preview_scale = 1.f;</a>
+<a name="ln442"> </a>
+<a name="ln443">  // if a single scale is requested it cannot be grather than the residual</a>
+<a name="ln444">  if(p-&gt;return_layer &gt; p-&gt;scales + 1)</a>
+<a name="ln445">  {</a>
+<a name="ln446">    p-&gt;return_layer = p-&gt;scales + 1;</a>
+<a name="ln447">  }</a>
+<a name="ln448"> </a>
+<a name="ln449">  const int max_scale = dwt_get_max_scale(p);</a>
+<a name="ln450"> </a>
+<a name="ln451">  // if requested scales is grather than max scales adjust it</a>
+<a name="ln452">  if(p-&gt;scales &gt; max_scale)</a>
+<a name="ln453">  {</a>
+<a name="ln454">    // residual shoud be returned</a>
+<a name="ln455">    if(p-&gt;return_layer &gt; p-&gt;scales) p-&gt;return_layer = max_scale + 1;</a>
+<a name="ln456">    // a scale should be returned, it cannot be grather than max scales</a>
+<a name="ln457">    else if(p-&gt;return_layer &gt; max_scale)</a>
+<a name="ln458">      p-&gt;return_layer = max_scale;</a>
+<a name="ln459"> </a>
+<a name="ln460">    p-&gt;scales = max_scale;</a>
+<a name="ln461">  }</a>
+<a name="ln462"> </a>
+<a name="ln463">  // call the actual decompose</a>
+<a name="ln464">  dwt_wavelet_decompose(p-&gt;image, p, layer_func);</a>
+<a name="ln465">}</a>
+<a name="ln466"> </a>
+<a name="ln467">#ifdef HAVE_OPENCL</a>
+<a name="ln468">dt_dwt_cl_global_t *dt_dwt_init_cl_global()</a>
+<a name="ln469">{</a>
+<a name="ln470">  dt_dwt_cl_global_t *g = (dt_dwt_cl_global_t *)malloc(sizeof(dt_dwt_cl_global_t));</a>
+<a name="ln471"> </a>
+<a name="ln472">  const int program = 20; // dwt.cl, from programs.conf</a>
+<a name="ln473">  g-&gt;kernel_dwt_add_img_to_layer = dt_opencl_create_kernel(program, &quot;dwt_add_img_to_layer&quot;);</a>
+<a name="ln474">  g-&gt;kernel_dwt_subtract_layer = dt_opencl_create_kernel(program, &quot;dwt_subtract_layer&quot;);</a>
+<a name="ln475">  g-&gt;kernel_dwt_hat_transform_col = dt_opencl_create_kernel(program, &quot;dwt_hat_transform_col&quot;);</a>
+<a name="ln476">  g-&gt;kernel_dwt_hat_transform_row = dt_opencl_create_kernel(program, &quot;dwt_hat_transform_row&quot;);</a>
+<a name="ln477">  g-&gt;kernel_dwt_init_buffer = dt_opencl_create_kernel(program, &quot;dwt_init_buffer&quot;);</a>
+<a name="ln478">  return g;</a>
+<a name="ln479">}</a>
+<a name="ln480"> </a>
+<a name="ln481">void dt_dwt_free_cl_global(dt_dwt_cl_global_t *g)</a>
+<a name="ln482">{</a>
+<a name="ln483">  if(!g) return;</a>
+<a name="ln484"> </a>
+<a name="ln485">  // destroy kernels</a>
+<a name="ln486">  dt_opencl_free_kernel(g-&gt;kernel_dwt_add_img_to_layer);</a>
+<a name="ln487">  dt_opencl_free_kernel(g-&gt;kernel_dwt_subtract_layer);</a>
+<a name="ln488">  dt_opencl_free_kernel(g-&gt;kernel_dwt_hat_transform_col);</a>
+<a name="ln489">  dt_opencl_free_kernel(g-&gt;kernel_dwt_hat_transform_row);</a>
+<a name="ln490">  dt_opencl_free_kernel(g-&gt;kernel_dwt_init_buffer);</a>
+<a name="ln491"> </a>
+<a name="ln492">  free(g);</a>
+<a name="ln493">}</a>
+<a name="ln494"> </a>
+<a name="ln495">dwt_params_cl_t *dt_dwt_init_cl(const int devid, cl_mem image, const int width, const int height, const int scales,</a>
+<a name="ln496">                                const int return_layer, const int merge_from_scale, void *user_data,</a>
+<a name="ln497">                                const float preview_scale)</a>
+<a name="ln498">{</a>
+<a name="ln499">  dwt_params_cl_t *p = (dwt_params_cl_t *)malloc(sizeof(dwt_params_cl_t));</a>
+<a name="ln500">  if(!p) return NULL;</a>
+<a name="ln501"> </a>
+<a name="ln502">  p-&gt;global = darktable.opencl-&gt;dwt;</a>
+<a name="ln503">  p-&gt;devid = devid;</a>
+<a name="ln504">  p-&gt;image = image;</a>
+<a name="ln505">  p-&gt;ch = 4;</a>
+<a name="ln506">  p-&gt;width = width;</a>
+<a name="ln507">  p-&gt;height = height;</a>
+<a name="ln508">  p-&gt;scales = scales;</a>
+<a name="ln509">  p-&gt;return_layer = return_layer;</a>
+<a name="ln510">  p-&gt;merge_from_scale = merge_from_scale;</a>
+<a name="ln511">  p-&gt;user_data = user_data;</a>
+<a name="ln512">  p-&gt;preview_scale = preview_scale;</a>
+<a name="ln513"> </a>
+<a name="ln514">  return p;</a>
+<a name="ln515">}</a>
+<a name="ln516"> </a>
+<a name="ln517">void dt_dwt_free_cl(dwt_params_cl_t *p)</a>
+<a name="ln518">{</a>
+<a name="ln519">  if(!p) return;</a>
+<a name="ln520"> </a>
+<a name="ln521">  // be sure we're done with the memory:</a>
+<a name="ln522">  dt_opencl_finish(p-&gt;devid);</a>
+<a name="ln523"> </a>
+<a name="ln524">  free(p);</a>
+<a name="ln525">}</a>
+<a name="ln526"> </a>
+<a name="ln527">int dwt_get_max_scale_cl(dwt_params_cl_t *p)</a>
+<a name="ln528">{</a>
+<a name="ln529">  return _get_max_scale(p-&gt;width / p-&gt;preview_scale, p-&gt;height / p-&gt;preview_scale, p-&gt;preview_scale);</a>
+<a name="ln530">}</a>
+<a name="ln531"> </a>
+<a name="ln532">int dt_dwt_first_scale_visible_cl(dwt_params_cl_t *p)</a>
+<a name="ln533">{</a>
+<a name="ln534">  return _first_scale_visible(p-&gt;scales, p-&gt;preview_scale);</a>
+<a name="ln535">}</a>
+<a name="ln536"> </a>
+<a name="ln537">static cl_int dwt_subtract_layer_cl(cl_mem bl, cl_mem bh, dwt_params_cl_t *const p)</a>
+<a name="ln538">{</a>
+<a name="ln539">  cl_int err = CL_MEM_OBJECT_ALLOCATION_FAILURE;</a>
+<a name="ln540"> </a>
+<a name="ln541">  const int devid = p-&gt;devid;</a>
+<a name="ln542">  const int kernel = p-&gt;global-&gt;kernel_dwt_subtract_layer;</a>
+<a name="ln543"> </a>
+<a name="ln544">  size_t sizes[] = { ROUNDUPWD(p-&gt;width), ROUNDUPHT(p-&gt;height), 1 };</a>
+<a name="ln545"> </a>
+<a name="ln546">  const float lpass_mult = (1.f / 16.f);</a>
+<a name="ln547">  const int width = p-&gt;width;</a>
+<a name="ln548">  const int height = p-&gt;height;</a>
+<a name="ln549"> </a>
+<a name="ln550">  dt_opencl_set_kernel_arg(devid, kernel, 0, sizeof(cl_mem), (void *)&amp;bl);</a>
+<a name="ln551">  dt_opencl_set_kernel_arg(devid, kernel, 1, sizeof(cl_mem), (void *)&amp;bh);</a>
+<a name="ln552">  dt_opencl_set_kernel_arg(devid, kernel, 2, sizeof(int), (void *)&amp;(width));</a>
+<a name="ln553">  dt_opencl_set_kernel_arg(devid, kernel, 3, sizeof(int), (void *)&amp;(height));</a>
+<a name="ln554">  dt_opencl_set_kernel_arg(devid, kernel, 4, sizeof(float), (void *)&amp;lpass_mult);</a>
+<a name="ln555">  err = dt_opencl_enqueue_kernel_2d(devid, kernel, sizes);</a>
+<a name="ln556"> </a>
+<a name="ln557">  return err;</a>
+<a name="ln558">}</a>
+<a name="ln559"> </a>
+<a name="ln560">static cl_int dwt_add_layer_cl(cl_mem img, cl_mem layers, dwt_params_cl_t *const p, const int n_scale)</a>
+<a name="ln561">{</a>
+<a name="ln562">  cl_int err = CL_MEM_OBJECT_ALLOCATION_FAILURE;</a>
+<a name="ln563"> </a>
+<a name="ln564">  const int devid = p-&gt;devid;</a>
+<a name="ln565">  const int kernel = p-&gt;global-&gt;kernel_dwt_add_img_to_layer;</a>
+<a name="ln566"> </a>
+<a name="ln567">  size_t sizes[] = { ROUNDUPWD(p-&gt;width), ROUNDUPHT(p-&gt;height), 1 };</a>
+<a name="ln568"> </a>
+<a name="ln569">  const int width = p-&gt;width;</a>
+<a name="ln570">  const int height = p-&gt;height;</a>
+<a name="ln571"> </a>
+<a name="ln572">  dt_opencl_set_kernel_arg(devid, kernel, 0, sizeof(cl_mem), (void *)&amp;img);</a>
+<a name="ln573">  dt_opencl_set_kernel_arg(devid, kernel, 1, sizeof(cl_mem), (void *)&amp;layers);</a>
+<a name="ln574">  dt_opencl_set_kernel_arg(devid, kernel, 2, sizeof(int), (void *)&amp;(width));</a>
+<a name="ln575">  dt_opencl_set_kernel_arg(devid, kernel, 3, sizeof(int), (void *)&amp;(height));</a>
+<a name="ln576">  err = dt_opencl_enqueue_kernel_2d(devid, kernel, sizes);</a>
+<a name="ln577"> </a>
+<a name="ln578">  return err;</a>
+<a name="ln579">}</a>
+<a name="ln580"> </a>
+<a name="ln581">static cl_int dwt_get_image_layer_cl(cl_mem layer, dwt_params_cl_t *const p)</a>
+<a name="ln582">{</a>
+<a name="ln583">  cl_int err = CL_SUCCESS;</a>
+<a name="ln584"> </a>
+<a name="ln585">  if(p-&gt;image != layer)</a>
+<a name="ln586">    err = dt_opencl_enqueue_copy_buffer_to_buffer(p-&gt;devid, layer, p-&gt;image, 0, 0,</a>
+<a name="ln587">                                                  (size_t)p-&gt;width * p-&gt;height * p-&gt;ch * sizeof(float));</a>
+<a name="ln588"> </a>
+<a name="ln589">  return err;</a>
+<a name="ln590">}</a>
+<a name="ln591"> </a>
+<a name="ln592">static cl_int dwt_wavelet_decompose_cl(cl_mem img, dwt_params_cl_t *const p, _dwt_layer_func_cl layer_func)</a>
+<a name="ln593">{</a>
+<a name="ln594">  cl_int err = CL_SUCCESS;</a>
+<a name="ln595"> </a>
+<a name="ln596">  const int devid = p-&gt;devid;</a>
+<a name="ln597"> </a>
+<a name="ln598">  cl_mem temp = NULL;</a>
+<a name="ln599">  cl_mem layers = NULL;</a>
+<a name="ln600">  cl_mem merged_layers = NULL;</a>
+<a name="ln601">  unsigned int lpass, hpass;</a>
+<a name="ln602">  cl_mem buffer[2] = { 0, 0 };</a>
+<a name="ln603">  int bcontinue = 1;</a>
+<a name="ln604"> </a>
+<a name="ln605">  if(layer_func)</a>
+<a name="ln606">  {</a>
+<a name="ln607">    err = layer_func(img, p, 0);</a>
+<a name="ln608">    if(err != CL_SUCCESS) goto cleanup;</a>
+<a name="ln609">  }</a>
+<a name="ln610"> </a>
+<a name="ln611">  if(p-&gt;scales &lt;= 0) goto cleanup;</a>
+<a name="ln612"> </a>
+<a name="ln613">  /* image buffers */</a>
+<a name="ln614">  buffer[0] = img;</a>
+<a name="ln615">  /* temporary storage */</a>
+<a name="ln616">  buffer[1] = dt_opencl_alloc_device_buffer(devid, (size_t)p-&gt;width * p-&gt;height * p-&gt;ch * sizeof(float));</a>
+<a name="ln617">  if(buffer[1] == NULL)</a>
+<a name="ln618">  {</a>
+<a name="ln619">    printf(&quot;not enough memory for wavelet decomposition&quot;);</a>
+<a name="ln620">    err = CL_MEM_OBJECT_ALLOCATION_FAILURE;</a>
+<a name="ln621">    goto cleanup;</a>
+<a name="ln622">  }</a>
+<a name="ln623"> </a>
+<a name="ln624">  // buffer to reconstruct the image</a>
+<a name="ln625">  layers = dt_opencl_alloc_device_buffer(devid, (size_t)p-&gt;width * p-&gt;height * p-&gt;ch * sizeof(float));</a>
+<a name="ln626">  if(layers == NULL)</a>
+<a name="ln627">  {</a>
+<a name="ln628">    printf(&quot;not enough memory for wavelet decomposition&quot;);</a>
+<a name="ln629">    err = CL_MEM_OBJECT_ALLOCATION_FAILURE;</a>
+<a name="ln630">    goto cleanup;</a>
+<a name="ln631">  }</a>
+<a name="ln632">  // init layer buffer</a>
+<a name="ln633">  {</a>
+<a name="ln634">    const int kernel = p-&gt;global-&gt;kernel_dwt_init_buffer;</a>
+<a name="ln635"> </a>
+<a name="ln636">    size_t sizes[] = { ROUNDUPWD(p-&gt;width), ROUNDUPHT(p-&gt;height), 1 };</a>
+<a name="ln637">    const int width = p-&gt;width;</a>
+<a name="ln638">    const int height = p-&gt;height;</a>
+<a name="ln639"> </a>
+<a name="ln640">    dt_opencl_set_kernel_arg(devid, kernel, 0, sizeof(cl_mem), (void *)&amp;layers);</a>
+<a name="ln641">    dt_opencl_set_kernel_arg(devid, kernel, 1, sizeof(int), (void *)&amp;(width));</a>
+<a name="ln642">    dt_opencl_set_kernel_arg(devid, kernel, 2, sizeof(int), (void *)&amp;(height));</a>
+<a name="ln643">    err = dt_opencl_enqueue_kernel_2d(devid, kernel, sizes);</a>
+<a name="ln644">    if(err != CL_SUCCESS) goto cleanup;</a>
+<a name="ln645">  }</a>
+<a name="ln646"> </a>
+<a name="ln647">  if(p-&gt;merge_from_scale &gt; 0)</a>
+<a name="ln648">  {</a>
+<a name="ln649">    merged_layers = dt_opencl_alloc_device_buffer(devid, (size_t)p-&gt;width * p-&gt;height * p-&gt;ch * sizeof(float));</a>
+<a name="ln650">    if(merged_layers == NULL)</a>
+<a name="ln651">    {</a>
+<a name="ln652">      printf(&quot;not enough memory for wavelet decomposition&quot;);</a>
+<a name="ln653">      err = CL_MEM_OBJECT_ALLOCATION_FAILURE;</a>
+<a name="ln654">      goto cleanup;</a>
+<a name="ln655">    }</a>
+<a name="ln656">    // init reconstruct buffer</a>
+<a name="ln657">    {</a>
+<a name="ln658">      const int kernel = p-&gt;global-&gt;kernel_dwt_init_buffer;</a>
+<a name="ln659"> </a>
+<a name="ln660">      size_t sizes[] = { ROUNDUPWD(p-&gt;width), ROUNDUPHT(p-&gt;height), 1 };</a>
+<a name="ln661">      const int width = p-&gt;width;</a>
+<a name="ln662">      const int height = p-&gt;height;</a>
+<a name="ln663"> </a>
+<a name="ln664">      dt_opencl_set_kernel_arg(devid, kernel, 0, sizeof(cl_mem), (void *)&amp;merged_layers);</a>
+<a name="ln665">      dt_opencl_set_kernel_arg(devid, kernel, 1, sizeof(int), (void *)&amp;(width));</a>
+<a name="ln666">      dt_opencl_set_kernel_arg(devid, kernel, 2, sizeof(int), (void *)&amp;(height));</a>
+<a name="ln667">      err = dt_opencl_enqueue_kernel_2d(devid, kernel, sizes);</a>
+<a name="ln668">      if(err != CL_SUCCESS) goto cleanup;</a>
+<a name="ln669">    }</a>
+<a name="ln670">  }</a>
+<a name="ln671"> </a>
+<a name="ln672">  // iterate over wavelet scales</a>
+<a name="ln673">  lpass = 1;</a>
+<a name="ln674">  hpass = 0;</a>
+<a name="ln675">  for(unsigned int lev = 0; lev &lt; p-&gt;scales &amp;&amp; bcontinue; lev++)</a>
+<a name="ln676">  {</a>
+<a name="ln677">    lpass = (1 - (lev &amp; 1));</a>
+<a name="ln678"> </a>
+<a name="ln679">    // when (*layer_func) uses too much memory I get a -4 error, so alloc and free for each scale</a>
+<a name="ln680">    // setup a temp buffer</a>
+<a name="ln681">    temp = dt_opencl_alloc_device_buffer(devid, (size_t)p-&gt;width * p-&gt;height * p-&gt;ch * sizeof(float));</a>
+<a name="ln682">    if(temp == NULL)</a>
+<a name="ln683">    {</a>
+<a name="ln684">      printf(&quot;not enough memory for wavelet decomposition&quot;);</a>
+<a name="ln685">      err = CL_MEM_OBJECT_ALLOCATION_FAILURE;</a>
+<a name="ln686">      goto cleanup;</a>
+<a name="ln687">    }</a>
+<a name="ln688"> </a>
+<a name="ln689">    // hat transform by row</a>
+<a name="ln690">    {</a>
+<a name="ln691">      const int kernel = p-&gt;global-&gt;kernel_dwt_hat_transform_row;</a>
+<a name="ln692"> </a>
+<a name="ln693">      int sc = 1 &lt;&lt; lev;</a>
+<a name="ln694">      sc = (int)(sc * p-&gt;preview_scale);</a>
+<a name="ln695">      if(sc &gt; p-&gt;width) sc = p-&gt;width;</a>
+<a name="ln696"> </a>
+<a name="ln697">      size_t sizes[] = { ROUNDUPWD(p-&gt;width), ROUNDUPHT(p-&gt;height), 1 };</a>
+<a name="ln698"> </a>
+<a name="ln699">      dt_opencl_set_kernel_arg(devid, kernel, 0, sizeof(cl_mem), (void *)&amp;temp);</a>
+<a name="ln700">      dt_opencl_set_kernel_arg(devid, kernel, 1, sizeof(cl_mem), (void *)&amp;(buffer[hpass]));</a>
+<a name="ln701">      dt_opencl_set_kernel_arg(devid, kernel, 2, sizeof(int), (void *)&amp;(p-&gt;width));</a>
+<a name="ln702">      dt_opencl_set_kernel_arg(devid, kernel, 3, sizeof(int), (void *)&amp;(p-&gt;height));</a>
+<a name="ln703">      dt_opencl_set_kernel_arg(devid, kernel, 4, sizeof(int), (void *)&amp;sc);</a>
+<a name="ln704">      err = dt_opencl_enqueue_kernel_2d(devid, kernel, sizes);</a>
+<a name="ln705">      if(err != CL_SUCCESS) goto cleanup;</a>
+<a name="ln706">    }</a>
+<a name="ln707"> </a>
+<a name="ln708">    // hat transform by col</a>
+<a name="ln709">    {</a>
+<a name="ln710">      const int kernel = p-&gt;global-&gt;kernel_dwt_hat_transform_col;</a>
+<a name="ln711"> </a>
+<a name="ln712">      int sc = 1 &lt;&lt; lev;</a>
+<a name="ln713">      sc = (int)(sc * p-&gt;preview_scale);</a>
+<a name="ln714">      if(sc &gt; p-&gt;height) sc = p-&gt;height;</a>
+<a name="ln715">      const float lpass_mult = (1.f / 16.f);</a>
+<a name="ln716"> </a>
+<a name="ln717">      size_t sizes[] = { ROUNDUPWD(p-&gt;width), ROUNDUPHT(p-&gt;height), 1 };</a>
+<a name="ln718"> </a>
+<a name="ln719">      dt_opencl_set_kernel_arg(devid, kernel, 0, sizeof(cl_mem), (void *)&amp;temp);</a>
+<a name="ln720">      dt_opencl_set_kernel_arg(devid, kernel, 1, sizeof(int), (void *)&amp;(p-&gt;width));</a>
+<a name="ln721">      dt_opencl_set_kernel_arg(devid, kernel, 2, sizeof(int), (void *)&amp;(p-&gt;height));</a>
+<a name="ln722">      dt_opencl_set_kernel_arg(devid, kernel, 3, sizeof(int), (void *)&amp;sc);</a>
+<a name="ln723">      dt_opencl_set_kernel_arg(devid, kernel, 4, sizeof(cl_mem), (void *)&amp;(buffer[lpass]));</a>
+<a name="ln724">      dt_opencl_set_kernel_arg(devid, kernel, 5, sizeof(float), (void *)&amp;lpass_mult);</a>
+<a name="ln725">      err = dt_opencl_enqueue_kernel_2d(devid, kernel, sizes);</a>
+<a name="ln726">      if(err != CL_SUCCESS) goto cleanup;</a>
+<a name="ln727">    }</a>
+<a name="ln728"> </a>
+<a name="ln729">    if(temp)</a>
+<a name="ln730">    {</a>
+<a name="ln731">      dt_opencl_release_mem_object(temp);</a>
+<a name="ln732">      temp = NULL;</a>
+<a name="ln733">    }</a>
+<a name="ln734"> </a>
+<a name="ln735">    err = dwt_subtract_layer_cl(buffer[lpass], buffer[hpass], p);</a>
+<a name="ln736">    if(err != CL_SUCCESS) goto cleanup;</a>
+<a name="ln737"> </a>
+<a name="ln738">    // no merge scales or we didn't reach the merge scale from yet</a>
+<a name="ln739">    if(p-&gt;merge_from_scale == 0 || p-&gt;merge_from_scale &gt; lev + 1)</a>
+<a name="ln740">    {</a>
+<a name="ln741">      // allow to process this detail scale</a>
+<a name="ln742">      if(layer_func)</a>
+<a name="ln743">      {</a>
+<a name="ln744">        err = layer_func(buffer[hpass], p, lev + 1);</a>
+<a name="ln745">        if(err != CL_SUCCESS) goto cleanup;</a>
+<a name="ln746">      }</a>
+<a name="ln747"> </a>
+<a name="ln748">      // user wants to preview this detail scale</a>
+<a name="ln749">      if(p-&gt;return_layer == lev + 1)</a>
+<a name="ln750">      {</a>
+<a name="ln751">        // return this detail scale</a>
+<a name="ln752">        err = dwt_get_image_layer_cl(buffer[hpass], p);</a>
+<a name="ln753">        if(err != CL_SUCCESS) goto cleanup;</a>
+<a name="ln754"> </a>
+<a name="ln755">        bcontinue = 0;</a>
+<a name="ln756">      }</a>
+<a name="ln757">      // user wants the entire reconstructed image</a>
+<a name="ln758">      else if(p-&gt;return_layer == 0)</a>
+<a name="ln759">      {</a>
+<a name="ln760">        // add this detail scale to the final image</a>
+<a name="ln761">        err = dwt_add_layer_cl(buffer[hpass], layers, p, lev + 1);</a>
+<a name="ln762">        if(err != CL_SUCCESS) goto cleanup;</a>
+<a name="ln763">      }</a>
+<a name="ln764">    }</a>
+<a name="ln765">    // we are on the merge scales range</a>
+<a name="ln766">    else</a>
+<a name="ln767">    {</a>
+<a name="ln768">      // add this detail scale to the merged ones</a>
+<a name="ln769">      err = dwt_add_layer_cl(buffer[hpass], merged_layers, p, lev + 1);</a>
+<a name="ln770">      if(err != CL_SUCCESS) goto cleanup;</a>
+<a name="ln771"> </a>
+<a name="ln772">      // allow to process this merged scale</a>
+<a name="ln773">      if(layer_func)</a>
+<a name="ln774">      {</a>
+<a name="ln775">        err = layer_func(merged_layers, p, lev + 1);</a>
+<a name="ln776">        if(err != CL_SUCCESS) goto cleanup;</a>
+<a name="ln777">      }</a>
+<a name="ln778"> </a>
+<a name="ln779">      // user wants to preview this merged scale</a>
+<a name="ln780">      if(p-&gt;return_layer == lev + 1)</a>
+<a name="ln781">      {</a>
+<a name="ln782">        // return this merged scale</a>
+<a name="ln783">        err = dwt_get_image_layer_cl(merged_layers, p);</a>
+<a name="ln784">        if(err != CL_SUCCESS) goto cleanup;</a>
+<a name="ln785"> </a>
+<a name="ln786">        bcontinue = 0;</a>
+<a name="ln787">      }</a>
+<a name="ln788">    }</a>
+<a name="ln789"> </a>
+<a name="ln790">    hpass = lpass;</a>
+<a name="ln791">  }</a>
+<a name="ln792"> </a>
+<a name="ln793">  // all scales have been processed</a>
+<a name="ln794">  if(bcontinue)</a>
+<a name="ln795">  {</a>
+<a name="ln796">    // allow to process residual image</a>
+<a name="ln797">    if(layer_func)</a>
+<a name="ln798">    {</a>
+<a name="ln799">      err = layer_func(buffer[hpass], p, p-&gt;scales + 1);</a>
+<a name="ln800">      if(err != CL_SUCCESS) goto cleanup;</a>
+<a name="ln801">    }</a>
+<a name="ln802"> </a>
+<a name="ln803">    // user wants to preview residual image</a>
+<a name="ln804">    if(p-&gt;return_layer == p-&gt;scales + 1)</a>
+<a name="ln805">    {</a>
+<a name="ln806">      // return residual image</a>
+<a name="ln807">      err = dwt_get_image_layer_cl(buffer[hpass], p);</a>
+<a name="ln808">      if(err != CL_SUCCESS) goto cleanup;</a>
+<a name="ln809">    }</a>
+<a name="ln810">    // return reconstructed image</a>
+<a name="ln811">    else if(p-&gt;return_layer == 0)</a>
+<a name="ln812">    {</a>
+<a name="ln813">      // some of the detail scales are on the merged layers</a>
+<a name="ln814">      if(p-&gt;merge_from_scale &gt; 0)</a>
+<a name="ln815">      {</a>
+<a name="ln816">        // add merged layers to final image</a>
+<a name="ln817">        err = dwt_add_layer_cl(merged_layers, layers, p, p-&gt;scales + 1);</a>
+<a name="ln818">        if(err != CL_SUCCESS) goto cleanup;</a>
+<a name="ln819">      }</a>
+<a name="ln820"> </a>
+<a name="ln821">      // add residual image to final image</a>
+<a name="ln822">      err = dwt_add_layer_cl(buffer[hpass], layers, p, p-&gt;scales + 1);</a>
+<a name="ln823">      if(err != CL_SUCCESS) goto cleanup;</a>
+<a name="ln824"> </a>
+<a name="ln825">      // allow to process reconstructed image</a>
+<a name="ln826">      if(layer_func)</a>
+<a name="ln827">      {</a>
+<a name="ln828">        err = layer_func(layers, p, p-&gt;scales + 2);</a>
+<a name="ln829">        if(err != CL_SUCCESS) goto cleanup;</a>
+<a name="ln830">      }</a>
+<a name="ln831"> </a>
+<a name="ln832">      // return reconstructed image</a>
+<a name="ln833">      err = dwt_get_image_layer_cl(layers, p);</a>
+<a name="ln834">      if(err != CL_SUCCESS) goto cleanup;</a>
+<a name="ln835">    }</a>
+<a name="ln836">  }</a>
+<a name="ln837"> </a>
+<a name="ln838">cleanup:</a>
+<a name="ln839">  if(layers) dt_opencl_release_mem_object(layers);</a>
+<a name="ln840">  if(merged_layers) dt_opencl_release_mem_object(merged_layers);</a>
+<a name="ln841">  if(temp) dt_opencl_release_mem_object(temp);</a>
+<a name="ln842">  if(buffer[1]) dt_opencl_release_mem_object(buffer[1]);</a>
+<a name="ln843"> </a>
+<a name="ln844">  return err;</a>
+<a name="ln845">}</a>
+<a name="ln846"> </a>
+<a name="ln847">cl_int dwt_decompose_cl(dwt_params_cl_t *p, _dwt_layer_func_cl layer_func)</a>
+<a name="ln848">{</a>
+<a name="ln849">  cl_int err = CL_SUCCESS;</a>
+<a name="ln850"> </a>
+<a name="ln851">  // this is a zoom scale, not a wavelet scale</a>
+<a name="ln852">  if(p-&gt;preview_scale &lt;= 0.f) p-&gt;preview_scale = 1.f;</a>
+<a name="ln853"> </a>
+<a name="ln854">  // if a single scale is requested it cannot be grather than the residual</a>
+<a name="ln855">  if(p-&gt;return_layer &gt; p-&gt;scales + 1)</a>
+<a name="ln856">  {</a>
+<a name="ln857">    p-&gt;return_layer = p-&gt;scales + 1;</a>
+<a name="ln858">  }</a>
+<a name="ln859"> </a>
+<a name="ln860">  const int max_scale = dwt_get_max_scale_cl(p);</a>
+<a name="ln861"> </a>
+<a name="ln862">  // if requested scales is grather than max scales adjust it</a>
+<a name="ln863">  if(p-&gt;scales &gt; max_scale)</a>
+<a name="ln864">  {</a>
+<a name="ln865">    // residual shoud be returned</a>
+<a name="ln866">    if(p-&gt;return_layer &gt; p-&gt;scales) p-&gt;return_layer = max_scale + 1;</a>
+<a name="ln867">    // a scale should be returned, it cannot be grather than max scales</a>
+<a name="ln868">    else if(p-&gt;return_layer &gt; max_scale)</a>
+<a name="ln869">      p-&gt;return_layer = max_scale;</a>
+<a name="ln870"> </a>
+<a name="ln871">    p-&gt;scales = max_scale;</a>
+<a name="ln872">  }</a>
+<a name="ln873"> </a>
+<a name="ln874">  // call the actual decompose</a>
+<a name="ln875">  err = dwt_wavelet_decompose_cl(p-&gt;image, p, layer_func);</a>
+<a name="ln876"> </a>
+<a name="ln877">  return err;</a>
+<a name="ln878">}</a>
+<a name="ln879"> </a>
+<a name="ln880">#endif</a>
+
+</code></pre>
+<div class="balloon" rel="473"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v522/" target="_blank">V522</a> There might be dereferencing of a potential null pointer 'g'. Check lines: 473, 470.</p></div>
+
+<link rel="stylesheet" href="highlight.css">
+<script src="highlight.pack.js"></script>
+<script src="highlightjs-line-numbers.js"></script>
+<script>hljs.initHighlightingOnLoad();</script>
+<script>hljs.initLineNumbersOnLoad();</script>
+<script>
+  $(document).ready(function() {
+      $('.balloon').each(function () {
+          var bl = $(this);
+          var line = bl.attr('rel');
+          var text = $('a[name="ln'+line+'"]').text();
+
+          var space_count = 0;
+          for(var i = 0; i<text.length; i++){
+              var char = text[i];
+              if((char !== ' ')&&(char !== '\t'))break;
+              if(char === '\t')space_count++;
+              space_count++;
+          }
+
+          bl.css('margin-left', space_count*8);
+          $('a[name="ln'+line+'"]').after(bl);
+      });
+
+      window.location = window.location;
+  });
+</script>
+</body>
+</html>

@@ -1,0 +1,804 @@
+
+<html>
+<head>
+  <link rel="stylesheet" href="../style.css"/>
+  <script src="../jquery-3.2.1.min.js"></script>
+</head>
+<body>
+<pre><code class = "cpp">
+<a name="ln1">/*</a>
+<a name="ln2">   This file is part of darktable,</a>
+<a name="ln3">   copyright (c) 2011 Jochen Schroeder</a>
+<a name="ln4"> </a>
+<a name="ln5">   darktable is free software: you can redistribute it and/or modify</a>
+<a name="ln6">   it under the terms of the GNU General Public License as published by</a>
+<a name="ln7">   the Free Software Foundation, either version 3 of the License, or</a>
+<a name="ln8">   (at your option) any later version.</a>
+<a name="ln9"> </a>
+<a name="ln10">   darktable is distributed in the hope that it will be useful,</a>
+<a name="ln11">   but WITHOUT ANY WARRANTY; without even the implied warranty of</a>
+<a name="ln12">   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the</a>
+<a name="ln13">   GNU General Public License for more details.</a>
+<a name="ln14"> </a>
+<a name="ln15">   You should have received a copy of the GNU General Public License</a>
+<a name="ln16">   along with darktable.  If not, see &lt;http://www.gnu.org/licenses/&gt;.</a>
+<a name="ln17"> </a>
+<a name="ln18">   Part of this file is based on nikon_curve.c from UFraw</a>
+<a name="ln19">   Copyright 2004-2008 by Shawn Freeman, Udi Fuchs</a>
+<a name="ln20">*/</a>
+<a name="ln21"> </a>
+<a name="ln22">#include &quot;curve_tools.h&quot;</a>
+<a name="ln23">#include &lt;float.h&gt;</a>
+<a name="ln24">#include &lt;math.h&gt;</a>
+<a name="ln25">#include &lt;stdio.h&gt;</a>
+<a name="ln26">#include &lt;stdlib.h&gt;</a>
+<a name="ln27"> </a>
+<a name="ln28">#define EPSILON 2 * FLT_MIN</a>
+<a name="ln29">#define MAX_ITER 10</a>
+<a name="ln30"> </a>
+<a name="ln31">static const int curvedata_anchors_max = 20;</a>
+<a name="ln32"> </a>
+<a name="ln33">// declare some functions and so I can use the function pointer</a>
+<a name="ln34">float spline_cubic_val(int n, float t[], float tval, float y[], float ypp[]);</a>
+<a name="ln35">float catmull_rom_val(int n, float x[], float xval, float y[], float tangents[]);</a>
+<a name="ln36"> </a>
+<a name="ln37">float *spline_cubic_set(int n, float t[], float y[]);</a>
+<a name="ln38">float *catmull_rom_set(int n, float x[], float y[]);</a>
+<a name="ln39">float *monotone_hermite_set(int n, float x[], float y[]);</a>
+<a name="ln40"> </a>
+<a name="ln41">float (*spline_val[])(int, float[], float, float[], float[])</a>
+<a name="ln42">    = { spline_cubic_val, catmull_rom_val, catmull_rom_val };</a>
+<a name="ln43"> </a>
+<a name="ln44">float *(*spline_set[])(int, float[], float[]) = { spline_cubic_set, catmull_rom_set, monotone_hermite_set };</a>
+<a name="ln45"> </a>
+<a name="ln46">/**********************************************************************</a>
+<a name="ln47"> </a>
+<a name="ln48">  Purpose:</a>
+<a name="ln49"> </a>
+<a name="ln50">    D3_NP_FS factors and solves a D3 system.</a>
+<a name="ln51"> </a>
+<a name="ln52">  Discussion:</a>
+<a name="ln53"> </a>
+<a name="ln54">    The D3 storage format is used for a tridiagonal matrix.</a>
+<a name="ln55">    The superdiagonal is stored in entries (1,2:N), the diagonal in</a>
+<a name="ln56">    entries (2,1:N), and the subdiagonal in (3,1:N-1).  Thus, the</a>
+<a name="ln57">    original matrix is &quot;collapsed&quot; vertically into the array.</a>
+<a name="ln58"> </a>
+<a name="ln59">    This algorithm requires that each diagonal entry be nonzero.</a>
+<a name="ln60">    It does not use pivoting, and so can fail on systems that</a>
+<a name="ln61">    are actually nonsingular.</a>
+<a name="ln62"> </a>
+<a name="ln63">  Example:</a>
+<a name="ln64"> </a>
+<a name="ln65">    Here is how a D3 matrix of order 5 would be stored:</a>
+<a name="ln66"> </a>
+<a name="ln67">       *  A12 A23 A34 A45</a>
+<a name="ln68">      A11 A22 A33 A44 A55</a>
+<a name="ln69">      A21 A32 A43 A54  *</a>
+<a name="ln70"> </a>
+<a name="ln71">  Modified:</a>
+<a name="ln72"> </a>
+<a name="ln73">      07 January 2005    Shawn Freeman (pure C modifications)</a>
+<a name="ln74">    15 November 2003    John Burkardt</a>
+<a name="ln75"> </a>
+<a name="ln76">  Author:</a>
+<a name="ln77"> </a>
+<a name="ln78">    John Burkardt</a>
+<a name="ln79"> </a>
+<a name="ln80">  Parameters:</a>
+<a name="ln81"> </a>
+<a name="ln82">    Input, int N, the order of the linear system.</a>
+<a name="ln83"> </a>
+<a name="ln84">    Input/output, float A[3*N].</a>
+<a name="ln85">    On input, the nonzero diagonals of the linear system.</a>
+<a name="ln86">    On output, the data in these vectors has been overwritten</a>
+<a name="ln87">    by factorization information.</a>
+<a name="ln88"> </a>
+<a name="ln89">    Input, float B[N], the right hand side.</a>
+<a name="ln90"> </a>
+<a name="ln91">    Output, float D3_NP_FS[N], the solution of the linear system.</a>
+<a name="ln92">    This is NULL if there was an error because one of the diagonal</a>
+<a name="ln93">    entries was zero.</a>
+<a name="ln94">**********************************************************************/</a>
+<a name="ln95">float *d3_np_fs(int n, float a[], float b[])</a>
+<a name="ln96"> </a>
+<a name="ln97">{</a>
+<a name="ln98">  if(n &lt;= 0 || n &gt; curvedata_anchors_max) return NULL;</a>
+<a name="ln99"> </a>
+<a name="ln100">  int i;</a>
+<a name="ln101">  float *x;</a>
+<a name="ln102">  float xmult;</a>
+<a name="ln103">  //</a>
+<a name="ln104">  //  Check.</a>
+<a name="ln105">  //</a>
+<a name="ln106">  for(i = 0; i &lt; n; i++)</a>
+<a name="ln107">  {</a>
+<a name="ln108">    if(a[1 + i * 3] == 0.0E+00)</a>
+<a name="ln109">    {</a>
+<a name="ln110">      return NULL;</a>
+<a name="ln111">    }</a>
+<a name="ln112">  }</a>
+<a name="ln113">  x = (float *)calloc(n, sizeof(float));</a>
+<a name="ln114">  // nc_merror(x, &quot;d3_np_fs&quot;);</a>
+<a name="ln115"> </a>
+<a name="ln116">  for(i = 0; i &lt; n; i++)</a>
+<a name="ln117">  {</a>
+<a name="ln118">    x[i] = b[i];</a>
+<a name="ln119">  }</a>
+<a name="ln120"> </a>
+<a name="ln121">  for(i = 1; i &lt; n; i++)</a>
+<a name="ln122">  {</a>
+<a name="ln123">    xmult = a[2 + (i - 1) * 3] / a[1 + (i - 1) * 3];</a>
+<a name="ln124">    a[1 + i * 3] = a[1 + i * 3] - xmult * a[0 + i * 3];</a>
+<a name="ln125">    x[i] = x[i] - xmult * x[i - 1];</a>
+<a name="ln126">  }</a>
+<a name="ln127"> </a>
+<a name="ln128">  x[n - 1] = x[n - 1] / a[1 + (n - 1) * 3];</a>
+<a name="ln129">  for(i = n - 2; 0 &lt;= i; i--)</a>
+<a name="ln130">  {</a>
+<a name="ln131">    x[i] = (x[i] - a[0 + (i + 1) * 3] * x[i + 1]) / a[1 + i * 3];</a>
+<a name="ln132">  }</a>
+<a name="ln133"> </a>
+<a name="ln134">  return x;</a>
+<a name="ln135">}</a>
+<a name="ln136"> </a>
+<a name="ln137">/**********************************************************************</a>
+<a name="ln138"> </a>
+<a name="ln139">  Purpose:</a>
+<a name="ln140"> </a>
+<a name="ln141">    SPLINE_CUBIC_SET computes the second derivatives of a piecewise cubic spline.</a>
+<a name="ln142"> </a>
+<a name="ln143">  Discussion:</a>
+<a name="ln144"> </a>
+<a name="ln145">    For data interpolation, the user must call SPLINE_SET to determine</a>
+<a name="ln146">    the second derivative data, passing in the data to be interpolated,</a>
+<a name="ln147">    and the desired boundary conditions.</a>
+<a name="ln148"> </a>
+<a name="ln149">    The data to be interpolated, plus the SPLINE_SET output, defines</a>
+<a name="ln150">    the spline.  The user may then call SPLINE_VAL to evaluate the</a>
+<a name="ln151">    spline at any point.</a>
+<a name="ln152"> </a>
+<a name="ln153">    The cubic spline is a piecewise cubic polynomial.  The intervals</a>
+<a name="ln154">    are determined by the &quot;knots&quot; or abscissas of the data to be</a>
+<a name="ln155">    interpolated.  The cubic spline has continuous first and second</a>
+<a name="ln156">    derivatives over the entire interval of interpolation.</a>
+<a name="ln157"> </a>
+<a name="ln158">    For any point T in the interval T(IVAL), T(IVAL+1), the form of</a>
+<a name="ln159">    the spline is</a>
+<a name="ln160"> </a>
+<a name="ln161">      SPL(T) = A(IVAL)</a>
+<a name="ln162">             + B(IVAL) * ( T - T(IVAL) )</a>
+<a name="ln163">             + C(IVAL) * ( T - T(IVAL) )**2</a>
+<a name="ln164">             + D(IVAL) * ( T - T(IVAL) )**3</a>
+<a name="ln165"> </a>
+<a name="ln166">    If we assume that we know the values Y(*) and YPP(*), which represent</a>
+<a name="ln167">    the values and second derivatives of the spline at each knot, then</a>
+<a name="ln168">    the coefficients can be computed as:</a>
+<a name="ln169"> </a>
+<a name="ln170">      A(IVAL) = Y(IVAL)</a>
+<a name="ln171">      B(IVAL) = ( Y(IVAL+1) - Y(IVAL) ) / ( T(IVAL+1) - T(IVAL) )</a>
+<a name="ln172">        - ( YPP(IVAL+1) + 2 * YPP(IVAL) ) * ( T(IVAL+1) - T(IVAL) ) / 6</a>
+<a name="ln173">      C(IVAL) = YPP(IVAL) / 2</a>
+<a name="ln174">      D(IVAL) = ( YPP(IVAL+1) - YPP(IVAL) ) / ( 6 * ( T(IVAL+1) - T(IVAL) ) )</a>
+<a name="ln175"> </a>
+<a name="ln176">    Since the first derivative of the spline is</a>
+<a name="ln177"> </a>
+<a name="ln178">      SPL'(T) =     B(IVAL)</a>
+<a name="ln179">              + 2 * C(IVAL) * ( T - T(IVAL) )</a>
+<a name="ln180">              + 3 * D(IVAL) * ( T - T(IVAL) )**2,</a>
+<a name="ln181"> </a>
+<a name="ln182">    the requirement that the first derivative be continuous at interior</a>
+<a name="ln183">    knot I results in a total of N-2 equations, of the form:</a>
+<a name="ln184"> </a>
+<a name="ln185">      B(IVAL-1) + 2 C(IVAL-1) * (T(IVAL)-T(IVAL-1))</a>
+<a name="ln186">      + 3 * D(IVAL-1) * (T(IVAL) - T(IVAL-1))**2 = B(IVAL)</a>
+<a name="ln187"> </a>
+<a name="ln188">    or, setting H(IVAL) = T(IVAL+1) - T(IVAL)</a>
+<a name="ln189"> </a>
+<a name="ln190">      ( Y(IVAL) - Y(IVAL-1) ) / H(IVAL-1)</a>
+<a name="ln191">      - ( YPP(IVAL) + 2 * YPP(IVAL-1) ) * H(IVAL-1) / 6</a>
+<a name="ln192">      + YPP(IVAL-1) * H(IVAL-1)</a>
+<a name="ln193">      + ( YPP(IVAL) - YPP(IVAL-1) ) * H(IVAL-1) / 2</a>
+<a name="ln194">      =</a>
+<a name="ln195">      ( Y(IVAL+1) - Y(IVAL) ) / H(IVAL)</a>
+<a name="ln196">      - ( YPP(IVAL+1) + 2 * YPP(IVAL) ) * H(IVAL) / 6</a>
+<a name="ln197"> </a>
+<a name="ln198">    or</a>
+<a name="ln199"> </a>
+<a name="ln200">      YPP(IVAL-1) * H(IVAL-1) + 2 * YPP(IVAL) * ( H(IVAL-1) + H(IVAL) )</a>
+<a name="ln201">      + YPP(IVAL) * H(IVAL)</a>
+<a name="ln202">      =</a>
+<a name="ln203">      6 * ( Y(IVAL+1) - Y(IVAL) ) / H(IVAL)</a>
+<a name="ln204">      - 6 * ( Y(IVAL) - Y(IVAL-1) ) / H(IVAL-1)</a>
+<a name="ln205"> </a>
+<a name="ln206">    Boundary conditions must be applied at the first and last knots.</a>
+<a name="ln207">    The resulting tridiagonal system can be solved for the YPP values.</a>
+<a name="ln208"> </a>
+<a name="ln209">  Modified:</a>
+<a name="ln210"> </a>
+<a name="ln211">      07 January 2005    Shawn Freeman (pure C modifications)</a>
+<a name="ln212">    06 February 2004    John Burkardt</a>
+<a name="ln213"> </a>
+<a name="ln214"> </a>
+<a name="ln215">  Author:</a>
+<a name="ln216"> </a>
+<a name="ln217">    John Burkardt</a>
+<a name="ln218"> </a>
+<a name="ln219">  Parameters:</a>
+<a name="ln220"> </a>
+<a name="ln221">    Input, int N, the number of data points.  N must be at least 2.</a>
+<a name="ln222">    In the special case where N = 2 and IBCBEG = IBCEND = 0, the</a>
+<a name="ln223">    spline will actually be linear.</a>
+<a name="ln224"> </a>
+<a name="ln225">    Input, float T[N], the knot values, that is, the points were data is</a>
+<a name="ln226">    specified.  The knot values should be distinct, and increasing.</a>
+<a name="ln227"> </a>
+<a name="ln228">    Input, float Y[N], the data values to be interpolated.</a>
+<a name="ln229"> </a>
+<a name="ln230">    Input, int IBCBEG, left boundary condition flag:</a>
+<a name="ln231">      0: the cubic spline should be a quadratic over the first interval;</a>
+<a name="ln232">      1: the first derivative at the left endpoint should be YBCBEG;</a>
+<a name="ln233">      2: the second derivative at the left endpoint should be YBCBEG.</a>
+<a name="ln234"> </a>
+<a name="ln235">    Input, float YBCBEG, the values to be used in the boundary</a>
+<a name="ln236">    conditions if IBCBEG is equal to 1 or 2.</a>
+<a name="ln237"> </a>
+<a name="ln238">    Input, int IBCEND, right boundary condition flag:</a>
+<a name="ln239">      0: the cubic spline should be a quadratic over the last interval;</a>
+<a name="ln240">      1: the first derivative at the right endpoint should be YBCEND;</a>
+<a name="ln241">      2: the second derivative at the right endpoint should be YBCEND.</a>
+<a name="ln242"> </a>
+<a name="ln243">    Input, float YBCEND, the values to be used in the boundary</a>
+<a name="ln244">    conditions if IBCEND is equal to 1 or 2.</a>
+<a name="ln245"> </a>
+<a name="ln246">    Output, float SPLINE_CUBIC_SET[N], the second derivatives of the cubic spline.</a>
+<a name="ln247">**********************************************************************/</a>
+<a name="ln248">static float *spline_cubic_set_internal(int n, float t[], float y[], int ibcbeg, float ybcbeg, int ibcend,</a>
+<a name="ln249">                                        float ybcend)</a>
+<a name="ln250">{</a>
+<a name="ln251">  float *a;</a>
+<a name="ln252">  float *b;</a>
+<a name="ln253">  int i;</a>
+<a name="ln254">  float *ypp;</a>
+<a name="ln255">  //</a>
+<a name="ln256">  //  Check.</a>
+<a name="ln257">  //</a>
+<a name="ln258">  if(n &lt;= 1)</a>
+<a name="ln259">  {</a>
+<a name="ln260">    // nc_message(NC_SET_ERROR, &quot;spline_cubic_set() error: &quot;</a>
+<a name="ln261">    //    &quot;The number of data points must be at least 2.\n&quot;);</a>
+<a name="ln262">    return NULL;</a>
+<a name="ln263">  }</a>
+<a name="ln264"> </a>
+<a name="ln265">  for(i = 0; i &lt; n - 1; i++)</a>
+<a name="ln266">  {</a>
+<a name="ln267">    if(t[i + 1] &lt;= t[i])</a>
+<a name="ln268">    {</a>
+<a name="ln269">      // nc_message(NC_SET_ERROR, &quot;spline_cubic_set() error: &quot;</a>
+<a name="ln270">      //   &quot;The knots must be strictly increasing, but &quot;</a>
+<a name="ln271">      //  &quot;T(%u) = %e, T(%u) = %e\n&quot;,i,t[i],i+1,t[i+1]);</a>
+<a name="ln272">      return NULL;</a>
+<a name="ln273">    }</a>
+<a name="ln274">  }</a>
+<a name="ln275">  a = (float *)calloc(3 * n, sizeof(float));</a>
+<a name="ln276">  // nc_merror(a, &quot;spline_cubic_set&quot;);</a>
+<a name="ln277">  b = (float *)calloc(n, sizeof(float));</a>
+<a name="ln278">  // nc_merror(b, &quot;spline_cubic_set&quot;);</a>
+<a name="ln279">  //</a>
+<a name="ln280">  //  Set up the first equation.</a>
+<a name="ln281">  //</a>
+<a name="ln282">  if(ibcbeg == 0)</a>
+<a name="ln283">  {</a>
+<a name="ln284">    b[0] = 0.0E+00;</a>
+<a name="ln285">    a[1 + 0 * 3] = 1.0E+00;</a>
+<a name="ln286">    a[0 + 1 * 3] = -1.0E+00;</a>
+<a name="ln287">  }</a>
+<a name="ln288">  else if(ibcbeg == 1)</a>
+<a name="ln289">  {</a>
+<a name="ln290">    b[0] = (y[1] - y[0]) / (t[1] - t[0]) - ybcbeg;</a>
+<a name="ln291">    a[1 + 0 * 3] = (t[1] - t[0]) / 3.0E+00;</a>
+<a name="ln292">    a[0 + 1 * 3] = (t[1] - t[0]) / 6.0E+00;</a>
+<a name="ln293">  }</a>
+<a name="ln294">  else if(ibcbeg == 2)</a>
+<a name="ln295">  {</a>
+<a name="ln296">    b[0] = ybcbeg;</a>
+<a name="ln297">    a[1 + 0 * 3] = 1.0E+00;</a>
+<a name="ln298">    a[0 + 1 * 3] = 0.0E+00;</a>
+<a name="ln299">  }</a>
+<a name="ln300">  else</a>
+<a name="ln301">  {</a>
+<a name="ln302">    // nc_message(NC_SET_ERROR, &quot;spline_cubic_set() error: &quot;</a>
+<a name="ln303">    //   &quot;IBCBEG must be 0, 1 or 2. The input value is %u.\n&quot;, ibcbeg);</a>
+<a name="ln304">    free(a);</a>
+<a name="ln305">    free(b);</a>
+<a name="ln306">    return NULL;</a>
+<a name="ln307">  }</a>
+<a name="ln308">  //</a>
+<a name="ln309">  //  Set up the intermediate equations.</a>
+<a name="ln310">  //</a>
+<a name="ln311">  for(i = 1; i &lt; n - 1; i++)</a>
+<a name="ln312">  {</a>
+<a name="ln313">    b[i] = (y[i + 1] - y[i]) / (t[i + 1] - t[i]) - (y[i] - y[i - 1]) / (t[i] - t[i - 1]);</a>
+<a name="ln314">    a[2 + (i - 1) * 3] = (t[i] - t[i - 1]) / 6.0E+00;</a>
+<a name="ln315">    a[1 + i * 3] = (t[i + 1] - t[i - 1]) / 3.0E+00;</a>
+<a name="ln316">    a[0 + (i + 1) * 3] = (t[i + 1] - t[i]) / 6.0E+00;</a>
+<a name="ln317">  }</a>
+<a name="ln318">  //</a>
+<a name="ln319">  //  Set up the last equation.</a>
+<a name="ln320">  //</a>
+<a name="ln321">  if(ibcend == 0)</a>
+<a name="ln322">  {</a>
+<a name="ln323">    b[n - 1] = 0.0E+00;</a>
+<a name="ln324">    a[2 + (n - 2) * 3] = -1.0E+00;</a>
+<a name="ln325">    a[1 + (n - 1) * 3] = 1.0E+00;</a>
+<a name="ln326">  }</a>
+<a name="ln327">  else if(ibcend == 1)</a>
+<a name="ln328">  {</a>
+<a name="ln329">    b[n - 1] = ybcend - (y[n - 1] - y[n - 2]) / (t[n - 1] - t[n - 2]);</a>
+<a name="ln330">    a[2 + (n - 2) * 3] = (t[n - 1] - t[n - 2]) / 6.0E+00;</a>
+<a name="ln331">    a[1 + (n - 1) * 3] = (t[n - 1] - t[n - 2]) / 3.0E+00;</a>
+<a name="ln332">  }</a>
+<a name="ln333">  else if(ibcend == 2)</a>
+<a name="ln334">  {</a>
+<a name="ln335">    b[n - 1] = ybcend;</a>
+<a name="ln336">    a[2 + (n - 2) * 3] = 0.0E+00;</a>
+<a name="ln337">    a[1 + (n - 1) * 3] = 1.0E+00;</a>
+<a name="ln338">  }</a>
+<a name="ln339">  else</a>
+<a name="ln340">  {</a>
+<a name="ln341">    // nc_message(NC_SET_ERROR, &quot;spline_cubic_set() error: &quot;</a>
+<a name="ln342">    //   &quot;IBCEND must be 0, 1 or 2. The input value is %u&quot;, ibcend);</a>
+<a name="ln343">    free(a);</a>
+<a name="ln344">    free(b);</a>
+<a name="ln345">    return NULL;</a>
+<a name="ln346">  }</a>
+<a name="ln347">  //</a>
+<a name="ln348">  //  Solve the linear system.</a>
+<a name="ln349">  //</a>
+<a name="ln350">  if(n == 2 &amp;&amp; ibcbeg == 0 &amp;&amp; ibcend == 0)</a>
+<a name="ln351">  {</a>
+<a name="ln352">    ypp = (float *)calloc(2, sizeof(float));</a>
+<a name="ln353">    // nc_merror(ypp, &quot;spline_cubic_set&quot;);</a>
+<a name="ln354"> </a>
+<a name="ln355">    ypp[0] = 0.0E+00;</a>
+<a name="ln356">    ypp[1] = 0.0E+00;</a>
+<a name="ln357">  }</a>
+<a name="ln358">  else</a>
+<a name="ln359">  {</a>
+<a name="ln360">    ypp = d3_np_fs(n, a, b);</a>
+<a name="ln361"> </a>
+<a name="ln362">    if(!ypp)</a>
+<a name="ln363">    {</a>
+<a name="ln364">      //  nc_message(NC_SET_ERROR, &quot;spline_cubic_set() error: &quot;</a>
+<a name="ln365">      //     &quot;The linear system could not be solved.\n&quot;);</a>
+<a name="ln366">      free(a);</a>
+<a name="ln367">      free(b);</a>
+<a name="ln368">      return NULL;</a>
+<a name="ln369">    }</a>
+<a name="ln370">  }</a>
+<a name="ln371"> </a>
+<a name="ln372">  free(a);</a>
+<a name="ln373">  free(b);</a>
+<a name="ln374">  return ypp;</a>
+<a name="ln375">}</a>
+<a name="ln376">/************************************************************</a>
+<a name="ln377"> *</a>
+<a name="ln378"> * This is a convenience wrapper function around spline_cubic_set</a>
+<a name="ln379"> *</a>
+<a name="ln380"> ************************************************************/</a>
+<a name="ln381">float *spline_cubic_set(int n, float t[], float y[])</a>
+<a name="ln382">{</a>
+<a name="ln383">  return spline_cubic_set_internal(n, t, y, 2, 0.0, 2, 0.0);</a>
+<a name="ln384">}</a>
+<a name="ln385"> </a>
+<a name="ln386">/*************************************************************</a>
+<a name="ln387">* monotone_hermite_set:</a>
+<a name="ln388">*      calculates the tangents for a monotonic hermite spline curve.</a>
+<a name="ln389">*      see http://en.wikipedia.org/wiki/Monotone_cubic_interpolation</a>
+<a name="ln390">*</a>
+<a name="ln391">*  input:</a>
+<a name="ln392">*      n = number of control points</a>
+<a name="ln393">*      x = input x array</a>
+<a name="ln394">*      y = input y array</a>
+<a name="ln395">*  output:</a>
+<a name="ln396">*      pointer to array containing the tangents</a>
+<a name="ln397">*************************************************************/</a>
+<a name="ln398">float *monotone_hermite_set(int n, float x[], float y[])</a>
+<a name="ln399">{</a>
+<a name="ln400">  float *delta;</a>
+<a name="ln401">  float *m;</a>
+<a name="ln402">  int i;</a>
+<a name="ln403">  if(n &lt;= 1)</a>
+<a name="ln404">  {</a>
+<a name="ln405">    // nc_message(NC_SET_ERROR, &quot;spline_cubic_set() error: &quot;</a>
+<a name="ln406">    //   &quot;The number of data points must be at least 2.\n&quot;);</a>
+<a name="ln407">    return NULL;</a>
+<a name="ln408">  }</a>
+<a name="ln409"> </a>
+<a name="ln410">  for(i = 0; i &lt; n - 1; i++)</a>
+<a name="ln411">  {</a>
+<a name="ln412">    if(x[i + 1] &lt;= x[i])</a>
+<a name="ln413">    {</a>
+<a name="ln414">      // nc_message(NC_SET_ERROR, &quot;spline_cubic_set() error: &quot;</a>
+<a name="ln415">      //   &quot;The knots must be strictly increasing, but &quot;</a>
+<a name="ln416">      //  &quot;T(%u) = %e, T(%u) = %e\n&quot;,i,x[i],i+1,x[i+1]);</a>
+<a name="ln417">      return NULL;</a>
+<a name="ln418">    }</a>
+<a name="ln419">  }</a>
+<a name="ln420"> </a>
+<a name="ln421">  delta = (float *)calloc(n, sizeof(float));</a>
+<a name="ln422">  // nc_merror(delta, &quot;spline_cubic_set&quot;);</a>
+<a name="ln423">  m = (float *)calloc(n + 1, sizeof(float));</a>
+<a name="ln424">  // nc_merror(m, &quot;spline_cubic_set&quot;);</a>
+<a name="ln425">  // calculate the slopes</a>
+<a name="ln426">  for(i = 0; i &lt; n - 1; i++)</a>
+<a name="ln427">  {</a>
+<a name="ln428">    delta[i] = (y[i + 1] - y[i]) / (x[i + 1] - x[i]);</a>
+<a name="ln429">  }</a>
+<a name="ln430">  delta[n - 1] = delta[n - 2];</a>
+<a name="ln431"> </a>
+<a name="ln432">  m[0] = delta[0];</a>
+<a name="ln433">  m[n - 1] = delta[n - 1];</a>
+<a name="ln434"> </a>
+<a name="ln435">  for(i = 1; i &lt; n - 1; i++)</a>
+<a name="ln436">  {</a>
+<a name="ln437">    m[i] = (delta[i - 1] + delta[i]) * .5f;</a>
+<a name="ln438">  }</a>
+<a name="ln439">  for(i = 0; i &lt; n; i++)</a>
+<a name="ln440">  {</a>
+<a name="ln441">    if(fabs(delta[i]) &lt; EPSILON)</a>
+<a name="ln442">    {</a>
+<a name="ln443">      m[i] = 0.0f;</a>
+<a name="ln444">      m[i + 1] = 0.0f;</a>
+<a name="ln445">    }</a>
+<a name="ln446">    else</a>
+<a name="ln447">    {</a>
+<a name="ln448">      const float alpha = m[i] / delta[i];</a>
+<a name="ln449">      const float beta = m[i + 1] / delta[i];</a>
+<a name="ln450">      const float tau = alpha * alpha + beta * beta;</a>
+<a name="ln451">      if(tau &gt; 9.0f)</a>
+<a name="ln452">      {</a>
+<a name="ln453">        m[i] = 3.0f * alpha * delta[i] / sqrtf(tau);</a>
+<a name="ln454">        m[i + 1] = 3.0f * beta * delta[i] / sqrtf(tau);</a>
+<a name="ln455">      }</a>
+<a name="ln456">    }</a>
+<a name="ln457">  }</a>
+<a name="ln458">  free(delta);</a>
+<a name="ln459">  return m;</a>
+<a name="ln460">}</a>
+<a name="ln461"> </a>
+<a name="ln462">/*************************************************************</a>
+<a name="ln463">* catmull_rom_set:</a>
+<a name="ln464">*      calculates the tangents for a catmull_rom spline</a>
+<a name="ln465">*      see http://en.wikipedia.org/wiki/Cubic_Hermite_spline</a>
+<a name="ln466">*</a>
+<a name="ln467">*</a>
+<a name="ln468">*  input:</a>
+<a name="ln469">*      n = number of control points</a>
+<a name="ln470">*      x = input x array</a>
+<a name="ln471">*      y = input y array</a>
+<a name="ln472">*  output:</a>
+<a name="ln473">*      pointer to array containing the tangents</a>
+<a name="ln474">*************************************************************/</a>
+<a name="ln475">float *catmull_rom_set(int n, float x[], float y[])</a>
+<a name="ln476">{</a>
+<a name="ln477">  float *m;</a>
+<a name="ln478">  int i;</a>
+<a name="ln479">  if(n &lt;= 1)</a>
+<a name="ln480">  {</a>
+<a name="ln481">    // nc_message(NC_SET_ERROR, &quot;spline_cubic_set() error: &quot;</a>
+<a name="ln482">    //   &quot;The number of data points must be at least 2.\n&quot;);</a>
+<a name="ln483">    return NULL;</a>
+<a name="ln484">  }</a>
+<a name="ln485"> </a>
+<a name="ln486">  for(i = 0; i &lt; n - 1; i++)</a>
+<a name="ln487">  {</a>
+<a name="ln488">    if(x[i + 1] &lt;= x[i])</a>
+<a name="ln489">    {</a>
+<a name="ln490">      // nc_message(NC_SET_ERROR, &quot;spline_cubic_set() error: &quot;</a>
+<a name="ln491">      //   &quot;The knots must be strictly increasing, but &quot;</a>
+<a name="ln492">      //  &quot;T(%u) = %e, T(%u) = %e\n&quot;,i,x[i],i+1,x[i+1]);</a>
+<a name="ln493">      return NULL;</a>
+<a name="ln494">    }</a>
+<a name="ln495">  }</a>
+<a name="ln496">  // nc_merror(delta, &quot;spline_cubic_set&quot;);</a>
+<a name="ln497">  m = (float *)calloc(n, sizeof(float));</a>
+<a name="ln498">  // nc_merror(m, &quot;spline_cubic_set&quot;);</a>
+<a name="ln499"> </a>
+<a name="ln500">  // calculate the slopes</a>
+<a name="ln501">  m[0] = (y[1] - y[0]) / (x[1] - x[0]);</a>
+<a name="ln502">  for(i = 1; i &lt; n - 1; i++)</a>
+<a name="ln503">  {</a>
+<a name="ln504">    m[i] = (y[i + 1] - y[i - 1]) / (x[i + 1] - x[i - 1]);</a>
+<a name="ln505">  }</a>
+<a name="ln506">  m[n - 1] = (y[n - 1] - y[n - 2]) / (x[n - 1] - x[n - 2]);</a>
+<a name="ln507"> </a>
+<a name="ln508">  return m;</a>
+<a name="ln509">}</a>
+<a name="ln510"> </a>
+<a name="ln511">float *interpolate_set(int n, float x[], float y[], unsigned int type)</a>
+<a name="ln512">{</a>
+<a name="ln513">  return (*spline_set[type])(n, x, y);</a>
+<a name="ln514">}</a>
+<a name="ln515"> </a>
+<a name="ln516">float interpolate_val(int n, float x[], float xval, float y[], float tangents[], unsigned int type)</a>
+<a name="ln517">{</a>
+<a name="ln518">  return (*spline_val[type])(n, x, xval, y, tangents);</a>
+<a name="ln519">}</a>
+<a name="ln520"> </a>
+<a name="ln521">/*************************************************************</a>
+<a name="ln522"> * catmull_rom_val:</a>
+<a name="ln523"> *      piecewise catmull-rom interpolation</a>
+<a name="ln524"> *</a>
+<a name="ln525"> *      n = number of control points</a>
+<a name="ln526"> *      x = input x array</a>
+<a name="ln527"> *      xval = input value where to interpolate the data</a>
+<a name="ln528"> *      y = input y array</a>
+<a name="ln529"> *      tangent = input array of tangents</a>
+<a name="ln530"> *  output:</a>
+<a name="ln531"> *      interpolated value at xval</a>
+<a name="ln532"> *</a>
+<a name="ln533"> *************************************************************/</a>
+<a name="ln534">float catmull_rom_val(int n, float x[], float xval, float y[], float tangents[])</a>
+<a name="ln535">{</a>
+<a name="ln536">  //</a>
+<a name="ln537">  //  Determine the interval [ T(I), T(I+1) ] that contains TVAL.</a>
+<a name="ln538">  //  Values below T[0] or above T[N-1] use extrapolation.</a>
+<a name="ln539">  //</a>
+<a name="ln540">  int ival = n - 2;</a>
+<a name="ln541"> </a>
+<a name="ln542">  for(int i = 0; i &lt; n - 2; i++)</a>
+<a name="ln543">  {</a>
+<a name="ln544">    if(xval &lt; x[i + 1])</a>
+<a name="ln545">    {</a>
+<a name="ln546">      ival = i;</a>
+<a name="ln547">      break;</a>
+<a name="ln548">    }</a>
+<a name="ln549">  }</a>
+<a name="ln550"> </a>
+<a name="ln551">  const float m0 = tangents[ival];</a>
+<a name="ln552">  const float m1 = tangents[ival + 1];</a>
+<a name="ln553">  //</a>
+<a name="ln554">  //  In the interval I, the polynomial is in terms of a normalized</a>
+<a name="ln555">  //  coordinate between 0 and 1.</a>
+<a name="ln556">  //</a>
+<a name="ln557">  const float h = x[ival + 1] - x[ival];</a>
+<a name="ln558">  const float dx = (xval - x[ival]) / h;</a>
+<a name="ln559">  const float dx2 = dx * dx;</a>
+<a name="ln560">  const float dx3 = dx * dx2;</a>
+<a name="ln561"> </a>
+<a name="ln562">  const float h00 = (2.0 * dx3) - (3.0 * dx2) + 1.0;</a>
+<a name="ln563">  const float h10 = (1.0 * dx3) - (2.0 * dx2) + dx;</a>
+<a name="ln564">  const float h01 = (-2.0 * dx3) + (3.0 * dx2);</a>
+<a name="ln565">  const float h11 = (1.0 * dx3) - (1.0 * dx2);</a>
+<a name="ln566"> </a>
+<a name="ln567">  return (h00 * y[ival]) + (h10 * h * m0) + (h01 * y[ival + 1]) + (h11 * h * m1);</a>
+<a name="ln568">}</a>
+<a name="ln569"> </a>
+<a name="ln570"> </a>
+<a name="ln571">/**********************************************************************</a>
+<a name="ln572"> </a>
+<a name="ln573">  Purpose:</a>
+<a name="ln574"> </a>
+<a name="ln575">    SPLINE_CUBIC_VAL evaluates a piecewise cubic spline at a point.</a>
+<a name="ln576"> </a>
+<a name="ln577">  Discussion:</a>
+<a name="ln578"> </a>
+<a name="ln579">    SPLINE_CUBIC_SET must have already been called to define the values of YPP.</a>
+<a name="ln580"> </a>
+<a name="ln581">    For any point T in the interval T(IVAL), T(IVAL+1), the form of</a>
+<a name="ln582">    the spline is</a>
+<a name="ln583"> </a>
+<a name="ln584">      SPL(T) = A</a>
+<a name="ln585">             + B * ( T - T(IVAL) )</a>
+<a name="ln586">             + C * ( T - T(IVAL) )**2</a>
+<a name="ln587">             + D * ( T - T(IVAL) )**3</a>
+<a name="ln588"> </a>
+<a name="ln589">    Here:</a>
+<a name="ln590">      A = Y(IVAL)</a>
+<a name="ln591">      B = ( Y(IVAL+1) - Y(IVAL) ) / ( T(IVAL+1) - T(IVAL) )</a>
+<a name="ln592">        - ( YPP(IVAL+1) + 2 * YPP(IVAL) ) * ( T(IVAL+1) - T(IVAL) ) / 6</a>
+<a name="ln593">      C = YPP(IVAL) / 2</a>
+<a name="ln594">      D = ( YPP(IVAL+1) - YPP(IVAL) ) / ( 6 * ( T(IVAL+1) - T(IVAL) ) )</a>
+<a name="ln595"> </a>
+<a name="ln596">  Modified:</a>
+<a name="ln597"> </a>
+<a name="ln598">      07 January 2005    Shawn Freeman (pure C modifications)</a>
+<a name="ln599">    04 February 1999    John Burkardt</a>
+<a name="ln600"> </a>
+<a name="ln601">  Author:</a>
+<a name="ln602"> </a>
+<a name="ln603">    John Burkardt</a>
+<a name="ln604"> </a>
+<a name="ln605">  Parameters:</a>
+<a name="ln606"> </a>
+<a name="ln607">    Input, int n, the number of knots.</a>
+<a name="ln608"> </a>
+<a name="ln609">    Input, float Y[N], the data values at the knots.</a>
+<a name="ln610"> </a>
+<a name="ln611">    Input, float T[N], the knot values.</a>
+<a name="ln612"> </a>
+<a name="ln613">    Input, float TVAL, a point, typically between T[0] and T[N-1], at</a>
+<a name="ln614">    which the spline is to be evalulated.  If TVAL lies outside</a>
+<a name="ln615">    this range, extrapolation is used.</a>
+<a name="ln616"> </a>
+<a name="ln617">    Input, float Y[N], the data values at the knots.</a>
+<a name="ln618"> </a>
+<a name="ln619">    Input, float YPP[N], the second derivatives of the spline at</a>
+<a name="ln620">    the knots.</a>
+<a name="ln621"> </a>
+<a name="ln622"> </a>
+<a name="ln623">    Output, float SPLINE_VAL, the value of the spline at TVAL.</a>
+<a name="ln624"> </a>
+<a name="ln625">**********************************************************************/</a>
+<a name="ln626">float spline_cubic_val(int n, float t[], float tval, float y[], float ypp[])</a>
+<a name="ln627">{</a>
+<a name="ln628">  float dt;</a>
+<a name="ln629">  float h;</a>
+<a name="ln630">  int i;</a>
+<a name="ln631">  int ival;</a>
+<a name="ln632">  float yval;</a>
+<a name="ln633">  //</a>
+<a name="ln634">  //  Determine the interval [ T(I), T(I+1) ] that contains TVAL.</a>
+<a name="ln635">  //  Values below T[0] or above T[N-1] use extrapolation.</a>
+<a name="ln636">  //</a>
+<a name="ln637">  ival = n - 2;</a>
+<a name="ln638"> </a>
+<a name="ln639">  for(i = 0; i &lt; n - 1; i++)</a>
+<a name="ln640">  {</a>
+<a name="ln641">    if(tval &lt; t[i + 1])</a>
+<a name="ln642">    {</a>
+<a name="ln643">      ival = i;</a>
+<a name="ln644">      break;</a>
+<a name="ln645">    }</a>
+<a name="ln646">  }</a>
+<a name="ln647">  //</a>
+<a name="ln648">  //  In the interval I, the polynomial is in terms of a normalized</a>
+<a name="ln649">  //  coordinate between 0 and 1.</a>
+<a name="ln650">  //</a>
+<a name="ln651">  dt = tval - t[ival];</a>
+<a name="ln652">  h = t[ival + 1] - t[ival];</a>
+<a name="ln653"> </a>
+<a name="ln654">  yval = y[ival]</a>
+<a name="ln655">         + dt * ((y[ival + 1] - y[ival]) / h - (ypp[ival + 1] / 6.0E+00 + ypp[ival] / 3.0E+00) * h</a>
+<a name="ln656">                 + dt * (0.5E+00 * ypp[ival] + dt * ((ypp[ival + 1] - ypp[ival]) / (6.0E+00 * h))));</a>
+<a name="ln657"> </a>
+<a name="ln658">  // we really never need the derivatives so commented this out</a>
+<a name="ln659">  /**ypval = ( y[ival+1] - y[ival] ) / h</a>
+<a name="ln660">    - ( ypp[ival+1] / 6.0E+00 + ypp[ival] / 3.0E+00 ) * h</a>
+<a name="ln661">    + dt * ( ypp[ival]</a>
+<a name="ln662">    + dt * ( 0.5E+00 * ( ypp[ival+1] - ypp[ival] ) / h ) );</a>
+<a name="ln663"> </a>
+<a name="ln664">  *yppval = ypp[ival] + dt * ( ypp[ival+1] - ypp[ival] ) / h;*/</a>
+<a name="ln665"> </a>
+<a name="ln666">  return yval;</a>
+<a name="ln667">}</a>
+<a name="ln668"> </a>
+<a name="ln669"> </a>
+<a name="ln670">/*********************************************</a>
+<a name="ln671">CurveDataSample:</a>
+<a name="ln672">    Samples from a spline curve constructed from</a>
+<a name="ln673">    the Nikon data.</a>
+<a name="ln674"> </a>
+<a name="ln675">    curve   - Pointer to curve struct to hold the data.</a>
+<a name="ln676">    sample  - Pointer to sample struct to hold the data.</a>
+<a name="ln677">**********************************************/</a>
+<a name="ln678">int CurveDataSample(CurveData *curve, CurveSample *sample)</a>
+<a name="ln679">{</a>
+<a name="ln680">  int i = 0, n;</a>
+<a name="ln681"> </a>
+<a name="ln682">  float x[20] = { 0 };</a>
+<a name="ln683">  float y[20] = { 0 };</a>
+<a name="ln684">  float *ypp;</a>
+<a name="ln685"> </a>
+<a name="ln686">  // The box points are what the anchor points are relative</a>
+<a name="ln687">  // to so...</a>
+<a name="ln688"> </a>
+<a name="ln689">  float box_width = curve-&gt;m_max_x - curve-&gt;m_min_x;</a>
+<a name="ln690">  float box_height = curve-&gt;m_max_y - curve-&gt;m_min_y;</a>
+<a name="ln691"> </a>
+<a name="ln692">  // build arrays for processing</a>
+<a name="ln693">  if(curve-&gt;m_numAnchors == 0)</a>
+<a name="ln694">  {</a>
+<a name="ln695">    // just a straight line using box coordinates</a>
+<a name="ln696">    x[0] = curve-&gt;m_min_x;</a>
+<a name="ln697">    y[0] = curve-&gt;m_min_y;</a>
+<a name="ln698">    x[1] = curve-&gt;m_max_x;</a>
+<a name="ln699">    y[1] = curve-&gt;m_max_y;</a>
+<a name="ln700">    n = 2;</a>
+<a name="ln701">  }</a>
+<a name="ln702">  else</a>
+<a name="ln703">  {</a>
+<a name="ln704">    for(i = 0; i &lt; curve-&gt;m_numAnchors; i++)</a>
+<a name="ln705">    {</a>
+<a name="ln706">      x[i] = curve-&gt;m_anchors[i].x * box_width + curve-&gt;m_min_x;</a>
+<a name="ln707">      y[i] = curve-&gt;m_anchors[i].y * box_height + curve-&gt;m_min_y;</a>
+<a name="ln708">    }</a>
+<a name="ln709">    n = curve-&gt;m_numAnchors;</a>
+<a name="ln710">  }</a>
+<a name="ln711">  int val;</a>
+<a name="ln712">  float res = 1.0 / (float)(sample-&gt;m_samplingRes - 1);</a>
+<a name="ln713">  int firstPointX = x[0] * (sample-&gt;m_samplingRes - 1);</a>
+<a name="ln714">  int firstPointY = y[0] * (sample-&gt;m_outputRes - 1);</a>
+<a name="ln715">  int lastPointX = x[n - 1] * (sample-&gt;m_samplingRes - 1);</a>
+<a name="ln716">  int lastPointY = y[n - 1] * (sample-&gt;m_outputRes - 1);</a>
+<a name="ln717">  int maxY = curve-&gt;m_max_y * (sample-&gt;m_outputRes - 1);</a>
+<a name="ln718">  int minY = curve-&gt;m_min_y * (sample-&gt;m_outputRes - 1);</a>
+<a name="ln719">  // returns an array of second derivatives used to calculate the spline curve.</a>
+<a name="ln720">  // this is a malloc'd array that needs to be freed when done.</a>
+<a name="ln721">  // The settings currently calculate the natural spline, which closely matches</a>
+<a name="ln722">  // camera curve output in raw files.</a>
+<a name="ln723">  ypp = interpolate_set(n, x, y, curve-&gt;m_spline_type);</a>
+<a name="ln724">  if(ypp == NULL) return CT_ERROR;</a>
+<a name="ln725"> </a>
+<a name="ln726">  for(i = 0; i &lt; (int)sample-&gt;m_samplingRes; i++)</a>
+<a name="ln727">  {</a>
+<a name="ln728">    // get the value of the curve at a point</a>
+<a name="ln729">    // take into account that curves may not necessarily begin at x = 0.0</a>
+<a name="ln730">    // nor end at x = 1.0</a>
+<a name="ln731"> </a>
+<a name="ln732">    // Before the first point and after the last point, take a strait line</a>
+<a name="ln733">    if(i &lt; firstPointX)</a>
+<a name="ln734">    {</a>
+<a name="ln735">      sample-&gt;m_Samples[i] = firstPointY;</a>
+<a name="ln736">    }</a>
+<a name="ln737">    else if(i &gt; lastPointX)</a>
+<a name="ln738">    {</a>
+<a name="ln739">      sample-&gt;m_Samples[i] = lastPointY;</a>
+<a name="ln740">    }</a>
+<a name="ln741">    else</a>
+<a name="ln742">    {</a>
+<a name="ln743">      // within range, we can sample the curve</a>
+<a name="ln744">      val = interpolate_val(n, x, i * res, y, ypp, curve-&gt;m_spline_type) * (sample-&gt;m_outputRes - 1) + 0.5;</a>
+<a name="ln745">      if(val &gt; maxY) val = maxY;</a>
+<a name="ln746">      if(val &lt; minY) val = minY;</a>
+<a name="ln747">      sample-&gt;m_Samples[i] = val;</a>
+<a name="ln748">    }</a>
+<a name="ln749">  }</a>
+<a name="ln750"> </a>
+<a name="ln751">  free(ypp);</a>
+<a name="ln752">  return CT_SUCCESS;</a>
+<a name="ln753">}</a>
+<a name="ln754"> </a>
+<a name="ln755">// modelines: These editor modelines have been set for all relevant files by tools/update_modelines.sh</a>
+<a name="ln756">// vim: shiftwidth=2 expandtab tabstop=2 cindent</a>
+<a name="ln757">// kate: tab-indents: off; indent-width 2; replace-tabs on; indent-mode cstyle; remove-trailing-spaces modified;</a>
+
+</code></pre>
+<div class="balloon" rel="118"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v522/" target="_blank">V522</a> There might be dereferencing of a potential null pointer 'x'. Check lines: 118, 113.</p></div>
+<div class="balloon" rel="284"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v522/" target="_blank">V522</a> There might be dereferencing of a potential null pointer 'b'. Check lines: 284, 277.</p></div>
+<div class="balloon" rel="285"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v522/" target="_blank">V522</a> There might be dereferencing of a potential null pointer 'a'. Check lines: 285, 275.</p></div>
+<div class="balloon" rel="355"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v522/" target="_blank">V522</a> There might be dereferencing of a potential null pointer 'ypp'. Check lines: 355, 352.</p></div>
+<div class="balloon" rel="428"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v522/" target="_blank">V522</a> There might be dereferencing of a potential null pointer 'delta'. Check lines: 428, 421.</p></div>
+<div class="balloon" rel="432"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v522/" target="_blank">V522</a> There might be dereferencing of a potential null pointer 'm'. Check lines: 432, 423.</p></div>
+<div class="balloon" rel="501"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v522/" target="_blank">V522</a> There might be dereferencing of a potential null pointer 'm'. Check lines: 501, 497.</p></div>
+
+<link rel="stylesheet" href="highlight.css">
+<script src="highlight.pack.js"></script>
+<script src="highlightjs-line-numbers.js"></script>
+<script>hljs.initHighlightingOnLoad();</script>
+<script>hljs.initLineNumbersOnLoad();</script>
+<script>
+  $(document).ready(function() {
+      $('.balloon').each(function () {
+          var bl = $(this);
+          var line = bl.attr('rel');
+          var text = $('a[name="ln'+line+'"]').text();
+
+          var space_count = 0;
+          for(var i = 0; i<text.length; i++){
+              var char = text[i];
+              if((char !== ' ')&&(char !== '\t'))break;
+              if(char === '\t')space_count++;
+              space_count++;
+          }
+
+          bl.css('margin-left', space_count*8);
+          $('a[name="ln'+line+'"]').after(bl);
+      });
+
+      window.location = window.location;
+  });
+</script>
+</body>
+</html>

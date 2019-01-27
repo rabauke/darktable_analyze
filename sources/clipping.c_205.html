@@ -1,0 +1,3256 @@
+
+<html>
+<head>
+  <link rel="stylesheet" href="../style.css"/>
+  <script src="../jquery-3.2.1.min.js"></script>
+</head>
+<body>
+<pre><code class = "cpp">
+<a name="ln1">/*</a>
+<a name="ln2">    This file is part of darktable,</a>
+<a name="ln3">    copyright (c) 2009--2011 johannes hanika.</a>
+<a name="ln4">    copyright (c) 2012 henrik andersson.</a>
+<a name="ln5"> </a>
+<a name="ln6">    darktable is free software: you can redistribute it and/or modify</a>
+<a name="ln7">    it under the terms of the GNU General Public License as published by</a>
+<a name="ln8">    the Free Software Foundation, either version 3 of the License, or</a>
+<a name="ln9">    (at your option) any later version.</a>
+<a name="ln10"> </a>
+<a name="ln11">    darktable is distributed in the hope that it will be useful,</a>
+<a name="ln12">    but WITHOUT ANY WARRANTY; without even the implied warranty of</a>
+<a name="ln13">    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the</a>
+<a name="ln14">    GNU General Public License for more details.</a>
+<a name="ln15"> </a>
+<a name="ln16">    You should have received a copy of the GNU General Public License</a>
+<a name="ln17">    along with darktable.  If not, see &lt;http://www.gnu.org/licenses/&gt;.</a>
+<a name="ln18">*/</a>
+<a name="ln19"> </a>
+<a name="ln20">#ifdef HAVE_CONFIG_H</a>
+<a name="ln21">#include &quot;config.h&quot;</a>
+<a name="ln22">#endif</a>
+<a name="ln23">#include &quot;bauhaus/bauhaus.h&quot;</a>
+<a name="ln24">#include &quot;common/debug.h&quot;</a>
+<a name="ln25">#include &quot;common/interpolation.h&quot;</a>
+<a name="ln26">#include &quot;common/opencl.h&quot;</a>
+<a name="ln27">#include &quot;control/conf.h&quot;</a>
+<a name="ln28">#include &quot;control/control.h&quot;</a>
+<a name="ln29">#include &quot;develop/develop.h&quot;</a>
+<a name="ln30">#include &quot;develop/imageop.h&quot;</a>
+<a name="ln31">#include &quot;develop/tiling.h&quot;</a>
+<a name="ln32">#include &quot;gui/accelerators.h&quot;</a>
+<a name="ln33">#include &quot;gui/gtk.h&quot;</a>
+<a name="ln34">#include &quot;gui/guides.h&quot;</a>
+<a name="ln35">#include &quot;gui/presets.h&quot;</a>
+<a name="ln36">#include &quot;iop/iop_api.h&quot;</a>
+<a name="ln37"> </a>
+<a name="ln38">#include &lt;assert.h&gt;</a>
+<a name="ln39">#include &lt;gdk/gdkkeysyms.h&gt;</a>
+<a name="ln40">#include &lt;gtk/gtk.h&gt;</a>
+<a name="ln41">#include &lt;inttypes.h&gt;</a>
+<a name="ln42">#include &lt;math.h&gt;</a>
+<a name="ln43">#include &lt;stdlib.h&gt;</a>
+<a name="ln44">#include &lt;string.h&gt;</a>
+<a name="ln45"> </a>
+<a name="ln46">DT_MODULE_INTROSPECTION(5, dt_iop_clipping_params_t)</a>
+<a name="ln47"> </a>
+<a name="ln48">#define CLAMPF(a, mn, mx) ((a) &lt; (mn) ? (mn) : ((a) &gt; (mx) ? (mx) : (a)))</a>
+<a name="ln49"> </a>
+<a name="ln50">/** flip H/V, rotate an image, then clip the buffer. */</a>
+<a name="ln51">typedef enum dt_iop_clipping_flags_t</a>
+<a name="ln52">{</a>
+<a name="ln53">  FLAG_FLIP_NONE = 0,</a>
+<a name="ln54">  FLAG_FLIP_HORIZONTAL = 1&lt;&lt;0,</a>
+<a name="ln55">  FLAG_FLIP_VERTICAL = 1&lt;&lt;1,</a>
+<a name="ln56">  FLAG_FLIP_BOTH = FLAG_FLIP_HORIZONTAL|FLAG_FLIP_VERTICAL</a>
+<a name="ln57">} dt_iop_clipping_flags_t;</a>
+<a name="ln58"> </a>
+<a name="ln59">typedef struct dt_iop_clipping_aspect_t</a>
+<a name="ln60">{</a>
+<a name="ln61">  char *name;</a>
+<a name="ln62">  int d, n;</a>
+<a name="ln63">} dt_iop_clipping_aspect_t;</a>
+<a name="ln64"> </a>
+<a name="ln65">typedef struct dt_iop_clipping_params_t</a>
+<a name="ln66">{</a>
+<a name="ln67">  float angle, cx, cy, cw, ch, k_h, k_v;</a>
+<a name="ln68">  float kxa, kya, kxb, kyb, kxc, kyc, kxd, kyd;</a>
+<a name="ln69">  int k_type, k_sym;</a>
+<a name="ln70">  int k_apply, crop_auto;</a>
+<a name="ln71">  int ratio_n, ratio_d;</a>
+<a name="ln72">} dt_iop_clipping_params_t;</a>
+<a name="ln73"> </a>
+<a name="ln74">typedef enum _grab_region_t</a>
+<a name="ln75">{</a>
+<a name="ln76">  GRAB_CENTER = 0,                                            // 0</a>
+<a name="ln77">  GRAB_LEFT = 1 &lt;&lt; 0,                                         // 1</a>
+<a name="ln78">  GRAB_TOP = 1 &lt;&lt; 1,                                          // 2</a>
+<a name="ln79">  GRAB_RIGHT = 1 &lt;&lt; 2,                                        // 4</a>
+<a name="ln80">  GRAB_BOTTOM = 1 &lt;&lt; 3,                                       // 8</a>
+<a name="ln81">  GRAB_TOP_LEFT = GRAB_TOP | GRAB_LEFT,                       // 3</a>
+<a name="ln82">  GRAB_TOP_RIGHT = GRAB_TOP | GRAB_RIGHT,                     // 6</a>
+<a name="ln83">  GRAB_BOTTOM_RIGHT = GRAB_BOTTOM | GRAB_RIGHT,               // 12</a>
+<a name="ln84">  GRAB_BOTTOM_LEFT = GRAB_BOTTOM | GRAB_LEFT,                 // 9</a>
+<a name="ln85">  GRAB_HORIZONTAL = GRAB_LEFT | GRAB_RIGHT,                   // 5</a>
+<a name="ln86">  GRAB_VERTICAL = GRAB_TOP | GRAB_BOTTOM,                     // 10</a>
+<a name="ln87">  GRAB_ALL = GRAB_LEFT | GRAB_TOP | GRAB_RIGHT | GRAB_BOTTOM, // 15</a>
+<a name="ln88">  GRAB_NONE = 1 &lt;&lt; 4                                          // 16</a>
+<a name="ln89">} _grab_region_t;</a>
+<a name="ln90"> </a>
+<a name="ln91">/* calculate the aspect ratios for current image */</a>
+<a name="ln92">static void keystone_type_populate(struct dt_iop_module_t *self, gboolean with_applied, int select);</a>
+<a name="ln93"> </a>
+<a name="ln94">int legacy_params(dt_iop_module_t *self, const void *const old_params, const int old_version,</a>
+<a name="ln95">                  void *new_params, const int new_version)</a>
+<a name="ln96">{</a>
+<a name="ln97">  if(new_version &lt;= old_version) return 1;</a>
+<a name="ln98">  if(new_version != 5) return 1;</a>
+<a name="ln99"> </a>
+<a name="ln100">  dt_iop_clipping_params_t *n = (dt_iop_clipping_params_t *)new_params;</a>
+<a name="ln101">  if(old_version == 2 &amp;&amp; new_version == 5)</a>
+<a name="ln102">  {</a>
+<a name="ln103">    // old structure def</a>
+<a name="ln104">    typedef struct old_params_t</a>
+<a name="ln105">    {</a>
+<a name="ln106">      float angle, cx, cy, cw, ch, k_h, k_v;</a>
+<a name="ln107">    } old_params_t;</a>
+<a name="ln108"> </a>
+<a name="ln109">    old_params_t *o = (old_params_t *)old_params;</a>
+<a name="ln110"> </a>
+<a name="ln111">    uint32_t intk = *(uint32_t *)&amp;o-&gt;k_h;</a>
+<a name="ln112">    int is_horizontal;</a>
+<a name="ln113">    if(intk &amp; 0x40000000u)</a>
+<a name="ln114">      is_horizontal = 1;</a>
+<a name="ln115">    else</a>
+<a name="ln116">      is_horizontal = 0;</a>
+<a name="ln117">    intk &amp;= ~0x40000000;</a>
+<a name="ln118">    float floatk = *(float *)&amp;intk;</a>
+<a name="ln119">    if(is_horizontal)</a>
+<a name="ln120">    {</a>
+<a name="ln121">      n-&gt;k_h = floatk;</a>
+<a name="ln122">      n-&gt;k_v = 0.0;</a>
+<a name="ln123">    }</a>
+<a name="ln124">    else</a>
+<a name="ln125">    {</a>
+<a name="ln126">      n-&gt;k_h = 0.0;</a>
+<a name="ln127">      n-&gt;k_v = floatk;</a>
+<a name="ln128">    }</a>
+<a name="ln129"> </a>
+<a name="ln130">    n-&gt;angle = o-&gt;angle, n-&gt;cx = o-&gt;cx, n-&gt;cy = o-&gt;cy, n-&gt;cw = o-&gt;cw, n-&gt;ch = o-&gt;ch;</a>
+<a name="ln131">    n-&gt;kxa = n-&gt;kxd = 0.2f;</a>
+<a name="ln132">    n-&gt;kxc = n-&gt;kxb = 0.8f;</a>
+<a name="ln133">    n-&gt;kya = n-&gt;kyb = 0.2f;</a>
+<a name="ln134">    n-&gt;kyc = n-&gt;kyd = 0.8f;</a>
+<a name="ln135">    if(n-&gt;k_h == 0 &amp;&amp; n-&gt;k_v == 0)</a>
+<a name="ln136">      n-&gt;k_type = 0;</a>
+<a name="ln137">    else</a>
+<a name="ln138">      n-&gt;k_type = 4;</a>
+<a name="ln139">    n-&gt;k_sym = 0;</a>
+<a name="ln140">    n-&gt;k_apply = 0;</a>
+<a name="ln141">    n-&gt;crop_auto = 1;</a>
+<a name="ln142"> </a>
+<a name="ln143">    // will be computed later, -2 here is used to detect uninitialized value, -1 is already used for no</a>
+<a name="ln144">    // clipping.</a>
+<a name="ln145">    n-&gt;ratio_d = n-&gt;ratio_n = -2;</a>
+<a name="ln146">  }</a>
+<a name="ln147">  if(old_version == 3 &amp;&amp; new_version == 5)</a>
+<a name="ln148">  {</a>
+<a name="ln149">    // old structure def</a>
+<a name="ln150">    typedef struct old_params_t</a>
+<a name="ln151">    {</a>
+<a name="ln152">      float angle, cx, cy, cw, ch, k_h, k_v;</a>
+<a name="ln153">    } old_params_t;</a>
+<a name="ln154"> </a>
+<a name="ln155">    old_params_t *o = (old_params_t *)old_params;</a>
+<a name="ln156"> </a>
+<a name="ln157">    n-&gt;angle = o-&gt;angle, n-&gt;cx = o-&gt;cx, n-&gt;cy = o-&gt;cy, n-&gt;cw = o-&gt;cw, n-&gt;ch = o-&gt;ch;</a>
+<a name="ln158">    n-&gt;k_h = o-&gt;k_h, n-&gt;k_v = o-&gt;k_v;</a>
+<a name="ln159">    n-&gt;kxa = n-&gt;kxd = 0.2f;</a>
+<a name="ln160">    n-&gt;kxc = n-&gt;kxb = 0.8f;</a>
+<a name="ln161">    n-&gt;kya = n-&gt;kyb = 0.2f;</a>
+<a name="ln162">    n-&gt;kyc = n-&gt;kyd = 0.8f;</a>
+<a name="ln163">    if(n-&gt;k_h == 0 &amp;&amp; n-&gt;k_v == 0)</a>
+<a name="ln164">      n-&gt;k_type = 0;</a>
+<a name="ln165">    else</a>
+<a name="ln166">      n-&gt;k_type = 4;</a>
+<a name="ln167">    n-&gt;k_sym = 0;</a>
+<a name="ln168">    n-&gt;k_apply = 0;</a>
+<a name="ln169">    n-&gt;crop_auto = 1;</a>
+<a name="ln170"> </a>
+<a name="ln171">    // will be computed later, -2 here is used to detect uninitialized value, -1 is already used for no</a>
+<a name="ln172">    // clipping.</a>
+<a name="ln173">    n-&gt;ratio_d = n-&gt;ratio_n = -2;</a>
+<a name="ln174">  }</a>
+<a name="ln175">  if(old_version == 4 &amp;&amp; new_version == 5)</a>
+<a name="ln176">  {</a>
+<a name="ln177">    typedef struct old_params_t</a>
+<a name="ln178">    {</a>
+<a name="ln179">      float angle, cx, cy, cw, ch, k_h, k_v;</a>
+<a name="ln180">      float kxa, kya, kxb, kyb, kxc, kyc, kxd, kyd;</a>
+<a name="ln181">      int k_type, k_sym;</a>
+<a name="ln182">      int k_apply, crop_auto;</a>
+<a name="ln183">    } old_params_t;</a>
+<a name="ln184"> </a>
+<a name="ln185">    old_params_t *o = (old_params_t *)old_params;</a>
+<a name="ln186"> </a>
+<a name="ln187">    n-&gt;angle = o-&gt;angle, n-&gt;cx = o-&gt;cx, n-&gt;cy = o-&gt;cy, n-&gt;cw = o-&gt;cw, n-&gt;ch = o-&gt;ch;</a>
+<a name="ln188">    n-&gt;k_h = o-&gt;k_h, n-&gt;k_v = o-&gt;k_v;</a>
+<a name="ln189">    n-&gt;kxa = o-&gt;kxa, n-&gt;kxb = o-&gt;kxb, n-&gt;kxc = o-&gt;kxc, n-&gt;kxd = o-&gt;kxd;</a>
+<a name="ln190">    n-&gt;kya = o-&gt;kya, n-&gt;kyb = o-&gt;kyb, n-&gt;kyc = o-&gt;kyc, n-&gt;kyd = o-&gt;kyd;</a>
+<a name="ln191">    n-&gt;k_type = o-&gt;k_type;</a>
+<a name="ln192">    n-&gt;k_sym = o-&gt;k_sym;</a>
+<a name="ln193">    n-&gt;k_apply = o-&gt;k_apply;</a>
+<a name="ln194">    n-&gt;crop_auto = o-&gt;crop_auto;</a>
+<a name="ln195"> </a>
+<a name="ln196">    // will be computed later, -2 here is used to detect uninitialized value, -1 is already used for no</a>
+<a name="ln197">    // clipping.</a>
+<a name="ln198">    n-&gt;ratio_d = n-&gt;ratio_n = -2;</a>
+<a name="ln199">  }</a>
+<a name="ln200"> </a>
+<a name="ln201">  return 0;</a>
+<a name="ln202">}</a>
+<a name="ln203">typedef struct dt_iop_clipping_gui_data_t</a>
+<a name="ln204">{</a>
+<a name="ln205">  GtkWidget *angle;</a>
+<a name="ln206">  GtkWidget *hvflip;</a>
+<a name="ln207"> </a>
+<a name="ln208">  GList *aspect_list;</a>
+<a name="ln209">  GtkWidget *aspect_presets;</a>
+<a name="ln210"> </a>
+<a name="ln211">  GtkWidget *guide_lines;</a>
+<a name="ln212">  GtkWidget *flip_guides;</a>
+<a name="ln213">  GtkWidget *guides_widgets;</a>
+<a name="ln214">  GList *guides_widgets_list;</a>
+<a name="ln215"> </a>
+<a name="ln216">  GtkWidget *keystone_type;</a>
+<a name="ln217">  GtkWidget *crop_auto;</a>
+<a name="ln218"> </a>
+<a name="ln219">  float button_down_x, button_down_y;</a>
+<a name="ln220">  float button_down_zoom_x, button_down_zoom_y,</a>
+<a name="ln221">      button_down_angle; // position in image where the button has been pressed.</a>
+<a name="ln222">  /* current clip box */</a>
+<a name="ln223">  float clip_x, clip_y, clip_w, clip_h, handle_x, handle_y;</a>
+<a name="ln224">  /* last committed clip box */</a>
+<a name="ln225">  float old_clip_x, old_clip_y, old_clip_w, old_clip_h;</a>
+<a name="ln226">  /* last box before change */</a>
+<a name="ln227">  float prev_clip_x, prev_clip_y, prev_clip_w, prev_clip_h;</a>
+<a name="ln228">  /* maximum clip box */</a>
+<a name="ln229">  float clip_max_x, clip_max_y, clip_max_w, clip_max_h;</a>
+<a name="ln230">  uint64_t clip_max_pipe_hash;</a>
+<a name="ln231"> </a>
+<a name="ln232">  int k_selected, k_show, k_selected_segment;</a>
+<a name="ln233">  gboolean k_drag;</a>
+<a name="ln234"> </a>
+<a name="ln235">  int cropping, straightening, applied, center_lock;</a>
+<a name="ln236">  int old_width, old_height;</a>
+<a name="ln237">} dt_iop_clipping_gui_data_t;</a>
+<a name="ln238"> </a>
+<a name="ln239">typedef struct dt_iop_clipping_data_t</a>
+<a name="ln240">{</a>
+<a name="ln241">  float angle;              // rotation angle</a>
+<a name="ln242">  float aspect;             // forced aspect ratio</a>
+<a name="ln243">  float m[4];               // rot matrix</a>
+<a name="ln244">  float ki_h, k_h;          // keystone correction, ki and corrected k</a>
+<a name="ln245">  float ki_v, k_v;          // keystone correction, ki and corrected k</a>
+<a name="ln246">  float tx, ty;             // rotation center</a>
+<a name="ln247">  float cx, cy, cw, ch;     // crop window</a>
+<a name="ln248">  float cix, ciy, ciw, cih; // crop window on roi_out 1.0 scale</a>
+<a name="ln249">  uint32_t all_off;         // 1: v and h off, else one of them is used</a>
+<a name="ln250">  uint32_t flags;           // flipping flags</a>
+<a name="ln251">  uint32_t flip;            // flipped output buffer so more area would fit.</a>
+<a name="ln252"> </a>
+<a name="ln253">  float k_space[4]; // space for the &quot;destination&quot; rectangle of the keystone quadrilatere</a>
+<a name="ln254">  float kxa, kya, kxb, kyb, kxc, kyc, kxd,</a>
+<a name="ln255">      kyd; // point of the &quot;source&quot; quadrilatere (modified if keystone is not &quot;full&quot;)</a>
+<a name="ln256">  float a, b, d, e, g, h; // value of the transformation matrix (c=f=0 &amp;&amp; i=1)</a>
+<a name="ln257">  int k_apply;</a>
+<a name="ln258">  int crop_auto;</a>
+<a name="ln259">  float enlarge_x, enlarge_y;</a>
+<a name="ln260">} dt_iop_clipping_data_t;</a>
+<a name="ln261"> </a>
+<a name="ln262">typedef struct dt_iop_clipping_global_data_t</a>
+<a name="ln263">{</a>
+<a name="ln264">  int kernel_clip_rotate_bilinear;</a>
+<a name="ln265">  int kernel_clip_rotate_bicubic;</a>
+<a name="ln266">  int kernel_clip_rotate_lanczos2;</a>
+<a name="ln267">  int kernel_clip_rotate_lanczos3;</a>
+<a name="ln268">} dt_iop_clipping_global_data_t;</a>
+<a name="ln269"> </a>
+<a name="ln270">static void commit_box(dt_iop_module_t *self, dt_iop_clipping_gui_data_t *g, dt_iop_clipping_params_t *p);</a>
+<a name="ln271"> </a>
+<a name="ln272"> </a>
+<a name="ln273">static void mul_mat_vec_2(const float *m, const float *p, float *o)</a>
+<a name="ln274">{</a>
+<a name="ln275">  o[0] = p[0] * m[0] + p[1] * m[1];</a>
+<a name="ln276">  o[1] = p[0] * m[2] + p[1] * m[3];</a>
+<a name="ln277">}</a>
+<a name="ln278"> </a>
+<a name="ln279">// helper to count corners in for loops:</a>
+<a name="ln280">static void get_corner(const float *aabb, const int i, float *p)</a>
+<a name="ln281">{</a>
+<a name="ln282">  for(int k = 0; k &lt; 2; k++) p[k] = aabb[2 * ((i &gt;&gt; k) &amp; 1) + k];</a>
+<a name="ln283">}</a>
+<a name="ln284"> </a>
+<a name="ln285">static void adjust_aabb(const float *p, float *aabb)</a>
+<a name="ln286">{</a>
+<a name="ln287">  aabb[0] = fminf(aabb[0], p[0]);</a>
+<a name="ln288">  aabb[1] = fminf(aabb[1], p[1]);</a>
+<a name="ln289">  aabb[2] = fmaxf(aabb[2], p[0]);</a>
+<a name="ln290">  aabb[3] = fmaxf(aabb[3], p[1]);</a>
+<a name="ln291">}</a>
+<a name="ln292"> </a>
+<a name="ln293"> </a>
+<a name="ln294">const char *name()</a>
+<a name="ln295">{</a>
+<a name="ln296">  return _(&quot;crop and rotate&quot;);</a>
+<a name="ln297">}</a>
+<a name="ln298"> </a>
+<a name="ln299">int default_group()</a>
+<a name="ln300">{</a>
+<a name="ln301">  return IOP_GROUP_BASIC;</a>
+<a name="ln302">}</a>
+<a name="ln303"> </a>
+<a name="ln304">int flags()</a>
+<a name="ln305">{</a>
+<a name="ln306">  return IOP_FLAGS_ALLOW_TILING | IOP_FLAGS_TILING_FULL_ROI | IOP_FLAGS_ONE_INSTANCE;</a>
+<a name="ln307">}</a>
+<a name="ln308"> </a>
+<a name="ln309">int operation_tags()</a>
+<a name="ln310">{</a>
+<a name="ln311">  return IOP_TAG_DISTORT | IOP_TAG_CLIPPING;</a>
+<a name="ln312">}</a>
+<a name="ln313"> </a>
+<a name="ln314">int operation_tags_filter()</a>
+<a name="ln315">{</a>
+<a name="ln316">  // switch off watermark, it gets confused.</a>
+<a name="ln317">  return IOP_TAG_DECORATION;</a>
+<a name="ln318">}</a>
+<a name="ln319"> </a>
+<a name="ln320"> </a>
+<a name="ln321">static int gui_has_focus(struct dt_iop_module_t *self)</a>
+<a name="ln322">{</a>
+<a name="ln323">  return self-&gt;dev-&gt;gui_module == self;</a>
+<a name="ln324">}</a>
+<a name="ln325"> </a>
+<a name="ln326">static void keystone_get_matrix(float *k_space, float kxa, float kxb, float kxc, float kxd, float kya,</a>
+<a name="ln327">                                float kyb, float kyc, float kyd, float *a, float *b, float *d, float *e,</a>
+<a name="ln328">                                float *g, float *h)</a>
+<a name="ln329">{</a>
+<a name="ln330">  *a = -((kxb * (kyd * kyd - kyc * kyd) - kxc * kyd * kyd + kyb * (kxc * kyd - kxd * kyd) + kxd * kyc * kyd)</a>
+<a name="ln331">         * k_space[2])</a>
+<a name="ln332">       / (kxb * (kxc * kyd * kyd - kxd * kyc * kyd) + kyb * (kxd * kxd * kyc - kxc * kxd * kyd));</a>
+<a name="ln333">  *b = ((kxb * (kxd * kyd - kxd * kyc) - kxc * kxd * kyd + kxd * kxd * kyc + (kxc * kxd - kxd * kxd) * kyb)</a>
+<a name="ln334">        * k_space[2])</a>
+<a name="ln335">       / (kxb * (kxc * kyd * kyd - kxd * kyc * kyd) + kyb * (kxd * kxd * kyc - kxc * kxd * kyd));</a>
+<a name="ln336">  *d = (kyb * (kxb * (kyd * k_space[3] - kyc * k_space[3]) - kxc * kyd * k_space[3] + kxd * kyc * k_space[3])</a>
+<a name="ln337">        + kyb * kyb * (kxc * k_space[3] - kxd * k_space[3]))</a>
+<a name="ln338">       / (kxb * kyb * (-kxc * kyd - kxd * kyc) + kxb * kxb * kyc * kyd + kxc * kxd * kyb * kyb);</a>
+<a name="ln339">  *e = -(kxb * (kxd * kyc * k_space[3] - kxc * kyd * k_space[3])</a>
+<a name="ln340">         + kxb * kxb * (kyd * k_space[3] - kyc * k_space[3])</a>
+<a name="ln341">         + kxb * kyb * (kxc * k_space[3] - kxd * k_space[3]))</a>
+<a name="ln342">       / (kxb * kyb * (-kxc * kyd - kxd * kyc) + kxb * kxb * kyc * kyd + kxc * kxd * kyb * kyb);</a>
+<a name="ln343">  *g = -(kyb * (kxb * (2.0f * kxc * kyd * kyd - 2.0f * kxc * kyc * kyd) - kxc * kxc * kyd * kyd</a>
+<a name="ln344">                + 2.0f * kxc * kxd * kyc * kyd - kxd * kxd * kyc * kyc)</a>
+<a name="ln345">         + kxb * kxb * (kyc * kyc * kyd - kyc * kyd * kyd)</a>
+<a name="ln346">         + kyb * kyb * (-2.0f * kxc * kxd * kyd + kxc * kxc * kyd + kxd * kxd * kyc))</a>
+<a name="ln347">       / (kxb * kxb * (kxd * kyc * kyc * kyd - kxc * kyc * kyd * kyd)</a>
+<a name="ln348">          + kxb * kyb * (kxc * kxc * kyd * kyd - kxd * kxd * kyc * kyc)</a>
+<a name="ln349">          + kyb * kyb * (kxc * kxd * kxd * kyc - kxc * kxc * kxd * kyd));</a>
+<a name="ln350">  *h = (kxb * (-kxc * kxc * kyd * kyd + 2.0f * kxc * kxd * kyc * kyd - kxd * kxd * kyc * kyc)</a>
+<a name="ln351">        + kxb * kxb * (kxc * kyd * kyd - 2.0f * kxd * kyc * kyd + kxd * kyc * kyc)</a>
+<a name="ln352">        + kxb * (2.0f * kxd * kxd - 2.0f * kxc * kxd) * kyb * kyc</a>
+<a name="ln353">        + (kxc * kxc * kxd - kxc * kxd * kxd) * kyb * kyb)</a>
+<a name="ln354">       / (kxb * kxb * (kxd * kyc * kyc * kyd - kxc * kyc * kyd * kyd)</a>
+<a name="ln355">          + kxb * kyb * (kxc * kxc * kyd * kyd - kxd * kxd * kyc * kyc)</a>
+<a name="ln356">          + kyb * kyb * (kxc * kxd * kxd * kyc - kxc * kxc * kxd * kyd));</a>
+<a name="ln357">}</a>
+<a name="ln358"> </a>
+<a name="ln359">static void keystone_backtransform(float *i, float *k_space, float a, float b, float d, float e, float g,</a>
+<a name="ln360">                                   float h, float kxa, float kya)</a>
+<a name="ln361">{</a>
+<a name="ln362">  float xx = i[0] - k_space[0];</a>
+<a name="ln363">  float yy = i[1] - k_space[1];</a>
+<a name="ln364"> </a>
+<a name="ln365">  float div = ((d * xx - a * yy) * h + (b * yy - e * xx) * g + a * e - b * d);</a>
+<a name="ln366"> </a>
+<a name="ln367">  i[0] = (e * xx - b * yy) / div + kxa;</a>
+<a name="ln368">  i[1] = -(d * xx - a * yy) / div + kya;</a>
+<a name="ln369">}</a>
+<a name="ln370"> </a>
+<a name="ln371">static int keystone_transform(float *i, float *k_space, float a, float b, float d, float e, float g, float h,</a>
+<a name="ln372">                              float kxa, float kya)</a>
+<a name="ln373">{</a>
+<a name="ln374">  float xx = i[0] - kxa;</a>
+<a name="ln375">  float yy = i[1] - kya;</a>
+<a name="ln376"> </a>
+<a name="ln377">  float div = g * xx + h * yy + 1;</a>
+<a name="ln378">  i[0] = (a * xx + b * yy) / div + k_space[0];</a>
+<a name="ln379">  i[1] = (d * xx + e * yy) / div + k_space[1];</a>
+<a name="ln380">  return 1;</a>
+<a name="ln381">}</a>
+<a name="ln382"> </a>
+<a name="ln383">static void backtransform(float *x, float *o, const float *m, const float t_h, const float t_v)</a>
+<a name="ln384">{</a>
+<a name="ln385">  x[1] /= (1.0f + x[0] * t_h);</a>
+<a name="ln386">  x[0] /= (1.0f + x[1] * t_v);</a>
+<a name="ln387">  mul_mat_vec_2(m, x, o);</a>
+<a name="ln388">}</a>
+<a name="ln389"> </a>
+<a name="ln390">static void transform(float *x, float *o, const float *m, const float t_h, const float t_v)</a>
+<a name="ln391">{</a>
+<a name="ln392">  float rt[] = { m[0], -m[1], -m[2], m[3] };</a>
+<a name="ln393">  mul_mat_vec_2(rt, x, o);</a>
+<a name="ln394">  o[1] *= (1.0f + o[0] * t_h);</a>
+<a name="ln395">  o[0] *= (1.0f + o[1] * t_v);</a>
+<a name="ln396">}</a>
+<a name="ln397"> </a>
+<a name="ln398"> </a>
+<a name="ln399"> </a>
+<a name="ln400">int distort_transform(dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, float *points, size_t points_count)</a>
+<a name="ln401">{</a>
+<a name="ln402">  // as dt_iop_roi_t contain int values and not floats, we can have some rounding errors</a>
+<a name="ln403">  // as a workaround, we use a factor for preview pipes</a>
+<a name="ln404">  float factor = 1.0f;</a>
+<a name="ln405">  if(piece-&gt;pipe-&gt;type == DT_DEV_PIXELPIPE_PREVIEW) factor = 100.0f;</a>
+<a name="ln406">  // we first need to be sure that all data values are computed</a>
+<a name="ln407">  // this is done in modify_roi_out fct, so we create tmp roi</a>
+<a name="ln408">  dt_iop_roi_t roi_out, roi_in;</a>
+<a name="ln409">  roi_in.width = piece-&gt;buf_in.width * factor;</a>
+<a name="ln410">  roi_in.height = piece-&gt;buf_in.height * factor;</a>
+<a name="ln411">  self-&gt;modify_roi_out(self, piece, &amp;roi_out, &amp;roi_in);</a>
+<a name="ln412"> </a>
+<a name="ln413">  dt_iop_clipping_data_t *d = (dt_iop_clipping_data_t *)piece-&gt;data;</a>
+<a name="ln414"> </a>
+<a name="ln415">  const float rx = piece-&gt;buf_in.width;</a>
+<a name="ln416">  const float ry = piece-&gt;buf_in.height;</a>
+<a name="ln417">  float k_space[4] = { d-&gt;k_space[0] * rx, d-&gt;k_space[1] * ry, d-&gt;k_space[2] * rx, d-&gt;k_space[3] * ry };</a>
+<a name="ln418">  const float kxa = d-&gt;kxa * rx, kxb = d-&gt;kxb * rx, kxc = d-&gt;kxc * rx, kxd = d-&gt;kxd * rx;</a>
+<a name="ln419">  const float kya = d-&gt;kya * ry, kyb = d-&gt;kyb * ry, kyc = d-&gt;kyc * ry, kyd = d-&gt;kyd * ry;</a>
+<a name="ln420">  float ma, mb, md, me, mg, mh;</a>
+<a name="ln421">  keystone_get_matrix(k_space, kxa, kxb, kxc, kxd, kya, kyb, kyc, kyd, &amp;ma, &amp;mb, &amp;md, &amp;me, &amp;mg, &amp;mh);</a>
+<a name="ln422"> </a>
+<a name="ln423">  for(size_t i = 0; i &lt; points_count * 2; i += 2)</a>
+<a name="ln424">  {</a>
+<a name="ln425">    float pi[2], po[2];</a>
+<a name="ln426">    pi[0] = points[i];</a>
+<a name="ln427">    pi[1] = points[i + 1];</a>
+<a name="ln428"> </a>
+<a name="ln429">    if(d-&gt;k_apply == 1) keystone_transform(pi, k_space, ma, mb, md, me, mg, mh, kxa, kya);</a>
+<a name="ln430"> </a>
+<a name="ln431">    pi[0] -= d-&gt;tx / factor;</a>
+<a name="ln432">    pi[1] -= d-&gt;ty / factor;</a>
+<a name="ln433">    // transform this point using matrix m</a>
+<a name="ln434">    transform(pi, po, d-&gt;m, d-&gt;k_h, d-&gt;k_v);</a>
+<a name="ln435"> </a>
+<a name="ln436">    if(d-&gt;flip)</a>
+<a name="ln437">    {</a>
+<a name="ln438">      po[1] += d-&gt;tx / factor;</a>
+<a name="ln439">      po[0] += d-&gt;ty / factor;</a>
+<a name="ln440">    }</a>
+<a name="ln441">    else</a>
+<a name="ln442">    {</a>
+<a name="ln443">      po[0] += d-&gt;tx / factor;</a>
+<a name="ln444">      po[1] += d-&gt;ty / factor;</a>
+<a name="ln445">    }</a>
+<a name="ln446"> </a>
+<a name="ln447">    points[i] = po[0] - (d-&gt;cix - d-&gt;enlarge_x) / factor;</a>
+<a name="ln448">    points[i + 1] = po[1] - (d-&gt;ciy - d-&gt;enlarge_y) / factor;</a>
+<a name="ln449">  }</a>
+<a name="ln450"> </a>
+<a name="ln451">  // revert side-effects of the previous call to modify_roi_out</a>
+<a name="ln452">  // TODO: this is just a quick hack. we need a major revamp of this module!</a>
+<a name="ln453">  if(factor != 1.0f)</a>
+<a name="ln454">  {</a>
+<a name="ln455">    roi_in.width = piece-&gt;buf_in.width;</a>
+<a name="ln456">    roi_in.height = piece-&gt;buf_in.height;</a>
+<a name="ln457">    self-&gt;modify_roi_out(self, piece, &amp;roi_out, &amp;roi_in);</a>
+<a name="ln458">  }</a>
+<a name="ln459"> </a>
+<a name="ln460">  return 1;</a>
+<a name="ln461">}</a>
+<a name="ln462">int distort_backtransform(dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, float *points,</a>
+<a name="ln463">                          size_t points_count)</a>
+<a name="ln464">{</a>
+<a name="ln465">  // as dt_iop_roi_t contain int values and not floats, we can have some rounding errors</a>
+<a name="ln466">  // as a workaround, we use a factor for preview pipes</a>
+<a name="ln467">  float factor = 1.0f;</a>
+<a name="ln468">  if(piece-&gt;pipe-&gt;type == DT_DEV_PIXELPIPE_PREVIEW) factor = 100.0f;</a>
+<a name="ln469">  // we first need to be sure that all data values are computed</a>
+<a name="ln470">  // this is done in modify_roi_out fct, so we create tmp roi</a>
+<a name="ln471">  dt_iop_roi_t roi_out, roi_in;</a>
+<a name="ln472">  roi_in.width = piece-&gt;buf_in.width * factor;</a>
+<a name="ln473">  roi_in.height = piece-&gt;buf_in.height * factor;</a>
+<a name="ln474">  self-&gt;modify_roi_out(self, piece, &amp;roi_out, &amp;roi_in);</a>
+<a name="ln475"> </a>
+<a name="ln476">  dt_iop_clipping_data_t *d = (dt_iop_clipping_data_t *)piece-&gt;data;</a>
+<a name="ln477"> </a>
+<a name="ln478">  const float rx = piece-&gt;buf_in.width;</a>
+<a name="ln479">  const float ry = piece-&gt;buf_in.height;</a>
+<a name="ln480"> </a>
+<a name="ln481">  float k_space[4] = { d-&gt;k_space[0] * rx, d-&gt;k_space[1] * ry, d-&gt;k_space[2] * rx, d-&gt;k_space[3] * ry };</a>
+<a name="ln482">  const float kxa = d-&gt;kxa * rx, kxb = d-&gt;kxb * rx, kxc = d-&gt;kxc * rx, kxd = d-&gt;kxd * rx;</a>
+<a name="ln483">  const float kya = d-&gt;kya * ry, kyb = d-&gt;kyb * ry, kyc = d-&gt;kyc * ry, kyd = d-&gt;kyd * ry;</a>
+<a name="ln484">  float ma, mb, md, me, mg, mh;</a>
+<a name="ln485">  keystone_get_matrix(k_space, kxa, kxb, kxc, kxd, kya, kyb, kyc, kyd, &amp;ma, &amp;mb, &amp;md, &amp;me, &amp;mg, &amp;mh);</a>
+<a name="ln486"> </a>
+<a name="ln487">  for(size_t i = 0; i &lt; points_count * 2; i += 2)</a>
+<a name="ln488">  {</a>
+<a name="ln489">    float pi[2], po[2];</a>
+<a name="ln490">    pi[0] = -(d-&gt;enlarge_x - d-&gt;cix) / factor + points[i];</a>
+<a name="ln491">    pi[1] = -(d-&gt;enlarge_y - d-&gt;ciy) / factor + points[i + 1];</a>
+<a name="ln492"> </a>
+<a name="ln493">    // transform this point using matrix m</a>
+<a name="ln494">    if(d-&gt;flip)</a>
+<a name="ln495">    {</a>
+<a name="ln496">      pi[1] -= d-&gt;tx / factor;</a>
+<a name="ln497">      pi[0] -= d-&gt;ty / factor;</a>
+<a name="ln498">    }</a>
+<a name="ln499">    else</a>
+<a name="ln500">    {</a>
+<a name="ln501">      pi[0] -= d-&gt;tx / factor;</a>
+<a name="ln502">      pi[1] -= d-&gt;ty / factor;</a>
+<a name="ln503">    }</a>
+<a name="ln504"> </a>
+<a name="ln505">    backtransform(pi, po, d-&gt;m, d-&gt;k_h, d-&gt;k_v);</a>
+<a name="ln506">    po[0] += d-&gt;tx / factor;</a>
+<a name="ln507">    po[1] += d-&gt;ty / factor;</a>
+<a name="ln508">    if(d-&gt;k_apply == 1) keystone_backtransform(po, k_space, ma, mb, md, me, mg, mh, kxa, kya);</a>
+<a name="ln509"> </a>
+<a name="ln510">    points[i] = po[0];</a>
+<a name="ln511">    points[i + 1] = po[1];</a>
+<a name="ln512">  }</a>
+<a name="ln513"> </a>
+<a name="ln514">  // revert side-effects of the previous call to modify_roi_out</a>
+<a name="ln515">  // TODO: this is just a quick hack. we need a major revamp of this module!</a>
+<a name="ln516">  if(factor != 1.0f)</a>
+<a name="ln517">  {</a>
+<a name="ln518">    roi_in.width = piece-&gt;buf_in.width;</a>
+<a name="ln519">    roi_in.height = piece-&gt;buf_in.height;</a>
+<a name="ln520">    self-&gt;modify_roi_out(self, piece, &amp;roi_out, &amp;roi_in);</a>
+<a name="ln521">  }</a>
+<a name="ln522"> </a>
+<a name="ln523">  return 1;</a>
+<a name="ln524">}</a>
+<a name="ln525"> </a>
+<a name="ln526">void distort_mask(struct dt_iop_module_t *self, struct dt_dev_pixelpipe_iop_t *piece, const float *const in,</a>
+<a name="ln527">                  float *const out, const dt_iop_roi_t *const roi_in, const dt_iop_roi_t *const roi_out)</a>
+<a name="ln528">{</a>
+<a name="ln529">  dt_iop_clipping_data_t *d = (dt_iop_clipping_data_t *)piece-&gt;data;</a>
+<a name="ln530"> </a>
+<a name="ln531">  // only crop, no rot fast and sharp path:</a>
+<a name="ln532">  if(!d-&gt;flags &amp;&amp; d-&gt;angle == 0.0 &amp;&amp; d-&gt;all_off &amp;&amp; roi_in-&gt;width == roi_out-&gt;width &amp;&amp; roi_in-&gt;height == roi_out-&gt;height)</a>
+<a name="ln533">  {</a>
+<a name="ln534">#ifdef _OPENMP</a>
+<a name="ln535">#pragma omp parallel for schedule(static) default(none) shared(d)</a>
+<a name="ln536">#endif</a>
+<a name="ln537">    for(int j = 0; j &lt; roi_out-&gt;height; j++)</a>
+<a name="ln538">    {</a>
+<a name="ln539">      const float *_in = in + (size_t)roi_out-&gt;width * j;</a>
+<a name="ln540">      float *_out = out + (size_t)roi_out-&gt;width * j;</a>
+<a name="ln541">      memcpy(_out, _in, sizeof(float) * roi_out-&gt;width);</a>
+<a name="ln542">    }</a>
+<a name="ln543">  }</a>
+<a name="ln544">  else</a>
+<a name="ln545">  {</a>
+<a name="ln546">    const struct dt_interpolation *interpolation = dt_interpolation_new(DT_INTERPOLATION_USERPREF);</a>
+<a name="ln547">    const float rx = piece-&gt;buf_in.width * roi_in-&gt;scale;</a>
+<a name="ln548">    const float ry = piece-&gt;buf_in.height * roi_in-&gt;scale;</a>
+<a name="ln549">    float k_space[4] = { d-&gt;k_space[0] * rx, d-&gt;k_space[1] * ry, d-&gt;k_space[2] * rx, d-&gt;k_space[3] * ry };</a>
+<a name="ln550">    const float kxa = d-&gt;kxa * rx, kxb = d-&gt;kxb * rx, kxc = d-&gt;kxc * rx, kxd = d-&gt;kxd * rx;</a>
+<a name="ln551">    const float kya = d-&gt;kya * ry, kyb = d-&gt;kyb * ry, kyc = d-&gt;kyc * ry, kyd = d-&gt;kyd * ry;</a>
+<a name="ln552">    float ma, mb, md, me, mg, mh;</a>
+<a name="ln553">    keystone_get_matrix(k_space, kxa, kxb, kxc, kxd, kya, kyb, kyc, kyd, &amp;ma, &amp;mb, &amp;md, &amp;me, &amp;mg, &amp;mh);</a>
+<a name="ln554"> </a>
+<a name="ln555">#ifdef _OPENMP</a>
+<a name="ln556">#pragma omp parallel for schedule(static) default(none) shared(d, interpolation, k_space, ma, mb, md, me, mg, mh)</a>
+<a name="ln557">#endif</a>
+<a name="ln558">    // (slow) point-by-point transformation.</a>
+<a name="ln559">    // TODO: optimize with scanlines and linear steps between?</a>
+<a name="ln560">    for(int j = 0; j &lt; roi_out-&gt;height; j++)</a>
+<a name="ln561">    {</a>
+<a name="ln562">      float *_out = out + (size_t)j * roi_out-&gt;width;</a>
+<a name="ln563">      for(int i = 0; i &lt; roi_out-&gt;width; i++, _out++)</a>
+<a name="ln564">      {</a>
+<a name="ln565">        float pi[2], po[2];</a>
+<a name="ln566"> </a>
+<a name="ln567">        pi[0] = roi_out-&gt;x - roi_out-&gt;scale * d-&gt;enlarge_x + roi_out-&gt;scale * d-&gt;cix + i + 0.5f;</a>
+<a name="ln568">        pi[1] = roi_out-&gt;y - roi_out-&gt;scale * d-&gt;enlarge_y + roi_out-&gt;scale * d-&gt;ciy + j + 0.5f;</a>
+<a name="ln569"> </a>
+<a name="ln570">        // transform this point using matrix m</a>
+<a name="ln571">        if(d-&gt;flip)</a>
+<a name="ln572">        {</a>
+<a name="ln573">          pi[1] -= d-&gt;tx * roi_out-&gt;scale;</a>
+<a name="ln574">          pi[0] -= d-&gt;ty * roi_out-&gt;scale;</a>
+<a name="ln575">        }</a>
+<a name="ln576">        else</a>
+<a name="ln577">        {</a>
+<a name="ln578">          pi[0] -= d-&gt;tx * roi_out-&gt;scale;</a>
+<a name="ln579">          pi[1] -= d-&gt;ty * roi_out-&gt;scale;</a>
+<a name="ln580">        }</a>
+<a name="ln581">        pi[0] /= roi_out-&gt;scale;</a>
+<a name="ln582">        pi[1] /= roi_out-&gt;scale;</a>
+<a name="ln583">        backtransform(pi, po, d-&gt;m, d-&gt;k_h, d-&gt;k_v);</a>
+<a name="ln584">        po[0] *= roi_in-&gt;scale;</a>
+<a name="ln585">        po[1] *= roi_in-&gt;scale;</a>
+<a name="ln586">        po[0] += d-&gt;tx * roi_in-&gt;scale;</a>
+<a name="ln587">        po[1] += d-&gt;ty * roi_in-&gt;scale;</a>
+<a name="ln588">        if(d-&gt;k_apply == 1) keystone_backtransform(po, k_space, ma, mb, md, me, mg, mh, kxa, kya);</a>
+<a name="ln589">        po[0] -= roi_in-&gt;x + 0.5f;</a>
+<a name="ln590">        po[1] -= roi_in-&gt;y + 0.5f;</a>
+<a name="ln591"> </a>
+<a name="ln592">        *_out = dt_interpolation_compute_sample(interpolation, in, po[0], po[1], roi_in-&gt;width, roi_in-&gt;height, 1,</a>
+<a name="ln593">                                                roi_in-&gt;width);</a>
+<a name="ln594">      }</a>
+<a name="ln595">    }</a>
+<a name="ln596">  }</a>
+<a name="ln597">}</a>
+<a name="ln598"> </a>
+<a name="ln599">static int _iop_clipping_set_max_clip(struct dt_iop_module_t *self)</a>
+<a name="ln600">{</a>
+<a name="ln601">  dt_iop_clipping_gui_data_t *g = (dt_iop_clipping_gui_data_t *)self-&gt;gui_data;</a>
+<a name="ln602">  dt_iop_clipping_params_t *p = (dt_iop_clipping_params_t *)self-&gt;params;</a>
+<a name="ln603"> </a>
+<a name="ln604">  if(g-&gt;clip_max_pipe_hash == self-&gt;dev-&gt;preview_pipe-&gt;backbuf_hash) return 1;</a>
+<a name="ln605"> </a>
+<a name="ln606">  // we want to know the size of the actual buffer</a>
+<a name="ln607">  dt_dev_pixelpipe_iop_t *piece = dt_dev_distort_get_iop_pipe(self-&gt;dev, self-&gt;dev-&gt;preview_pipe, self);</a>
+<a name="ln608">  if(!piece) return 0;</a>
+<a name="ln609"> </a>
+<a name="ln610">  float wp = piece-&gt;buf_out.width, hp = piece-&gt;buf_out.height;</a>
+<a name="ln611">  float points[8] = { 0.0, 0.0, wp, hp, p-&gt;cx * wp, p-&gt;cy * hp, fabsf(p-&gt;cw) * wp, fabsf(p-&gt;ch) * hp };</a>
+<a name="ln612">  if(!dt_dev_distort_transform_plus(self-&gt;dev, self-&gt;dev-&gt;preview_pipe, self-&gt;priority + 1, 999999, points, 4))</a>
+<a name="ln613">    return 0;</a>
+<a name="ln614"> </a>
+<a name="ln615">  g-&gt;clip_max_x = points[0] / self-&gt;dev-&gt;preview_pipe-&gt;backbuf_width;</a>
+<a name="ln616">  g-&gt;clip_max_y = points[1] / self-&gt;dev-&gt;preview_pipe-&gt;backbuf_height;</a>
+<a name="ln617">  g-&gt;clip_max_w = (points[2] - points[0]) / self-&gt;dev-&gt;preview_pipe-&gt;backbuf_width;</a>
+<a name="ln618">  g-&gt;clip_max_h = (points[3] - points[1]) / self-&gt;dev-&gt;preview_pipe-&gt;backbuf_height;</a>
+<a name="ln619"> </a>
+<a name="ln620">  // if clipping values are not null, this is undistorted values...</a>
+<a name="ln621">  g-&gt;clip_x = points[4] / self-&gt;dev-&gt;preview_pipe-&gt;backbuf_width;</a>
+<a name="ln622">  g-&gt;clip_y = points[5] / self-&gt;dev-&gt;preview_pipe-&gt;backbuf_height;</a>
+<a name="ln623">  g-&gt;clip_w = (points[6] - points[4]) / self-&gt;dev-&gt;preview_pipe-&gt;backbuf_width;</a>
+<a name="ln624">  g-&gt;clip_h = (points[7] - points[5]) / self-&gt;dev-&gt;preview_pipe-&gt;backbuf_height;</a>
+<a name="ln625">  g-&gt;clip_x = fmaxf(g-&gt;clip_x, g-&gt;clip_max_x);</a>
+<a name="ln626">  g-&gt;clip_y = fmaxf(g-&gt;clip_y, g-&gt;clip_max_y);</a>
+<a name="ln627">  g-&gt;clip_w = fminf(g-&gt;clip_w, g-&gt;clip_max_w);</a>
+<a name="ln628">  g-&gt;clip_h = fminf(g-&gt;clip_h, g-&gt;clip_max_h);</a>
+<a name="ln629">  g-&gt;clip_max_pipe_hash = self-&gt;dev-&gt;preview_pipe-&gt;backbuf_hash;</a>
+<a name="ln630">  return 1;</a>
+<a name="ln631">}</a>
+<a name="ln632"> </a>
+<a name="ln633">// 1st pass: how large would the output be, given this input roi?</a>
+<a name="ln634">// this is always called with the full buffer before processing.</a>
+<a name="ln635">void modify_roi_out(struct dt_iop_module_t *self, struct dt_dev_pixelpipe_iop_t *piece, dt_iop_roi_t *roi_out,</a>
+<a name="ln636">                    const dt_iop_roi_t *roi_in_orig)</a>
+<a name="ln637">{</a>
+<a name="ln638">  dt_iop_roi_t roi_in_d = *roi_in_orig;</a>
+<a name="ln639">  dt_iop_roi_t *roi_in = &amp;roi_in_d;</a>
+<a name="ln640"> </a>
+<a name="ln641">  dt_iop_clipping_data_t *d = (dt_iop_clipping_data_t *)piece-&gt;data;</a>
+<a name="ln642"> </a>
+<a name="ln643">  // use whole-buffer roi information to create matrix and inverse.</a>
+<a name="ln644">  float rt[] = { cosf(d-&gt;angle), sinf(d-&gt;angle), -sinf(d-&gt;angle), cosf(d-&gt;angle) };</a>
+<a name="ln645">  if(d-&gt;angle == 0.0f)</a>
+<a name="ln646">  {</a>
+<a name="ln647">    rt[0] = rt[3] = 1.0;</a>
+<a name="ln648">    rt[1] = rt[2] = 0.0f;</a>
+<a name="ln649">  }</a>
+<a name="ln650"> </a>
+<a name="ln651">  for(int k = 0; k &lt; 4; k++) d-&gt;m[k] = rt[k];</a>
+<a name="ln652">  if(d-&gt;flags &amp; FLAG_FLIP_HORIZONTAL)</a>
+<a name="ln653">  {</a>
+<a name="ln654">    d-&gt;m[0] = -rt[0];</a>
+<a name="ln655">    d-&gt;m[2] = -rt[2];</a>
+<a name="ln656">  }</a>
+<a name="ln657">  if(d-&gt;flags &amp; FLAG_FLIP_VERTICAL)</a>
+<a name="ln658">  {</a>
+<a name="ln659">    d-&gt;m[1] = -rt[1];</a>
+<a name="ln660">    d-&gt;m[3] = -rt[3];</a>
+<a name="ln661">  }</a>
+<a name="ln662"> </a>
+<a name="ln663">  if(d-&gt;k_apply == 0 &amp;&amp; d-&gt;crop_auto == 1) // this is the old solution.</a>
+<a name="ln664">  {</a>
+<a name="ln665">    *roi_out = *roi_in;</a>
+<a name="ln666"> </a>
+<a name="ln667">    // correct keystone correction factors by resolution of this buffer</a>
+<a name="ln668">    const float kc = 1.0f / fminf(roi_in-&gt;width, roi_in-&gt;height);</a>
+<a name="ln669">    d-&gt;k_h = d-&gt;ki_h * kc;</a>
+<a name="ln670">    d-&gt;k_v = d-&gt;ki_v * kc;</a>
+<a name="ln671"> </a>
+<a name="ln672">    float cropscale = -1.0f;</a>
+<a name="ln673">    // check portrait/landscape orientation, whichever fits more area:</a>
+<a name="ln674">    const float oaabb[4]</a>
+<a name="ln675">        = { -.5f * roi_in-&gt;width, -.5f * roi_in-&gt;height, .5f * roi_in-&gt;width, .5f * roi_in-&gt;height };</a>
+<a name="ln676">    for(int flip = 0; flip &lt; 2; flip++)</a>
+<a name="ln677">    {</a>
+<a name="ln678">      const float roi_in_width = flip ? roi_in-&gt;height : roi_in-&gt;width;</a>
+<a name="ln679">      const float roi_in_height = flip ? roi_in-&gt;width : roi_in-&gt;height;</a>
+<a name="ln680">      float newcropscale = 1.0f;</a>
+<a name="ln681">      // fwd transform rotated points on corners and scale back inside roi_in bounds.</a>
+<a name="ln682">      float p[2], o[2],</a>
+<a name="ln683">          aabb[4] = { -.5f * roi_in_width, -.5f * roi_in_height, .5f * roi_in_width, .5f * roi_in_height };</a>
+<a name="ln684">      for(int c = 0; c &lt; 4; c++)</a>
+<a name="ln685">      {</a>
+<a name="ln686">        get_corner(oaabb, c, p);</a>
+<a name="ln687">        transform(p, o, rt, d-&gt;k_h, d-&gt;k_v);</a>
+<a name="ln688">        for(int k = 0; k &lt; 2; k++)</a>
+<a name="ln689">          if(fabsf(o[k]) &gt; 0.001f) newcropscale = fminf(newcropscale, aabb[(o[k] &gt; 0 ? 2 : 0) + k] / o[k]);</a>
+<a name="ln690">      }</a>
+<a name="ln691">      if(newcropscale &gt;= cropscale)</a>
+<a name="ln692">      {</a>
+<a name="ln693">        cropscale = newcropscale;</a>
+<a name="ln694">        // remember rotation center in whole-buffer coordinates:</a>
+<a name="ln695">        d-&gt;tx = roi_in-&gt;width * .5f;</a>
+<a name="ln696">        d-&gt;ty = roi_in-&gt;height * .5f;</a>
+<a name="ln697">        d-&gt;flip = flip;</a>
+<a name="ln698"> </a>
+<a name="ln699">        float ach = d-&gt;ch - d-&gt;cy, acw = d-&gt;cw - d-&gt;cx;</a>
+<a name="ln700">        // rotate and clip to max extent</a>
+<a name="ln701">        if(flip)</a>
+<a name="ln702">        {</a>
+<a name="ln703">          roi_out-&gt;y = d-&gt;tx - (.5f - d-&gt;cy) * cropscale * roi_in-&gt;width;</a>
+<a name="ln704">          roi_out-&gt;x = d-&gt;ty - (.5f - d-&gt;cx) * cropscale * roi_in-&gt;height;</a>
+<a name="ln705">          roi_out-&gt;height = ach * cropscale * roi_in-&gt;width;</a>
+<a name="ln706">          roi_out-&gt;width = acw * cropscale * roi_in-&gt;height;</a>
+<a name="ln707">        }</a>
+<a name="ln708">        else</a>
+<a name="ln709">        {</a>
+<a name="ln710">          roi_out-&gt;x = d-&gt;tx - (.5f - d-&gt;cx) * cropscale * roi_in-&gt;width;</a>
+<a name="ln711">          roi_out-&gt;y = d-&gt;ty - (.5f - d-&gt;cy) * cropscale * roi_in-&gt;height;</a>
+<a name="ln712">          roi_out-&gt;width = acw * cropscale * roi_in-&gt;width;</a>
+<a name="ln713">          roi_out-&gt;height = ach * cropscale * roi_in-&gt;height;</a>
+<a name="ln714">        }</a>
+<a name="ln715">      }</a>
+<a name="ln716">    }</a>
+<a name="ln717">  }</a>
+<a name="ln718">  else</a>
+<a name="ln719">  {</a>
+<a name="ln720">    *roi_out = *roi_in;</a>
+<a name="ln721">    // set roi_out values with rotation and keystone</a>
+<a name="ln722">    // initial corners pos</a>
+<a name="ln723">    float corn_x[4] = { 0.0f, roi_in-&gt;width, roi_in-&gt;width, 0.0f };</a>
+<a name="ln724">    float corn_y[4] = { 0.0f, 0.0f, roi_in-&gt;height, roi_in-&gt;height };</a>
+<a name="ln725">    // destination corner points</a>
+<a name="ln726">    float corn_out_x[4] = { 0.0f };</a>
+<a name="ln727">    float corn_out_y[4] = { 0.0f };</a>
+<a name="ln728"> </a>
+<a name="ln729">    // we don't test image flip as autocrop is not completely ok...</a>
+<a name="ln730">    d-&gt;flip = 0;</a>
+<a name="ln731"> </a>
+<a name="ln732">    // we apply rotation and keystone to all those points</a>
+<a name="ln733">    float p[2], o[2];</a>
+<a name="ln734">    for(int c = 0; c &lt; 4; c++)</a>
+<a name="ln735">    {</a>
+<a name="ln736">      // keystone</a>
+<a name="ln737">      o[0] = corn_x[c];</a>
+<a name="ln738">      o[1] = corn_y[c];</a>
+<a name="ln739">      if(d-&gt;k_apply == 1)</a>
+<a name="ln740">      {</a>
+<a name="ln741">        o[0] /= (float)roi_in-&gt;width, o[1] /= (float)roi_in-&gt;height;</a>
+<a name="ln742">        if(keystone_transform(o, d-&gt;k_space, d-&gt;a, d-&gt;b, d-&gt;d, d-&gt;e, d-&gt;g, d-&gt;h, d-&gt;kxa, d-&gt;kya) != 1)</a>
+<a name="ln743">        {</a>
+<a name="ln744">          // we set the point to maximum possible</a>
+<a name="ln745">          if(o[0] &lt; 0.5f)</a>
+<a name="ln746">            o[0] = -1.0f;</a>
+<a name="ln747">          else</a>
+<a name="ln748">            o[0] = 2.0f;</a>
+<a name="ln749">          if(o[1] &lt; 0.5f)</a>
+<a name="ln750">            o[1] = -1.0f;</a>
+<a name="ln751">          else</a>
+<a name="ln752">            o[1] = 2.0f;</a>
+<a name="ln753">        }</a>
+<a name="ln754">        o[0] *= roi_in-&gt;width, o[1] *= roi_in-&gt;height;</a>
+<a name="ln755">      }</a>
+<a name="ln756">      // rotation</a>
+<a name="ln757">      p[0] = o[0] - .5f * roi_in-&gt;width;</a>
+<a name="ln758">      p[1] = o[1] - .5f * roi_in-&gt;height;</a>
+<a name="ln759">      transform(p, o, d-&gt;m, d-&gt;k_h, d-&gt;k_v);</a>
+<a name="ln760">      o[0] += .5f * roi_in-&gt;width;</a>
+<a name="ln761">      o[1] += .5f * roi_in-&gt;height;</a>
+<a name="ln762"> </a>
+<a name="ln763">      // and we set the values</a>
+<a name="ln764">      corn_out_x[c] = o[0];</a>
+<a name="ln765">      corn_out_y[c] = o[1];</a>
+<a name="ln766">    }</a>
+<a name="ln767"> </a>
+<a name="ln768">    float new_x, new_y, new_sc_x, new_sc_y;</a>
+<a name="ln769">    new_x = fminf(fminf(fminf(corn_out_x[0], corn_out_x[1]), corn_out_x[2]), corn_out_x[3]);</a>
+<a name="ln770">    if(new_x + roi_in-&gt;width &lt; 0) new_x = -roi_in-&gt;width;</a>
+<a name="ln771">    new_y = fminf(fminf(fminf(corn_out_y[0], corn_out_y[1]), corn_out_y[2]), corn_out_y[3]);</a>
+<a name="ln772">    if(new_y + roi_in-&gt;height &lt; 0) new_y = -roi_in-&gt;height;</a>
+<a name="ln773"> </a>
+<a name="ln774">    new_sc_x = fmaxf(fmaxf(fmaxf(corn_out_x[0], corn_out_x[1]), corn_out_x[2]), corn_out_x[3]);</a>
+<a name="ln775">    if(new_sc_x &gt; 2.0f * roi_in-&gt;width) new_sc_x = 2.0f * roi_in-&gt;width;</a>
+<a name="ln776">    new_sc_y = fmaxf(fmaxf(fmaxf(corn_out_y[0], corn_out_y[1]), corn_out_y[2]), corn_out_y[3]);</a>
+<a name="ln777">    if(new_sc_y &gt; 2.0f * roi_in-&gt;height) new_sc_y = 2.0f * roi_in-&gt;height;</a>
+<a name="ln778"> </a>
+<a name="ln779">    // be careful, we don't want too small area here !</a>
+<a name="ln780">    if(new_sc_x - new_x &lt; roi_in-&gt;width / 8.0f)</a>
+<a name="ln781">    {</a>
+<a name="ln782">      float f = (new_sc_x + new_x) / 2.0f;</a>
+<a name="ln783">      if(f &lt; roi_in-&gt;width / 16.0f) f = roi_in-&gt;width / 16.0f;</a>
+<a name="ln784">      if(f &gt;= roi_in-&gt;width * 15.0f / 16.0f) f = roi_in-&gt;width * 15.0f / 16.0f - 1.0f;</a>
+<a name="ln785">      new_x = f - roi_in-&gt;width / 16.0f, new_sc_x = f + roi_in-&gt;width / 16.0f;</a>
+<a name="ln786">    }</a>
+<a name="ln787">    if(new_sc_y - new_y &lt; roi_in-&gt;height / 8.0f)</a>
+<a name="ln788">    {</a>
+<a name="ln789">      float f = (new_sc_y + new_y) / 2.0f;</a>
+<a name="ln790">      if(f &lt; roi_in-&gt;height / 16.0f) f = roi_in-&gt;height / 16.0f;</a>
+<a name="ln791">      if(f &gt;= roi_in-&gt;height * 15.0f / 16.0f) f = roi_in-&gt;height * 15.0f / 16.0f - 1.0f;</a>
+<a name="ln792">      new_y = f - roi_in-&gt;height / 16.0f, new_sc_y = f + roi_in-&gt;height / 16.0f;</a>
+<a name="ln793">    }</a>
+<a name="ln794"> </a>
+<a name="ln795">    new_sc_y = new_sc_y - new_y;</a>
+<a name="ln796">    new_sc_x = new_sc_x - new_x;</a>
+<a name="ln797"> </a>
+<a name="ln798">    // now we apply the clipping</a>
+<a name="ln799">    new_x += d-&gt;cx * new_sc_x;</a>
+<a name="ln800">    new_y += d-&gt;cy * new_sc_y;</a>
+<a name="ln801">    new_sc_x *= d-&gt;cw - d-&gt;cx;</a>
+<a name="ln802">    new_sc_y *= d-&gt;ch - d-&gt;cy;</a>
+<a name="ln803"> </a>
+<a name="ln804">    d-&gt;enlarge_x = fmaxf(-new_x, 0.0f);</a>
+<a name="ln805">    roi_out-&gt;x = fmaxf(new_x, 0.0f);</a>
+<a name="ln806">    d-&gt;enlarge_y = fmaxf(-new_y, 0.0f);</a>
+<a name="ln807">    roi_out-&gt;y = fmaxf(new_y, 0.0f);</a>
+<a name="ln808"> </a>
+<a name="ln809">    roi_out-&gt;width = new_sc_x;</a>
+<a name="ln810">    roi_out-&gt;height = new_sc_y;</a>
+<a name="ln811">    d-&gt;tx = roi_in-&gt;width * .5f;</a>
+<a name="ln812">    d-&gt;ty = roi_in-&gt;height * .5f;</a>
+<a name="ln813">  }</a>
+<a name="ln814"> </a>
+<a name="ln815">  // sanity check.</a>
+<a name="ln816">  if(roi_out-&gt;x &lt; 0) roi_out-&gt;x = 0;</a>
+<a name="ln817">  if(roi_out-&gt;y &lt; 0) roi_out-&gt;y = 0;</a>
+<a name="ln818">  if(roi_out-&gt;width &lt; 1) roi_out-&gt;width = 1;</a>
+<a name="ln819">  if(roi_out-&gt;height &lt; 1) roi_out-&gt;height = 1;</a>
+<a name="ln820"> </a>
+<a name="ln821">  // save rotation crop on output buffer in world scale:</a>
+<a name="ln822">  d-&gt;cix = roi_out-&gt;x;</a>
+<a name="ln823">  d-&gt;ciy = roi_out-&gt;y;</a>
+<a name="ln824">  d-&gt;ciw = roi_out-&gt;width;</a>
+<a name="ln825">  d-&gt;cih = roi_out-&gt;height;</a>
+<a name="ln826">}</a>
+<a name="ln827"> </a>
+<a name="ln828">// 2nd pass: which roi would this operation need as input to fill the given output region?</a>
+<a name="ln829">void modify_roi_in(struct dt_iop_module_t *self, struct dt_dev_pixelpipe_iop_t *piece,</a>
+<a name="ln830">                   const dt_iop_roi_t *roi_out, dt_iop_roi_t *roi_in)</a>
+<a name="ln831">{</a>
+<a name="ln832">  dt_iop_clipping_data_t *d = (dt_iop_clipping_data_t *)piece-&gt;data;</a>
+<a name="ln833">  *roi_in = *roi_out;</a>
+<a name="ln834">  // modify_roi_out took care of bounds checking for us. we hopefully do not get requests outside the clipping</a>
+<a name="ln835">  // area.</a>
+<a name="ln836">  // transform aabb back to roi_in</a>
+<a name="ln837"> </a>
+<a name="ln838">  // this aabb is set off by cx/cy</a>
+<a name="ln839">  const float so = roi_out-&gt;scale;</a>
+<a name="ln840">  const float kw = piece-&gt;buf_in.width * so, kh = piece-&gt;buf_in.height * so;</a>
+<a name="ln841">  const float roi_out_x = roi_out-&gt;x - d-&gt;enlarge_x * so, roi_out_y = roi_out-&gt;y - d-&gt;enlarge_y * so;</a>
+<a name="ln842">  float p[2], o[2],</a>
+<a name="ln843">      aabb[4] = { roi_out_x + d-&gt;cix * so, roi_out_y + d-&gt;ciy * so, roi_out_x + d-&gt;cix * so + roi_out-&gt;width,</a>
+<a name="ln844">                  roi_out_y + d-&gt;ciy * so + roi_out-&gt;height };</a>
+<a name="ln845">  float aabb_in[4] = { INFINITY, INFINITY, -INFINITY, -INFINITY };</a>
+<a name="ln846">  for(int c = 0; c &lt; 4; c++)</a>
+<a name="ln847">  {</a>
+<a name="ln848">    // get corner points of roi_out</a>
+<a name="ln849">    get_corner(aabb, c, p);</a>
+<a name="ln850"> </a>
+<a name="ln851">    // backtransform aabb using m</a>
+<a name="ln852">    if(d-&gt;flip)</a>
+<a name="ln853">    {</a>
+<a name="ln854">      p[1] -= d-&gt;tx * so;</a>
+<a name="ln855">      p[0] -= d-&gt;ty * so;</a>
+<a name="ln856">    }</a>
+<a name="ln857">    else</a>
+<a name="ln858">    {</a>
+<a name="ln859">      p[0] -= d-&gt;tx * so;</a>
+<a name="ln860">      p[1] -= d-&gt;ty * so;</a>
+<a name="ln861">    }</a>
+<a name="ln862">    p[0] *= 1.0 / so;</a>
+<a name="ln863">    p[1] *= 1.0 / so;</a>
+<a name="ln864">    backtransform(p, o, d-&gt;m, d-&gt;k_h, d-&gt;k_v);</a>
+<a name="ln865">    o[0] *= so;</a>
+<a name="ln866">    o[1] *= so;</a>
+<a name="ln867">    o[0] += d-&gt;tx * so;</a>
+<a name="ln868">    o[1] += d-&gt;ty * so;</a>
+<a name="ln869">    o[0] /= kw;</a>
+<a name="ln870">    o[1] /= kh;</a>
+<a name="ln871">    if(d-&gt;k_apply == 1)</a>
+<a name="ln872">      keystone_backtransform(o, d-&gt;k_space, d-&gt;a, d-&gt;b, d-&gt;d, d-&gt;e, d-&gt;g, d-&gt;h, d-&gt;kxa, d-&gt;kya);</a>
+<a name="ln873">    o[0] *= kw;</a>
+<a name="ln874">    o[1] *= kh;</a>
+<a name="ln875">    // transform to roi_in space, get aabb.</a>
+<a name="ln876">    adjust_aabb(o, aabb_in);</a>
+<a name="ln877">  }</a>
+<a name="ln878"> </a>
+<a name="ln879">  // adjust roi_in to minimally needed region</a>
+<a name="ln880">  roi_in-&gt;x = aabb_in[0] - 1;</a>
+<a name="ln881">  roi_in-&gt;y = aabb_in[1] - 1;</a>
+<a name="ln882">  roi_in-&gt;width = aabb_in[2] - aabb_in[0] + 2;</a>
+<a name="ln883">  roi_in-&gt;height = aabb_in[3] - aabb_in[1] + 2;</a>
+<a name="ln884"> </a>
+<a name="ln885">  if(d-&gt;angle == 0.0f &amp;&amp; d-&gt;all_off)</a>
+<a name="ln886">  {</a>
+<a name="ln887">    // just crop: make sure everything is precise.</a>
+<a name="ln888">    roi_in-&gt;x = aabb_in[0];</a>
+<a name="ln889">    roi_in-&gt;y = aabb_in[1];</a>
+<a name="ln890">    roi_in-&gt;width = roi_out-&gt;width;</a>
+<a name="ln891">    roi_in-&gt;height = roi_out-&gt;height;</a>
+<a name="ln892">  }</a>
+<a name="ln893"> </a>
+<a name="ln894">  // sanity check.</a>
+<a name="ln895">  const float scwidth = piece-&gt;buf_in.width * so, scheight = piece-&gt;buf_in.height * so;</a>
+<a name="ln896">  roi_in-&gt;x = CLAMP(roi_in-&gt;x, 0, (int)floorf(scwidth));</a>
+<a name="ln897">  roi_in-&gt;y = CLAMP(roi_in-&gt;y, 0, (int)floorf(scheight));</a>
+<a name="ln898">  roi_in-&gt;width = CLAMP(roi_in-&gt;width, 1, (int)ceilf(scwidth) - roi_in-&gt;x);</a>
+<a name="ln899">  roi_in-&gt;height = CLAMP(roi_in-&gt;height, 1, (int)ceilf(scheight) - roi_in-&gt;y);</a>
+<a name="ln900">}</a>
+<a name="ln901"> </a>
+<a name="ln902">// 3rd (final) pass: you get this input region (may be different from what was requested above),</a>
+<a name="ln903">// do your best to fill the output region!</a>
+<a name="ln904">void process(struct dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, const void *const ivoid,</a>
+<a name="ln905">             void *const ovoid, const dt_iop_roi_t *const roi_in, const dt_iop_roi_t *const roi_out)</a>
+<a name="ln906">{</a>
+<a name="ln907">  dt_iop_clipping_data_t *d = (dt_iop_clipping_data_t *)piece-&gt;data;</a>
+<a name="ln908"> </a>
+<a name="ln909">  const int ch = piece-&gt;colors;</a>
+<a name="ln910">  const int ch_width = ch * roi_in-&gt;width;</a>
+<a name="ln911"> </a>
+<a name="ln912">  assert(ch == 4);</a>
+<a name="ln913"> </a>
+<a name="ln914">  // only crop, no rot fast and sharp path:</a>
+<a name="ln915">  if(!d-&gt;flags &amp;&amp; d-&gt;angle == 0.0 &amp;&amp; d-&gt;all_off &amp;&amp; roi_in-&gt;width == roi_out-&gt;width</a>
+<a name="ln916">     &amp;&amp; roi_in-&gt;height == roi_out-&gt;height)</a>
+<a name="ln917">  {</a>
+<a name="ln918">#ifdef _OPENMP</a>
+<a name="ln919">#pragma omp parallel for schedule(static) default(none) shared(d)</a>
+<a name="ln920">#endif</a>
+<a name="ln921">    for(int j = 0; j &lt; roi_out-&gt;height; j++)</a>
+<a name="ln922">    {</a>
+<a name="ln923">      const float *in = ((float *)ivoid) + (size_t)ch * roi_out-&gt;width * j;</a>
+<a name="ln924">      float *out = ((float *)ovoid) + (size_t)ch * roi_out-&gt;width * j;</a>
+<a name="ln925">      for(int i = 0; i &lt; roi_out-&gt;width; i++)</a>
+<a name="ln926">      {</a>
+<a name="ln927">        for(int c = 0; c &lt; 4; c++) out[c] = in[c];</a>
+<a name="ln928">        out += ch;</a>
+<a name="ln929">        in += ch;</a>
+<a name="ln930">      }</a>
+<a name="ln931">    }</a>
+<a name="ln932">  }</a>
+<a name="ln933">  else</a>
+<a name="ln934">  {</a>
+<a name="ln935">    const struct dt_interpolation *interpolation = dt_interpolation_new(DT_INTERPOLATION_USERPREF);</a>
+<a name="ln936">    const float rx = piece-&gt;buf_in.width * roi_in-&gt;scale;</a>
+<a name="ln937">    const float ry = piece-&gt;buf_in.height * roi_in-&gt;scale;</a>
+<a name="ln938">    float k_space[4] = { d-&gt;k_space[0] * rx, d-&gt;k_space[1] * ry, d-&gt;k_space[2] * rx, d-&gt;k_space[3] * ry };</a>
+<a name="ln939">    const float kxa = d-&gt;kxa * rx, kxb = d-&gt;kxb * rx, kxc = d-&gt;kxc * rx, kxd = d-&gt;kxd * rx;</a>
+<a name="ln940">    const float kya = d-&gt;kya * ry, kyb = d-&gt;kyb * ry, kyc = d-&gt;kyc * ry, kyd = d-&gt;kyd * ry;</a>
+<a name="ln941">    float ma, mb, md, me, mg, mh;</a>
+<a name="ln942">    keystone_get_matrix(k_space, kxa, kxb, kxc, kxd, kya, kyb, kyc, kyd, &amp;ma, &amp;mb, &amp;md, &amp;me, &amp;mg, &amp;mh);</a>
+<a name="ln943"> </a>
+<a name="ln944">#ifdef _OPENMP</a>
+<a name="ln945">#pragma omp parallel for schedule(static) default(none) shared(d, interpolation, k_space, ma, mb, md, me, mg, mh)</a>
+<a name="ln946">#endif</a>
+<a name="ln947">    // (slow) point-by-point transformation.</a>
+<a name="ln948">    // TODO: optimize with scanlines and linear steps between?</a>
+<a name="ln949">    for(int j = 0; j &lt; roi_out-&gt;height; j++)</a>
+<a name="ln950">    {</a>
+<a name="ln951">      float *out = ((float *)ovoid) + (size_t)ch * j * roi_out-&gt;width;</a>
+<a name="ln952">      for(int i = 0; i &lt; roi_out-&gt;width; i++, out += ch)</a>
+<a name="ln953">      {</a>
+<a name="ln954">        float pi[2], po[2];</a>
+<a name="ln955"> </a>
+<a name="ln956">        pi[0] = roi_out-&gt;x - roi_out-&gt;scale * d-&gt;enlarge_x + roi_out-&gt;scale * d-&gt;cix + i + 0.5f;</a>
+<a name="ln957">        pi[1] = roi_out-&gt;y - roi_out-&gt;scale * d-&gt;enlarge_y + roi_out-&gt;scale * d-&gt;ciy + j + 0.5f;</a>
+<a name="ln958"> </a>
+<a name="ln959">        // transform this point using matrix m</a>
+<a name="ln960">        if(d-&gt;flip)</a>
+<a name="ln961">        {</a>
+<a name="ln962">          pi[1] -= d-&gt;tx * roi_out-&gt;scale;</a>
+<a name="ln963">          pi[0] -= d-&gt;ty * roi_out-&gt;scale;</a>
+<a name="ln964">        }</a>
+<a name="ln965">        else</a>
+<a name="ln966">        {</a>
+<a name="ln967">          pi[0] -= d-&gt;tx * roi_out-&gt;scale;</a>
+<a name="ln968">          pi[1] -= d-&gt;ty * roi_out-&gt;scale;</a>
+<a name="ln969">        }</a>
+<a name="ln970">        pi[0] /= roi_out-&gt;scale;</a>
+<a name="ln971">        pi[1] /= roi_out-&gt;scale;</a>
+<a name="ln972">        backtransform(pi, po, d-&gt;m, d-&gt;k_h, d-&gt;k_v);</a>
+<a name="ln973">        po[0] *= roi_in-&gt;scale;</a>
+<a name="ln974">        po[1] *= roi_in-&gt;scale;</a>
+<a name="ln975">        po[0] += d-&gt;tx * roi_in-&gt;scale;</a>
+<a name="ln976">        po[1] += d-&gt;ty * roi_in-&gt;scale;</a>
+<a name="ln977">        if(d-&gt;k_apply == 1) keystone_backtransform(po, k_space, ma, mb, md, me, mg, mh, kxa, kya);</a>
+<a name="ln978">        po[0] -= roi_in-&gt;x + 0.5f;</a>
+<a name="ln979">        po[1] -= roi_in-&gt;y + 0.5f;</a>
+<a name="ln980"> </a>
+<a name="ln981">        dt_interpolation_compute_pixel4c(interpolation, (float *)ivoid, out, po[0], po[1], roi_in-&gt;width,</a>
+<a name="ln982">                                         roi_in-&gt;height, ch_width);</a>
+<a name="ln983">      }</a>
+<a name="ln984">    }</a>
+<a name="ln985">  }</a>
+<a name="ln986">}</a>
+<a name="ln987"> </a>
+<a name="ln988"> </a>
+<a name="ln989"> </a>
+<a name="ln990">#ifdef HAVE_OPENCL</a>
+<a name="ln991">int process_cl(struct dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, cl_mem dev_in, cl_mem dev_out,</a>
+<a name="ln992">               const dt_iop_roi_t *const roi_in, const dt_iop_roi_t *const roi_out)</a>
+<a name="ln993">{</a>
+<a name="ln994">  dt_iop_clipping_data_t *d = (dt_iop_clipping_data_t *)piece-&gt;data;</a>
+<a name="ln995">  dt_iop_clipping_global_data_t *gd = (dt_iop_clipping_global_data_t *)self-&gt;data;</a>
+<a name="ln996"> </a>
+<a name="ln997">  cl_int err = -999;</a>
+<a name="ln998">  const int devid = piece-&gt;pipe-&gt;devid;</a>
+<a name="ln999"> </a>
+<a name="ln1000">  const int width = roi_out-&gt;width;</a>
+<a name="ln1001">  const int height = roi_out-&gt;height;</a>
+<a name="ln1002"> </a>
+<a name="ln1003">  // only crop, no rot fast and sharp path:</a>
+<a name="ln1004">  if(!d-&gt;flags &amp;&amp; d-&gt;angle == 0.0 &amp;&amp; d-&gt;all_off &amp;&amp; roi_in-&gt;width == roi_out-&gt;width</a>
+<a name="ln1005">     &amp;&amp; roi_in-&gt;height == roi_out-&gt;height)</a>
+<a name="ln1006">  {</a>
+<a name="ln1007">    size_t origin[] = { 0, 0, 0 };</a>
+<a name="ln1008">    size_t region[] = { width, height, 1 };</a>
+<a name="ln1009">    err = dt_opencl_enqueue_copy_image(devid, dev_in, dev_out, origin, origin, region);</a>
+<a name="ln1010">    if(err != CL_SUCCESS) goto error;</a>
+<a name="ln1011">  }</a>
+<a name="ln1012">  else</a>
+<a name="ln1013">  {</a>
+<a name="ln1014">    int crkernel = -1;</a>
+<a name="ln1015"> </a>
+<a name="ln1016">    const struct dt_interpolation *interpolation = dt_interpolation_new(DT_INTERPOLATION_USERPREF);</a>
+<a name="ln1017"> </a>
+<a name="ln1018">    switch(interpolation-&gt;id)</a>
+<a name="ln1019">    {</a>
+<a name="ln1020">      case DT_INTERPOLATION_BILINEAR:</a>
+<a name="ln1021">        crkernel = gd-&gt;kernel_clip_rotate_bilinear;</a>
+<a name="ln1022">        break;</a>
+<a name="ln1023">      case DT_INTERPOLATION_BICUBIC:</a>
+<a name="ln1024">        crkernel = gd-&gt;kernel_clip_rotate_bicubic;</a>
+<a name="ln1025">        break;</a>
+<a name="ln1026">      case DT_INTERPOLATION_LANCZOS2:</a>
+<a name="ln1027">        crkernel = gd-&gt;kernel_clip_rotate_lanczos2;</a>
+<a name="ln1028">        break;</a>
+<a name="ln1029">      case DT_INTERPOLATION_LANCZOS3:</a>
+<a name="ln1030">        crkernel = gd-&gt;kernel_clip_rotate_lanczos3;</a>
+<a name="ln1031">        break;</a>
+<a name="ln1032">      default:</a>
+<a name="ln1033">        return FALSE;</a>
+<a name="ln1034">    }</a>
+<a name="ln1035"> </a>
+<a name="ln1036">    int roi[2] = { roi_in-&gt;x, roi_in-&gt;y };</a>
+<a name="ln1037">    float roo[2] = { roi_out-&gt;x - roi_out-&gt;scale * d-&gt;enlarge_x + roi_out-&gt;scale * d-&gt;cix,</a>
+<a name="ln1038">                     roi_out-&gt;y - roi_out-&gt;scale * d-&gt;enlarge_y + roi_out-&gt;scale * d-&gt;ciy };</a>
+<a name="ln1039">    float t[2] = { d-&gt;tx, d-&gt;ty };</a>
+<a name="ln1040">    float k[2] = { d-&gt;k_h, d-&gt;k_v };</a>
+<a name="ln1041">    float m[4] = { d-&gt;m[0], d-&gt;m[1], d-&gt;m[2], d-&gt;m[3] };</a>
+<a name="ln1042"> </a>
+<a name="ln1043">    float k_sizes[2] = { piece-&gt;buf_in.width * roi_in-&gt;scale, piece-&gt;buf_in.height * roi_in-&gt;scale };</a>
+<a name="ln1044">    float k_space[4] = { d-&gt;k_space[0] * k_sizes[0], d-&gt;k_space[1] * k_sizes[1], d-&gt;k_space[2] * k_sizes[0],</a>
+<a name="ln1045">                         d-&gt;k_space[3] * k_sizes[1] };</a>
+<a name="ln1046">    if(d-&gt;k_apply == 0) k_space[2] = 0.0f;</a>
+<a name="ln1047">    float ma, mb, md, me, mg, mh;</a>
+<a name="ln1048">    keystone_get_matrix(k_space, d-&gt;kxa * k_sizes[0], d-&gt;kxb * k_sizes[0], d-&gt;kxc * k_sizes[0],</a>
+<a name="ln1049">                        d-&gt;kxd * k_sizes[0], d-&gt;kya * k_sizes[1], d-&gt;kyb * k_sizes[1], d-&gt;kyc * k_sizes[1],</a>
+<a name="ln1050">                        d-&gt;kyd * k_sizes[1], &amp;ma, &amp;mb, &amp;md, &amp;me, &amp;mg, &amp;mh);</a>
+<a name="ln1051">    float ka[2] = { d-&gt;kxa * k_sizes[0], d-&gt;kya * k_sizes[1] };</a>
+<a name="ln1052">    float maa[4] = { ma, mb, md, me };</a>
+<a name="ln1053">    float mbb[2] = { mg, mh };</a>
+<a name="ln1054"> </a>
+<a name="ln1055">    size_t sizes[3];</a>
+<a name="ln1056"> </a>
+<a name="ln1057">    sizes[0] = ROUNDUPWD(width);</a>
+<a name="ln1058">    sizes[1] = ROUNDUPHT(height);</a>
+<a name="ln1059">    sizes[2] = 1;</a>
+<a name="ln1060">    dt_opencl_set_kernel_arg(devid, crkernel, 0, sizeof(cl_mem), &amp;dev_in);</a>
+<a name="ln1061">    dt_opencl_set_kernel_arg(devid, crkernel, 1, sizeof(cl_mem), &amp;dev_out);</a>
+<a name="ln1062">    dt_opencl_set_kernel_arg(devid, crkernel, 2, sizeof(int), &amp;width);</a>
+<a name="ln1063">    dt_opencl_set_kernel_arg(devid, crkernel, 3, sizeof(int), &amp;height);</a>
+<a name="ln1064">    dt_opencl_set_kernel_arg(devid, crkernel, 4, sizeof(int), &amp;roi_in-&gt;width);</a>
+<a name="ln1065">    dt_opencl_set_kernel_arg(devid, crkernel, 5, sizeof(int), &amp;roi_in-&gt;height);</a>
+<a name="ln1066">    dt_opencl_set_kernel_arg(devid, crkernel, 6, 2 * sizeof(int), &amp;roi);</a>
+<a name="ln1067">    dt_opencl_set_kernel_arg(devid, crkernel, 7, 2 * sizeof(float), &amp;roo);</a>
+<a name="ln1068">    dt_opencl_set_kernel_arg(devid, crkernel, 8, sizeof(float), &amp;roi_in-&gt;scale);</a>
+<a name="ln1069">    dt_opencl_set_kernel_arg(devid, crkernel, 9, sizeof(float), &amp;roi_out-&gt;scale);</a>
+<a name="ln1070">    dt_opencl_set_kernel_arg(devid, crkernel, 10, sizeof(int), &amp;d-&gt;flip);</a>
+<a name="ln1071">    dt_opencl_set_kernel_arg(devid, crkernel, 11, 2 * sizeof(float), &amp;t);</a>
+<a name="ln1072">    dt_opencl_set_kernel_arg(devid, crkernel, 12, 2 * sizeof(float), &amp;k);</a>
+<a name="ln1073">    dt_opencl_set_kernel_arg(devid, crkernel, 13, 4 * sizeof(float), &amp;m);</a>
+<a name="ln1074">    dt_opencl_set_kernel_arg(devid, crkernel, 14, 4 * sizeof(float), &amp;k_space);</a>
+<a name="ln1075">    dt_opencl_set_kernel_arg(devid, crkernel, 15, 2 * sizeof(float), &amp;ka);</a>
+<a name="ln1076">    dt_opencl_set_kernel_arg(devid, crkernel, 16, 4 * sizeof(float), &amp;maa);</a>
+<a name="ln1077">    dt_opencl_set_kernel_arg(devid, crkernel, 17, 2 * sizeof(float), &amp;mbb);</a>
+<a name="ln1078">    err = dt_opencl_enqueue_kernel_2d(devid, crkernel, sizes);</a>
+<a name="ln1079">    if(err != CL_SUCCESS) goto error;</a>
+<a name="ln1080">  }</a>
+<a name="ln1081"> </a>
+<a name="ln1082">  return TRUE;</a>
+<a name="ln1083"> </a>
+<a name="ln1084">error:</a>
+<a name="ln1085">  dt_print(DT_DEBUG_OPENCL, &quot;[opencl_clipping] couldn't enqueue kernel! %d\n&quot;, err);</a>
+<a name="ln1086">  return FALSE;</a>
+<a name="ln1087">}</a>
+<a name="ln1088">#endif</a>
+<a name="ln1089"> </a>
+<a name="ln1090">void init_global(dt_iop_module_so_t *module)</a>
+<a name="ln1091">{</a>
+<a name="ln1092">  const int program = 2; // basic.cl from programs.conf</a>
+<a name="ln1093">  dt_iop_clipping_global_data_t *gd</a>
+<a name="ln1094">      = (dt_iop_clipping_global_data_t *)malloc(sizeof(dt_iop_clipping_global_data_t));</a>
+<a name="ln1095">  module-&gt;data = gd;</a>
+<a name="ln1096">  gd-&gt;kernel_clip_rotate_bilinear = dt_opencl_create_kernel(program, &quot;clip_rotate_bilinear&quot;);</a>
+<a name="ln1097">  gd-&gt;kernel_clip_rotate_bicubic = dt_opencl_create_kernel(program, &quot;clip_rotate_bicubic&quot;);</a>
+<a name="ln1098">  gd-&gt;kernel_clip_rotate_lanczos2 = dt_opencl_create_kernel(program, &quot;clip_rotate_lanczos2&quot;);</a>
+<a name="ln1099">  gd-&gt;kernel_clip_rotate_lanczos3 = dt_opencl_create_kernel(program, &quot;clip_rotate_lanczos3&quot;);</a>
+<a name="ln1100">}</a>
+<a name="ln1101"> </a>
+<a name="ln1102"> </a>
+<a name="ln1103">void cleanup_global(dt_iop_module_so_t *module)</a>
+<a name="ln1104">{</a>
+<a name="ln1105">  dt_iop_clipping_global_data_t *gd = (dt_iop_clipping_global_data_t *)module-&gt;data;</a>
+<a name="ln1106">  dt_opencl_free_kernel(gd-&gt;kernel_clip_rotate_bilinear);</a>
+<a name="ln1107">  dt_opencl_free_kernel(gd-&gt;kernel_clip_rotate_bicubic);</a>
+<a name="ln1108">  dt_opencl_free_kernel(gd-&gt;kernel_clip_rotate_lanczos2);</a>
+<a name="ln1109">  dt_opencl_free_kernel(gd-&gt;kernel_clip_rotate_lanczos3);</a>
+<a name="ln1110">  free(module-&gt;data);</a>
+<a name="ln1111">  module-&gt;data = NULL;</a>
+<a name="ln1112">}</a>
+<a name="ln1113"> </a>
+<a name="ln1114"> </a>
+<a name="ln1115">void commit_params(struct dt_iop_module_t *self, dt_iop_params_t *p1, dt_dev_pixelpipe_t *pipe,</a>
+<a name="ln1116">                   dt_dev_pixelpipe_iop_t *piece)</a>
+<a name="ln1117">{</a>
+<a name="ln1118">  dt_iop_clipping_params_t *p = (dt_iop_clipping_params_t *)p1;</a>
+<a name="ln1119">  dt_iop_clipping_data_t *d = (dt_iop_clipping_data_t *)piece-&gt;data;</a>
+<a name="ln1120"> </a>
+<a name="ln1121">  // reset all values to be sure everything is initialized</a>
+<a name="ln1122">  d-&gt;m[0] = d-&gt;m[3] = 1.0f;</a>
+<a name="ln1123">  d-&gt;m[1] = d-&gt;m[2] = 0.0f;</a>
+<a name="ln1124">  d-&gt;ki_h = d-&gt;ki_v = d-&gt;k_h = d-&gt;k_v = 0.0f;</a>
+<a name="ln1125">  d-&gt;tx = d-&gt;ty = 0.0f;</a>
+<a name="ln1126">  d-&gt;cix = d-&gt;ciy = 0.0f;</a>
+<a name="ln1127">  d-&gt;cih = d-&gt;ciw = 1.0f;</a>
+<a name="ln1128">  d-&gt;kxa = d-&gt;kxd = d-&gt;kya = d-&gt;kyb = 0.0f;</a>
+<a name="ln1129">  d-&gt;kxb = d-&gt;kxc = d-&gt;kyc = d-&gt;kyd = 0.6f;</a>
+<a name="ln1130">  d-&gt;k_space[0] = d-&gt;k_space[1] = 0.2f;</a>
+<a name="ln1131">  d-&gt;k_space[2] = d-&gt;k_space[3] = 0.6f;</a>
+<a name="ln1132">  d-&gt;k_apply = 0;</a>
+<a name="ln1133">  d-&gt;enlarge_x = d-&gt;enlarge_y = 0.0f;</a>
+<a name="ln1134">  d-&gt;flip = 0;</a>
+<a name="ln1135">  d-&gt;angle = M_PI / 180.0 * p-&gt;angle;</a>
+<a name="ln1136"> </a>
+<a name="ln1137">  // image flip</a>
+<a name="ln1138">  d-&gt;flags = (p-&gt;ch &lt; 0 ? FLAG_FLIP_VERTICAL : 0) | (p-&gt;cw &lt; 0 ? FLAG_FLIP_HORIZONTAL : 0);</a>
+<a name="ln1139">  d-&gt;crop_auto = p-&gt;crop_auto;</a>
+<a name="ln1140"> </a>
+<a name="ln1141">  // keystones values computation</a>
+<a name="ln1142">  if(p-&gt;k_type == 4)</a>
+<a name="ln1143">  {</a>
+<a name="ln1144">    // this is for old keystoning</a>
+<a name="ln1145">    d-&gt;k_apply = 0;</a>
+<a name="ln1146">    d-&gt;all_off = 1;</a>
+<a name="ln1147">    if(fabsf(p-&gt;k_h) &gt;= .0001) d-&gt;all_off = 0;</a>
+<a name="ln1148">    if(p-&gt;k_h &gt;= -1.0 &amp;&amp; p-&gt;k_h &lt;= 1.0)</a>
+<a name="ln1149">      d-&gt;ki_h = p-&gt;k_h;</a>
+<a name="ln1150">    else</a>
+<a name="ln1151">      d-&gt;ki_h = 0.0f;</a>
+<a name="ln1152">    if(fabsf(p-&gt;k_v) &gt;= .0001) d-&gt;all_off = 0;</a>
+<a name="ln1153">    if(p-&gt;k_v &gt;= -1.0 &amp;&amp; p-&gt;k_v &lt;= 1.0)</a>
+<a name="ln1154">      d-&gt;ki_v = p-&gt;k_v;</a>
+<a name="ln1155">    else</a>
+<a name="ln1156">      d-&gt;ki_v = 0.0f;</a>
+<a name="ln1157">  }</a>
+<a name="ln1158">  else if(p-&gt;k_type &gt;= 0 &amp;&amp; p-&gt;k_apply == 1)</a>
+<a name="ln1159">  {</a>
+<a name="ln1160">    // we reset old keystoning values</a>
+<a name="ln1161">    d-&gt;ki_h = d-&gt;ki_v = 0;</a>
+<a name="ln1162">    d-&gt;kxa = p-&gt;kxa;</a>
+<a name="ln1163">    d-&gt;kxb = p-&gt;kxb;</a>
+<a name="ln1164">    d-&gt;kxc = p-&gt;kxc;</a>
+<a name="ln1165">    d-&gt;kxd = p-&gt;kxd;</a>
+<a name="ln1166">    d-&gt;kya = p-&gt;kya;</a>
+<a name="ln1167">    d-&gt;kyb = p-&gt;kyb;</a>
+<a name="ln1168">    d-&gt;kyc = p-&gt;kyc;</a>
+<a name="ln1169">    d-&gt;kyd = p-&gt;kyd;</a>
+<a name="ln1170">    // we adjust the points if the keystoning is not in &quot;full&quot; mode</a>
+<a name="ln1171">    if(p-&gt;k_type == 1) // we want horizontal points to be aligned</a>
+<a name="ln1172">    {</a>
+<a name="ln1173">      // line equations parameters</a>
+<a name="ln1174">      float a1 = (d-&gt;kxd - d-&gt;kxa) / (float)(d-&gt;kyd - d-&gt;kya);</a>
+<a name="ln1175">      float b1 = d-&gt;kxa - a1 * d-&gt;kya;</a>
+<a name="ln1176">      float a2 = (d-&gt;kxc - d-&gt;kxb) / (float)(d-&gt;kyc - d-&gt;kyb);</a>
+<a name="ln1177">      float b2 = d-&gt;kxb - a2 * d-&gt;kyb;</a>
+<a name="ln1178"> </a>
+<a name="ln1179">      if(d-&gt;kya &gt; d-&gt;kyb)</a>
+<a name="ln1180">      {</a>
+<a name="ln1181">        // we move kya to the level of kyb</a>
+<a name="ln1182">        d-&gt;kya = d-&gt;kyb;</a>
+<a name="ln1183">        d-&gt;kxa = a1 * d-&gt;kya + b1;</a>
+<a name="ln1184">      }</a>
+<a name="ln1185">      else</a>
+<a name="ln1186">      {</a>
+<a name="ln1187">        // we move kyb to the level of kya</a>
+<a name="ln1188">        d-&gt;kyb = d-&gt;kya;</a>
+<a name="ln1189">        d-&gt;kxb = a2 * d-&gt;kyb + b2;</a>
+<a name="ln1190">      }</a>
+<a name="ln1191"> </a>
+<a name="ln1192">      if(d-&gt;kyc &gt; d-&gt;kyd)</a>
+<a name="ln1193">      {</a>
+<a name="ln1194">        // we move kyd to the level of kyc</a>
+<a name="ln1195">        d-&gt;kyd = d-&gt;kyc;</a>
+<a name="ln1196">        d-&gt;kxd = a1 * d-&gt;kyd + b1;</a>
+<a name="ln1197">      }</a>
+<a name="ln1198">      else</a>
+<a name="ln1199">      {</a>
+<a name="ln1200">        // we move kyc to the level of kyd</a>
+<a name="ln1201">        d-&gt;kyc = d-&gt;kyd;</a>
+<a name="ln1202">        d-&gt;kxc = a2 * d-&gt;kyc + b2;</a>
+<a name="ln1203">      }</a>
+<a name="ln1204">    }</a>
+<a name="ln1205">    else if(p-&gt;k_type == 2) // we want vertical points to be aligned</a>
+<a name="ln1206">    {</a>
+<a name="ln1207">      // line equations parameters</a>
+<a name="ln1208">      float a1 = (d-&gt;kyb - d-&gt;kya) / (float)(d-&gt;kxb - d-&gt;kxa);</a>
+<a name="ln1209">      float b1 = d-&gt;kya - a1 * d-&gt;kxa;</a>
+<a name="ln1210">      float a2 = (d-&gt;kyc - d-&gt;kyd) / (float)(d-&gt;kxc - d-&gt;kxd);</a>
+<a name="ln1211">      float b2 = d-&gt;kyd - a2 * d-&gt;kxd;</a>
+<a name="ln1212"> </a>
+<a name="ln1213">      if(d-&gt;kxa &gt; d-&gt;kxd)</a>
+<a name="ln1214">      {</a>
+<a name="ln1215">        // we move kxa to the level of kxd</a>
+<a name="ln1216">        d-&gt;kxa = d-&gt;kxd;</a>
+<a name="ln1217">        d-&gt;kya = a1 * d-&gt;kxa + b1;</a>
+<a name="ln1218">      }</a>
+<a name="ln1219">      else</a>
+<a name="ln1220">      {</a>
+<a name="ln1221">        // we move kyb to the level of kya</a>
+<a name="ln1222">        d-&gt;kxd = d-&gt;kxa;</a>
+<a name="ln1223">        d-&gt;kyd = a2 * d-&gt;kxd + b2;</a>
+<a name="ln1224">      }</a>
+<a name="ln1225"> </a>
+<a name="ln1226">      if(d-&gt;kxc &gt; d-&gt;kxb)</a>
+<a name="ln1227">      {</a>
+<a name="ln1228">        // we move kyd to the level of kyc</a>
+<a name="ln1229">        d-&gt;kxb = d-&gt;kxc;</a>
+<a name="ln1230">        d-&gt;kyb = a1 * d-&gt;kxb + b1;</a>
+<a name="ln1231">      }</a>
+<a name="ln1232">      else</a>
+<a name="ln1233">      {</a>
+<a name="ln1234">        // we move kyc to the level of kyd</a>
+<a name="ln1235">        d-&gt;kxc = d-&gt;kxb;</a>
+<a name="ln1236">        d-&gt;kyc = a2 * d-&gt;kxc + b2;</a>
+<a name="ln1237">      }</a>
+<a name="ln1238">    }</a>
+<a name="ln1239">    d-&gt;k_space[0] = fabsf((d-&gt;kxa + d-&gt;kxd) / 2.0f);</a>
+<a name="ln1240">    d-&gt;k_space[1] = fabsf((d-&gt;kya + d-&gt;kyb) / 2.0f);</a>
+<a name="ln1241">    d-&gt;k_space[2] = fabsf((d-&gt;kxb + d-&gt;kxc) / 2.0f) - d-&gt;k_space[0];</a>
+<a name="ln1242">    d-&gt;k_space[3] = fabsf((d-&gt;kyc + d-&gt;kyd) / 2.0f) - d-&gt;k_space[1];</a>
+<a name="ln1243">    d-&gt;kxb = d-&gt;kxb - d-&gt;kxa;</a>
+<a name="ln1244">    d-&gt;kxc = d-&gt;kxc - d-&gt;kxa;</a>
+<a name="ln1245">    d-&gt;kxd = d-&gt;kxd - d-&gt;kxa;</a>
+<a name="ln1246">    d-&gt;kyb = d-&gt;kyb - d-&gt;kya;</a>
+<a name="ln1247">    d-&gt;kyc = d-&gt;kyc - d-&gt;kya;</a>
+<a name="ln1248">    d-&gt;kyd = d-&gt;kyd - d-&gt;kya;</a>
+<a name="ln1249">    keystone_get_matrix(d-&gt;k_space, d-&gt;kxa, d-&gt;kxb, d-&gt;kxc, d-&gt;kxd, d-&gt;kya, d-&gt;kyb, d-&gt;kyc, d-&gt;kyd, &amp;d-&gt;a,</a>
+<a name="ln1250">                        &amp;d-&gt;b, &amp;d-&gt;d, &amp;d-&gt;e, &amp;d-&gt;g, &amp;d-&gt;h);</a>
+<a name="ln1251"> </a>
+<a name="ln1252">    d-&gt;k_apply = 1;</a>
+<a name="ln1253">    d-&gt;all_off = 0;</a>
+<a name="ln1254">    d-&gt;crop_auto = 0;</a>
+<a name="ln1255">  }</a>
+<a name="ln1256">  else</a>
+<a name="ln1257">  {</a>
+<a name="ln1258">    d-&gt;all_off = 1;</a>
+<a name="ln1259">    d-&gt;k_apply = 0;</a>
+<a name="ln1260">  }</a>
+<a name="ln1261"> </a>
+<a name="ln1262">  if(gui_has_focus(self))</a>
+<a name="ln1263">  {</a>
+<a name="ln1264">    d-&gt;cx = 0.0f;</a>
+<a name="ln1265">    d-&gt;cy = 0.0f;</a>
+<a name="ln1266">    d-&gt;cw = 1.0f;</a>
+<a name="ln1267">    d-&gt;ch = 1.0f;</a>
+<a name="ln1268">  }</a>
+<a name="ln1269">  else</a>
+<a name="ln1270">  {</a>
+<a name="ln1271">    d-&gt;cx = p-&gt;cx;</a>
+<a name="ln1272">    d-&gt;cy = p-&gt;cy;</a>
+<a name="ln1273">    d-&gt;cw = fabsf(p-&gt;cw);</a>
+<a name="ln1274">    d-&gt;ch = fabsf(p-&gt;ch);</a>
+<a name="ln1275">  }</a>
+<a name="ln1276">}</a>
+<a name="ln1277"> </a>
+<a name="ln1278">void gui_focus(struct dt_iop_module_t *self, gboolean in)</a>
+<a name="ln1279">{</a>
+<a name="ln1280">  dt_iop_clipping_gui_data_t *g = (dt_iop_clipping_gui_data_t *)self-&gt;gui_data;</a>
+<a name="ln1281">  dt_iop_clipping_params_t *p = (dt_iop_clipping_params_t *)self-&gt;params;</a>
+<a name="ln1282">  if(self-&gt;enabled)</a>
+<a name="ln1283">  {</a>
+<a name="ln1284">    if(in)</a>
+<a name="ln1285">    {</a>
+<a name="ln1286">      // got focus. make it redraw in full and grab stuff to gui:</a>
+<a name="ln1287">      // need to get gui stuff for the first time for this image,</a>
+<a name="ln1288">      // and advice the pipe to redraw in full:</a>
+<a name="ln1289">      g-&gt;clip_x = p-&gt;cx;</a>
+<a name="ln1290">      g-&gt;clip_w = fabsf(p-&gt;cw) - p-&gt;cx;</a>
+<a name="ln1291">      g-&gt;clip_y = p-&gt;cy;</a>
+<a name="ln1292">      g-&gt;clip_h = fabsf(p-&gt;ch) - p-&gt;cy;</a>
+<a name="ln1293">      if(g-&gt;clip_x &gt; 0 || g-&gt;clip_y &gt; 0 || g-&gt;clip_h &lt; 1.0f || g-&gt;clip_w &lt; 1.0f)</a>
+<a name="ln1294">      {</a>
+<a name="ln1295">        g-&gt;old_width = self-&gt;dev-&gt;preview_pipe-&gt;backbuf_width;</a>
+<a name="ln1296">        g-&gt;old_height = self-&gt;dev-&gt;preview_pipe-&gt;backbuf_height;</a>
+<a name="ln1297">      }</a>
+<a name="ln1298">      else</a>
+<a name="ln1299">      {</a>
+<a name="ln1300">        g-&gt;old_width = g-&gt;old_height = -1;</a>
+<a name="ln1301">      }</a>
+<a name="ln1302">      // make sure the cache is avoided:</a>
+<a name="ln1303">      dt_dev_reprocess_all(self-&gt;dev);</a>
+<a name="ln1304">    }</a>
+<a name="ln1305">    else</a>
+<a name="ln1306">    {</a>
+<a name="ln1307">      // lost focus, commit current params:</a>
+<a name="ln1308">      // if the keystone setting is not finished, we discard it</a>
+<a name="ln1309">      if(p-&gt;k_apply == 0 &amp;&amp; p-&gt;k_type &lt; 4 &amp;&amp; p-&gt;k_type &gt; 0)</a>
+<a name="ln1310">      {</a>
+<a name="ln1311">        keystone_type_populate(self, FALSE, 0);</a>
+<a name="ln1312">      }</a>
+<a name="ln1313">      commit_box(self, g, p);</a>
+<a name="ln1314">      g-&gt;clip_max_pipe_hash = 0;</a>
+<a name="ln1315">    }</a>
+<a name="ln1316">  }</a>
+<a name="ln1317">}</a>
+<a name="ln1318"> </a>
+<a name="ln1319"> </a>
+<a name="ln1320">void init_pipe(struct dt_iop_module_t *self, dt_dev_pixelpipe_t *pipe, dt_dev_pixelpipe_iop_t *piece)</a>
+<a name="ln1321">{</a>
+<a name="ln1322">  piece-&gt;data = malloc(sizeof(dt_iop_clipping_data_t));</a>
+<a name="ln1323">  self-&gt;commit_params(self, self-&gt;default_params, pipe, piece);</a>
+<a name="ln1324">}</a>
+<a name="ln1325"> </a>
+<a name="ln1326">void cleanup_pipe(struct dt_iop_module_t *self, dt_dev_pixelpipe_t *pipe, dt_dev_pixelpipe_iop_t *piece)</a>
+<a name="ln1327">{</a>
+<a name="ln1328">  free(piece-&gt;data);</a>
+<a name="ln1329">  piece-&gt;data = NULL;</a>
+<a name="ln1330">}</a>
+<a name="ln1331"> </a>
+<a name="ln1332">static float _ratio_get_aspect(dt_iop_module_t *self)</a>
+<a name="ln1333">{</a>
+<a name="ln1334">  dt_iop_clipping_params_t *p = (dt_iop_clipping_params_t *)self-&gt;params;</a>
+<a name="ln1335"> </a>
+<a name="ln1336">  // we want to know the size of the actual buffer</a>
+<a name="ln1337">  dt_dev_pixelpipe_iop_t *piece = dt_dev_distort_get_iop_pipe(self-&gt;dev, self-&gt;dev-&gt;preview_pipe, self);</a>
+<a name="ln1338">  if(!piece) return 0;</a>
+<a name="ln1339"> </a>
+<a name="ln1340">  const int iwd = piece-&gt;buf_in.width, iht = piece-&gt;buf_in.height;</a>
+<a name="ln1341"> </a>
+<a name="ln1342">  // if we do not have yet computed the aspect ratio, let's do it now</a>
+<a name="ln1343">  if(p-&gt;ratio_d == -2 &amp;&amp; p-&gt;ratio_n == -2)</a>
+<a name="ln1344">  {</a>
+<a name="ln1345">    if(fabsf(p-&gt;cw) == 1.0 &amp;&amp; p-&gt;cx == 0.0 &amp;&amp; fabsf(p-&gt;ch) == 1.0 &amp;&amp; p-&gt;cy == 0.0)</a>
+<a name="ln1346">      p-&gt;ratio_d = -1, p-&gt;ratio_n = -1;</a>
+<a name="ln1347">    else</a>
+<a name="ln1348">    {</a>
+<a name="ln1349">      const struct dt_interpolation *interpolation = dt_interpolation_new(DT_INTERPOLATION_USERPREF);</a>
+<a name="ln1350">      float whratio = ((float)(iwd - 2 * interpolation-&gt;width) * (fabsf(p-&gt;cw) - p-&gt;cx))</a>
+<a name="ln1351">                      / ((float)(iht - 2 * interpolation-&gt;width) * (fabsf(p-&gt;ch) - p-&gt;cy));</a>
+<a name="ln1352">      float ri = (float)iwd / (float)iht;</a>
+<a name="ln1353"> </a>
+<a name="ln1354">      float prec = 0.0003f;</a>
+<a name="ln1355">      if(fabsf(whratio - 3.0f / 2.0f) &lt; prec)</a>
+<a name="ln1356">        p-&gt;ratio_d = 3, p-&gt;ratio_n = 2;</a>
+<a name="ln1357">      else if(fabsf(whratio - 3.0f / 2.0f) &lt; prec)</a>
+<a name="ln1358">        p-&gt;ratio_d = 3, p-&gt;ratio_n = 2;</a>
+<a name="ln1359">      else if(fabsf(whratio - 2.0f / 1.0f) &lt; prec)</a>
+<a name="ln1360">        p-&gt;ratio_d = 2, p-&gt;ratio_n = 1;</a>
+<a name="ln1361">      else if(fabsf(whratio - 7.0f / 5.0f) &lt; prec)</a>
+<a name="ln1362">        p-&gt;ratio_d = 7, p-&gt;ratio_n = 5;</a>
+<a name="ln1363">      else if(fabsf(whratio - 4.0f / 3.0f) &lt; prec)</a>
+<a name="ln1364">        p-&gt;ratio_d = 4, p-&gt;ratio_n = 3;</a>
+<a name="ln1365">      else if(fabsf(whratio - 5.0f / 4.0f) &lt; prec)</a>
+<a name="ln1366">        p-&gt;ratio_d = 5, p-&gt;ratio_n = 4;</a>
+<a name="ln1367">      else if(fabsf(whratio - 1.0f / 1.0f) &lt; prec)</a>
+<a name="ln1368">        p-&gt;ratio_d = 1, p-&gt;ratio_n = 1;</a>
+<a name="ln1369">      else if(fabsf(whratio - 16.0f / 9.0f) &lt; prec)</a>
+<a name="ln1370">        p-&gt;ratio_d = 16, p-&gt;ratio_n = 9;</a>
+<a name="ln1371">      else if(fabsf(whratio - 16.0f / 10.0f) &lt; prec)</a>
+<a name="ln1372">        p-&gt;ratio_d = 16, p-&gt;ratio_n = 10;</a>
+<a name="ln1373">      else if(fabsf(whratio - 244.5f / 203.2f) &lt; prec)</a>
+<a name="ln1374">        p-&gt;ratio_d = 2445, p-&gt;ratio_n = 2032;</a>
+<a name="ln1375">      else if(fabsf(whratio - sqrtf(2.0)) &lt; prec)</a>
+<a name="ln1376">        p-&gt;ratio_d = 14142136, p-&gt;ratio_n = 10000000;</a>
+<a name="ln1377">      else if(fabsf(whratio - PHI) &lt; prec)</a>
+<a name="ln1378">        p-&gt;ratio_d = 16180340, p-&gt;ratio_n = 10000000;</a>
+<a name="ln1379">      else if(fabsf(whratio - ri) &lt; prec)</a>
+<a name="ln1380">        p-&gt;ratio_d = 1, p-&gt;ratio_n = 0;</a>
+<a name="ln1381">      else</a>
+<a name="ln1382">        p-&gt;ratio_d = 0, p-&gt;ratio_n = 0;</a>
+<a name="ln1383">    }</a>
+<a name="ln1384">  }</a>
+<a name="ln1385"> </a>
+<a name="ln1386">  if(p-&gt;ratio_d == 0 &amp;&amp; p-&gt;ratio_n == 0) return -1.0f;</a>
+<a name="ln1387">  float d = 1.0f, n = 1.0f;</a>
+<a name="ln1388">  if(p-&gt;ratio_n == 0)</a>
+<a name="ln1389">    d = copysign(iwd, p-&gt;ratio_d), n = iht;</a>
+<a name="ln1390">  else</a>
+<a name="ln1391">    d = p-&gt;ratio_d, n = p-&gt;ratio_n;</a>
+<a name="ln1392"> </a>
+<a name="ln1393">  // make aspect ratios like 3:2 and 2:3 to be the same thing</a>
+<a name="ln1394">  const float dn = copysign(MAX(fabsf(d), fabsf(n)), d);</a>
+<a name="ln1395">  const float nn = copysign(MIN(fabsf(d), fabsf(n)), n);</a>
+<a name="ln1396"> </a>
+<a name="ln1397">  if(dn &lt; 0)</a>
+<a name="ln1398">    return -nn / dn;</a>
+<a name="ln1399">  else</a>
+<a name="ln1400">    return dn / nn;</a>
+<a name="ln1401">}</a>
+<a name="ln1402"> </a>
+<a name="ln1403">static void apply_box_aspect(dt_iop_module_t *self, _grab_region_t grab)</a>
+<a name="ln1404">{</a>
+<a name="ln1405">  dt_iop_clipping_gui_data_t *g = (dt_iop_clipping_gui_data_t *)self-&gt;gui_data;</a>
+<a name="ln1406"> </a>
+<a name="ln1407">  int iwd, iht;</a>
+<a name="ln1408">  dt_dev_get_processed_size(darktable.develop, &amp;iwd, &amp;iht);</a>
+<a name="ln1409"> </a>
+<a name="ln1410">  // enforce aspect ratio.</a>
+<a name="ln1411">  float aspect = _ratio_get_aspect(self);</a>
+<a name="ln1412"> </a>
+<a name="ln1413">  // since one rarely changes between portrait and landscape by cropping,</a>
+<a name="ln1414">  // long side of the crop box should match the long side of the image.</a>
+<a name="ln1415">  if(iwd &lt; iht) aspect = 1.0 / aspect;</a>
+<a name="ln1416"> </a>
+<a name="ln1417">  if(aspect &gt; 0)</a>
+<a name="ln1418">  {</a>
+<a name="ln1419">    // if only one side changed, force aspect by two adjacent in equal parts</a>
+<a name="ln1420">    // 1 2 4 8 : x y w h</a>
+<a name="ln1421">    double clip_x = g-&gt;clip_x, clip_y = g-&gt;clip_y, clip_w = g-&gt;clip_w, clip_h = g-&gt;clip_h;</a>
+<a name="ln1422"> </a>
+<a name="ln1423">    // if we only modified one dim, respectively, we wanted these values:</a>
+<a name="ln1424">    const double target_h = (double)iwd * g-&gt;clip_w / (double)((double)iht * aspect);</a>
+<a name="ln1425">    const double target_w = (double)iht * g-&gt;clip_h * aspect / (double)iwd;</a>
+<a name="ln1426">    // i.e. target_w/h = w/target_h = aspect</a>
+<a name="ln1427">    // first fix aspect ratio:</a>
+<a name="ln1428"> </a>
+<a name="ln1429">    // corners: move two adjacent</a>
+<a name="ln1430">    if(grab == GRAB_TOP_LEFT)</a>
+<a name="ln1431">    {</a>
+<a name="ln1432">      // move x y</a>
+<a name="ln1433">      clip_x = clip_x + clip_w - (target_w + clip_w) * .5;</a>
+<a name="ln1434">      clip_y = clip_y + clip_h - (target_h + clip_h) * .5;</a>
+<a name="ln1435">      clip_w = (target_w + clip_w) * .5;</a>
+<a name="ln1436">      clip_h = (target_h + clip_h) * .5;</a>
+<a name="ln1437">    }</a>
+<a name="ln1438">    else if(grab == GRAB_TOP_RIGHT) // move y w</a>
+<a name="ln1439">    {</a>
+<a name="ln1440">      clip_y = clip_y + clip_h - (target_h + clip_h) * .5;</a>
+<a name="ln1441">      clip_w = (target_w + clip_w) * .5;</a>
+<a name="ln1442">      clip_h = (target_h + clip_h) * .5;</a>
+<a name="ln1443">    }</a>
+<a name="ln1444">    else if(grab == GRAB_BOTTOM_RIGHT) // move w h</a>
+<a name="ln1445">    {</a>
+<a name="ln1446">      clip_w = (target_w + clip_w) * .5;</a>
+<a name="ln1447">      clip_h = (target_h + clip_h) * .5;</a>
+<a name="ln1448">    }</a>
+<a name="ln1449">    else if(grab == GRAB_BOTTOM_LEFT) // move h x</a>
+<a name="ln1450">    {</a>
+<a name="ln1451">      clip_h = (target_h + clip_h) * .5;</a>
+<a name="ln1452">      clip_x = clip_x + clip_w - (target_w + clip_w) * .5;</a>
+<a name="ln1453">      clip_w = (target_w + clip_w) * .5;</a>
+<a name="ln1454">    }</a>
+<a name="ln1455">    else if(grab &amp; GRAB_HORIZONTAL) // dragged either x or w (1 4)</a>
+<a name="ln1456">    {</a>
+<a name="ln1457">      // change h and move y, h equally</a>
+<a name="ln1458">      const double off = target_h - clip_h;</a>
+<a name="ln1459">      clip_h = clip_h + off;</a>
+<a name="ln1460">      clip_y = clip_y - .5 * off;</a>
+<a name="ln1461">    }</a>
+<a name="ln1462">    else if(grab &amp; GRAB_VERTICAL) // dragged either y or h (2 8)</a>
+<a name="ln1463">    {</a>
+<a name="ln1464">      // change w and move x, w equally</a>
+<a name="ln1465">      const double off = target_w - clip_w;</a>
+<a name="ln1466">      clip_w = clip_w + off;</a>
+<a name="ln1467">      clip_x = clip_x - .5 * off;</a>
+<a name="ln1468">    }</a>
+<a name="ln1469"> </a>
+<a name="ln1470">    // now fix outside boxes:</a>
+<a name="ln1471">    if(clip_x &lt; g-&gt;clip_max_x)</a>
+<a name="ln1472">    {</a>
+<a name="ln1473">      double prev_clip_h = clip_h;</a>
+<a name="ln1474">      clip_h *= (clip_w + clip_x - g-&gt;clip_max_x) / clip_w;</a>
+<a name="ln1475">      clip_w = clip_w + clip_x - g-&gt;clip_max_x;</a>
+<a name="ln1476">      clip_x = g-&gt;clip_max_x;</a>
+<a name="ln1477">      if(grab &amp; GRAB_TOP) clip_y += prev_clip_h - clip_h;</a>
+<a name="ln1478">    }</a>
+<a name="ln1479">    if(clip_y &lt; g-&gt;clip_max_y)</a>
+<a name="ln1480">    {</a>
+<a name="ln1481">      double prev_clip_w = clip_w;</a>
+<a name="ln1482">      clip_w *= (clip_h + clip_y - g-&gt;clip_max_y) / clip_h;</a>
+<a name="ln1483">      clip_h = clip_h + clip_y - g-&gt;clip_max_y;</a>
+<a name="ln1484">      clip_y = g-&gt;clip_max_y;</a>
+<a name="ln1485">      if(grab &amp; GRAB_LEFT) clip_x += prev_clip_w - clip_w;</a>
+<a name="ln1486">    }</a>
+<a name="ln1487">    if(clip_x + clip_w &gt; g-&gt;clip_max_x + g-&gt;clip_max_w)</a>
+<a name="ln1488">    {</a>
+<a name="ln1489">      double prev_clip_h = clip_h;</a>
+<a name="ln1490">      clip_h *= (g-&gt;clip_max_x + g-&gt;clip_max_w - clip_x) / clip_w;</a>
+<a name="ln1491">      clip_w = g-&gt;clip_max_x + g-&gt;clip_max_w - clip_x;</a>
+<a name="ln1492">      if(grab &amp; GRAB_TOP) clip_y += prev_clip_h - clip_h;</a>
+<a name="ln1493">    }</a>
+<a name="ln1494">    if(clip_y + clip_h &gt; g-&gt;clip_max_y + g-&gt;clip_max_h)</a>
+<a name="ln1495">    {</a>
+<a name="ln1496">      double prev_clip_w = clip_w;</a>
+<a name="ln1497">      clip_w *= (g-&gt;clip_max_y + g-&gt;clip_max_h - clip_y) / clip_h;</a>
+<a name="ln1498">      clip_h = g-&gt;clip_max_y + g-&gt;clip_max_h - clip_y;</a>
+<a name="ln1499">      if(grab &amp; GRAB_LEFT) clip_x += prev_clip_w - clip_w;</a>
+<a name="ln1500">    }</a>
+<a name="ln1501">    g-&gt;clip_x = clip_x;</a>
+<a name="ln1502">    g-&gt;clip_y = clip_y;</a>
+<a name="ln1503">    g-&gt;clip_w = clip_w;</a>
+<a name="ln1504">    g-&gt;clip_h = clip_h;</a>
+<a name="ln1505">  }</a>
+<a name="ln1506">}</a>
+<a name="ln1507"> </a>
+<a name="ln1508">void reload_defaults(dt_iop_module_t *self)</a>
+<a name="ln1509">{</a>
+<a name="ln1510">  dt_iop_clipping_params_t tmp</a>
+<a name="ln1511">      = (dt_iop_clipping_params_t){ 0.0f, 0.0f, 0.0f, 1.0f, 1.0f, 0.0f, 0.0f,  0.2f, 0.2f, 0.8f, 0.2f,</a>
+<a name="ln1512">                                    0.8f, 0.8f, 0.2f, 0.8f, 0,    0,    FALSE, TRUE, -1,   -1 };</a>
+<a name="ln1513">  memcpy(self-&gt;params, &amp;tmp, sizeof(dt_iop_clipping_params_t));</a>
+<a name="ln1514">  memcpy(self-&gt;default_params, &amp;tmp, sizeof(dt_iop_clipping_params_t));</a>
+<a name="ln1515">  self-&gt;default_enabled = 0;</a>
+<a name="ln1516">}</a>
+<a name="ln1517"> </a>
+<a name="ln1518">static void aspect_presets_changed(GtkWidget *combo, dt_iop_module_t *self)</a>
+<a name="ln1519">{</a>
+<a name="ln1520">  dt_iop_clipping_gui_data_t *g = (dt_iop_clipping_gui_data_t *)self-&gt;gui_data;</a>
+<a name="ln1521">  dt_iop_clipping_params_t *p = (dt_iop_clipping_params_t *)self-&gt;params;</a>
+<a name="ln1522">  int which = dt_bauhaus_combobox_get(combo);</a>
+<a name="ln1523">  int d = p-&gt;ratio_d, n = p-&gt;ratio_n;</a>
+<a name="ln1524">  const char *text = dt_bauhaus_combobox_get_text(combo);</a>
+<a name="ln1525">  if(which &lt; 0)</a>
+<a name="ln1526">  {</a>
+<a name="ln1527">    if(text)</a>
+<a name="ln1528">    {</a>
+<a name="ln1529">      const char *c = text;</a>
+<a name="ln1530">      const char *end = text + strlen(text);</a>
+<a name="ln1531">      while(*c != ':' &amp;&amp; *c != '/' &amp;&amp; c &lt; end) c++;</a>
+<a name="ln1532">      if(c &lt; end - 1)</a>
+<a name="ln1533">      {</a>
+<a name="ln1534">        c++;</a>
+<a name="ln1535">        int dd = atoi(text);</a>
+<a name="ln1536">        int nn = atoi(c);</a>
+<a name="ln1537">        // some sanity check</a>
+<a name="ln1538">        if(nn == 0 || dd == 0)</a>
+<a name="ln1539">        {</a>
+<a name="ln1540">          dt_control_log(_(&quot;invalid ratio format. it should be \&quot;number:number\&quot;&quot;));</a>
+<a name="ln1541">          dt_bauhaus_combobox_set(combo, 0);</a>
+<a name="ln1542">          return;</a>
+<a name="ln1543">        }</a>
+<a name="ln1544">        d = dd;</a>
+<a name="ln1545">        n = nn;</a>
+<a name="ln1546">      }</a>
+<a name="ln1547">    }</a>
+<a name="ln1548">  }</a>
+<a name="ln1549">  else</a>
+<a name="ln1550">  {</a>
+<a name="ln1551">    d = n = 0;</a>
+<a name="ln1552"> </a>
+<a name="ln1553">    GList *iter = g-&gt;aspect_list;</a>
+<a name="ln1554">    while(iter != NULL)</a>
+<a name="ln1555">    {</a>
+<a name="ln1556">      const dt_iop_clipping_aspect_t *aspect = iter-&gt;data;</a>
+<a name="ln1557">      if(g_strcmp0(aspect-&gt;name, text) == 0)</a>
+<a name="ln1558">      {</a>
+<a name="ln1559">        d = aspect-&gt;d;</a>
+<a name="ln1560">        n = aspect-&gt;n;</a>
+<a name="ln1561">        break;</a>
+<a name="ln1562">      }</a>
+<a name="ln1563">      iter = g_list_next(iter);</a>
+<a name="ln1564">    }</a>
+<a name="ln1565">  }</a>
+<a name="ln1566"> </a>
+<a name="ln1567">  // now we save all that if it has changed</a>
+<a name="ln1568">  if(d != abs(p-&gt;ratio_d) || n != p-&gt;ratio_n)</a>
+<a name="ln1569">  {</a>
+<a name="ln1570">    p-&gt;ratio_d = d;</a>
+<a name="ln1571">    p-&gt;ratio_n = n;</a>
+<a name="ln1572">    dt_conf_set_int(&quot;plugins/darkroom/clipping/ratio_d&quot;, abs(p-&gt;ratio_d));</a>
+<a name="ln1573">    dt_conf_set_int(&quot;plugins/darkroom/clipping/ratio_n&quot;, p-&gt;ratio_n);</a>
+<a name="ln1574">    if(self-&gt;dt-&gt;gui-&gt;reset) return;</a>
+<a name="ln1575">    apply_box_aspect(self, GRAB_HORIZONTAL);</a>
+<a name="ln1576">    dt_control_queue_redraw_center();</a>
+<a name="ln1577">  }</a>
+<a name="ln1578">}</a>
+<a name="ln1579"> </a>
+<a name="ln1580">static void angle_callback(GtkWidget *slider, dt_iop_module_t *self)</a>
+<a name="ln1581">{</a>
+<a name="ln1582">  if(self-&gt;dt-&gt;gui-&gt;reset) return;</a>
+<a name="ln1583">  dt_iop_clipping_gui_data_t *g = (dt_iop_clipping_gui_data_t *)self-&gt;gui_data;</a>
+<a name="ln1584">  dt_iop_clipping_params_t *p = (dt_iop_clipping_params_t *)self-&gt;params;</a>
+<a name="ln1585">  p-&gt;angle = -dt_bauhaus_slider_get(slider);</a>
+<a name="ln1586">  commit_box(self, g, p);</a>
+<a name="ln1587">}</a>
+<a name="ln1588"> </a>
+<a name="ln1589">void gui_reset(struct dt_iop_module_t *self)</a>
+<a name="ln1590">{</a>
+<a name="ln1591">  dt_iop_clipping_gui_data_t *g = (dt_iop_clipping_gui_data_t *)self-&gt;gui_data;</a>
+<a name="ln1592">  /* reset aspect preset to default */</a>
+<a name="ln1593">  dt_conf_set_int(&quot;plugins/darkroom/clipping/ratio_d&quot;, 0);</a>
+<a name="ln1594">  dt_conf_set_int(&quot;plugins/darkroom/clipping/ratio_n&quot;, 0);</a>
+<a name="ln1595">  g-&gt;k_show = -1;</a>
+<a name="ln1596">}</a>
+<a name="ln1597"> </a>
+<a name="ln1598">static void keystone_type_changed(GtkWidget *combo, dt_iop_module_t *self)</a>
+<a name="ln1599">{</a>
+<a name="ln1600">  dt_iop_clipping_gui_data_t *g = (dt_iop_clipping_gui_data_t *)self-&gt;gui_data;</a>
+<a name="ln1601">  dt_iop_clipping_params_t *p = (dt_iop_clipping_params_t *)self-&gt;params;</a>
+<a name="ln1602">  int which = dt_bauhaus_combobox_get(combo);</a>
+<a name="ln1603">  if((which == 5) || (which == 4 &amp;&amp; p-&gt;k_h == 0 &amp;&amp; p-&gt;k_v == 0))</a>
+<a name="ln1604">  {</a>
+<a name="ln1605">    // if the keystone is applied,autocrop must be disabled !</a>
+<a name="ln1606">    gtk_widget_set_sensitive(g-&gt;crop_auto, FALSE);</a>
+<a name="ln1607">    gtk_widget_set_sensitive(g-&gt;aspect_presets, TRUE);</a>
+<a name="ln1608">    return;</a>
+<a name="ln1609">  }</a>
+<a name="ln1610">  // we recreate the list to be sure that the &quot;already applied&quot; entry is not display</a>
+<a name="ln1611">  if(g-&gt;k_show == 2)</a>
+<a name="ln1612">  {</a>
+<a name="ln1613">    if(which == 0 || which == 4)</a>
+<a name="ln1614">      g-&gt;k_show = 0;</a>
+<a name="ln1615">    else</a>
+<a name="ln1616">      g-&gt;k_show = 1;</a>
+<a name="ln1617">    keystone_type_populate(self, FALSE, which);</a>
+<a name="ln1618">  }</a>
+<a name="ln1619"> </a>
+<a name="ln1620">  // we set the params</a>
+<a name="ln1621">  p-&gt;k_apply = 0;</a>
+<a name="ln1622">  p-&gt;k_type = which;</a>
+<a name="ln1623">  if(which == 0 || which == 4)</a>
+<a name="ln1624">    g-&gt;k_show = 0;</a>
+<a name="ln1625">  else</a>
+<a name="ln1626">    g-&gt;k_show = 1;</a>
+<a name="ln1627"> </a>
+<a name="ln1628">  // we can enable autocrop</a>
+<a name="ln1629">  gtk_widget_set_sensitive(g-&gt;crop_auto, (g-&gt;k_show == 0));</a>
+<a name="ln1630">  gtk_widget_set_sensitive(g-&gt;aspect_presets, (g-&gt;k_show == 0));</a>
+<a name="ln1631"> </a>
+<a name="ln1632">  commit_box(self, g, p);</a>
+<a name="ln1633">  dt_control_queue_redraw_center();</a>
+<a name="ln1634">}</a>
+<a name="ln1635"> </a>
+<a name="ln1636">static void keystone_type_populate(struct dt_iop_module_t *self, gboolean with_applied, int select)</a>
+<a name="ln1637">{</a>
+<a name="ln1638">  dt_iop_clipping_gui_data_t *g = (dt_iop_clipping_gui_data_t *)self-&gt;gui_data;</a>
+<a name="ln1639">  dt_iop_clipping_params_t *p = (dt_iop_clipping_params_t *)self-&gt;params;</a>
+<a name="ln1640">  dt_bauhaus_combobox_clear(g-&gt;keystone_type);</a>
+<a name="ln1641">  dt_bauhaus_combobox_add(g-&gt;keystone_type, _(&quot;none&quot;));</a>
+<a name="ln1642">  dt_bauhaus_combobox_add(g-&gt;keystone_type, _(&quot;vertical&quot;));</a>
+<a name="ln1643">  dt_bauhaus_combobox_add(g-&gt;keystone_type, _(&quot;horizontal&quot;));</a>
+<a name="ln1644">  dt_bauhaus_combobox_add(g-&gt;keystone_type, _(&quot;full&quot;));</a>
+<a name="ln1645">  if(p-&gt;k_h != 0 || p-&gt;k_v != 0) dt_bauhaus_combobox_add(g-&gt;keystone_type, _(&quot;old system&quot;));</a>
+<a name="ln1646">  if(with_applied) dt_bauhaus_combobox_add(g-&gt;keystone_type, _(&quot;correction applied&quot;));</a>
+<a name="ln1647"> </a>
+<a name="ln1648">  if(select &lt; 0) return;</a>
+<a name="ln1649">  int sel = 0;</a>
+<a name="ln1650">  if(select &gt; 10 &amp;&amp; p-&gt;k_h == 0 &amp;&amp; p-&gt;k_v == 0)</a>
+<a name="ln1651">    sel = 4;</a>
+<a name="ln1652">  else if(select &gt; 10)</a>
+<a name="ln1653">    sel = 5;</a>
+<a name="ln1654">  else</a>
+<a name="ln1655">    sel = select;</a>
+<a name="ln1656"> </a>
+<a name="ln1657">  dt_bauhaus_combobox_set(g-&gt;keystone_type, sel);</a>
+<a name="ln1658">  // we have to be sure that the event is called...</a>
+<a name="ln1659">  keystone_type_changed(g-&gt;keystone_type, self);</a>
+<a name="ln1660">}</a>
+<a name="ln1661"> </a>
+<a name="ln1662">void gui_update(struct dt_iop_module_t *self)</a>
+<a name="ln1663">{</a>
+<a name="ln1664">  dt_iop_clipping_gui_data_t *g = (dt_iop_clipping_gui_data_t *)self-&gt;gui_data;</a>
+<a name="ln1665">  dt_iop_clipping_params_t *p = (dt_iop_clipping_params_t *)self-&gt;params;</a>
+<a name="ln1666"> </a>
+<a name="ln1667">  /* update ui elements */</a>
+<a name="ln1668">  dt_bauhaus_slider_set(g-&gt;angle, -p-&gt;angle);</a>
+<a name="ln1669">  int hvflip = 0;</a>
+<a name="ln1670">  if(p-&gt;cw &lt; 0)</a>
+<a name="ln1671">  {</a>
+<a name="ln1672">    if(p-&gt;ch &lt; 0)</a>
+<a name="ln1673">      hvflip = 3;</a>
+<a name="ln1674">    else</a>
+<a name="ln1675">      hvflip = 1;</a>
+<a name="ln1676">  }</a>
+<a name="ln1677">  else</a>
+<a name="ln1678">  {</a>
+<a name="ln1679">    if(p-&gt;ch &lt; 0)</a>
+<a name="ln1680">      hvflip = 2;</a>
+<a name="ln1681">    else</a>
+<a name="ln1682">      hvflip = 0;</a>
+<a name="ln1683">  }</a>
+<a name="ln1684">  dt_bauhaus_combobox_set(g-&gt;hvflip, hvflip);</a>
+<a name="ln1685"> </a>
+<a name="ln1686">  //  set aspect ratio based on the current image, if not found let's default</a>
+<a name="ln1687">  //  to free aspect.</a>
+<a name="ln1688"> </a>
+<a name="ln1689">  if(p-&gt;ratio_d == -2 &amp;&amp; p-&gt;ratio_n == -2) _ratio_get_aspect(self);</a>
+<a name="ln1690"> </a>
+<a name="ln1691">  if(p-&gt;ratio_d == -1 &amp;&amp; p-&gt;ratio_n == -1)</a>
+<a name="ln1692">  {</a>
+<a name="ln1693">    p-&gt;ratio_d = dt_conf_get_int(&quot;plugins/darkroom/clipping/ratio_d&quot;);</a>
+<a name="ln1694">    p-&gt;ratio_n = dt_conf_get_int(&quot;plugins/darkroom/clipping/ratio_n&quot;);</a>
+<a name="ln1695">  }</a>
+<a name="ln1696">  const int d = abs(p-&gt;ratio_d), n = p-&gt;ratio_n;</a>
+<a name="ln1697"> </a>
+<a name="ln1698">  int act = -1, i = 0;</a>
+<a name="ln1699"> </a>
+<a name="ln1700">  GList *iter = g-&gt;aspect_list;</a>
+<a name="ln1701">  while(iter != NULL)</a>
+<a name="ln1702">  {</a>
+<a name="ln1703">    const dt_iop_clipping_aspect_t *aspect = iter-&gt;data;</a>
+<a name="ln1704">    if((aspect-&gt;d == d) &amp;&amp; (aspect-&gt;n == n))</a>
+<a name="ln1705">    {</a>
+<a name="ln1706">      act = i;</a>
+<a name="ln1707">      break;</a>
+<a name="ln1708">    }</a>
+<a name="ln1709">    i++;</a>
+<a name="ln1710">    iter = g_list_next(iter);</a>
+<a name="ln1711">  }</a>
+<a name="ln1712"> </a>
+<a name="ln1713">  // keystone :</a>
+<a name="ln1714">  if(p-&gt;k_apply == 1) g-&gt;k_show = 2; // needed to initialise correctly the combobox</a>
+<a name="ln1715">  else g-&gt;k_show = -1;</a>
+<a name="ln1716"> </a>
+<a name="ln1717">  if(g-&gt;k_show == 2)</a>
+<a name="ln1718">  {</a>
+<a name="ln1719">    keystone_type_populate(self, TRUE, 99);</a>
+<a name="ln1720">  }</a>
+<a name="ln1721">  else if(g-&gt;k_show == -1)</a>
+<a name="ln1722">  {</a>
+<a name="ln1723">    keystone_type_populate(self, FALSE, p-&gt;k_type);</a>
+<a name="ln1724">  }</a>
+<a name="ln1725"> </a>
+<a name="ln1726"> </a>
+<a name="ln1727">  /* special handling the combobox when current act is already selected</a>
+<a name="ln1728">     callback is not called, let do it our self then..</a>
+<a name="ln1729">   */</a>
+<a name="ln1730">  if(act == -1)</a>
+<a name="ln1731">  {</a>
+<a name="ln1732">    char str[128];</a>
+<a name="ln1733">    snprintf(str, sizeof(str), &quot;%d:%d&quot;, abs(p-&gt;ratio_d), p-&gt;ratio_n);</a>
+<a name="ln1734">    dt_bauhaus_combobox_set_text(g-&gt;aspect_presets, str);</a>
+<a name="ln1735">  }</a>
+<a name="ln1736">  if(dt_bauhaus_combobox_get(g-&gt;aspect_presets) == act)</a>
+<a name="ln1737">    aspect_presets_changed(g-&gt;aspect_presets, self);</a>
+<a name="ln1738">  else</a>
+<a name="ln1739">    dt_bauhaus_combobox_set(g-&gt;aspect_presets, act);</a>
+<a name="ln1740"> </a>
+<a name="ln1741">  // reset gui draw box to what we have in the parameters:</a>
+<a name="ln1742">  g-&gt;applied = 1;</a>
+<a name="ln1743">  g-&gt;clip_x = p-&gt;cx;</a>
+<a name="ln1744">  g-&gt;clip_w = fabsf(p-&gt;cw) - p-&gt;cx;</a>
+<a name="ln1745">  g-&gt;clip_y = p-&gt;cy;</a>
+<a name="ln1746">  g-&gt;clip_h = fabsf(p-&gt;ch) - p-&gt;cy;</a>
+<a name="ln1747"> </a>
+<a name="ln1748">  dt_bauhaus_combobox_set(g-&gt;crop_auto, p-&gt;crop_auto);</a>
+<a name="ln1749">}</a>
+<a name="ln1750"> </a>
+<a name="ln1751">void init(dt_iop_module_t *module)</a>
+<a name="ln1752">{</a>
+<a name="ln1753">  // module-&gt;data = malloc(sizeof(dt_iop_clipping_data_t));</a>
+<a name="ln1754">  module-&gt;params = calloc(1, sizeof(dt_iop_clipping_params_t));</a>
+<a name="ln1755">  module-&gt;default_params = calloc(1, sizeof(dt_iop_clipping_params_t));</a>
+<a name="ln1756">  module-&gt;default_enabled = 0;</a>
+<a name="ln1757">  module-&gt;params_size = sizeof(dt_iop_clipping_params_t);</a>
+<a name="ln1758">  module-&gt;gui_data = NULL;</a>
+<a name="ln1759">  module-&gt;priority = 285; // module order created by iop_dependencies.py, do not edit!</a>
+<a name="ln1760">}</a>
+<a name="ln1761"> </a>
+<a name="ln1762">void cleanup(dt_iop_module_t *module)</a>
+<a name="ln1763">{</a>
+<a name="ln1764">  free(module-&gt;params);</a>
+<a name="ln1765">  module-&gt;params = NULL;</a>
+<a name="ln1766">}</a>
+<a name="ln1767"> </a>
+<a name="ln1768">static void hvflip_callback(GtkWidget *widget, dt_iop_module_t *self)</a>
+<a name="ln1769">{</a>
+<a name="ln1770">  if(self-&gt;dt-&gt;gui-&gt;reset) return;</a>
+<a name="ln1771">  dt_iop_clipping_gui_data_t *g = (dt_iop_clipping_gui_data_t *)self-&gt;gui_data;</a>
+<a name="ln1772">  dt_iop_clipping_params_t *p = (dt_iop_clipping_params_t *)self-&gt;params;</a>
+<a name="ln1773">  const int flip = dt_bauhaus_combobox_get(widget);</a>
+<a name="ln1774">  p-&gt;cw = copysignf(p-&gt;cw, (flip &amp; 1) ? -1.0 : 1.0);</a>
+<a name="ln1775">  p-&gt;ch = copysignf(p-&gt;ch, (flip &amp; 2) ? -1.0 : 1.0);</a>
+<a name="ln1776">  commit_box(self, g, p);</a>
+<a name="ln1777">}</a>
+<a name="ln1778"> </a>
+<a name="ln1779">static void key_swap_callback(GtkAccelGroup *accel_group, GObject *acceleratable, guint keyval,</a>
+<a name="ln1780">                              GdkModifierType modifier, gpointer d)</a>
+<a name="ln1781">{</a>
+<a name="ln1782">  (void)accel_group;</a>
+<a name="ln1783">  (void)acceleratable;</a>
+<a name="ln1784">  (void)keyval;</a>
+<a name="ln1785">  (void)modifier;</a>
+<a name="ln1786">  dt_iop_module_t *self = (dt_iop_module_t *)d;</a>
+<a name="ln1787">  dt_iop_clipping_params_t *p = (dt_iop_clipping_params_t *)self-&gt;params;</a>
+<a name="ln1788">  p-&gt;ratio_d = -p-&gt;ratio_d;</a>
+<a name="ln1789">  apply_box_aspect(self, GRAB_HORIZONTAL);</a>
+<a name="ln1790">  dt_control_queue_redraw_center();</a>
+<a name="ln1791">}</a>
+<a name="ln1792"> </a>
+<a name="ln1793">static gboolean key_commit_callback(GtkAccelGroup *accel_group, GObject *acceleratable, guint keyval,</a>
+<a name="ln1794">                                    GdkModifierType modifier, gpointer data)</a>
+<a name="ln1795">{</a>
+<a name="ln1796">  dt_iop_module_t *self = (dt_iop_module_t *)data;</a>
+<a name="ln1797">  dt_iop_clipping_gui_data_t *g = (dt_iop_clipping_gui_data_t *)self-&gt;gui_data;</a>
+<a name="ln1798">  dt_iop_clipping_params_t *p = (dt_iop_clipping_params_t *)self-&gt;params;</a>
+<a name="ln1799">  commit_box(self, g, p);</a>
+<a name="ln1800">  return TRUE;</a>
+<a name="ln1801">}</a>
+<a name="ln1802"> </a>
+<a name="ln1803">static void aspect_flip(GtkWidget *button, dt_iop_module_t *self)</a>
+<a name="ln1804">{</a>
+<a name="ln1805">  key_swap_callback(NULL, NULL, 0, 0, self);</a>
+<a name="ln1806">}</a>
+<a name="ln1807"> </a>
+<a name="ln1808">// TODO once we depend on GTK3 &gt;= 3.12 use the name as in 2f491cf8355a81554b98de538fe862d6ad9b62e5</a>
+<a name="ln1809">static void guides_presets_set_visibility(dt_iop_clipping_gui_data_t *g, int which)</a>
+<a name="ln1810">{</a>
+<a name="ln1811">  if(which == 0)</a>
+<a name="ln1812">  {</a>
+<a name="ln1813">    gtk_widget_set_no_show_all(g-&gt;guides_widgets, TRUE);</a>
+<a name="ln1814">    gtk_widget_hide(g-&gt;guides_widgets);</a>
+<a name="ln1815">    gtk_widget_set_no_show_all(g-&gt;flip_guides, TRUE);</a>
+<a name="ln1816">    gtk_widget_hide(g-&gt;flip_guides);</a>
+<a name="ln1817">  }</a>
+<a name="ln1818">  else</a>
+<a name="ln1819">  {</a>
+<a name="ln1820">    GtkWidget *widget = g_list_nth_data(g-&gt;guides_widgets_list, which - 1);</a>
+<a name="ln1821">    if(widget)</a>
+<a name="ln1822">    {</a>
+<a name="ln1823">      gtk_widget_set_no_show_all(g-&gt;guides_widgets, FALSE);</a>
+<a name="ln1824">      gtk_widget_show_all(g-&gt;guides_widgets);</a>
+<a name="ln1825">      gtk_stack_set_visible_child(GTK_STACK(g-&gt;guides_widgets), widget);</a>
+<a name="ln1826">    }</a>
+<a name="ln1827">    else</a>
+<a name="ln1828">    {</a>
+<a name="ln1829">      gtk_widget_set_no_show_all(g-&gt;guides_widgets, TRUE);</a>
+<a name="ln1830">      gtk_widget_hide(g-&gt;guides_widgets);</a>
+<a name="ln1831">    }</a>
+<a name="ln1832">    gtk_widget_set_no_show_all(g-&gt;flip_guides, FALSE);</a>
+<a name="ln1833">    gtk_widget_show_all(g-&gt;flip_guides);</a>
+<a name="ln1834">  }</a>
+<a name="ln1835"> </a>
+<a name="ln1836">  // TODO: add a support_flip flag to guides to hide the flip gui?</a>
+<a name="ln1837">}</a>
+<a name="ln1838"> </a>
+<a name="ln1839">static void guides_presets_changed(GtkWidget *combo, dt_iop_module_t *self)</a>
+<a name="ln1840">{</a>
+<a name="ln1841">  dt_iop_clipping_gui_data_t *g = (dt_iop_clipping_gui_data_t *)self-&gt;gui_data;</a>
+<a name="ln1842">  int which = dt_bauhaus_combobox_get(combo);</a>
+<a name="ln1843">  guides_presets_set_visibility(g, which);</a>
+<a name="ln1844"> </a>
+<a name="ln1845">  // remember setting</a>
+<a name="ln1846">  dt_conf_set_int(&quot;plugins/darkroom/clipping/guide&quot;, which);</a>
+<a name="ln1847"> </a>
+<a name="ln1848">  dt_control_queue_redraw_center();</a>
+<a name="ln1849">}</a>
+<a name="ln1850"> </a>
+<a name="ln1851">static void guides_flip_changed(GtkWidget *combo, dt_iop_module_t *self)</a>
+<a name="ln1852">{</a>
+<a name="ln1853">  int flip = dt_bauhaus_combobox_get(combo);</a>
+<a name="ln1854"> </a>
+<a name="ln1855">  // remember setting</a>
+<a name="ln1856">  dt_conf_set_int(&quot;plugins/darkroom/clipping/flip_guides&quot;, flip);</a>
+<a name="ln1857"> </a>
+<a name="ln1858">  dt_control_queue_redraw_center();</a>
+<a name="ln1859">}</a>
+<a name="ln1860"> </a>
+<a name="ln1861">static void crop_auto_changed(GtkWidget *combo, dt_iop_module_t *self)</a>
+<a name="ln1862">{</a>
+<a name="ln1863">  dt_iop_clipping_gui_data_t *g = (dt_iop_clipping_gui_data_t *)self-&gt;gui_data;</a>
+<a name="ln1864">  dt_iop_clipping_params_t *p = (dt_iop_clipping_params_t *)self-&gt;params;</a>
+<a name="ln1865"> </a>
+<a name="ln1866">  if(dt_bauhaus_combobox_get(combo) == p-&gt;crop_auto) return; // no change</a>
+<a name="ln1867">  p-&gt;crop_auto = dt_bauhaus_combobox_get(combo);</a>
+<a name="ln1868">  commit_box(self, g, p);</a>
+<a name="ln1869">  dt_control_queue_redraw_center();</a>
+<a name="ln1870">}</a>
+<a name="ln1871"> </a>
+<a name="ln1872">static gint _aspect_ratio_cmp(const dt_iop_clipping_aspect_t *a, const dt_iop_clipping_aspect_t *b)</a>
+<a name="ln1873">{</a>
+<a name="ln1874">  // want most square at the end, and the most non-square at the beginning</a>
+<a name="ln1875"> </a>
+<a name="ln1876">  if((a-&gt;d == 0 || a-&gt;d == 1) &amp;&amp; a-&gt;n == 0) return -1;</a>
+<a name="ln1877"> </a>
+<a name="ln1878">  const float ad = MAX(a-&gt;d, a-&gt;n);</a>
+<a name="ln1879">  const float an = MIN(a-&gt;d, a-&gt;n);</a>
+<a name="ln1880">  const float bd = MAX(b-&gt;d, b-&gt;n);</a>
+<a name="ln1881">  const float bn = MIN(b-&gt;d, b-&gt;n);</a>
+<a name="ln1882">  const float aratio = (float)ad / (float)an;</a>
+<a name="ln1883">  const float bratio = (float)bd / (float)bn;</a>
+<a name="ln1884"> </a>
+<a name="ln1885">  if(aratio &lt; bratio) return -1;</a>
+<a name="ln1886"> </a>
+<a name="ln1887">  float prec = 0.0003f;</a>
+<a name="ln1888">  if(fabsf(aratio - bratio) &lt; prec) return 0;</a>
+<a name="ln1889"> </a>
+<a name="ln1890">  return 1;</a>
+<a name="ln1891">}</a>
+<a name="ln1892"> </a>
+<a name="ln1893"> </a>
+<a name="ln1894">static gchar *format_aspect(gchar *original, int adim, int bdim)</a>
+<a name="ln1895">{</a>
+<a name="ln1896">  // Special ratios:  freehand, original image</a>
+<a name="ln1897">  if ( bdim == 0 ) {</a>
+<a name="ln1898">    return g_strdup(original);</a>
+<a name="ln1899">  }</a>
+<a name="ln1900"> </a>
+<a name="ln1901">  return g_strdup_printf(&quot;%s  %4.2f&quot;, original, ((float)adim / (float)bdim));</a>
+<a name="ln1902">}</a>
+<a name="ln1903"> </a>
+<a name="ln1904"> </a>
+<a name="ln1905">void gui_init(struct dt_iop_module_t *self)</a>
+<a name="ln1906">{</a>
+<a name="ln1907">  self-&gt;gui_data = calloc(1, sizeof(dt_iop_clipping_gui_data_t));</a>
+<a name="ln1908">  dt_iop_clipping_gui_data_t *g = (dt_iop_clipping_gui_data_t *)self-&gt;gui_data;</a>
+<a name="ln1909">  dt_iop_clipping_params_t *p = (dt_iop_clipping_params_t *)self-&gt;params;</a>
+<a name="ln1910"> </a>
+<a name="ln1911">  g-&gt;aspect_list = NULL;</a>
+<a name="ln1912">  g-&gt;clip_x = g-&gt;clip_y = g-&gt;handle_x = g-&gt;handle_y = 0.0;</a>
+<a name="ln1913">  g-&gt;clip_w = g-&gt;clip_h = 1.0;</a>
+<a name="ln1914">  g-&gt;old_clip_x = g-&gt;old_clip_y = 0.0;</a>
+<a name="ln1915">  g-&gt;old_clip_w = g-&gt;old_clip_h = 1.0;</a>
+<a name="ln1916">  g-&gt;clip_max_x = g-&gt;clip_max_y = 0.0;</a>
+<a name="ln1917">  g-&gt;clip_max_w = g-&gt;clip_max_h = 1.0;</a>
+<a name="ln1918">  g-&gt;clip_max_pipe_hash = 0;</a>
+<a name="ln1919">  g-&gt;cropping = 0;</a>
+<a name="ln1920">  g-&gt;straightening = 0;</a>
+<a name="ln1921">  g-&gt;applied = 1;</a>
+<a name="ln1922">  g-&gt;center_lock = 0;</a>
+<a name="ln1923">  g-&gt;k_drag = FALSE;</a>
+<a name="ln1924">  g-&gt;k_show = -1;</a>
+<a name="ln1925">  g-&gt;k_selected = -1;</a>
+<a name="ln1926">  g-&gt;old_width = g-&gt;old_height = -1;</a>
+<a name="ln1927"> </a>
+<a name="ln1928">  self-&gt;widget = gtk_box_new(GTK_ORIENTATION_VERTICAL, DT_BAUHAUS_SPACE);</a>
+<a name="ln1929">  dt_gui_add_help_link(self-&gt;widget, dt_get_help_url(self-&gt;op));</a>
+<a name="ln1930">  g-&gt;hvflip = dt_bauhaus_combobox_new(self);</a>
+<a name="ln1931">  dt_bauhaus_widget_set_label(g-&gt;hvflip, NULL, _(&quot;flip&quot;));</a>
+<a name="ln1932">  dt_bauhaus_combobox_add(g-&gt;hvflip, _(&quot;none&quot;));</a>
+<a name="ln1933">  dt_bauhaus_combobox_add(g-&gt;hvflip, _(&quot;horizontal&quot;));</a>
+<a name="ln1934">  dt_bauhaus_combobox_add(g-&gt;hvflip, _(&quot;vertical&quot;));</a>
+<a name="ln1935">  dt_bauhaus_combobox_add(g-&gt;hvflip, _(&quot;both&quot;));</a>
+<a name="ln1936">  g_signal_connect(G_OBJECT(g-&gt;hvflip), &quot;value-changed&quot;, G_CALLBACK(hvflip_callback), self);</a>
+<a name="ln1937">  gtk_widget_set_tooltip_text(g-&gt;hvflip, _(&quot;mirror image horizontally and/or vertically&quot;));</a>
+<a name="ln1938">  gtk_box_pack_start(GTK_BOX(self-&gt;widget), g-&gt;hvflip, TRUE, TRUE, 0);</a>
+<a name="ln1939"> </a>
+<a name="ln1940"> </a>
+<a name="ln1941">  g-&gt;angle = dt_bauhaus_slider_new_with_range(self, -180.0, 180.0, 0.25, p-&gt;angle, 2);</a>
+<a name="ln1942">  dt_bauhaus_widget_set_label(g-&gt;angle, NULL, _(&quot;angle&quot;));</a>
+<a name="ln1943">  dt_bauhaus_slider_set_format(g-&gt;angle, &quot;%.02f°&quot;);</a>
+<a name="ln1944">  g_signal_connect(G_OBJECT(g-&gt;angle), &quot;value-changed&quot;, G_CALLBACK(angle_callback), self);</a>
+<a name="ln1945">  gtk_widget_set_tooltip_text(g-&gt;angle, _(&quot;right-click and drag a line on the image to drag a straight line&quot;));</a>
+<a name="ln1946">  gtk_box_pack_start(GTK_BOX(self-&gt;widget), g-&gt;angle, TRUE, TRUE, 0);</a>
+<a name="ln1947"> </a>
+<a name="ln1948">  g-&gt;keystone_type = dt_bauhaus_combobox_new(self);</a>
+<a name="ln1949">  dt_bauhaus_widget_set_label(g-&gt;keystone_type, NULL, _(&quot;keystone&quot;));</a>
+<a name="ln1950">  dt_bauhaus_combobox_add(g-&gt;keystone_type, _(&quot;none&quot;));</a>
+<a name="ln1951">  dt_bauhaus_combobox_add(g-&gt;keystone_type, _(&quot;vertical&quot;));</a>
+<a name="ln1952">  dt_bauhaus_combobox_add(g-&gt;keystone_type, _(&quot;horizontal&quot;));</a>
+<a name="ln1953">  dt_bauhaus_combobox_add(g-&gt;keystone_type, _(&quot;full&quot;));</a>
+<a name="ln1954">  gtk_widget_set_tooltip_text(g-&gt;keystone_type, _(&quot;set perspective correction for your image&quot;));</a>
+<a name="ln1955">  g_signal_connect(G_OBJECT(g-&gt;keystone_type), &quot;value-changed&quot;, G_CALLBACK(keystone_type_changed), self);</a>
+<a name="ln1956">  gtk_box_pack_start(GTK_BOX(self-&gt;widget), g-&gt;keystone_type, TRUE, TRUE, 0);</a>
+<a name="ln1957"> </a>
+<a name="ln1958">  g-&gt;crop_auto = dt_bauhaus_combobox_new(self);</a>
+<a name="ln1959">  dt_bauhaus_widget_set_label(g-&gt;crop_auto, NULL, _(&quot;automatic cropping&quot;));</a>
+<a name="ln1960">  dt_bauhaus_combobox_add(g-&gt;crop_auto, _(&quot;no&quot;));</a>
+<a name="ln1961">  dt_bauhaus_combobox_add(g-&gt;crop_auto, _(&quot;yes&quot;));</a>
+<a name="ln1962">  gtk_widget_set_tooltip_text(g-&gt;crop_auto, _(&quot;automatically crop to avoid black edges&quot;));</a>
+<a name="ln1963">  g_signal_connect(G_OBJECT(g-&gt;crop_auto), &quot;value-changed&quot;, G_CALLBACK(crop_auto_changed), self);</a>
+<a name="ln1964">  gtk_box_pack_start(GTK_BOX(self-&gt;widget), g-&gt;crop_auto, TRUE, TRUE, 0);</a>
+<a name="ln1965"> </a>
+<a name="ln1966">  dt_iop_clipping_aspect_t aspects[] = { { _(&quot;freehand&quot;), 0, 0 },</a>
+<a name="ln1967">                                         { _(&quot;original image&quot;), 1, 0 },</a>
+<a name="ln1968">                                         { _(&quot;square&quot;), 1, 1 },</a>
+<a name="ln1969">                                         { _(&quot;10:8 in print&quot;), 2445, 2032 },</a>
+<a name="ln1970">                                         { _(&quot;5:4, 4x5, 8x10&quot;), 5, 4 },</a>
+<a name="ln1971">                                         { _(&quot;11x14&quot;), 14, 11 },</a>
+<a name="ln1972">                                         { _(&quot;8.5x11, letter&quot;), 110, 85 },</a>
+<a name="ln1973">                                         { _(&quot;4:3, VGA, TV&quot;), 4, 3 },</a>
+<a name="ln1974">                                         { _(&quot;5x7&quot;), 7, 5 },</a>
+<a name="ln1975">                                         { _(&quot;ISO 216, DIN 476, A4&quot;), 14142136, 10000000 },</a>
+<a name="ln1976">                                         { _(&quot;3:2, 4x6, 35mm&quot;), 3, 2 },</a>
+<a name="ln1977">                                         { _(&quot;16:10, 8x5&quot;), 16, 10 },</a>
+<a name="ln1978">                                         { _(&quot;golden cut&quot;), 16180340, 10000000 },</a>
+<a name="ln1979">                                         { _(&quot;16:9, HDTV&quot;), 16, 9 },</a>
+<a name="ln1980">                                         { _(&quot;widescreen&quot;), 185, 100 },</a>
+<a name="ln1981">                                         { _(&quot;2:1, univisium&quot;), 2, 1 },</a>
+<a name="ln1982">                                         { _(&quot;cinemascope&quot;), 235, 100 },</a>
+<a name="ln1983">                                         { _(&quot;21:9&quot;), 237, 100 },</a>
+<a name="ln1984">                                         { _(&quot;anamorphic&quot;), 239, 100 },</a>
+<a name="ln1985">                                         { _(&quot;3:1, panorama&quot;), 300, 100 },</a>
+<a name="ln1986">  };</a>
+<a name="ln1987"> </a>
+<a name="ln1988">  const int aspects_count = sizeof(aspects) / sizeof(dt_iop_clipping_aspect_t);</a>
+<a name="ln1989"> </a>
+<a name="ln1990">  for(int i = 0; i &lt; aspects_count; i++)</a>
+<a name="ln1991">  {</a>
+<a name="ln1992">    dt_iop_clipping_aspect_t *aspect = g_malloc(sizeof(dt_iop_clipping_aspect_t));</a>
+<a name="ln1993">    aspect-&gt;name = format_aspect(aspects[i].name, aspects[i].d, aspects[i].n);</a>
+<a name="ln1994">    aspect-&gt;d = aspects[i].d;</a>
+<a name="ln1995">    aspect-&gt;n = aspects[i].n;</a>
+<a name="ln1996">    g-&gt;aspect_list = g_list_append(g-&gt;aspect_list, aspect);</a>
+<a name="ln1997">  }</a>
+<a name="ln1998"> </a>
+<a name="ln1999">  // add custom presets from config to the list</a>
+<a name="ln2000">  GSList *custom_aspects = dt_conf_all_string_entries(&quot;plugins/darkroom/clipping/extra_aspect_ratios&quot;);</a>
+<a name="ln2001">  for(GSList *iter = custom_aspects; iter; iter = g_slist_next(iter))</a>
+<a name="ln2002">  {</a>
+<a name="ln2003">    dt_conf_string_entry_t *nv = (dt_conf_string_entry_t *)iter-&gt;data;</a>
+<a name="ln2004"> </a>
+<a name="ln2005">    const char *c = nv-&gt;value;</a>
+<a name="ln2006">    const char *end = nv-&gt;value + strlen(nv-&gt;value);</a>
+<a name="ln2007">    while(*c != ':' &amp;&amp; *c != '/' &amp;&amp; c &lt; end) c++;</a>
+<a name="ln2008">    if(c &lt; end - 1)</a>
+<a name="ln2009">    {</a>
+<a name="ln2010">      c++;</a>
+<a name="ln2011">      int d = atoi(nv-&gt;value);</a>
+<a name="ln2012">      int n = atoi(c);</a>
+<a name="ln2013">      // some sanity check</a>
+<a name="ln2014">      if(n == 0 || d == 0)</a>
+<a name="ln2015">      {</a>
+<a name="ln2016">        fprintf(stderr, &quot;invalid ratio format for `%s'. it should be \&quot;number:number\&quot;\n&quot;, nv-&gt;key);</a>
+<a name="ln2017">        dt_control_log(_(&quot;invalid ratio format for `%s'. it should be \&quot;number:number\&quot;&quot;), nv-&gt;key);</a>
+<a name="ln2018">        continue;</a>
+<a name="ln2019">      }</a>
+<a name="ln2020">      dt_iop_clipping_aspect_t *aspect = g_malloc(sizeof(dt_iop_clipping_aspect_t));</a>
+<a name="ln2021">      aspect-&gt;name = format_aspect(nv-&gt;key, d, n);</a>
+<a name="ln2022">      aspect-&gt;d = d;</a>
+<a name="ln2023">      aspect-&gt;n = n;</a>
+<a name="ln2024">      g-&gt;aspect_list = g_list_append(g-&gt;aspect_list, aspect);</a>
+<a name="ln2025">    }</a>
+<a name="ln2026">    else</a>
+<a name="ln2027">    {</a>
+<a name="ln2028">      fprintf(stderr, &quot;invalid ratio format for `%s'. it should be \&quot;number:number\&quot;\n&quot;, nv-&gt;key);</a>
+<a name="ln2029">      dt_control_log(_(&quot;invalid ratio format for `%s'. it should be \&quot;number:number\&quot;&quot;), nv-&gt;key);</a>
+<a name="ln2030">      continue;</a>
+<a name="ln2031">    }</a>
+<a name="ln2032"> </a>
+<a name="ln2033">  }</a>
+<a name="ln2034">  g_slist_free_full(custom_aspects, dt_conf_string_entry_free);</a>
+<a name="ln2035"> </a>
+<a name="ln2036"> </a>
+<a name="ln2037">  g-&gt;aspect_list = g_list_sort(g-&gt;aspect_list, (GCompareFunc)_aspect_ratio_cmp);</a>
+<a name="ln2038"> </a>
+<a name="ln2039">  // remove duplicates from the aspect ratio list</a>
+<a name="ln2040">  int d = ((dt_iop_clipping_aspect_t *)g-&gt;aspect_list-&gt;data)-&gt;d + 1,</a>
+<a name="ln2041">      n = ((dt_iop_clipping_aspect_t *)g-&gt;aspect_list-&gt;data)-&gt;n + 1;</a>
+<a name="ln2042">  for(GList *iter = g-&gt;aspect_list; iter; iter = g_list_next(iter))</a>
+<a name="ln2043">  {</a>
+<a name="ln2044">    dt_iop_clipping_aspect_t *aspect = (dt_iop_clipping_aspect_t *)iter-&gt;data;</a>
+<a name="ln2045">    int dd = MIN(aspect-&gt;d, aspect-&gt;n);</a>
+<a name="ln2046">    int nn = MAX(aspect-&gt;d, aspect-&gt;n);</a>
+<a name="ln2047">    if(dd == d &amp;&amp; nn == n)</a>
+<a name="ln2048">    {</a>
+<a name="ln2049">      // same as the last one, remove this entry</a>
+<a name="ln2050">      g_free(aspect-&gt;name);</a>
+<a name="ln2051">      GList *prev = g_list_previous(iter);</a>
+<a name="ln2052">      g-&gt;aspect_list = g_list_delete_link(g-&gt;aspect_list, iter);</a>
+<a name="ln2053">      // it should never be NULL as the 1st element can't be a duplicate, but better safe than sorry</a>
+<a name="ln2054">      iter = prev ? prev : g-&gt;aspect_list;</a>
+<a name="ln2055">    }</a>
+<a name="ln2056">    else</a>
+<a name="ln2057">    {</a>
+<a name="ln2058">      d = dd;</a>
+<a name="ln2059">      n = nn;</a>
+<a name="ln2060">    }</a>
+<a name="ln2061">  }</a>
+<a name="ln2062"> </a>
+<a name="ln2063">  g-&gt;aspect_presets = dt_bauhaus_combobox_new(self);</a>
+<a name="ln2064">  dt_bauhaus_combobox_set_editable(g-&gt;aspect_presets, 1);</a>
+<a name="ln2065">  dt_bauhaus_widget_set_label(g-&gt;aspect_presets, NULL, _(&quot;aspect&quot;));</a>
+<a name="ln2066"> </a>
+<a name="ln2067">  for(GList *iter = g-&gt;aspect_list; iter; iter = g_list_next(iter))</a>
+<a name="ln2068">  {</a>
+<a name="ln2069">    const dt_iop_clipping_aspect_t *aspect = iter-&gt;data;</a>
+<a name="ln2070">    dt_bauhaus_combobox_add(g-&gt;aspect_presets, aspect-&gt;name);</a>
+<a name="ln2071">  }</a>
+<a name="ln2072"> </a>
+<a name="ln2073">  dt_bauhaus_combobox_set(g-&gt;aspect_presets, 0);</a>
+<a name="ln2074"> </a>
+<a name="ln2075">  g_signal_connect(G_OBJECT(g-&gt;aspect_presets), &quot;value-changed&quot;, G_CALLBACK(aspect_presets_changed), self);</a>
+<a name="ln2076">  gtk_widget_set_tooltip_text(g-&gt;aspect_presets, _(&quot;set the aspect ratio\n&quot;</a>
+<a name="ln2077">                                                   &quot;the list is sorted: from most square to least square&quot;));</a>
+<a name="ln2078">  dt_bauhaus_widget_set_quad_paint(g-&gt;aspect_presets, dtgtk_cairo_paint_aspectflip, 0, NULL);</a>
+<a name="ln2079">  g_signal_connect(G_OBJECT(g-&gt;aspect_presets), &quot;quad-pressed&quot;, G_CALLBACK(aspect_flip), self);</a>
+<a name="ln2080">  gtk_box_pack_start(GTK_BOX(self-&gt;widget), g-&gt;aspect_presets, TRUE, TRUE, 0);</a>
+<a name="ln2081"> </a>
+<a name="ln2082">  g-&gt;guide_lines = dt_bauhaus_combobox_new(self);</a>
+<a name="ln2083">  dt_bauhaus_widget_set_label(g-&gt;guide_lines, NULL, _(&quot;guides&quot;));</a>
+<a name="ln2084">  gtk_box_pack_start(GTK_BOX(self-&gt;widget), g-&gt;guide_lines, TRUE, TRUE, 0);</a>
+<a name="ln2085"> </a>
+<a name="ln2086">  g-&gt;guides_widgets = gtk_stack_new();</a>
+<a name="ln2087">  gtk_stack_set_homogeneous(GTK_STACK(g-&gt;guides_widgets), FALSE);</a>
+<a name="ln2088">  gtk_box_pack_start(GTK_BOX(self-&gt;widget), g-&gt;guides_widgets, TRUE, TRUE, 0);</a>
+<a name="ln2089"> </a>
+<a name="ln2090">  dt_bauhaus_combobox_add(g-&gt;guide_lines, _(&quot;none&quot;));</a>
+<a name="ln2091">  int i = 0;</a>
+<a name="ln2092">  for(GList *iter = darktable.guides; iter; iter = g_list_next(iter), i++)</a>
+<a name="ln2093">  {</a>
+<a name="ln2094">    GtkWidget *widget = NULL;</a>
+<a name="ln2095">    dt_guides_t *guide = (dt_guides_t *)iter-&gt;data;</a>
+<a name="ln2096">    dt_bauhaus_combobox_add(g-&gt;guide_lines, _(guide-&gt;name));</a>
+<a name="ln2097">    if(guide-&gt;widget)</a>
+<a name="ln2098">    {</a>
+<a name="ln2099">      // generate some unique name so that we can have the same name several times</a>
+<a name="ln2100">      char name[5];</a>
+<a name="ln2101">      snprintf(name, sizeof(name), &quot;%d&quot;, i);</a>
+<a name="ln2102">      widget = guide-&gt;widget(self, guide-&gt;user_data);</a>
+<a name="ln2103">      gtk_widget_show_all(widget);</a>
+<a name="ln2104">      gtk_stack_add_named(GTK_STACK(g-&gt;guides_widgets), widget, name);</a>
+<a name="ln2105">    }</a>
+<a name="ln2106">    g-&gt;guides_widgets_list = g_list_append(g-&gt;guides_widgets_list, widget);</a>
+<a name="ln2107">  }</a>
+<a name="ln2108"> </a>
+<a name="ln2109">  int guide = dt_conf_get_int(&quot;plugins/darkroom/clipping/guide&quot;);</a>
+<a name="ln2110">  dt_bauhaus_combobox_set(g-&gt;guide_lines, guide);</a>
+<a name="ln2111"> </a>
+<a name="ln2112">  gtk_widget_set_tooltip_text(g-&gt;guide_lines, _(&quot;display guide lines to help compose your photograph&quot;));</a>
+<a name="ln2113">  g_signal_connect(G_OBJECT(g-&gt;guide_lines), &quot;value-changed&quot;, G_CALLBACK(guides_presets_changed), self);</a>
+<a name="ln2114"> </a>
+<a name="ln2115">  g-&gt;flip_guides = dt_bauhaus_combobox_new(self);</a>
+<a name="ln2116">  dt_bauhaus_widget_set_label(g-&gt;flip_guides, NULL, _(&quot;flip guides&quot;));</a>
+<a name="ln2117">  dt_bauhaus_combobox_add(g-&gt;flip_guides, _(&quot;none&quot;));</a>
+<a name="ln2118">  dt_bauhaus_combobox_add(g-&gt;flip_guides, _(&quot;horizontally&quot;));</a>
+<a name="ln2119">  dt_bauhaus_combobox_add(g-&gt;flip_guides, _(&quot;vertically&quot;));</a>
+<a name="ln2120">  dt_bauhaus_combobox_add(g-&gt;flip_guides, _(&quot;both&quot;));</a>
+<a name="ln2121">  gtk_widget_set_tooltip_text(g-&gt;flip_guides, _(&quot;flip guides&quot;));</a>
+<a name="ln2122">  g_signal_connect(G_OBJECT(g-&gt;flip_guides), &quot;value-changed&quot;, G_CALLBACK(guides_flip_changed), self);</a>
+<a name="ln2123">  gtk_box_pack_start(GTK_BOX(self-&gt;widget), g-&gt;flip_guides, TRUE, TRUE, 0);</a>
+<a name="ln2124">  dt_bauhaus_combobox_set(g-&gt;flip_guides, dt_conf_get_int(&quot;plugins/darkroom/clipping/flip_guides&quot;));</a>
+<a name="ln2125"> </a>
+<a name="ln2126">  guides_presets_set_visibility(g, guide);</a>
+<a name="ln2127">}</a>
+<a name="ln2128"> </a>
+<a name="ln2129">static void free_aspect(gpointer data)</a>
+<a name="ln2130">{</a>
+<a name="ln2131">  dt_iop_clipping_aspect_t *aspect = (dt_iop_clipping_aspect_t *)data;</a>
+<a name="ln2132">  g_free(aspect-&gt;name);</a>
+<a name="ln2133">  aspect-&gt;name = NULL;</a>
+<a name="ln2134">  g_free(aspect);</a>
+<a name="ln2135">}</a>
+<a name="ln2136"> </a>
+<a name="ln2137">void gui_cleanup(struct dt_iop_module_t *self)</a>
+<a name="ln2138">{</a>
+<a name="ln2139">  dt_iop_clipping_gui_data_t *g = (dt_iop_clipping_gui_data_t *)self-&gt;gui_data;</a>
+<a name="ln2140">  g_list_free_full(g-&gt;aspect_list, free_aspect);</a>
+<a name="ln2141">  g-&gt;aspect_list = NULL;</a>
+<a name="ln2142">  free(self-&gt;gui_data);</a>
+<a name="ln2143">  self-&gt;gui_data = NULL;</a>
+<a name="ln2144">}</a>
+<a name="ln2145"> </a>
+<a name="ln2146">static _grab_region_t get_grab(float pzx, float pzy, dt_iop_clipping_gui_data_t *g, const float border,</a>
+<a name="ln2147">                               const float wd, const float ht)</a>
+<a name="ln2148">{</a>
+<a name="ln2149">  _grab_region_t grab = GRAB_NONE;</a>
+<a name="ln2150">  if(!(pzx &lt; g-&gt;clip_x || pzx &gt; g-&gt;clip_x + g-&gt;clip_w || pzy &lt; g-&gt;clip_y || pzy &gt; g-&gt;clip_y + g-&gt;clip_h))</a>
+<a name="ln2151">  {</a>
+<a name="ln2152">    // we are inside the crop box</a>
+<a name="ln2153">    grab = GRAB_CENTER;</a>
+<a name="ln2154">    if(pzx &gt;= g-&gt;clip_x &amp;&amp; pzx * wd &lt; g-&gt;clip_x * wd + border) grab |= GRAB_LEFT; // left border</a>
+<a name="ln2155">    if(pzy &gt;= g-&gt;clip_y &amp;&amp; pzy * ht &lt; g-&gt;clip_y * ht + border) grab |= GRAB_TOP;  // top border</a>
+<a name="ln2156">    if(pzx &lt;= g-&gt;clip_x + g-&gt;clip_w &amp;&amp; pzx * wd &gt; (g-&gt;clip_w + g-&gt;clip_x) * wd - border)</a>
+<a name="ln2157">      grab |= GRAB_RIGHT; // right border</a>
+<a name="ln2158">    if(pzy &lt;= g-&gt;clip_y + g-&gt;clip_h &amp;&amp; pzy * ht &gt; (g-&gt;clip_h + g-&gt;clip_y) * ht - border)</a>
+<a name="ln2159">      grab |= GRAB_BOTTOM; // bottom border</a>
+<a name="ln2160">  }</a>
+<a name="ln2161">  return grab;</a>
+<a name="ln2162">}</a>
+<a name="ln2163"> </a>
+<a name="ln2164">// draw rounded rectangle</a>
+<a name="ln2165">static void gui_draw_rounded_rectangle(cairo_t *cr, int width, int height, int x, int y)</a>
+<a name="ln2166">{</a>
+<a name="ln2167">  float radius = height / 5.0f;</a>
+<a name="ln2168">  float degrees = M_PI / 180.0;</a>
+<a name="ln2169">  cairo_new_sub_path(cr);</a>
+<a name="ln2170">  cairo_arc(cr, x + width - radius, y + radius, radius, -90 * degrees, 0 * degrees);</a>
+<a name="ln2171">  cairo_arc(cr, x + width - radius, y + height - radius, radius, 0 * degrees, 90 * degrees);</a>
+<a name="ln2172">  cairo_arc(cr, x + radius, y + height - radius, radius, 90 * degrees, 180 * degrees);</a>
+<a name="ln2173">  cairo_arc(cr, x + radius, y + radius, radius, 180 * degrees, 270 * degrees);</a>
+<a name="ln2174">  cairo_close_path(cr);</a>
+<a name="ln2175">  cairo_fill(cr);</a>
+<a name="ln2176">}</a>
+<a name="ln2177">// draw symmetry signs</a>
+<a name="ln2178">static void gui_draw_sym(cairo_t *cr, float x, float y, gboolean active)</a>
+<a name="ln2179">{</a>
+<a name="ln2180">  PangoLayout *layout;</a>
+<a name="ln2181">  PangoRectangle ink;</a>
+<a name="ln2182">  PangoFontDescription *desc = pango_font_description_copy_static(darktable.bauhaus-&gt;pango_font_desc);</a>
+<a name="ln2183">  pango_font_description_set_weight(desc, PANGO_WEIGHT_BOLD);</a>
+<a name="ln2184">  pango_font_description_set_absolute_size(desc, DT_PIXEL_APPLY_DPI(16) * PANGO_SCALE);</a>
+<a name="ln2185">  layout = pango_cairo_create_layout(cr);</a>
+<a name="ln2186">  pango_layout_set_font_description(layout, desc);</a>
+<a name="ln2187">  pango_layout_set_text(layout, &quot;ꝏ&quot;, -1);</a>
+<a name="ln2188">  pango_layout_get_pixel_extents(layout, &amp;ink, NULL);</a>
+<a name="ln2189">  cairo_set_source_rgba(cr, .5, .5, .5, .7);</a>
+<a name="ln2190">  gui_draw_rounded_rectangle(</a>
+<a name="ln2191">      cr, ink.width + DT_PIXEL_APPLY_DPI(4), ink.height + DT_PIXEL_APPLY_DPI(8),</a>
+<a name="ln2192">      x - ink.width / 2.0f - DT_PIXEL_APPLY_DPI(2), y - ink.height / 2.0f - DT_PIXEL_APPLY_DPI(4));</a>
+<a name="ln2193">  cairo_move_to(cr, x - ink.width / 2.0f, y - 3.0 * ink.height / 4.0f - DT_PIXEL_APPLY_DPI(4));</a>
+<a name="ln2194">  if(active)</a>
+<a name="ln2195">    cairo_set_source_rgba(cr, 1.0, 0.0, 0.0, .9);</a>
+<a name="ln2196">  else</a>
+<a name="ln2197">    cairo_set_source_rgba(cr, .2, .2, .2, .9);</a>
+<a name="ln2198">  pango_cairo_show_layout(cr, layout);</a>
+<a name="ln2199">  pango_font_description_free(desc);</a>
+<a name="ln2200">  g_object_unref(layout);</a>
+<a name="ln2201">}</a>
+<a name="ln2202"> </a>
+<a name="ln2203">// draw guides and handles over the image</a>
+<a name="ln2204">void gui_post_expose(struct dt_iop_module_t *self, cairo_t *cr, int32_t width, int32_t height,</a>
+<a name="ln2205">                     int32_t pointerx, int32_t pointery)</a>
+<a name="ln2206">{</a>
+<a name="ln2207">  dt_develop_t *dev = self-&gt;dev;</a>
+<a name="ln2208">  dt_iop_clipping_gui_data_t *g = (dt_iop_clipping_gui_data_t *)self-&gt;gui_data;</a>
+<a name="ln2209">  dt_iop_clipping_params_t *p = (dt_iop_clipping_params_t *)self-&gt;params;</a>
+<a name="ln2210"> </a>
+<a name="ln2211">  // we don't do anything if the image is not ready</a>
+<a name="ln2212">  if(self-&gt;dev-&gt;preview_pipe-&gt;backbuf_width == g-&gt;old_width</a>
+<a name="ln2213">     &amp;&amp; self-&gt;dev-&gt;preview_pipe-&gt;backbuf_height == g-&gt;old_height)</a>
+<a name="ln2214">    return;</a>
+<a name="ln2215">  g-&gt;old_width = g-&gt;old_height = -1;</a>
+<a name="ln2216"> </a>
+<a name="ln2217">  // reapply box aspect to be sure that the ratio has not been modified by the keystone transform</a>
+<a name="ln2218">  apply_box_aspect(self, GRAB_HORIZONTAL);</a>
+<a name="ln2219"> </a>
+<a name="ln2220">  float wd = dev-&gt;preview_pipe-&gt;backbuf_width;</a>
+<a name="ln2221">  float ht = dev-&gt;preview_pipe-&gt;backbuf_height;</a>
+<a name="ln2222">  float zoom_y = dt_control_get_dev_zoom_y();</a>
+<a name="ln2223">  float zoom_x = dt_control_get_dev_zoom_x();</a>
+<a name="ln2224">  dt_dev_zoom_t zoom = dt_control_get_dev_zoom();</a>
+<a name="ln2225">  int closeup = dt_control_get_dev_closeup();</a>
+<a name="ln2226">  float zoom_scale = dt_dev_get_zoom_scale(dev, zoom, 1&lt;&lt;closeup, 1);</a>
+<a name="ln2227"> </a>
+<a name="ln2228">  cairo_translate(cr, width / 2.0, height / 2.0f);</a>
+<a name="ln2229">  cairo_scale(cr, zoom_scale, zoom_scale);</a>
+<a name="ln2230">  cairo_translate(cr, -.5f * wd - zoom_x * wd, -.5f * ht - zoom_y * ht);</a>
+<a name="ln2231"> </a>
+<a name="ln2232">  double dashes = DT_PIXEL_APPLY_DPI(5.0) / zoom_scale;</a>
+<a name="ln2233"> </a>
+<a name="ln2234">  // draw cropping window</a>
+<a name="ln2235">  float pzx, pzy;</a>
+<a name="ln2236">  dt_dev_get_pointer_zoom_pos(dev, pointerx, pointery, &amp;pzx, &amp;pzy);</a>
+<a name="ln2237">  pzx += 0.5f;</a>
+<a name="ln2238">  pzy += 0.5f;</a>
+<a name="ln2239">  if(_iop_clipping_set_max_clip(self))</a>
+<a name="ln2240">  {</a>
+<a name="ln2241">    cairo_set_dash(cr, &amp;dashes, 0, 0);</a>
+<a name="ln2242">    cairo_set_source_rgba(cr, .2, .2, .2, .8);</a>
+<a name="ln2243">    cairo_set_fill_rule(cr, CAIRO_FILL_RULE_EVEN_ODD);</a>
+<a name="ln2244">    cairo_rectangle(cr, g-&gt;clip_max_x * wd - 1.0f, g-&gt;clip_max_y * ht - 1.0f, g-&gt;clip_max_w * wd + 1.0f,</a>
+<a name="ln2245">                    g-&gt;clip_max_h * ht + 1.0f);</a>
+<a name="ln2246">    cairo_rectangle(cr, g-&gt;clip_x * wd, g-&gt;clip_y * ht, g-&gt;clip_w * wd, g-&gt;clip_h * ht);</a>
+<a name="ln2247">    cairo_fill(cr);</a>
+<a name="ln2248">  }</a>
+<a name="ln2249">  if(g-&gt;clip_x &gt; .0f || g-&gt;clip_y &gt; .0f || g-&gt;clip_w &lt; 1.0f || g-&gt;clip_h &lt; 1.0f)</a>
+<a name="ln2250">  {</a>
+<a name="ln2251">    cairo_set_line_width(cr, dashes / 2.0);</a>
+<a name="ln2252">    cairo_rectangle(cr, g-&gt;clip_x * wd, g-&gt;clip_y * ht, g-&gt;clip_w * wd, g-&gt;clip_h * ht);</a>
+<a name="ln2253">    cairo_set_source_rgb(cr, .7, .7, .7);</a>
+<a name="ln2254">    cairo_stroke(cr);</a>
+<a name="ln2255">  }</a>
+<a name="ln2256"> </a>
+<a name="ln2257">  // draw cropping window dimensions if first mouse button is pressed</a>
+<a name="ln2258">  if(darktable.control-&gt;button_down &amp;&amp; darktable.control-&gt;button_down_which == 1 &amp;&amp; g-&gt;k_show != 1)</a>
+<a name="ln2259">  {</a>
+<a name="ln2260">    char dimensions[16];</a>
+<a name="ln2261">    dimensions[0] = '\0';</a>
+<a name="ln2262">    PangoLayout *layout;</a>
+<a name="ln2263">    PangoRectangle ink;</a>
+<a name="ln2264">    PangoFontDescription *desc = pango_font_description_copy_static(darktable.bauhaus-&gt;pango_font_desc);</a>
+<a name="ln2265">    pango_font_description_set_weight(desc, PANGO_WEIGHT_BOLD);</a>
+<a name="ln2266">    pango_font_description_set_absolute_size(desc, DT_PIXEL_APPLY_DPI(16) * PANGO_SCALE / zoom_scale);</a>
+<a name="ln2267">    layout = pango_cairo_create_layout(cr);</a>
+<a name="ln2268">    pango_layout_set_font_description(layout, desc);</a>
+<a name="ln2269"> </a>
+<a name="ln2270">    int procw, proch;</a>
+<a name="ln2271">    dt_dev_get_processed_size(dev, &amp;procw, &amp;proch);</a>
+<a name="ln2272">    snprintf(dimensions, sizeof(dimensions), &quot;%.0fx%.0f&quot;, (float)procw * g-&gt;clip_w, (float)proch * g-&gt;clip_h);</a>
+<a name="ln2273"> </a>
+<a name="ln2274">    pango_layout_set_text(layout, dimensions, -1);</a>
+<a name="ln2275">    pango_layout_get_pixel_extents(layout, &amp;ink, NULL);</a>
+<a name="ln2276">    cairo_move_to(cr, (g-&gt;clip_x + g-&gt;clip_w / 2) * wd - ink.width * .5f,</a>
+<a name="ln2277">                  (g-&gt;clip_y + g-&gt;clip_h / 2) * ht - ink.height * .5f);</a>
+<a name="ln2278">    pango_cairo_show_layout(cr, layout);</a>
+<a name="ln2279">    pango_font_description_free(desc);</a>
+<a name="ln2280">    g_object_unref(layout);</a>
+<a name="ln2281">  }</a>
+<a name="ln2282"> </a>
+<a name="ln2283">  // draw crop area guides</a>
+<a name="ln2284">  int guide_flip = dt_bauhaus_combobox_get(g-&gt;flip_guides);</a>
+<a name="ln2285">  float left = g-&gt;clip_x * wd;</a>
+<a name="ln2286">  float top = g-&gt;clip_y * ht;</a>
+<a name="ln2287">  float cwidth = g-&gt;clip_w * wd;</a>
+<a name="ln2288">  float cheight = g-&gt;clip_h * ht;</a>
+<a name="ln2289"> </a>
+<a name="ln2290">  // save context</a>
+<a name="ln2291">  cairo_save(cr);</a>
+<a name="ln2292">  cairo_rectangle(cr, left, top, cwidth, cheight);</a>
+<a name="ln2293">  cairo_clip(cr);</a>
+<a name="ln2294">  cairo_set_line_width(cr, DT_PIXEL_APPLY_DPI(1.0) / zoom_scale);</a>
+<a name="ln2295">  cairo_set_source_rgb(cr, .8, .8, .8);</a>
+<a name="ln2296">  cairo_set_dash(cr, &amp;dashes, 1, 0);</a>
+<a name="ln2297"> </a>
+<a name="ln2298">  // Move coordinates to local center selection.</a>
+<a name="ln2299">  cairo_translate(cr, (cwidth / 2 + left), (cheight / 2 + top));</a>
+<a name="ln2300"> </a>
+<a name="ln2301">  // Flip horizontal.</a>
+<a name="ln2302">  if(guide_flip &amp; FLAG_FLIP_HORIZONTAL) cairo_scale(cr, -1, 1);</a>
+<a name="ln2303">  // Flip vertical.</a>
+<a name="ln2304">  if(guide_flip &amp; FLAG_FLIP_VERTICAL) cairo_scale(cr, 1, -1);</a>
+<a name="ln2305"> </a>
+<a name="ln2306">  int which = dt_bauhaus_combobox_get(g-&gt;guide_lines);</a>
+<a name="ln2307">  dt_guides_t *guide = (dt_guides_t *)g_list_nth_data(darktable.guides, which - 1);</a>
+<a name="ln2308">  if(guide)</a>
+<a name="ln2309">  {</a>
+<a name="ln2310">    guide-&gt;draw(cr, -cwidth / 2, -cheight / 2, cwidth, cheight, zoom_scale, guide-&gt;user_data);</a>
+<a name="ln2311">    cairo_stroke_preserve(cr);</a>
+<a name="ln2312">    cairo_set_dash(cr, &amp;dashes, 0, 0);</a>
+<a name="ln2313">    cairo_set_source_rgba(cr, 0.3, .3, .3, .8);</a>
+<a name="ln2314">    cairo_stroke(cr);</a>
+<a name="ln2315">  }</a>
+<a name="ln2316">  cairo_restore(cr);</a>
+<a name="ln2317"> </a>
+<a name="ln2318">  cairo_set_line_width(cr, DT_PIXEL_APPLY_DPI(2.0) / zoom_scale);</a>
+<a name="ln2319">  cairo_set_source_rgb(cr, .3, .3, .3);</a>
+<a name="ln2320">  const int border = DT_PIXEL_APPLY_DPI(30.0) / zoom_scale;</a>
+<a name="ln2321">  if(g-&gt;straightening)</a>
+<a name="ln2322">  {</a>
+<a name="ln2323">    PangoRectangle ink;</a>
+<a name="ln2324">    PangoLayout *layout;</a>
+<a name="ln2325">    PangoFontDescription *desc = pango_font_description_copy_static(darktable.bauhaus-&gt;pango_font_desc);</a>
+<a name="ln2326">    pango_font_description_set_weight(desc, PANGO_WEIGHT_BOLD);</a>
+<a name="ln2327">    pango_font_description_set_absolute_size(desc, DT_PIXEL_APPLY_DPI(16) * PANGO_SCALE / zoom_scale);</a>
+<a name="ln2328">    layout = pango_cairo_create_layout(cr);</a>
+<a name="ln2329">    pango_layout_set_font_description(layout, desc);</a>
+<a name="ln2330">    float bzx = g-&gt;button_down_zoom_x + .5f, bzy = g-&gt;button_down_zoom_y + .5f;</a>
+<a name="ln2331">    cairo_arc(cr, bzx * wd, bzy * ht, DT_PIXEL_APPLY_DPI(3), 0, 2.0 * M_PI);</a>
+<a name="ln2332">    cairo_stroke(cr);</a>
+<a name="ln2333">    cairo_arc(cr, pzx * wd, pzy * ht, DT_PIXEL_APPLY_DPI(3), 0, 2.0 * M_PI);</a>
+<a name="ln2334">    cairo_stroke(cr);</a>
+<a name="ln2335">    cairo_move_to(cr, bzx * wd, bzy * ht);</a>
+<a name="ln2336">    cairo_line_to(cr, pzx * wd, pzy * ht);</a>
+<a name="ln2337">    cairo_stroke(cr);</a>
+<a name="ln2338"> </a>
+<a name="ln2339">    // show rotation angle</a>
+<a name="ln2340">    float dx = pzx * wd - bzx * wd, dy = pzy * ht - bzy * ht;</a>
+<a name="ln2341">    if(dx &lt; 0)</a>
+<a name="ln2342">    {</a>
+<a name="ln2343">      dx = -dx;</a>
+<a name="ln2344">      dy = -dy;</a>
+<a name="ln2345">    }</a>
+<a name="ln2346">    float angle = atan2f(dy, dx);</a>
+<a name="ln2347">    angle = angle * 180 / M_PI;</a>
+<a name="ln2348">    if(angle &gt; 45.0) angle -= 90;</a>
+<a name="ln2349">    if(angle &lt; -45.0) angle += 90;</a>
+<a name="ln2350"> </a>
+<a name="ln2351">    char view_angle[16];</a>
+<a name="ln2352">    view_angle[0] = '\0';</a>
+<a name="ln2353">    snprintf(view_angle, sizeof(view_angle), &quot;%.2f°&quot;, angle);</a>
+<a name="ln2354">    pango_layout_set_text(layout, view_angle, -1);</a>
+<a name="ln2355">    pango_layout_get_pixel_extents(layout, &amp;ink, NULL);</a>
+<a name="ln2356">    cairo_set_source_rgb(cr, .7, .7, .7);</a>
+<a name="ln2357">    cairo_move_to(cr, pzx * wd + DT_PIXEL_APPLY_DPI(20) / zoom_scale, pzy * ht - ink.height);</a>
+<a name="ln2358">    pango_cairo_show_layout(cr, layout);</a>
+<a name="ln2359">    pango_font_description_free(desc);</a>
+<a name="ln2360">    g_object_unref(layout);</a>
+<a name="ln2361">  }</a>
+<a name="ln2362">  else if(g-&gt;k_show != 1)</a>
+<a name="ln2363">  {</a>
+<a name="ln2364">    _grab_region_t grab = g-&gt;cropping ? g-&gt;cropping : get_grab(pzx, pzy, g, border, wd, ht);</a>
+<a name="ln2365">    if(grab == GRAB_LEFT) cairo_rectangle(cr, g-&gt;clip_x * wd, g-&gt;clip_y * ht, border, g-&gt;clip_h * ht);</a>
+<a name="ln2366">    if(grab == GRAB_TOP) cairo_rectangle(cr, g-&gt;clip_x * wd, g-&gt;clip_y * ht, g-&gt;clip_w * wd, border);</a>
+<a name="ln2367">    if(grab == GRAB_TOP_LEFT) cairo_rectangle(cr, g-&gt;clip_x * wd, g-&gt;clip_y * ht, border, border);</a>
+<a name="ln2368">    if(grab == GRAB_RIGHT)</a>
+<a name="ln2369">      cairo_rectangle(cr, (g-&gt;clip_x + g-&gt;clip_w) * wd - border, g-&gt;clip_y * ht, border, g-&gt;clip_h * ht);</a>
+<a name="ln2370">    if(grab == GRAB_BOTTOM)</a>
+<a name="ln2371">      cairo_rectangle(cr, g-&gt;clip_x * wd, (g-&gt;clip_y + g-&gt;clip_h) * ht - border, g-&gt;clip_w * wd, border);</a>
+<a name="ln2372">    if(grab == GRAB_BOTTOM_RIGHT)</a>
+<a name="ln2373">      cairo_rectangle(cr, (g-&gt;clip_x + g-&gt;clip_w) * wd - border, (g-&gt;clip_y + g-&gt;clip_h) * ht - border,</a>
+<a name="ln2374">                      border, border);</a>
+<a name="ln2375">    if(grab == GRAB_TOP_RIGHT)</a>
+<a name="ln2376">      cairo_rectangle(cr, (g-&gt;clip_x + g-&gt;clip_w) * wd - border, g-&gt;clip_y * ht, border, border);</a>
+<a name="ln2377">    if(grab == GRAB_BOTTOM_LEFT)</a>
+<a name="ln2378">      cairo_rectangle(cr, g-&gt;clip_x * wd, (g-&gt;clip_y + g-&gt;clip_h) * ht - border, border, border);</a>
+<a name="ln2379">    cairo_stroke(cr);</a>
+<a name="ln2380">  }</a>
+<a name="ln2381"> </a>
+<a name="ln2382">  // draw keystone points and lines</a>
+<a name="ln2383">  if(g-&gt;k_show == 1 &amp;&amp; p-&gt;k_type &gt; 0)</a>
+<a name="ln2384">  {</a>
+<a name="ln2385">    // points in screen space</a>
+<a name="ln2386">    dt_dev_pixelpipe_iop_t *piece = dt_dev_distort_get_iop_pipe(self-&gt;dev, self-&gt;dev-&gt;preview_pipe, self);</a>
+<a name="ln2387">    if(!piece) return;</a>
+<a name="ln2388"> </a>
+<a name="ln2389">    float wp = piece-&gt;buf_out.width, hp = piece-&gt;buf_out.height;</a>
+<a name="ln2390">    float pts[8] = { p-&gt;kxa * wp, p-&gt;kya * hp, p-&gt;kxb * wp, p-&gt;kyb * hp,</a>
+<a name="ln2391">                     p-&gt;kxc * wp, p-&gt;kyc * hp, p-&gt;kxd * wp, p-&gt;kyd * hp };</a>
+<a name="ln2392">    if(dt_dev_distort_transform_plus(self-&gt;dev, self-&gt;dev-&gt;preview_pipe, self-&gt;priority + 1, 999999, pts, 4))</a>
+<a name="ln2393">    {</a>
+<a name="ln2394">      if(p-&gt;k_type == 3)</a>
+<a name="ln2395">      {</a>
+<a name="ln2396">        // determine extremity of the lines</a>
+<a name="ln2397">        int v1t = pts[0] - (pts[6] - pts[0]) * pts[1] / (float)(pts[7] - pts[1]);</a>
+<a name="ln2398">        int v1b = (pts[6] - pts[0]) * ht / (float)(pts[7] - pts[1]) + v1t;</a>
+<a name="ln2399">        int v2t = pts[2] - (pts[4] - pts[2]) * pts[3] / (float)(pts[5] - pts[3]);</a>
+<a name="ln2400">        int v2b = (pts[4] - pts[2]) * ht / (float)(pts[5] - pts[3]) + v2t;</a>
+<a name="ln2401">        int h1l = pts[1] - (pts[3] - pts[1]) * pts[0] / (float)(pts[2] - pts[0]);</a>
+<a name="ln2402">        int h1r = (pts[3] - pts[1]) * wd / (float)(pts[2] - pts[0]) + h1l;</a>
+<a name="ln2403">        int h2l = pts[7] - (pts[5] - pts[7]) * pts[6] / (float)(pts[4] - pts[6]);</a>
+<a name="ln2404">        int h2r = (pts[5] - pts[7]) * wd / (float)(pts[4] - pts[6]) + h2l;</a>
+<a name="ln2405"> </a>
+<a name="ln2406">        // draw the lines</a>
+<a name="ln2407">        cairo_move_to(cr, v1t, 0);</a>
+<a name="ln2408">        cairo_line_to(cr, v1b, ht);</a>
+<a name="ln2409">        cairo_stroke(cr);</a>
+<a name="ln2410">        cairo_move_to(cr, v2t, 0);</a>
+<a name="ln2411">        cairo_line_to(cr, v2b, ht);</a>
+<a name="ln2412">        cairo_stroke(cr);</a>
+<a name="ln2413">        cairo_move_to(cr, 0, h1l);</a>
+<a name="ln2414">        cairo_line_to(cr, wd, h1r);</a>
+<a name="ln2415">        cairo_stroke(cr);</a>
+<a name="ln2416">        cairo_move_to(cr, 0, h2l);</a>
+<a name="ln2417">        cairo_line_to(cr, wd, h2r);</a>
+<a name="ln2418">        cairo_stroke(cr);</a>
+<a name="ln2419">        // redraw selected one</a>
+<a name="ln2420">        cairo_set_line_width(cr, DT_PIXEL_APPLY_DPI(4.0) / zoom_scale);</a>
+<a name="ln2421">        if(g-&gt;k_selected_segment == 0)</a>
+<a name="ln2422">        {</a>
+<a name="ln2423">          cairo_move_to(cr, pts[0], pts[1]);</a>
+<a name="ln2424">          cairo_line_to(cr, pts[2], pts[3]);</a>
+<a name="ln2425">          cairo_stroke(cr);</a>
+<a name="ln2426">        }</a>
+<a name="ln2427">        else if(g-&gt;k_selected_segment == 1)</a>
+<a name="ln2428">        {</a>
+<a name="ln2429">          cairo_move_to(cr, pts[4], pts[5]);</a>
+<a name="ln2430">          cairo_line_to(cr, pts[2], pts[3]);</a>
+<a name="ln2431">          cairo_stroke(cr);</a>
+<a name="ln2432">        }</a>
+<a name="ln2433">        else if(g-&gt;k_selected_segment == 2)</a>
+<a name="ln2434">        {</a>
+<a name="ln2435">          cairo_move_to(cr, pts[4], pts[5]);</a>
+<a name="ln2436">          cairo_line_to(cr, pts[6], pts[7]);</a>
+<a name="ln2437">          cairo_stroke(cr);</a>
+<a name="ln2438">        }</a>
+<a name="ln2439">        else if(g-&gt;k_selected_segment == 3)</a>
+<a name="ln2440">        {</a>
+<a name="ln2441">          cairo_move_to(cr, pts[0], pts[1]);</a>
+<a name="ln2442">          cairo_line_to(cr, pts[6], pts[7]);</a>
+<a name="ln2443">          cairo_stroke(cr);</a>
+<a name="ln2444">        }</a>
+<a name="ln2445">      }</a>
+<a name="ln2446">      else if(p-&gt;k_type == 2)</a>
+<a name="ln2447">      {</a>
+<a name="ln2448">        // determine extremity of the lines</a>
+<a name="ln2449">        int h1l = pts[1] - (pts[3] - pts[1]) * pts[0] / (float)(pts[2] - pts[0]);</a>
+<a name="ln2450">        int h1r = (pts[3] - pts[1]) * wd / (float)(pts[2] - pts[0]) + h1l;</a>
+<a name="ln2451">        int h2l = pts[7] - (pts[5] - pts[7]) * pts[6] / (float)(pts[4] - pts[6]);</a>
+<a name="ln2452">        int h2r = (pts[5] - pts[7]) * wd / (float)(pts[4] - pts[6]) + h2l;</a>
+<a name="ln2453"> </a>
+<a name="ln2454">        // draw the lines</a>
+<a name="ln2455">        cairo_move_to(cr, 0, h1l);</a>
+<a name="ln2456">        cairo_line_to(cr, wd, h1r);</a>
+<a name="ln2457">        cairo_stroke(cr);</a>
+<a name="ln2458">        cairo_move_to(cr, 0, h2l);</a>
+<a name="ln2459">        cairo_line_to(cr, wd, h2r);</a>
+<a name="ln2460">        cairo_stroke(cr);</a>
+<a name="ln2461">        // redraw selected one</a>
+<a name="ln2462">        cairo_set_line_width(cr, DT_PIXEL_APPLY_DPI(4.0) / zoom_scale);</a>
+<a name="ln2463">        if(g-&gt;k_selected_segment == 1)</a>
+<a name="ln2464">        {</a>
+<a name="ln2465">          cairo_move_to(cr, pts[4], pts[5]);</a>
+<a name="ln2466">          cairo_line_to(cr, pts[2], pts[3]);</a>
+<a name="ln2467">          cairo_stroke(cr);</a>
+<a name="ln2468">        }</a>
+<a name="ln2469">        else if(g-&gt;k_selected_segment == 3)</a>
+<a name="ln2470">        {</a>
+<a name="ln2471">          cairo_move_to(cr, pts[0], pts[1]);</a>
+<a name="ln2472">          cairo_line_to(cr, pts[6], pts[7]);</a>
+<a name="ln2473">          cairo_stroke(cr);</a>
+<a name="ln2474">        }</a>
+<a name="ln2475">      }</a>
+<a name="ln2476">      else if(p-&gt;k_type == 1)</a>
+<a name="ln2477">      {</a>
+<a name="ln2478">        // determine extremity of the lines</a>
+<a name="ln2479">        int v1t = pts[0] - (pts[6] - pts[0]) * pts[1] / (float)(pts[7] - pts[1]);</a>
+<a name="ln2480">        int v1b = (pts[6] - pts[0]) * ht / (float)(pts[7] - pts[1]) + v1t;</a>
+<a name="ln2481">        int v2t = pts[2] - (pts[4] - pts[2]) * pts[3] / (float)(pts[5] - pts[3]);</a>
+<a name="ln2482">        int v2b = (pts[4] - pts[2]) * ht / (float)(pts[5] - pts[3]) + v2t;</a>
+<a name="ln2483"> </a>
+<a name="ln2484">        // draw the lines</a>
+<a name="ln2485">        cairo_move_to(cr, v1t, 0);</a>
+<a name="ln2486">        cairo_line_to(cr, v1b, ht);</a>
+<a name="ln2487">        cairo_stroke(cr);</a>
+<a name="ln2488">        cairo_move_to(cr, v2t, 0);</a>
+<a name="ln2489">        cairo_line_to(cr, v2b, ht);</a>
+<a name="ln2490">        cairo_stroke(cr);</a>
+<a name="ln2491">        // redraw selected one</a>
+<a name="ln2492">        cairo_set_line_width(cr, DT_PIXEL_APPLY_DPI(4.0) / zoom_scale);</a>
+<a name="ln2493">        if(g-&gt;k_selected_segment == 0)</a>
+<a name="ln2494">        {</a>
+<a name="ln2495">          cairo_move_to(cr, pts[0], pts[1]);</a>
+<a name="ln2496">          cairo_line_to(cr, pts[2], pts[3]);</a>
+<a name="ln2497">          cairo_stroke(cr);</a>
+<a name="ln2498">        }</a>
+<a name="ln2499">        else if(g-&gt;k_selected_segment == 2)</a>
+<a name="ln2500">        {</a>
+<a name="ln2501">          cairo_move_to(cr, pts[4], pts[5]);</a>
+<a name="ln2502">          cairo_line_to(cr, pts[6], pts[7]);</a>
+<a name="ln2503">          cairo_stroke(cr);</a>
+<a name="ln2504">        }</a>
+<a name="ln2505">      }</a>
+<a name="ln2506"> </a>
+<a name="ln2507">      // draw the points</a>
+<a name="ln2508">      if(g-&gt;k_selected == 0) // point 1</a>
+<a name="ln2509">      {</a>
+<a name="ln2510">        cairo_set_line_width(cr, DT_PIXEL_APPLY_DPI(4.0) / zoom_scale);</a>
+<a name="ln2511">        cairo_set_source_rgba(cr, 1.0, 0, 0, .8);</a>
+<a name="ln2512">      }</a>
+<a name="ln2513">      else</a>
+<a name="ln2514">      {</a>
+<a name="ln2515">        cairo_set_line_width(cr, DT_PIXEL_APPLY_DPI(2.0) / zoom_scale);</a>
+<a name="ln2516">        cairo_set_source_rgba(cr, 1.0, 0, 0, .5);</a>
+<a name="ln2517">      }</a>
+<a name="ln2518">      cairo_arc(cr, pts[0], pts[1], DT_PIXEL_APPLY_DPI(5.0) / zoom_scale, 0, 2.0 * M_PI);</a>
+<a name="ln2519">      cairo_stroke(cr);</a>
+<a name="ln2520">      if(g-&gt;k_selected == 1) // point 2</a>
+<a name="ln2521">      {</a>
+<a name="ln2522">        cairo_set_line_width(cr, DT_PIXEL_APPLY_DPI(4.0) / zoom_scale);</a>
+<a name="ln2523">        cairo_set_source_rgba(cr, 1.0, 0, 0, .8);</a>
+<a name="ln2524">      }</a>
+<a name="ln2525">      else</a>
+<a name="ln2526">      {</a>
+<a name="ln2527">        cairo_set_line_width(cr, DT_PIXEL_APPLY_DPI(2.0) / zoom_scale);</a>
+<a name="ln2528">        cairo_set_source_rgba(cr, 1.0, 0, 0, .5);</a>
+<a name="ln2529">      }</a>
+<a name="ln2530">      cairo_arc(cr, pts[2], pts[3], DT_PIXEL_APPLY_DPI(5.0) / zoom_scale, 0, 2.0 * M_PI);</a>
+<a name="ln2531">      cairo_stroke(cr);</a>
+<a name="ln2532">      if(g-&gt;k_selected == 2) // point 3</a>
+<a name="ln2533">      {</a>
+<a name="ln2534">        cairo_set_line_width(cr, DT_PIXEL_APPLY_DPI(4.0) / zoom_scale);</a>
+<a name="ln2535">        cairo_set_source_rgba(cr, 1.0, 0, 0, .8);</a>
+<a name="ln2536">      }</a>
+<a name="ln2537">      else</a>
+<a name="ln2538">      {</a>
+<a name="ln2539">        cairo_set_line_width(cr, DT_PIXEL_APPLY_DPI(2.0) / zoom_scale);</a>
+<a name="ln2540">        cairo_set_source_rgba(cr, 1.0, 0, 0, .5);</a>
+<a name="ln2541">      }</a>
+<a name="ln2542">      cairo_arc(cr, pts[4], pts[5], DT_PIXEL_APPLY_DPI(5.0) / zoom_scale, 0, 2.0 * M_PI);</a>
+<a name="ln2543">      cairo_stroke(cr);</a>
+<a name="ln2544">      if(g-&gt;k_selected == 3) // point 4</a>
+<a name="ln2545">      {</a>
+<a name="ln2546">        cairo_set_line_width(cr, DT_PIXEL_APPLY_DPI(4.0) / zoom_scale);</a>
+<a name="ln2547">        cairo_set_source_rgba(cr, 1.0, 0, 0, .8);</a>
+<a name="ln2548">      }</a>
+<a name="ln2549">      else</a>
+<a name="ln2550">      {</a>
+<a name="ln2551">        cairo_set_line_width(cr, DT_PIXEL_APPLY_DPI(2.0) / zoom_scale);</a>
+<a name="ln2552">        cairo_set_source_rgba(cr, 1.0, 0, 0, .5);</a>
+<a name="ln2553">      }</a>
+<a name="ln2554">      cairo_arc(cr, pts[6], pts[7], DT_PIXEL_APPLY_DPI(5.0) / zoom_scale, 0, 2.0 * M_PI);</a>
+<a name="ln2555">      cairo_stroke(cr);</a>
+<a name="ln2556"> </a>
+<a name="ln2557">      // draw the apply &quot;button&quot;</a>
+<a name="ln2558">      PangoLayout *layout;</a>
+<a name="ln2559">      PangoRectangle ink;</a>
+<a name="ln2560">      PangoFontDescription *desc = pango_font_description_copy_static(darktable.bauhaus-&gt;pango_font_desc);</a>
+<a name="ln2561">      pango_font_description_set_weight(desc, PANGO_WEIGHT_BOLD);</a>
+<a name="ln2562">      pango_font_description_set_absolute_size(desc, DT_PIXEL_APPLY_DPI(16) * PANGO_SCALE);</a>
+<a name="ln2563">      layout = pango_cairo_create_layout(cr);</a>
+<a name="ln2564">      pango_layout_set_font_description(layout, desc);</a>
+<a name="ln2565">      cairo_set_font_size(cr, DT_PIXEL_APPLY_DPI(16));</a>
+<a name="ln2566">      pango_layout_set_text(layout, &quot;ok&quot;, -1);</a>
+<a name="ln2567">      pango_layout_get_pixel_extents(layout, &amp;ink, NULL);</a>
+<a name="ln2568">      int c[2] = { (MIN(pts[4], pts[2]) + MAX(pts[0], pts[6])) / 2.0f,</a>
+<a name="ln2569">                   (MIN(pts[5], pts[7]) + MAX(pts[1], pts[3])) / 2.0f };</a>
+<a name="ln2570">      cairo_set_source_rgba(cr, .5, .5, .5, .9);</a>
+<a name="ln2571">      gui_draw_rounded_rectangle(cr, ink.width + DT_PIXEL_APPLY_DPI(8),</a>
+<a name="ln2572">                                 ink.height + DT_PIXEL_APPLY_DPI(12),</a>
+<a name="ln2573">                                 c[0] - ink.width / 2.0f - DT_PIXEL_APPLY_DPI(4),</a>
+<a name="ln2574">                                 c[1] - ink.height / 2.0f - DT_PIXEL_APPLY_DPI(6));</a>
+<a name="ln2575">      cairo_move_to(cr, c[0] - ink.width / 2.0f, c[1] - 3.0 * ink.height / 4.0f);</a>
+<a name="ln2576">      cairo_set_source_rgba(cr, .2, .2, .2, .9);</a>
+<a name="ln2577">      pango_cairo_show_layout(cr, layout);</a>
+<a name="ln2578">      pango_font_description_free(desc);</a>
+<a name="ln2579">      g_object_unref(layout);</a>
+<a name="ln2580"> </a>
+<a name="ln2581">      // draw the symmetry buttons</a>
+<a name="ln2582">      gboolean sym = FALSE;</a>
+<a name="ln2583">      if(p-&gt;k_type == 1 || p-&gt;k_type == 3)</a>
+<a name="ln2584">      {</a>
+<a name="ln2585">        if(p-&gt;k_sym == 1 || p-&gt;k_sym == 3) sym = TRUE;</a>
+<a name="ln2586">        gui_draw_sym(cr, (pts[0] + pts[6]) / 2.0f, (pts[1] + pts[7]) / 2.0f, sym);</a>
+<a name="ln2587">        gui_draw_sym(cr, (pts[2] + pts[4]) / 2.0f, (pts[3] + pts[5]) / 2.0f, sym);</a>
+<a name="ln2588">      }</a>
+<a name="ln2589">      if(p-&gt;k_type == 2 || p-&gt;k_type == 3)</a>
+<a name="ln2590">      {</a>
+<a name="ln2591">        sym = (p-&gt;k_sym &gt;= 2);</a>
+<a name="ln2592">        gui_draw_sym(cr, (pts[0] + pts[2]) / 2.0f, (pts[1] + pts[3]) / 2.0f, sym);</a>
+<a name="ln2593">        gui_draw_sym(cr, (pts[6] + pts[4]) / 2.0f, (pts[7] + pts[5]) / 2.0f, sym);</a>
+<a name="ln2594">      }</a>
+<a name="ln2595">    }</a>
+<a name="ln2596">  }</a>
+<a name="ln2597">}</a>
+<a name="ln2598"> </a>
+<a name="ln2599">// determine the distance between the segment [(xa,ya)(xb,yb)] and the point (xc,yc)</a>
+<a name="ln2600">static float dist_seg(float xa, float ya, float xb, float yb, float xc, float yc)</a>
+<a name="ln2601">{</a>
+<a name="ln2602">  if(xa == xb &amp;&amp; ya == yb) return (xc - xa) * (xc - xa) + (yc - ya) * (yc - ya);</a>
+<a name="ln2603"> </a>
+<a name="ln2604">  float sx = xb - xa;</a>
+<a name="ln2605">  float sy = yb - ya;</a>
+<a name="ln2606"> </a>
+<a name="ln2607">  float ux = xc - xa;</a>
+<a name="ln2608">  float uy = yc - ya;</a>
+<a name="ln2609"> </a>
+<a name="ln2610">  float dp = sx * ux + sy * uy;</a>
+<a name="ln2611">  if(dp &lt; 0) return (xc - xa) * (xc - xa) + (yc - ya) * (yc - ya);</a>
+<a name="ln2612"> </a>
+<a name="ln2613">  float sn2 = sx * sx + sy * sy;</a>
+<a name="ln2614">  if(dp &gt; sn2) return (xc - xb) * (xc - xb) + (yc - yb) * (yc - yb);</a>
+<a name="ln2615"> </a>
+<a name="ln2616">  float ah2 = dp * dp / sn2;</a>
+<a name="ln2617">  float un2 = ux * ux + uy * uy;</a>
+<a name="ln2618">  return un2 - ah2;</a>
+<a name="ln2619">}</a>
+<a name="ln2620"> </a>
+<a name="ln2621">int mouse_moved(struct dt_iop_module_t *self, double x, double y, double pressure, int which)</a>
+<a name="ln2622">{</a>
+<a name="ln2623">  dt_iop_clipping_gui_data_t *g = (dt_iop_clipping_gui_data_t *)self-&gt;gui_data;</a>
+<a name="ln2624">  dt_iop_clipping_params_t *p = (dt_iop_clipping_params_t *)self-&gt;params;</a>
+<a name="ln2625"> </a>
+<a name="ln2626">  // we don't do anything if the image is not ready</a>
+<a name="ln2627">  if((self-&gt;dev-&gt;preview_pipe-&gt;backbuf_width == g-&gt;old_width</a>
+<a name="ln2628">      &amp;&amp; self-&gt;dev-&gt;preview_pipe-&gt;backbuf_height == g-&gt;old_height)</a>
+<a name="ln2629">    ||self-&gt;dev-&gt;preview_loading</a>
+<a name="ln2630">    )</a>
+<a name="ln2631">    return 0;</a>
+<a name="ln2632">  g-&gt;old_width = g-&gt;old_height = -1;</a>
+<a name="ln2633"> </a>
+<a name="ln2634">  const float wd = self-&gt;dev-&gt;preview_pipe-&gt;backbuf_width;</a>
+<a name="ln2635">  const float ht = self-&gt;dev-&gt;preview_pipe-&gt;backbuf_height;</a>
+<a name="ln2636">  dt_dev_zoom_t zoom = dt_control_get_dev_zoom();</a>
+<a name="ln2637">  int closeup = dt_control_get_dev_closeup();</a>
+<a name="ln2638">  float zoom_scale = dt_dev_get_zoom_scale(self-&gt;dev, zoom, 1&lt;&lt;closeup, 1);</a>
+<a name="ln2639">  float pzx, pzy;</a>
+<a name="ln2640">  dt_dev_get_pointer_zoom_pos(self-&gt;dev, x, y, &amp;pzx, &amp;pzy);</a>
+<a name="ln2641">  pzx += 0.5f;</a>
+<a name="ln2642">  pzy += 0.5f;</a>
+<a name="ln2643">  static int old_grab = -1;</a>
+<a name="ln2644">  _iop_clipping_set_max_clip(self);</a>
+<a name="ln2645">  _grab_region_t grab = get_grab(pzx, pzy, g, DT_PIXEL_APPLY_DPI(30.0) / zoom_scale, wd, ht);</a>
+<a name="ln2646"> </a>
+<a name="ln2647">  if(darktable.control-&gt;button_down &amp;&amp; darktable.control-&gt;button_down_which == 3 &amp;&amp; g-&gt;k_show != 1)</a>
+<a name="ln2648">  {</a>
+<a name="ln2649">    // second mouse button, straighten activated:</a>
+<a name="ln2650">    g-&gt;straightening = 1;</a>
+<a name="ln2651">    dt_control_change_cursor(GDK_CROSSHAIR);</a>
+<a name="ln2652">    dt_control_queue_redraw_center();</a>
+<a name="ln2653">  }</a>
+<a name="ln2654">  else if(darktable.control-&gt;button_down &amp;&amp; darktable.control-&gt;button_down_which == 1)</a>
+<a name="ln2655">  {</a>
+<a name="ln2656">    // case when we drag a point for keystone</a>
+<a name="ln2657">    if(g-&gt;k_drag == TRUE &amp;&amp; g-&gt;k_selected &gt;= 0)</a>
+<a name="ln2658">    {</a>
+<a name="ln2659">      float pts[2] = { pzx * wd, pzy * ht };</a>
+<a name="ln2660">      dt_dev_distort_backtransform_plus(self-&gt;dev, self-&gt;dev-&gt;preview_pipe, self-&gt;priority + 1, 9999999, pts,</a>
+<a name="ln2661">                                        1);</a>
+<a name="ln2662">      dt_dev_pixelpipe_iop_t *piece = dt_dev_distort_get_iop_pipe(self-&gt;dev, self-&gt;dev-&gt;preview_pipe, self);</a>
+<a name="ln2663">      float xx = pts[0] / (float)piece-&gt;buf_out.width, yy = pts[1] / (float)piece-&gt;buf_out.height;</a>
+<a name="ln2664">      if(g-&gt;k_selected == 0)</a>
+<a name="ln2665">      {</a>
+<a name="ln2666">        if(p-&gt;k_sym == 1 || p-&gt;k_sym == 3)</a>
+<a name="ln2667">          p-&gt;kxa = fminf(xx, (p-&gt;kxc + p-&gt;kxd - 0.01f) / 2.0f), p-&gt;kxb = p-&gt;kxc - p-&gt;kxa + p-&gt;kxd;</a>
+<a name="ln2668">        else</a>
+<a name="ln2669">          p-&gt;kxa = fminf(xx, p-&gt;kxb - 0.01f);</a>
+<a name="ln2670">        if(p-&gt;k_sym &gt; 1)</a>
+<a name="ln2671">          p-&gt;kya = fminf(yy, (p-&gt;kyc + p-&gt;kyb - 0.01f) / 2.0f), p-&gt;kyd = p-&gt;kyc - p-&gt;kya + p-&gt;kyb;</a>
+<a name="ln2672">        else</a>
+<a name="ln2673">          p-&gt;kya = fminf(yy, p-&gt;kyd - 0.01f);</a>
+<a name="ln2674">      }</a>
+<a name="ln2675">      else if(g-&gt;k_selected == 1)</a>
+<a name="ln2676">      {</a>
+<a name="ln2677">        if(p-&gt;k_sym == 1 || p-&gt;k_sym == 3)</a>
+<a name="ln2678">          p-&gt;kxb = fmaxf(xx, (p-&gt;kxc + p-&gt;kxd + 0.01f) / 2.0f), p-&gt;kxa = p-&gt;kxc - p-&gt;kxb + p-&gt;kxd;</a>
+<a name="ln2679">        else</a>
+<a name="ln2680">          p-&gt;kxb = fmaxf(xx, p-&gt;kxa + 0.01f);</a>
+<a name="ln2681">        if(p-&gt;k_sym &gt; 1)</a>
+<a name="ln2682">          p-&gt;kyb = fminf(yy, (p-&gt;kya + p-&gt;kyd - 0.01f) / 2.0f), p-&gt;kyc = p-&gt;kya - p-&gt;kyb + p-&gt;kyd;</a>
+<a name="ln2683">        else</a>
+<a name="ln2684">          p-&gt;kyb = fminf(yy, p-&gt;kyc - 0.01f);</a>
+<a name="ln2685">      }</a>
+<a name="ln2686">      else if(g-&gt;k_selected == 2)</a>
+<a name="ln2687">      {</a>
+<a name="ln2688">        if(p-&gt;k_sym == 1 || p-&gt;k_sym == 3)</a>
+<a name="ln2689">          p-&gt;kxc = fmaxf(xx, (p-&gt;kxa + p-&gt;kxb + 0.01f) / 2.0f), p-&gt;kxd = p-&gt;kxa - p-&gt;kxc + p-&gt;kxb;</a>
+<a name="ln2690">        else</a>
+<a name="ln2691">          p-&gt;kxc = fmaxf(xx, p-&gt;kxd + 0.01f);</a>
+<a name="ln2692">        if(p-&gt;k_sym &gt; 1)</a>
+<a name="ln2693">          p-&gt;kyc = fmaxf(yy, (p-&gt;kya + p-&gt;kyd + 0.01f) / 2.0f), p-&gt;kyb = p-&gt;kya - p-&gt;kyc + p-&gt;kyd;</a>
+<a name="ln2694">        else</a>
+<a name="ln2695">          p-&gt;kyc = fmaxf(yy, p-&gt;kyb + 0.01f);</a>
+<a name="ln2696">      }</a>
+<a name="ln2697">      else if(g-&gt;k_selected == 3)</a>
+<a name="ln2698">      {</a>
+<a name="ln2699">        if(p-&gt;k_sym == 1 || p-&gt;k_sym == 3)</a>
+<a name="ln2700">          p-&gt;kxd = fminf(xx, (p-&gt;kxa + p-&gt;kxb - 0.01f) / 2.0f), p-&gt;kxc = p-&gt;kxa - p-&gt;kxd + p-&gt;kxb;</a>
+<a name="ln2701">        else</a>
+<a name="ln2702">          p-&gt;kxd = fminf(xx, p-&gt;kxc - 0.01f);</a>
+<a name="ln2703">        if(p-&gt;k_sym &gt; 1)</a>
+<a name="ln2704">          p-&gt;kyd = fmaxf(yy, (p-&gt;kyc + p-&gt;kyb + 0.01f) / 2.0f), p-&gt;kya = p-&gt;kyc - p-&gt;kyd + p-&gt;kyb;</a>
+<a name="ln2705">        else</a>
+<a name="ln2706">          p-&gt;kyd = fmaxf(yy, p-&gt;kya + 0.01f);</a>
+<a name="ln2707">      }</a>
+<a name="ln2708">      dt_control_queue_redraw_center();</a>
+<a name="ln2709">      return 1;</a>
+<a name="ln2710">    }</a>
+<a name="ln2711">    // case when we drag a segment for keystone</a>
+<a name="ln2712">    if(g-&gt;k_drag == TRUE &amp;&amp; g-&gt;k_selected_segment &gt;= 0)</a>
+<a name="ln2713">    {</a>
+<a name="ln2714">      float decalx = pzx - g-&gt;button_down_zoom_x;</a>
+<a name="ln2715">      float decaly = pzy - g-&gt;button_down_zoom_y;</a>
+<a name="ln2716">      if(g-&gt;k_selected_segment == 0 &amp;&amp; (p-&gt;k_type == 1 || p-&gt;k_type == 3))</a>
+<a name="ln2717">      {</a>
+<a name="ln2718">        decaly = fminf(decaly, p-&gt;kyd - p-&gt;kya);</a>
+<a name="ln2719">        decaly = fminf(decaly, p-&gt;kyc - p-&gt;kyb);</a>
+<a name="ln2720">        p-&gt;kxa += decalx;</a>
+<a name="ln2721">        p-&gt;kya += decaly;</a>
+<a name="ln2722">        p-&gt;kxb += decalx;</a>
+<a name="ln2723">        p-&gt;kyb += decaly;</a>
+<a name="ln2724">      }</a>
+<a name="ln2725">      else if(g-&gt;k_selected_segment == 1 &amp;&amp; (p-&gt;k_type == 2 || p-&gt;k_type == 3))</a>
+<a name="ln2726">      {</a>
+<a name="ln2727">        decalx = fmaxf(decalx, p-&gt;kxa - p-&gt;kxb);</a>
+<a name="ln2728">        decalx = fmaxf(decalx, p-&gt;kxd - p-&gt;kxc);</a>
+<a name="ln2729">        p-&gt;kxc += decalx;</a>
+<a name="ln2730">        p-&gt;kyc += decaly;</a>
+<a name="ln2731">        p-&gt;kxb += decalx;</a>
+<a name="ln2732">        p-&gt;kyb += decaly;</a>
+<a name="ln2733">      }</a>
+<a name="ln2734">      else if(g-&gt;k_selected_segment == 2 &amp;&amp; (p-&gt;k_type == 1 || p-&gt;k_type == 3))</a>
+<a name="ln2735">      {</a>
+<a name="ln2736">        decaly = fmaxf(decaly, p-&gt;kya - p-&gt;kyd);</a>
+<a name="ln2737">        decaly = fmaxf(decaly, p-&gt;kyb - p-&gt;kyc);</a>
+<a name="ln2738">        p-&gt;kxc += decalx;</a>
+<a name="ln2739">        p-&gt;kyc += decaly;</a>
+<a name="ln2740">        p-&gt;kxd += decalx;</a>
+<a name="ln2741">        p-&gt;kyd += decaly;</a>
+<a name="ln2742">      }</a>
+<a name="ln2743">      else if(g-&gt;k_selected_segment == 3 &amp;&amp; (p-&gt;k_type == 2 || p-&gt;k_type == 3))</a>
+<a name="ln2744">      {</a>
+<a name="ln2745">        decalx = fminf(decalx, p-&gt;kxb - p-&gt;kxa);</a>
+<a name="ln2746">        decalx = fminf(decalx, p-&gt;kxc - p-&gt;kxd);</a>
+<a name="ln2747">        p-&gt;kxa += decalx;</a>
+<a name="ln2748">        p-&gt;kya += decaly;</a>
+<a name="ln2749">        p-&gt;kxd += decalx;</a>
+<a name="ln2750">        p-&gt;kyd += decaly;</a>
+<a name="ln2751">      }</a>
+<a name="ln2752">      g-&gt;button_down_zoom_x = pzx;</a>
+<a name="ln2753">      g-&gt;button_down_zoom_y = pzy;</a>
+<a name="ln2754">      dt_control_queue_redraw_center();</a>
+<a name="ln2755">      return 1;</a>
+<a name="ln2756">    }</a>
+<a name="ln2757">    // draw a light gray frame, to show it's not stored yet:</a>
+<a name="ln2758">    g-&gt;applied = 0;</a>
+<a name="ln2759">    // first mouse button, adjust cropping frame, but what do we do?</a>
+<a name="ln2760">    float bzx = g-&gt;button_down_zoom_x + .5f, bzy = g-&gt;button_down_zoom_y + .5f;</a>
+<a name="ln2761">    if(g-&gt;cropping == GRAB_CENTER &amp;&amp; !g-&gt;straightening &amp;&amp; g-&gt;k_show != 1)</a>
+<a name="ln2762">    {</a>
+<a name="ln2763">      g-&gt;cropping = grab;</a>
+<a name="ln2764">      if(grab == GRAB_CENTER)</a>
+<a name="ln2765">      {</a>
+<a name="ln2766">        g-&gt;cropping = GRAB_ALL;</a>
+<a name="ln2767">        g-&gt;handle_x = g-&gt;clip_x;</a>
+<a name="ln2768">        g-&gt;handle_y = g-&gt;clip_y;</a>
+<a name="ln2769">      }</a>
+<a name="ln2770">      if(grab &amp; GRAB_LEFT) g-&gt;handle_x = bzx - g-&gt;clip_x;</a>
+<a name="ln2771">      if(grab &amp; GRAB_TOP) g-&gt;handle_y = bzy - g-&gt;clip_y;</a>
+<a name="ln2772">      if(grab &amp; GRAB_RIGHT) g-&gt;handle_x = bzx - (g-&gt;clip_w + g-&gt;clip_x);</a>
+<a name="ln2773">      if(grab &amp; GRAB_BOTTOM) g-&gt;handle_y = bzy - (g-&gt;clip_h + g-&gt;clip_y);</a>
+<a name="ln2774">      if(!grab &amp;&amp; darktable.control-&gt;button_down_which == 3) g-&gt;straightening = 1;</a>
+<a name="ln2775">    }</a>
+<a name="ln2776">    if(!g-&gt;straightening &amp;&amp; darktable.control-&gt;button_down_which == 1 &amp;&amp; g-&gt;k_show != 1)</a>
+<a name="ln2777">    {</a>
+<a name="ln2778">      grab = g-&gt;cropping;</a>
+<a name="ln2779"> </a>
+<a name="ln2780">      if(grab == GRAB_ALL)</a>
+<a name="ln2781">      {</a>
+<a name="ln2782">        /* moving the crop window */</a>
+<a name="ln2783">        g-&gt;clip_x</a>
+<a name="ln2784">            = fminf(g-&gt;clip_max_w + g-&gt;clip_max_x - g-&gt;clip_w, fmaxf(g-&gt;clip_max_x, g-&gt;handle_x + pzx - bzx));</a>
+<a name="ln2785">        g-&gt;clip_y</a>
+<a name="ln2786">            = fminf(g-&gt;clip_max_h + g-&gt;clip_max_y - g-&gt;clip_h, fmaxf(g-&gt;clip_max_y, g-&gt;handle_y + pzy - bzy));</a>
+<a name="ln2787">      }</a>
+<a name="ln2788">      else</a>
+<a name="ln2789">      {</a>
+<a name="ln2790">        /* changing the crop window */</a>
+<a name="ln2791">        if(g-&gt;center_lock)</a>
+<a name="ln2792">        {</a>
+<a name="ln2793">          /* the center is locked, scale crop radial with locked ratio */</a>
+<a name="ln2794">          gboolean flag = FALSE;</a>
+<a name="ln2795">          float length = 0.0;</a>
+<a name="ln2796">          float xx = 0.0;</a>
+<a name="ln2797">          float yy = 0.0;</a>
+<a name="ln2798"> </a>
+<a name="ln2799">          if(grab &amp; GRAB_LEFT || grab &amp; GRAB_RIGHT) xx = (grab &amp; GRAB_LEFT) ? (pzx - bzx) : (bzx - pzx);</a>
+<a name="ln2800">          if(grab &amp; GRAB_TOP || grab &amp; GRAB_BOTTOM) yy = (grab &amp; GRAB_TOP) ? (pzy - bzy) : (bzy - pzy);</a>
+<a name="ln2801"> </a>
+<a name="ln2802">          length = (fabs(xx) &gt; fabs(yy)) ? xx : yy;</a>
+<a name="ln2803"> </a>
+<a name="ln2804">          if((g-&gt;prev_clip_w - (length + length)) &lt; 0.1 || (g-&gt;prev_clip_h - (length + length)) &lt; 0.1)</a>
+<a name="ln2805">            flag = TRUE;</a>
+<a name="ln2806"> </a>
+<a name="ln2807">          g-&gt;clip_x = flag ? g-&gt;clip_x : g-&gt;prev_clip_x + length;</a>
+<a name="ln2808">          g-&gt;clip_y = flag ? g-&gt;clip_y : g-&gt;prev_clip_y + length;</a>
+<a name="ln2809">          g-&gt;clip_w = fmax(0.1, g-&gt;prev_clip_w - (length + length));</a>
+<a name="ln2810">          g-&gt;clip_h = fmax(0.1, g-&gt;prev_clip_h - (length + length));</a>
+<a name="ln2811">        }</a>
+<a name="ln2812">        else</a>
+<a name="ln2813">        {</a>
+<a name="ln2814"> </a>
+<a name="ln2815">          if(grab &amp; GRAB_LEFT)</a>
+<a name="ln2816">          {</a>
+<a name="ln2817">            const float old_clip_x = g-&gt;clip_x;</a>
+<a name="ln2818">            g-&gt;clip_x = fmaxf(g-&gt;clip_max_x, pzx - g-&gt;handle_x);</a>
+<a name="ln2819">            g-&gt;clip_w = fmaxf(0.1, old_clip_x + g-&gt;clip_w - g-&gt;clip_x);</a>
+<a name="ln2820">          }</a>
+<a name="ln2821">          if(grab &amp; GRAB_TOP)</a>
+<a name="ln2822">          {</a>
+<a name="ln2823">            const float old_clip_y = g-&gt;clip_y;</a>
+<a name="ln2824">            g-&gt;clip_y = fmaxf(g-&gt;clip_max_y, pzy - g-&gt;handle_y);</a>
+<a name="ln2825">            g-&gt;clip_h = fmaxf(0.1, old_clip_y + g-&gt;clip_h - g-&gt;clip_y);</a>
+<a name="ln2826">          }</a>
+<a name="ln2827">          if(grab &amp; GRAB_RIGHT)</a>
+<a name="ln2828">            g-&gt;clip_w = fmaxf(0.1, fminf(g-&gt;clip_max_w + g-&gt;clip_max_x, pzx - g-&gt;clip_x - g-&gt;handle_x));</a>
+<a name="ln2829">          if(grab &amp; GRAB_BOTTOM)</a>
+<a name="ln2830">            g-&gt;clip_h = fmaxf(0.1, fminf(g-&gt;clip_max_h + g-&gt;clip_max_y, pzy - g-&gt;clip_y - g-&gt;handle_y));</a>
+<a name="ln2831">        }</a>
+<a name="ln2832"> </a>
+<a name="ln2833">        if(g-&gt;clip_x + g-&gt;clip_w &gt; g-&gt;clip_max_w + g-&gt;clip_max_x)</a>
+<a name="ln2834">          g-&gt;clip_w = g-&gt;clip_max_w + g-&gt;clip_max_x - g-&gt;clip_x;</a>
+<a name="ln2835">        if(g-&gt;clip_y + g-&gt;clip_h &gt; g-&gt;clip_max_h + g-&gt;clip_max_y)</a>
+<a name="ln2836">          g-&gt;clip_h = g-&gt;clip_max_h + g-&gt;clip_max_y - g-&gt;clip_y;</a>
+<a name="ln2837">      }</a>
+<a name="ln2838">      apply_box_aspect(self, grab);</a>
+<a name="ln2839">      // we save crop params too</a>
+<a name="ln2840">      float points[4]</a>
+<a name="ln2841">          = { g-&gt;clip_x * wd, g-&gt;clip_y * ht, (g-&gt;clip_x + g-&gt;clip_w) * wd, (g-&gt;clip_y + g-&gt;clip_h) * ht };</a>
+<a name="ln2842">      if(dt_dev_distort_backtransform_plus(self-&gt;dev, self-&gt;dev-&gt;preview_pipe, self-&gt;priority + 1, 9999999,</a>
+<a name="ln2843">                                           points, 2))</a>
+<a name="ln2844">      {</a>
+<a name="ln2845">        dt_dev_pixelpipe_iop_t *piece = dt_dev_distort_get_iop_pipe(self-&gt;dev, self-&gt;dev-&gt;preview_pipe, self);</a>
+<a name="ln2846">        if(piece)</a>
+<a name="ln2847">        {</a>
+<a name="ln2848">          p-&gt;cx = points[0] / (float)piece-&gt;buf_out.width;</a>
+<a name="ln2849">          p-&gt;cy = points[1] / (float)piece-&gt;buf_out.height;</a>
+<a name="ln2850">          p-&gt;cw = copysignf(points[2] / (float)piece-&gt;buf_out.width, p-&gt;cw);</a>
+<a name="ln2851">          p-&gt;ch = copysignf(points[3] / (float)piece-&gt;buf_out.height, p-&gt;ch);</a>
+<a name="ln2852">        }</a>
+<a name="ln2853">      }</a>
+<a name="ln2854">    }</a>
+<a name="ln2855">    dt_control_queue_redraw_center();</a>
+<a name="ln2856">    return 1;</a>
+<a name="ln2857">  }</a>
+<a name="ln2858">  else if(grab &amp;&amp; g-&gt;k_show != 1)</a>
+<a name="ln2859">  {</a>
+<a name="ln2860">    // hover over active borders, no button pressed</a>
+<a name="ln2861">    if(old_grab != grab)</a>
+<a name="ln2862">    {</a>
+<a name="ln2863">      // change mouse pointer</a>
+<a name="ln2864">      if(grab == GRAB_LEFT)</a>
+<a name="ln2865">        dt_control_change_cursor(GDK_LEFT_SIDE);</a>
+<a name="ln2866">      else if(grab == GRAB_TOP)</a>
+<a name="ln2867">        dt_control_change_cursor(GDK_TOP_SIDE);</a>
+<a name="ln2868">      else if(grab == GRAB_RIGHT)</a>
+<a name="ln2869">        dt_control_change_cursor(GDK_RIGHT_SIDE);</a>
+<a name="ln2870">      else if(grab == GRAB_BOTTOM)</a>
+<a name="ln2871">        dt_control_change_cursor(GDK_BOTTOM_SIDE);</a>
+<a name="ln2872">      else if(grab == GRAB_TOP_LEFT)</a>
+<a name="ln2873">        dt_control_change_cursor(GDK_TOP_LEFT_CORNER);</a>
+<a name="ln2874">      else if(grab == GRAB_TOP_RIGHT)</a>
+<a name="ln2875">        dt_control_change_cursor(GDK_TOP_RIGHT_CORNER);</a>
+<a name="ln2876">      else if(grab == GRAB_BOTTOM_RIGHT)</a>
+<a name="ln2877">        dt_control_change_cursor(GDK_BOTTOM_RIGHT_CORNER);</a>
+<a name="ln2878">      else if(grab == GRAB_BOTTOM_LEFT)</a>
+<a name="ln2879">        dt_control_change_cursor(GDK_BOTTOM_LEFT_CORNER);</a>
+<a name="ln2880">      else if(grab == GRAB_NONE)</a>
+<a name="ln2881">        dt_control_change_cursor(GDK_LEFT_PTR);</a>
+<a name="ln2882">    }</a>
+<a name="ln2883">    dt_control_queue_redraw_center();</a>
+<a name="ln2884">  }</a>
+<a name="ln2885">  else</a>
+<a name="ln2886">  {</a>
+<a name="ln2887">    // somewhere besides borders. maybe rotate?</a>
+<a name="ln2888">    if(old_grab != grab) dt_control_change_cursor(GDK_FLEUR);</a>
+<a name="ln2889">    g-&gt;straightening = g-&gt;cropping = 0;</a>
+<a name="ln2890">    // or maybe keystone</a>
+<a name="ln2891">    float ext = DT_PIXEL_APPLY_DPI(0.005f) / zoom_scale;</a>
+<a name="ln2892">    if(g-&gt;k_show == 1 &amp;&amp; g-&gt;k_drag == FALSE)</a>
+<a name="ln2893">    {</a>
+<a name="ln2894">      float pts[2] = { pzx * wd, pzy * ht };</a>
+<a name="ln2895">      dt_dev_distort_backtransform_plus(self-&gt;dev, self-&gt;dev-&gt;preview_pipe, self-&gt;priority + 1, 9999999, pts,</a>
+<a name="ln2896">                                        1);</a>
+<a name="ln2897">      dt_dev_pixelpipe_iop_t *piece = dt_dev_distort_get_iop_pipe(self-&gt;dev, self-&gt;dev-&gt;preview_pipe, self);</a>
+<a name="ln2898">      float xx = pts[0] / (float)piece-&gt;buf_out.width, yy = pts[1] / (float)piece-&gt;buf_out.height;</a>
+<a name="ln2899">      // are we near a keystone point ?</a>
+<a name="ln2900">      g-&gt;k_selected = -1;</a>
+<a name="ln2901">      g-&gt;k_selected_segment = -1;</a>
+<a name="ln2902">      if(xx &lt; p-&gt;kxa + ext &amp;&amp; xx &gt; p-&gt;kxa - ext &amp;&amp; yy &lt; p-&gt;kya + ext &amp;&amp; yy &gt; p-&gt;kya - ext) g-&gt;k_selected = 0;</a>
+<a name="ln2903">      if(xx &lt; p-&gt;kxb + ext &amp;&amp; xx &gt; p-&gt;kxb - ext &amp;&amp; yy &lt; p-&gt;kyb + ext &amp;&amp; yy &gt; p-&gt;kyb - ext) g-&gt;k_selected = 1;</a>
+<a name="ln2904">      if(xx &lt; p-&gt;kxc + ext &amp;&amp; xx &gt; p-&gt;kxc - ext &amp;&amp; yy &lt; p-&gt;kyc + ext &amp;&amp; yy &gt; p-&gt;kyc - ext) g-&gt;k_selected = 2;</a>
+<a name="ln2905">      if(xx &lt; p-&gt;kxd + ext &amp;&amp; xx &gt; p-&gt;kxd - ext &amp;&amp; yy &lt; p-&gt;kyd + ext &amp;&amp; yy &gt; p-&gt;kyd - ext) g-&gt;k_selected = 3;</a>
+<a name="ln2906">      // or near a keystone segment</a>
+<a name="ln2907">      if(g-&gt;k_selected &lt; 0)</a>
+<a name="ln2908">      {</a>
+<a name="ln2909">        if(p-&gt;k_type == 1 || p-&gt;k_type == 3)</a>
+<a name="ln2910">        {</a>
+<a name="ln2911">          if(dist_seg(p-&gt;kxa, p-&gt;kya, p-&gt;kxb, p-&gt;kyb, xx, yy) &lt; ext * ext)</a>
+<a name="ln2912">            g-&gt;k_selected_segment = 0;</a>
+<a name="ln2913">          else if(dist_seg(p-&gt;kxd, p-&gt;kyd, p-&gt;kxc, p-&gt;kyc, xx, yy) &lt; ext * ext)</a>
+<a name="ln2914">            g-&gt;k_selected_segment = 2;</a>
+<a name="ln2915">        }</a>
+<a name="ln2916">        if(p-&gt;k_type == 1 || p-&gt;k_type == 3)</a>
+<a name="ln2917">        {</a>
+<a name="ln2918">          if(dist_seg(p-&gt;kxb, p-&gt;kyb, p-&gt;kxc, p-&gt;kyc, xx, yy) &lt; ext * ext)</a>
+<a name="ln2919">            g-&gt;k_selected_segment = 1;</a>
+<a name="ln2920">          else if(dist_seg(p-&gt;kxd, p-&gt;kyd, p-&gt;kxa, p-&gt;kya, xx, yy) &lt; ext * ext)</a>
+<a name="ln2921">            g-&gt;k_selected_segment = 3;</a>
+<a name="ln2922">        }</a>
+<a name="ln2923">      }</a>
+<a name="ln2924">      if(g-&gt;k_selected &gt;= 0)</a>
+<a name="ln2925">        dt_control_change_cursor(GDK_CROSS);</a>
+<a name="ln2926">      else</a>
+<a name="ln2927">        dt_control_change_cursor(GDK_FLEUR);</a>
+<a name="ln2928">    }</a>
+<a name="ln2929">    dt_control_queue_redraw_center();</a>
+<a name="ln2930">  }</a>
+<a name="ln2931">  old_grab = grab;</a>
+<a name="ln2932">  return 0;</a>
+<a name="ln2933">}</a>
+<a name="ln2934"> </a>
+<a name="ln2935">static void commit_box(dt_iop_module_t *self, dt_iop_clipping_gui_data_t *g, dt_iop_clipping_params_t *p)</a>
+<a name="ln2936">{</a>
+<a name="ln2937">  if(darktable.gui-&gt;reset) return;</a>
+<a name="ln2938">  g-&gt;old_clip_x = g-&gt;clip_x;</a>
+<a name="ln2939">  g-&gt;old_clip_y = g-&gt;clip_y;</a>
+<a name="ln2940">  g-&gt;old_clip_w = g-&gt;clip_w;</a>
+<a name="ln2941">  g-&gt;old_clip_h = g-&gt;clip_h;</a>
+<a name="ln2942">  g-&gt;cropping = 0;</a>
+<a name="ln2943">  if(!self-&gt;enabled)</a>
+<a name="ln2944">  {</a>
+<a name="ln2945">    // first time crop, if any data is stored in p, it's obsolete:</a>
+<a name="ln2946">    p-&gt;cx = p-&gt;cy = 0.0f;</a>
+<a name="ln2947">    p-&gt;cw = p-&gt;ch = 1.0f;</a>
+<a name="ln2948">  }</a>
+<a name="ln2949">  // we want value in iop space</a>
+<a name="ln2950">  float wd = self-&gt;dev-&gt;preview_pipe-&gt;backbuf_width;</a>
+<a name="ln2951">  float ht = self-&gt;dev-&gt;preview_pipe-&gt;backbuf_height;</a>
+<a name="ln2952">  float points[4]</a>
+<a name="ln2953">      = { g-&gt;clip_x * wd, g-&gt;clip_y * ht, (g-&gt;clip_x + g-&gt;clip_w) * wd, (g-&gt;clip_y + g-&gt;clip_h) * ht };</a>
+<a name="ln2954">  if(dt_dev_distort_backtransform_plus(self-&gt;dev, self-&gt;dev-&gt;preview_pipe, self-&gt;priority + 1, 9999999,</a>
+<a name="ln2955">                                       points, 2))</a>
+<a name="ln2956">  {</a>
+<a name="ln2957">    dt_dev_pixelpipe_iop_t *piece = dt_dev_distort_get_iop_pipe(self-&gt;dev, self-&gt;dev-&gt;preview_pipe, self);</a>
+<a name="ln2958">    if(piece)</a>
+<a name="ln2959">    {</a>
+<a name="ln2960">      p-&gt;cx = points[0] / (float)piece-&gt;buf_out.width;</a>
+<a name="ln2961">      p-&gt;cy = points[1] / (float)piece-&gt;buf_out.height;</a>
+<a name="ln2962">      p-&gt;cw = copysignf(points[2] / (float)piece-&gt;buf_out.width, p-&gt;cw);</a>
+<a name="ln2963">      p-&gt;ch = copysignf(points[3] / (float)piece-&gt;buf_out.height, p-&gt;ch);</a>
+<a name="ln2964">      // verify that the crop area stay in the image area</a>
+<a name="ln2965">      if(p-&gt;cx &gt;= 1.0f) p-&gt;cx = 0.5f;</a>
+<a name="ln2966">      if(p-&gt;cy &gt;= 1.0f) p-&gt;cy = 0.5f;</a>
+<a name="ln2967">      p-&gt;cw = CLAMPF(p-&gt;cw, -1.0f, 1.0f);</a>
+<a name="ln2968">      p-&gt;ch = CLAMPF(p-&gt;ch, -1.0f, 1.0f);</a>
+<a name="ln2969">    }</a>
+<a name="ln2970">  }</a>
+<a name="ln2971">  g-&gt;applied = 1;</a>
+<a name="ln2972">  dt_dev_add_history_item(darktable.develop, self, TRUE);</a>
+<a name="ln2973">}</a>
+<a name="ln2974"> </a>
+<a name="ln2975">int button_released(struct dt_iop_module_t *self, double x, double y, int which, uint32_t state)</a>
+<a name="ln2976">{</a>
+<a name="ln2977">  dt_iop_clipping_gui_data_t *g = (dt_iop_clipping_gui_data_t *)self-&gt;gui_data;</a>
+<a name="ln2978">  // we don't do anything if the image is not ready</a>
+<a name="ln2979">  if(self-&gt;dev-&gt;preview_pipe-&gt;backbuf_width == g-&gt;old_width</a>
+<a name="ln2980">     &amp;&amp; self-&gt;dev-&gt;preview_pipe-&gt;backbuf_height == g-&gt;old_height)</a>
+<a name="ln2981">    return 0;</a>
+<a name="ln2982">  g-&gt;old_width = g-&gt;old_height = -1;</a>
+<a name="ln2983"> </a>
+<a name="ln2984">  if(g-&gt;straightening)</a>
+<a name="ln2985">  {</a>
+<a name="ln2986">    float dx = x - g-&gt;button_down_x, dy = y - g-&gt;button_down_y;</a>
+<a name="ln2987">    if(dx &lt; 0)</a>
+<a name="ln2988">    {</a>
+<a name="ln2989">      dx = -dx;</a>
+<a name="ln2990">      dy = -dy;</a>
+<a name="ln2991">    }</a>
+<a name="ln2992">    float angle = atan2f(dy, dx);</a>
+<a name="ln2993">    if(!(angle &gt;= -M_PI / 2.0 &amp;&amp; angle &lt;= M_PI / 2.0)) angle = 0.0f;</a>
+<a name="ln2994">    float close = angle;</a>
+<a name="ln2995">    if(close &gt; M_PI / 4.0)</a>
+<a name="ln2996">      close = M_PI / 2.0 - close;</a>
+<a name="ln2997">    else if(close &lt; -M_PI / 4.0)</a>
+<a name="ln2998">      close = -M_PI / 2.0 - close;</a>
+<a name="ln2999">    else</a>
+<a name="ln3000">      close = -close;</a>
+<a name="ln3001">    float a = 180.0 / M_PI * close + g-&gt;button_down_angle;</a>
+<a name="ln3002">    if(a &lt; -180.0) a += 360.0;</a>
+<a name="ln3003">    if(a &gt; 180.0) a -= 360.0;</a>
+<a name="ln3004">    dt_bauhaus_slider_set(g-&gt;angle, -a);</a>
+<a name="ln3005">    dt_control_change_cursor(GDK_LEFT_PTR);</a>
+<a name="ln3006">  }</a>
+<a name="ln3007">  if(g-&gt;k_drag) g-&gt;k_drag = FALSE;</a>
+<a name="ln3008"> </a>
+<a name="ln3009">  /* reset internal ui states*/</a>
+<a name="ln3010">  g-&gt;center_lock = g-&gt;straightening = g-&gt;cropping = 0;</a>
+<a name="ln3011">  return 1;</a>
+<a name="ln3012">}</a>
+<a name="ln3013"> </a>
+<a name="ln3014">int button_pressed(struct dt_iop_module_t *self, double x, double y, double pressure, int which, int type,</a>
+<a name="ln3015">                   uint32_t state)</a>
+<a name="ln3016">{</a>
+<a name="ln3017"> </a>
+<a name="ln3018">  dt_iop_clipping_gui_data_t *g = (dt_iop_clipping_gui_data_t *)self-&gt;gui_data;</a>
+<a name="ln3019">  dt_iop_clipping_params_t *p = (dt_iop_clipping_params_t *)self-&gt;params;</a>
+<a name="ln3020">  // we don't do anything if the image is not ready</a>
+<a name="ln3021">  if(self-&gt;dev-&gt;preview_pipe-&gt;backbuf_width == g-&gt;old_width</a>
+<a name="ln3022">     &amp;&amp; self-&gt;dev-&gt;preview_pipe-&gt;backbuf_height == g-&gt;old_height)</a>
+<a name="ln3023">    return 0;</a>
+<a name="ln3024">  g-&gt;old_width = g-&gt;old_height = -1;</a>
+<a name="ln3025"> </a>
+<a name="ln3026">  // avoid unexpected back to lt mode:</a>
+<a name="ln3027">  if(type == GDK_2BUTTON_PRESS &amp;&amp; which == 1)</a>
+<a name="ln3028">  {</a>
+<a name="ln3029">    dt_iop_request_focus(NULL);</a>
+<a name="ln3030">    commit_box(self, g, p);</a>
+<a name="ln3031">    return 1;</a>
+<a name="ln3032">  }</a>
+<a name="ln3033">  if(which == 3 || which == 1)</a>
+<a name="ln3034">  {</a>
+<a name="ln3035">    // switch module on already, other code depends in this:</a>
+<a name="ln3036">    dt_dev_add_history_item(darktable.develop, self, TRUE);</a>
+<a name="ln3037"> </a>
+<a name="ln3038">    if(g-&gt;k_show == 1)</a>
+<a name="ln3039">    {</a>
+<a name="ln3040">      if(g-&gt;k_selected &gt;= 0)</a>
+<a name="ln3041">        g-&gt;k_drag = TRUE; // if a keystone point is selected then we start to drag it</a>
+<a name="ln3042">      else // if we click to the apply button</a>
+<a name="ln3043">      {</a>
+<a name="ln3044">        dt_dev_zoom_t zoom = dt_control_get_dev_zoom();</a>
+<a name="ln3045">        int closeup = dt_control_get_dev_closeup();</a>
+<a name="ln3046">        float zoom_scale = dt_dev_get_zoom_scale(self-&gt;dev, zoom, 1&lt;&lt;closeup, 1);</a>
+<a name="ln3047">        float pzx, pzy;</a>
+<a name="ln3048">        dt_dev_get_pointer_zoom_pos(self-&gt;dev, x, y, &amp;pzx, &amp;pzy);</a>
+<a name="ln3049">        pzx += 0.5f;</a>
+<a name="ln3050">        pzy += 0.5f;</a>
+<a name="ln3051"> </a>
+<a name="ln3052">        dt_dev_pixelpipe_iop_t *piece = dt_dev_distort_get_iop_pipe(self-&gt;dev, self-&gt;dev-&gt;preview_pipe, self);</a>
+<a name="ln3053">        float wp = piece-&gt;buf_out.width, hp = piece-&gt;buf_out.height;</a>
+<a name="ln3054">        float pts[8] = { p-&gt;kxa * wp, p-&gt;kya * hp, p-&gt;kxb * wp, p-&gt;kyb * hp,</a>
+<a name="ln3055">                         p-&gt;kxc * wp, p-&gt;kyc * hp, p-&gt;kxd * wp, p-&gt;kyd * hp };</a>
+<a name="ln3056">        dt_dev_distort_transform_plus(self-&gt;dev, self-&gt;dev-&gt;preview_pipe, self-&gt;priority + 1, 999999, pts, 4);</a>
+<a name="ln3057"> </a>
+<a name="ln3058">        float xx = pzx * self-&gt;dev-&gt;preview_pipe-&gt;backbuf_width,</a>
+<a name="ln3059">              yy = pzy * self-&gt;dev-&gt;preview_pipe-&gt;backbuf_height;</a>
+<a name="ln3060">        float c[2] = { (MIN(pts[4], pts[2]) + MAX(pts[0], pts[6])) / 2.0f,</a>
+<a name="ln3061">                       (MIN(pts[5], pts[7]) + MAX(pts[1], pts[3])) / 2.0f };</a>
+<a name="ln3062">        float ext = DT_PIXEL_APPLY_DPI(10.0) / (zoom_scale);</a>
+<a name="ln3063">        // Apply button</a>
+<a name="ln3064">        if(xx &gt; c[0] - ext &amp;&amp; xx &lt; c[0] + ext &amp;&amp; yy &gt; c[1] - ext &amp;&amp; yy &lt; c[1] + ext)</a>
+<a name="ln3065">        {</a>
+<a name="ln3066">          // add an entry to the combo box and select it</a>
+<a name="ln3067">          keystone_type_populate(self, TRUE, 99);</a>
+<a name="ln3068">          // reset gui settings</a>
+<a name="ln3069">          g-&gt;k_show = 2;</a>
+<a name="ln3070">          g-&gt;k_selected = -1;</a>
+<a name="ln3071">          g-&gt;k_drag = FALSE;</a>
+<a name="ln3072">          // do the changes</a>
+<a name="ln3073">          p-&gt;k_apply = 1;</a>
+<a name="ln3074">          commit_box(self, g, p);</a>
+<a name="ln3075">        }</a>
+<a name="ln3076">        else</a>
+<a name="ln3077">        {</a>
+<a name="ln3078">          // Horizontal symmetry button (1)</a>
+<a name="ln3079">          c[0] = (pts[0] + pts[6]) / 2.0f, c[1] = (pts[1] + pts[7]) / 2.0f;</a>
+<a name="ln3080">          if(xx &gt; c[0] - ext &amp;&amp; xx &lt; c[0] + ext &amp;&amp; yy &gt; c[1] - ext &amp;&amp; yy &lt; c[1] + ext</a>
+<a name="ln3081">             &amp;&amp; (p-&gt;k_type == 1 || p-&gt;k_type == 3))</a>
+<a name="ln3082">          {</a>
+<a name="ln3083">            if(p-&gt;k_sym == 0)</a>
+<a name="ln3084">              p-&gt;k_sym = 1;</a>
+<a name="ln3085">            else if(p-&gt;k_sym == 1)</a>
+<a name="ln3086">              p-&gt;k_sym = 0;</a>
+<a name="ln3087">            else if(p-&gt;k_sym == 2)</a>
+<a name="ln3088">              p-&gt;k_sym = 3;</a>
+<a name="ln3089">            else</a>
+<a name="ln3090">              p-&gt;k_sym = 2;</a>
+<a name="ln3091">          }</a>
+<a name="ln3092">          else</a>
+<a name="ln3093">          {</a>
+<a name="ln3094">            // Horizontal symmetry button (2)</a>
+<a name="ln3095">            c[0] = (pts[2] + pts[4]) / 2.0f, c[1] = (pts[3] + pts[5]) / 2.0f;</a>
+<a name="ln3096">            if(xx &gt; c[0] - ext &amp;&amp; xx &lt; c[0] + ext &amp;&amp; yy &gt; c[1] - ext &amp;&amp; yy &lt; c[1] + ext</a>
+<a name="ln3097">               &amp;&amp; (p-&gt;k_type == 1 || p-&gt;k_type == 3))</a>
+<a name="ln3098">            {</a>
+<a name="ln3099">              if(p-&gt;k_sym == 0)</a>
+<a name="ln3100">                p-&gt;k_sym = 1;</a>
+<a name="ln3101">              else if(p-&gt;k_sym == 1)</a>
+<a name="ln3102">                p-&gt;k_sym = 0;</a>
+<a name="ln3103">              else if(p-&gt;k_sym == 2)</a>
+<a name="ln3104">                p-&gt;k_sym = 3;</a>
+<a name="ln3105">              else</a>
+<a name="ln3106">                p-&gt;k_sym = 2;</a>
+<a name="ln3107">            }</a>
+<a name="ln3108">            else</a>
+<a name="ln3109">            {</a>
+<a name="ln3110">              // vertical symmetry button (1)</a>
+<a name="ln3111">              c[0] = (pts[2] + pts[0]) / 2.0f, c[1] = (pts[3] + pts[1]) / 2.0f;</a>
+<a name="ln3112">              if(xx &gt; c[0] - ext &amp;&amp; xx &lt; c[0] + ext &amp;&amp; yy &gt; c[1] - ext &amp;&amp; yy &lt; c[1] + ext</a>
+<a name="ln3113">                 &amp;&amp; (p-&gt;k_type == 2 || p-&gt;k_type == 3))</a>
+<a name="ln3114">              {</a>
+<a name="ln3115">                if(p-&gt;k_sym == 0)</a>
+<a name="ln3116">                  p-&gt;k_sym = 2;</a>
+<a name="ln3117">                else if(p-&gt;k_sym == 1)</a>
+<a name="ln3118">                  p-&gt;k_sym = 3;</a>
+<a name="ln3119">                else if(p-&gt;k_sym == 2)</a>
+<a name="ln3120">                  p-&gt;k_sym = 0;</a>
+<a name="ln3121">                else</a>
+<a name="ln3122">                  p-&gt;k_sym = 1;</a>
+<a name="ln3123">              }</a>
+<a name="ln3124">              else</a>
+<a name="ln3125">              {</a>
+<a name="ln3126">                // vertical symmetry button (2)</a>
+<a name="ln3127">                c[0] = (pts[4] + pts[6]) / 2.0f, c[1] = (pts[5] + pts[7]) / 2.0f;</a>
+<a name="ln3128">                if(xx &gt; c[0] - ext &amp;&amp; xx &lt; c[0] + ext &amp;&amp; yy &gt; c[1] - ext &amp;&amp; yy &lt; c[1] + ext</a>
+<a name="ln3129">                   &amp;&amp; (p-&gt;k_type == 2 || p-&gt;k_type == 3))</a>
+<a name="ln3130">                {</a>
+<a name="ln3131">                  if(p-&gt;k_sym == 0)</a>
+<a name="ln3132">                    p-&gt;k_sym = 2;</a>
+<a name="ln3133">                  else if(p-&gt;k_sym == 1)</a>
+<a name="ln3134">                    p-&gt;k_sym = 3;</a>
+<a name="ln3135">                  else if(p-&gt;k_sym == 2)</a>
+<a name="ln3136">                    p-&gt;k_sym = 0;</a>
+<a name="ln3137">                  else</a>
+<a name="ln3138">                    p-&gt;k_sym = 1;</a>
+<a name="ln3139">                }</a>
+<a name="ln3140">                else</a>
+<a name="ln3141">                {</a>
+<a name="ln3142">                  // dragging a border ?</a>
+<a name="ln3143">                  if(g-&gt;k_selected_segment &gt;= 0)</a>
+<a name="ln3144">                  {</a>
+<a name="ln3145">                    dt_dev_get_pointer_zoom_pos(self-&gt;dev, x, y, &amp;g-&gt;button_down_zoom_x,</a>
+<a name="ln3146">                                                &amp;g-&gt;button_down_zoom_y);</a>
+<a name="ln3147">                    g-&gt;button_down_zoom_x += 0.5;</a>
+<a name="ln3148">                    g-&gt;button_down_zoom_y += 0.5;</a>
+<a name="ln3149">                    g-&gt;k_drag = TRUE;</a>
+<a name="ln3150">                  }</a>
+<a name="ln3151">                }</a>
+<a name="ln3152">              }</a>
+<a name="ln3153">            }</a>
+<a name="ln3154">          }</a>
+<a name="ln3155">        }</a>
+<a name="ln3156">      }</a>
+<a name="ln3157">    }</a>
+<a name="ln3158">    else</a>
+<a name="ln3159">    {</a>
+<a name="ln3160">      g-&gt;button_down_x = x;</a>
+<a name="ln3161">      g-&gt;button_down_y = y;</a>
+<a name="ln3162">      dt_dev_get_pointer_zoom_pos(self-&gt;dev, x, y, &amp;g-&gt;button_down_zoom_x, &amp;g-&gt;button_down_zoom_y);</a>
+<a name="ln3163">      g-&gt;button_down_angle = p-&gt;angle;</a>
+<a name="ln3164"> </a>
+<a name="ln3165">      /* update prev clip box with current */</a>
+<a name="ln3166">      g-&gt;prev_clip_x = g-&gt;clip_x;</a>
+<a name="ln3167">      g-&gt;prev_clip_y = g-&gt;clip_y;</a>
+<a name="ln3168">      g-&gt;prev_clip_w = g-&gt;clip_w;</a>
+<a name="ln3169">      g-&gt;prev_clip_h = g-&gt;clip_h;</a>
+<a name="ln3170"> </a>
+<a name="ln3171">      /* if shift is pressed, then lock crop on center */</a>
+<a name="ln3172">      if((state &amp; GDK_SHIFT_MASK) == GDK_SHIFT_MASK) g-&gt;center_lock = 1;</a>
+<a name="ln3173">    }</a>
+<a name="ln3174"> </a>
+<a name="ln3175">    return 1;</a>
+<a name="ln3176">  }</a>
+<a name="ln3177">  else</a>
+<a name="ln3178">    return 0;</a>
+<a name="ln3179">}</a>
+<a name="ln3180"> </a>
+<a name="ln3181">void init_key_accels(dt_iop_module_so_t *self)</a>
+<a name="ln3182">{</a>
+<a name="ln3183">  dt_accel_register_iop(self, TRUE, NC_(&quot;accel&quot;, &quot;commit&quot;), GDK_KEY_Return, 0);</a>
+<a name="ln3184">  dt_accel_register_slider_iop(self, FALSE, NC_(&quot;accel&quot;, &quot;angle&quot;));</a>
+<a name="ln3185">}</a>
+<a name="ln3186"> </a>
+<a name="ln3187">void connect_key_accels(dt_iop_module_t *self)</a>
+<a name="ln3188">{</a>
+<a name="ln3189">  dt_iop_clipping_gui_data_t *g = (dt_iop_clipping_gui_data_t *)self-&gt;gui_data;</a>
+<a name="ln3190">  GClosure *closure;</a>
+<a name="ln3191"> </a>
+<a name="ln3192">  closure = g_cclosure_new(G_CALLBACK(key_commit_callback), (gpointer)self, NULL);</a>
+<a name="ln3193">  dt_accel_connect_iop(self, &quot;commit&quot;, closure);</a>
+<a name="ln3194"> </a>
+<a name="ln3195">  dt_accel_connect_slider_iop(self, &quot;angle&quot;, GTK_WIDGET(g-&gt;angle));</a>
+<a name="ln3196">}</a>
+<a name="ln3197"> </a>
+<a name="ln3198">#undef PHI</a>
+<a name="ln3199">#undef INVPHI</a>
+<a name="ln3200"> </a>
+<a name="ln3201">// modelines: These editor modelines have been set for all relevant files by tools/update_modelines.sh</a>
+<a name="ln3202">// vim: shiftwidth=2 expandtab tabstop=2 cindent</a>
+<a name="ln3203">// kate: tab-indents: off; indent-width 2; replace-tabs on; indent-mode cstyle; remove-trailing-spaces modified;</a>
+
+</code></pre>
+<div class="balloon" rel="101"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v560/" target="_blank">V560</a> A part of conditional expression is always true: new_version == 5.</p></div>
+<div class="balloon" rel="147"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v560/" target="_blank">V560</a> A part of conditional expression is always true: new_version == 5.</p></div>
+<div class="balloon" rel="175"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v560/" target="_blank">V560</a> A part of conditional expression is always true: new_version == 5.</p></div>
+<div class="balloon" rel="326"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v751/" target="_blank">V751</a> Parameter 'kxa' is not used inside function body.</p></div>
+<div class="balloon" rel="326"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v751/" target="_blank">V751</a> Parameter 'kya' is not used inside function body.</p></div>
+<div class="balloon" rel="1096"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v522/" target="_blank">V522</a> There might be dereferencing of a potential null pointer 'gd'. Check lines: 1096, 1094.</p></div>
+<div class="balloon" rel="1355"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v517/" target="_blank">V517</a> The use of 'if (A) {...} else if (A) {...}' pattern was detected. There is a probability of logical error presence. Check lines: 1355, 1357.</p></div>
+<div class="balloon" rel="1911"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v522/" target="_blank">V522</a> There might be dereferencing of a potential null pointer 'g'. Check lines: 1911, 1907.</p></div>
+<div class="balloon" rel="2774"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v768/" target="_blank">V768</a> The variable 'grab' is of enum type. It is odd that it is used as a variable of a Boolean-type.</p></div>
+<div class="balloon" rel="2774"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v560/" target="_blank">V560</a> A part of conditional expression is always false.</p></div>
+<div class="balloon" rel="2776"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v560/" target="_blank">V560</a> A part of conditional expression is always true.</p></div>
+<div class="balloon" rel="2858"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v768/" target="_blank">V768</a> The variable 'grab' is of enum type. It is odd that it is used as a variable of a Boolean-type.</p></div>
+<div class="balloon" rel="2916"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v581/" target="_blank">V581</a> The conditional expressions of the 'if' statements situated alongside each other are identical. Check lines: 2909, 2916.</p></div>
+
+<link rel="stylesheet" href="highlight.css">
+<script src="highlight.pack.js"></script>
+<script src="highlightjs-line-numbers.js"></script>
+<script>hljs.initHighlightingOnLoad();</script>
+<script>hljs.initLineNumbersOnLoad();</script>
+<script>
+  $(document).ready(function() {
+      $('.balloon').each(function () {
+          var bl = $(this);
+          var line = bl.attr('rel');
+          var text = $('a[name="ln'+line+'"]').text();
+
+          var space_count = 0;
+          for(var i = 0; i<text.length; i++){
+              var char = text[i];
+              if((char !== ' ')&&(char !== '\t'))break;
+              if(char === '\t')space_count++;
+              space_count++;
+          }
+
+          bl.css('margin-left', space_count*8);
+          $('a[name="ln'+line+'"]').after(bl);
+      });
+
+      window.location = window.location;
+  });
+</script>
+</body>
+</html>

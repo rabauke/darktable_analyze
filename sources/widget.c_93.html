@@ -1,0 +1,393 @@
+
+<html>
+<head>
+  <link rel="stylesheet" href="../style.css"/>
+  <script src="../jquery-3.2.1.min.js"></script>
+</head>
+<body>
+<pre><code class = "cpp">
+<a name="ln1">/*</a>
+<a name="ln2">   This file is part of darktable,</a>
+<a name="ln3">   copyright (c) 2015 Jeremy Rosen</a>
+<a name="ln4">   copyright (c) 2015 tobias ellinghaus</a>
+<a name="ln5"> </a>
+<a name="ln6">   darktable is free software: you can redistribute it and/or modify</a>
+<a name="ln7">   it under the terms of the GNU General Public License as published by</a>
+<a name="ln8">   the Free Software Foundation, either version 3 of the License, or</a>
+<a name="ln9">   (at your option) any later version.</a>
+<a name="ln10"> </a>
+<a name="ln11">   darktable is distributed in the hope that it will be useful,</a>
+<a name="ln12">   but WITHOUT ANY WARRANTY; without even the implied warranty of</a>
+<a name="ln13">   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the</a>
+<a name="ln14">   GNU General Public License for more details.</a>
+<a name="ln15"> </a>
+<a name="ln16">   You should have received a copy of the GNU General Public License</a>
+<a name="ln17">   along with darktable.  If not, see &lt;http://www.gnu.org/licenses/&gt;.</a>
+<a name="ln18"> */</a>
+<a name="ln19">#include &quot;control/control.h&quot;</a>
+<a name="ln20">#include &quot;lua/call.h&quot;</a>
+<a name="ln21">#include &quot;lua/modules.h&quot;</a>
+<a name="ln22">#include &quot;lua/types.h&quot;</a>
+<a name="ln23">#include &quot;lua/widget/common.h&quot;</a>
+<a name="ln24">#include &quot;stdarg.h&quot;</a>
+<a name="ln25">/**</a>
+<a name="ln26">  TODO</a>
+<a name="ln27">  use name to save/restore states as pref like other widgets</a>
+<a name="ln28">  have a way to save presets</a>
+<a name="ln29">  luastorage can't save presets</a>
+<a name="ln30">dt_ui_section_label : make new lua widget</a>
+<a name="ln31">widget names : implement for CSS ?</a>
+<a name="ln32">  */</a>
+<a name="ln33"> </a>
+<a name="ln34">#pragma GCC diagnostic ignored &quot;-Wshadow&quot;</a>
+<a name="ln35"> </a>
+<a name="ln36">dt_lua_widget_type_t widget_type = {</a>
+<a name="ln37">  .name = &quot;widget&quot;,</a>
+<a name="ln38">  .gui_init = NULL,</a>
+<a name="ln39">  .gui_cleanup = NULL,</a>
+<a name="ln40">  .alloc_size = sizeof(dt_lua_widget_t),</a>
+<a name="ln41">  .parent = NULL</a>
+<a name="ln42">};</a>
+<a name="ln43"> </a>
+<a name="ln44"> </a>
+<a name="ln45">static void cleanup_widget_sub(lua_State *L,dt_lua_widget_type_t*widget_type,lua_widget widget);</a>
+<a name="ln46">static void cleanup_widget_sub(lua_State *L,dt_lua_widget_type_t*widget_type,lua_widget widget) {</a>
+<a name="ln47">  if(widget_type-&gt;parent) </a>
+<a name="ln48">    cleanup_widget_sub(L,widget_type-&gt;parent,widget);</a>
+<a name="ln49">  if(widget_type-&gt;gui_cleanup) {</a>
+<a name="ln50">    widget_type-&gt;gui_cleanup(L,widget);</a>
+<a name="ln51">  }</a>
+<a name="ln52">}</a>
+<a name="ln53"> </a>
+<a name="ln54">static void init_widget_sub(lua_State *L,dt_lua_widget_type_t*widget_type);</a>
+<a name="ln55">static void init_widget_sub(lua_State *L,dt_lua_widget_type_t*widget_type) {</a>
+<a name="ln56">  if(widget_type-&gt;parent) </a>
+<a name="ln57">    init_widget_sub(L,widget_type-&gt;parent);</a>
+<a name="ln58">  if(widget_type-&gt;gui_init) </a>
+<a name="ln59">    widget_type-&gt;gui_init(L);</a>
+<a name="ln60">}</a>
+<a name="ln61"> </a>
+<a name="ln62">static void on_destroy(GtkWidget *widget, gpointer user_data)</a>
+<a name="ln63">{</a>
+<a name="ln64">}</a>
+<a name="ln65"> </a>
+<a name="ln66">static gboolean on_destroy_wrapper(gpointer user_data)</a>
+<a name="ln67">{</a>
+<a name="ln68">  gtk_widget_destroy((GtkWidget*) user_data);</a>
+<a name="ln69">  return false;</a>
+<a name="ln70">}</a>
+<a name="ln71"> </a>
+<a name="ln72">static int widget_gc(lua_State *L)</a>
+<a name="ln73">{</a>
+<a name="ln74">  lua_widget lwidget;</a>
+<a name="ln75">  luaA_to(L,lua_widget,&amp;lwidget,1);</a>
+<a name="ln76">  if(!lwidget) return 0; // object has been destroyed</a>
+<a name="ln77">  if(gtk_widget_get_parent(lwidget-&gt;widget)) {</a>
+<a name="ln78">    luaL_error(L,&quot;Destroying a widget which is still parented, this should never happen (%s at %p)\n&quot;,lwidget-&gt;type-&gt;name,lwidget);</a>
+<a name="ln79">  }</a>
+<a name="ln80">  cleanup_widget_sub(L,lwidget-&gt;type,lwidget);</a>
+<a name="ln81">  dt_lua_widget_unbind(L,lwidget);</a>
+<a name="ln82">  // no need to drop, the pointer table is weak and the widget is already being GC, so it's not in the table anymore</a>
+<a name="ln83">  //dt_lua_type_gpointer_drop(L,lwidget);</a>
+<a name="ln84">  //dt_lua_type_gpointer_drop(L,lwidget-&gt;widget);</a>
+<a name="ln85">  g_idle_add(on_destroy_wrapper,lwidget-&gt;widget);</a>
+<a name="ln86">  free(lwidget);</a>
+<a name="ln87">  return 0;</a>
+<a name="ln88">}</a>
+<a name="ln89"> </a>
+<a name="ln90">static int get_widget_params(lua_State *L)</a>
+<a name="ln91">{</a>
+<a name="ln92">  struct dt_lua_widget_type_t *widget_type = lua_touserdata(L, lua_upvalueindex(1));</a>
+<a name="ln93">  if(G_TYPE_IS_ABSTRACT(widget_type-&gt;gtk_type)){</a>
+<a name="ln94">    luaL_error(L,&quot;Trying to create a widget of an abstract type : %s\n&quot;,widget_type-&gt;name);</a>
+<a name="ln95">  }</a>
+<a name="ln96">  lua_widget widget= malloc(widget_type-&gt;alloc_size);</a>
+<a name="ln97">  widget-&gt;widget = gtk_widget_new(widget_type-&gt;gtk_type,NULL);</a>
+<a name="ln98">  gtk_widget_show(widget-&gt;widget);// widgets are invisible by default</a>
+<a name="ln99">  g_object_ref_sink(widget-&gt;widget);</a>
+<a name="ln100">  widget-&gt;type = widget_type;</a>
+<a name="ln101">  luaA_push_type(L,widget_type-&gt;associated_type,&amp;widget);</a>
+<a name="ln102">  dt_lua_type_gpointer_alias_type(L,widget_type-&gt;associated_type,widget,widget-&gt;widget);</a>
+<a name="ln103">  init_widget_sub(L,widget_type);</a>
+<a name="ln104"> </a>
+<a name="ln105">  luaL_getmetafield(L,-1,&quot;__gtk_signals&quot;);</a>
+<a name="ln106">  lua_pushnil(L); /* first key */</a>
+<a name="ln107">  while(lua_next(L, -2) != 0)</a>
+<a name="ln108">  {</a>
+<a name="ln109">    g_signal_connect(widget-&gt;widget, lua_tostring(L,-2), G_CALLBACK(lua_touserdata(L,-1)), widget);</a>
+<a name="ln110">    lua_pop(L,1);</a>
+<a name="ln111">  }</a>
+<a name="ln112">  lua_pop(L,1);</a>
+<a name="ln113">  g_signal_connect(widget-&gt;widget,&quot;destroy&quot;,G_CALLBACK(on_destroy),widget);</a>
+<a name="ln114">  return 1;</a>
+<a name="ln115">}</a>
+<a name="ln116"> </a>
+<a name="ln117"> </a>
+<a name="ln118"> </a>
+<a name="ln119">luaA_Type dt_lua_init_widget_type_type(lua_State *L, dt_lua_widget_type_t* widget_type,const char* lua_type,GType gtk_type)</a>
+<a name="ln120">{</a>
+<a name="ln121">  luaA_Type type_id = dt_lua_init_gpointer_type_type(L,luaA_type_add(L,lua_type,sizeof(gpointer)));</a>
+<a name="ln122">  widget_type-&gt;associated_type = type_id;</a>
+<a name="ln123">  widget_type-&gt;gtk_type = gtk_type;</a>
+<a name="ln124">  dt_lua_type_register_parent_type(L, type_id, widget_type-&gt;parent-&gt;associated_type);</a>
+<a name="ln125"> </a>
+<a name="ln126">  lua_newtable(L);</a>
+<a name="ln127">  dt_lua_type_setmetafield_type(L,type_id,&quot;__gtk_signals&quot;);</a>
+<a name="ln128">  // add to the table</a>
+<a name="ln129">  lua_pushlightuserdata(L, widget_type);</a>
+<a name="ln130">  lua_pushcclosure(L, get_widget_params, 1);</a>
+<a name="ln131">  dt_lua_gtk_wrap(L);</a>
+<a name="ln132">  dt_lua_module_entry_new(L, -1, &quot;widget&quot;, widget_type-&gt;name);</a>
+<a name="ln133">  lua_pop(L, 1);</a>
+<a name="ln134">  return type_id;</a>
+<a name="ln135">};</a>
+<a name="ln136"> </a>
+<a name="ln137"> </a>
+<a name="ln138"> </a>
+<a name="ln139">static int new_widget(lua_State *L)</a>
+<a name="ln140">{</a>
+<a name="ln141">  const char *entry_name = luaL_checkstring(L, 1);</a>
+<a name="ln142">  dt_lua_module_entry_push(L, &quot;widget&quot;, entry_name);</a>
+<a name="ln143">  lua_insert(L,2);</a>
+<a name="ln144">  lua_call(L, lua_gettop(L)-2, 1);</a>
+<a name="ln145">  return 1;</a>
+<a name="ln146">}</a>
+<a name="ln147"> </a>
+<a name="ln148">void dt_lua_widget_set_callback(lua_State *L,int index,const char* name)</a>
+<a name="ln149">{</a>
+<a name="ln150">  luaL_argcheck(L, dt_lua_isa(L, index, lua_widget), index, &quot;lua_widget expected&quot;);</a>
+<a name="ln151">  luaL_checktype(L,-1,LUA_TFUNCTION);</a>
+<a name="ln152">  lua_getuservalue(L,index);</a>
+<a name="ln153">  lua_pushvalue(L,-2);</a>
+<a name="ln154">  lua_setfield(L,-2,name);</a>
+<a name="ln155">  lua_pop(L,2);</a>
+<a name="ln156">}</a>
+<a name="ln157"> </a>
+<a name="ln158">void dt_lua_widget_get_callback(lua_State *L,int index,const char* name)</a>
+<a name="ln159">{</a>
+<a name="ln160">  luaL_argcheck(L, dt_lua_isa(L, index, lua_widget), index, &quot;lua_widget expected&quot;);</a>
+<a name="ln161">  lua_getuservalue(L,index);</a>
+<a name="ln162">  lua_getfield(L,-1,name);</a>
+<a name="ln163">  lua_remove(L,-2);</a>
+<a name="ln164">}</a>
+<a name="ln165"> </a>
+<a name="ln166">int dt_lua_widget_trigger_callback(lua_State *L)</a>
+<a name="ln167">{</a>
+<a name="ln168">  int nargs = lua_gettop(L) -2;</a>
+<a name="ln169">  lua_widget widget;</a>
+<a name="ln170">  luaA_to(L,lua_widget,&amp;widget,1);</a>
+<a name="ln171">  const char* name = lua_tostring(L,2);</a>
+<a name="ln172">  lua_getuservalue(L,1);</a>
+<a name="ln173">  lua_getfield(L,-1,name);</a>
+<a name="ln174">  if(!lua_isnil(L,-1)) {</a>
+<a name="ln175">    lua_pushvalue(L,1);</a>
+<a name="ln176">    for(int i = 0 ; i &lt; nargs ; i++) {</a>
+<a name="ln177">      lua_pushvalue(L,i+3);</a>
+<a name="ln178">    }</a>
+<a name="ln179">    dt_lua_treated_pcall(L,nargs+1,0);</a>
+<a name="ln180">    dt_lua_redraw_screen();</a>
+<a name="ln181">  }</a>
+<a name="ln182">  return 0;</a>
+<a name="ln183">}</a>
+<a name="ln184"> </a>
+<a name="ln185">static int reset_member(lua_State *L)</a>
+<a name="ln186">{</a>
+<a name="ln187">  if(lua_gettop(L) &gt; 2) {</a>
+<a name="ln188">    dt_lua_widget_set_callback(L,1,&quot;reset&quot;);</a>
+<a name="ln189">    return 0;</a>
+<a name="ln190">  }</a>
+<a name="ln191">  dt_lua_widget_get_callback(L,1,&quot;reset&quot;);</a>
+<a name="ln192">  return 1;</a>
+<a name="ln193">}</a>
+<a name="ln194"> </a>
+<a name="ln195"> </a>
+<a name="ln196">static int tooltip_member(lua_State *L)</a>
+<a name="ln197">{</a>
+<a name="ln198">  lua_widget widget;</a>
+<a name="ln199">  luaA_to(L,lua_widget,&amp;widget,1);</a>
+<a name="ln200">  if(lua_gettop(L) &gt; 2) {</a>
+<a name="ln201">    if(lua_isnil(L,3)) {</a>
+<a name="ln202">      gtk_widget_set_tooltip_text(widget-&gt;widget,NULL);</a>
+<a name="ln203">    } else {</a>
+<a name="ln204">      const char * text = luaL_checkstring(L,3);</a>
+<a name="ln205">      gtk_widget_set_tooltip_text(widget-&gt;widget,text);</a>
+<a name="ln206">    }</a>
+<a name="ln207">    return 0;</a>
+<a name="ln208">  }</a>
+<a name="ln209">  char* result = gtk_widget_get_tooltip_text(widget-&gt;widget);</a>
+<a name="ln210">  lua_pushstring(L,result);</a>
+<a name="ln211">  free(result);</a>
+<a name="ln212">  return 1;</a>
+<a name="ln213">}</a>
+<a name="ln214"> </a>
+<a name="ln215">static int sensitive_member(lua_State *L)</a>
+<a name="ln216">{</a>
+<a name="ln217">  lua_widget widget;</a>
+<a name="ln218">  luaA_to(L,lua_widget,&amp;widget,1);</a>
+<a name="ln219">  if(lua_gettop(L) &gt; 2) {</a>
+<a name="ln220">    gboolean value = lua_toboolean(L,3);</a>
+<a name="ln221">    gtk_widget_set_sensitive(widget-&gt;widget,value);</a>
+<a name="ln222">    return 0;</a>
+<a name="ln223">  }</a>
+<a name="ln224">  gboolean result = gtk_widget_get_sensitive(widget-&gt;widget);</a>
+<a name="ln225">  lua_pushboolean(L,result);</a>
+<a name="ln226">  return 1;</a>
+<a name="ln227">}</a>
+<a name="ln228"> </a>
+<a name="ln229">int dt_lua_widget_tostring_member(lua_State *L)</a>
+<a name="ln230">{</a>
+<a name="ln231">  lua_widget widget;</a>
+<a name="ln232">  luaA_to(L, lua_widget, &amp;widget, 1);</a>
+<a name="ln233">  lua_pushstring(L, G_OBJECT_TYPE_NAME(widget-&gt;widget));</a>
+<a name="ln234">  return 1;</a>
+<a name="ln235">}</a>
+<a name="ln236"> </a>
+<a name="ln237">static int gtk_signal_member(lua_State *L)</a>
+<a name="ln238">{</a>
+<a name="ln239"> </a>
+<a name="ln240">  const char *signal = lua_tostring(L,lua_upvalueindex(1));</a>
+<a name="ln241">  if(lua_gettop(L) &gt; 2) {</a>
+<a name="ln242">    dt_lua_widget_set_callback(L,1,signal);</a>
+<a name="ln243">    return 0;</a>
+<a name="ln244">  }</a>
+<a name="ln245">  dt_lua_widget_get_callback(L,1,signal);</a>
+<a name="ln246">  return 1;</a>
+<a name="ln247">}</a>
+<a name="ln248"> </a>
+<a name="ln249">void dt_lua_widget_register_gtk_callback_type(lua_State *L,luaA_Type type_id,const char* signal_name, const char* lua_name,GCallback callback) </a>
+<a name="ln250">{</a>
+<a name="ln251">  lua_pushstring(L,signal_name);</a>
+<a name="ln252">  lua_pushcclosure(L,gtk_signal_member,1);</a>
+<a name="ln253">  dt_lua_type_register_type(L, type_id, lua_name);</a>
+<a name="ln254"> </a>
+<a name="ln255">  luaL_newmetatable(L, luaA_typename(L, type_id));</a>
+<a name="ln256">  lua_getfield(L,-1,&quot;__gtk_signals&quot;);</a>
+<a name="ln257">  lua_pushlightuserdata(L,callback);</a>
+<a name="ln258">  lua_setfield(L,-2,signal_name);</a>
+<a name="ln259">  lua_pop(L,2);</a>
+<a name="ln260">  </a>
+<a name="ln261">}</a>
+<a name="ln262"> </a>
+<a name="ln263">int widget_call(lua_State *L)</a>
+<a name="ln264">{</a>
+<a name="ln265">  lua_pushnil(L); /* first key */</a>
+<a name="ln266">  while(lua_next(L, 2) != 0)</a>
+<a name="ln267">  {</a>
+<a name="ln268">    lua_pushvalue(L,-2);</a>
+<a name="ln269">    lua_pushvalue(L,-2);</a>
+<a name="ln270">    lua_settable(L,1);</a>
+<a name="ln271">    lua_pop(L,1);</a>
+<a name="ln272">  }</a>
+<a name="ln273">  lua_pop(L,1);</a>
+<a name="ln274">  return 1;</a>
+<a name="ln275">}</a>
+<a name="ln276"> </a>
+<a name="ln277">void dt_lua_widget_bind(lua_State *L, lua_widget widget)</a>
+<a name="ln278">{</a>
+<a name="ln279">  /* check that widget isn't already parented */</a>
+<a name="ln280">  if(gtk_widget_get_parent (widget-&gt;widget) != NULL) {</a>
+<a name="ln281">    luaL_error(L,&quot;Attempting to bind a widget which already has a parent\n&quot;);</a>
+<a name="ln282">  }</a>
+<a name="ln283"> </a>
+<a name="ln284">  /* store it as a toplevel widget */</a>
+<a name="ln285">  lua_getfield(L, LUA_REGISTRYINDEX,&quot;dt_lua_widget_bind_table&quot;);</a>
+<a name="ln286">  lua_pushlightuserdata(L,widget);</a>
+<a name="ln287">  luaA_push(L,lua_widget,&amp;widget);</a>
+<a name="ln288">  lua_settable(L,-3);</a>
+<a name="ln289">  lua_pop(L,1);</a>
+<a name="ln290">}</a>
+<a name="ln291"> </a>
+<a name="ln292">void dt_lua_widget_unbind(lua_State *L, lua_widget widget)</a>
+<a name="ln293">{</a>
+<a name="ln294">  lua_getfield(L, LUA_REGISTRYINDEX,&quot;dt_lua_widget_bind_table&quot;);</a>
+<a name="ln295">  lua_pushlightuserdata(L,widget);</a>
+<a name="ln296">  lua_pushnil(L);</a>
+<a name="ln297">  lua_settable(L,-3);</a>
+<a name="ln298">  lua_pop(L,1);</a>
+<a name="ln299">}</a>
+<a name="ln300"> </a>
+<a name="ln301"> </a>
+<a name="ln302">int dt_lua_init_widget(lua_State* L)</a>
+<a name="ln303">{</a>
+<a name="ln304"> </a>
+<a name="ln305">  lua_newtable(L);</a>
+<a name="ln306">  lua_setfield(L, LUA_REGISTRYINDEX,&quot;dt_lua_widget_bind_table&quot;);</a>
+<a name="ln307"> </a>
+<a name="ln308">  dt_lua_module_new(L,&quot;widget&quot;);</a>
+<a name="ln309"> </a>
+<a name="ln310">  widget_type.associated_type = dt_lua_init_gpointer_type(L,lua_widget);</a>
+<a name="ln311">  lua_pushcfunction(L,tooltip_member);</a>
+<a name="ln312">  dt_lua_gtk_wrap(L);</a>
+<a name="ln313">  dt_lua_type_register(L, lua_widget, &quot;tooltip&quot;);</a>
+<a name="ln314">  lua_pushcfunction(L,widget_gc);</a>
+<a name="ln315">  dt_lua_gtk_wrap(L);</a>
+<a name="ln316">  dt_lua_type_setmetafield(L,lua_widget,&quot;__gc&quot;);</a>
+<a name="ln317">  lua_pushcfunction(L,reset_member);</a>
+<a name="ln318">  dt_lua_type_register(L, lua_widget, &quot;reset_callback&quot;);</a>
+<a name="ln319">  lua_pushcfunction(L,widget_call);</a>
+<a name="ln320">  dt_lua_type_setmetafield(L,lua_widget,&quot;__call&quot;);</a>
+<a name="ln321">  lua_pushcfunction(L,sensitive_member);</a>
+<a name="ln322">  dt_lua_gtk_wrap(L);</a>
+<a name="ln323">  dt_lua_type_register(L, lua_widget, &quot;sensitive&quot;);</a>
+<a name="ln324">  lua_pushcfunction(L, dt_lua_widget_tostring_member);</a>
+<a name="ln325">  dt_lua_gtk_wrap(L);</a>
+<a name="ln326">  dt_lua_type_setmetafield(L,lua_widget,&quot;__tostring&quot;);</a>
+<a name="ln327"> </a>
+<a name="ln328">  dt_lua_init_widget_container(L);</a>
+<a name="ln329"> </a>
+<a name="ln330">  dt_lua_init_widget_box(L);</a>
+<a name="ln331">  dt_lua_init_widget_button(L);</a>
+<a name="ln332">  dt_lua_init_widget_check_button(L);</a>
+<a name="ln333">  dt_lua_init_widget_combobox(L);</a>
+<a name="ln334">  dt_lua_init_widget_label(L);</a>
+<a name="ln335">  dt_lua_init_widget_section_label(L);</a>
+<a name="ln336">  dt_lua_init_widget_entry(L);</a>
+<a name="ln337">  dt_lua_init_widget_file_chooser_button(L);</a>
+<a name="ln338">  dt_lua_init_widget_separator(L);</a>
+<a name="ln339">  dt_lua_init_widget_slider(L);</a>
+<a name="ln340">  dt_lua_init_widget_stack(L);</a>
+<a name="ln341">  dt_lua_init_widget_text_view(L);</a>
+<a name="ln342"> </a>
+<a name="ln343">  dt_lua_push_darktable_lib(L);</a>
+<a name="ln344">  lua_pushstring(L, &quot;new_widget&quot;);</a>
+<a name="ln345">  lua_pushcfunction(L, &amp;new_widget);</a>
+<a name="ln346">  lua_settable(L, -3);</a>
+<a name="ln347">  lua_pop(L, 1);</a>
+<a name="ln348">  return 0;</a>
+<a name="ln349">}</a>
+<a name="ln350">// modelines: These editor modelines have been set for all relevant files by tools/update_modelines.sh</a>
+<a name="ln351">// vim: shiftwidth=2 expandtab tabstop=2 cindent</a>
+<a name="ln352">// kate: tab-indents: off; indent-width 2; replace-tabs on; indent-mode cstyle; remove-trailing-spaces modified;</a>
+
+</code></pre>
+<div class="balloon" rel="97"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v522/" target="_blank">V522</a> There might be dereferencing of a potential null pointer 'widget'. Check lines: 97, 96.</p></div>
+
+<link rel="stylesheet" href="highlight.css">
+<script src="highlight.pack.js"></script>
+<script src="highlightjs-line-numbers.js"></script>
+<script>hljs.initHighlightingOnLoad();</script>
+<script>hljs.initLineNumbersOnLoad();</script>
+<script>
+  $(document).ready(function() {
+      $('.balloon').each(function () {
+          var bl = $(this);
+          var line = bl.attr('rel');
+          var text = $('a[name="ln'+line+'"]').text();
+
+          var space_count = 0;
+          for(var i = 0; i<text.length; i++){
+              var char = text[i];
+              if((char !== ' ')&&(char !== '\t'))break;
+              if(char === '\t')space_count++;
+              space_count++;
+          }
+
+          bl.css('margin-left', space_count*8);
+          $('a[name="ln'+line+'"]').after(bl);
+      });
+
+      window.location = window.location;
+  });
+</script>
+</body>
+</html>

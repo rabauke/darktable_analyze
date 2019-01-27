@@ -1,0 +1,775 @@
+
+<html>
+<head>
+  <link rel="stylesheet" href="../style.css"/>
+  <script src="../jquery-3.2.1.min.js"></script>
+</head>
+<body>
+<pre><code class = "cpp">
+<a name="ln1">/*</a>
+<a name="ln2">   This file is part of darktable,</a>
+<a name="ln3">   copyright (c) 2012 Jeremy Rosen</a>
+<a name="ln4"> </a>
+<a name="ln5">   darktable is free software: you can redistribute it and/or modify</a>
+<a name="ln6">   it under the terms of the GNU General Public License as published by</a>
+<a name="ln7">   the Free Software Foundation, either version 3 of the License, or</a>
+<a name="ln8">   (at your option) any later version.</a>
+<a name="ln9"> </a>
+<a name="ln10">   darktable is distributed in the hope that it will be useful,</a>
+<a name="ln11">   but WITHOUT ANY WARRANTY; without even the implied warranty of</a>
+<a name="ln12">   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the</a>
+<a name="ln13">   GNU General Public License for more details.</a>
+<a name="ln14"> </a>
+<a name="ln15">   You should have received a copy of the GNU General Public License</a>
+<a name="ln16">   along with darktable.  If not, see &lt;http://www.gnu.org/licenses/&gt;.</a>
+<a name="ln17"> */</a>
+<a name="ln18">#include &quot;lua/call.h&quot;</a>
+<a name="ln19">#include &quot;control/control.h&quot;</a>
+<a name="ln20">#include &quot;lua/lua.h&quot;</a>
+<a name="ln21">#ifndef _WIN32</a>
+<a name="ln22">#include &lt;glib-unix.h&gt;</a>
+<a name="ln23">#endif</a>
+<a name="ln24">#include &lt;glib.h&gt;</a>
+<a name="ln25">#include &lt;stdlib.h&gt;</a>
+<a name="ln26">#ifndef _WIN32</a>
+<a name="ln27">#include &lt;sys/select.h&gt;</a>
+<a name="ln28">#endif</a>
+<a name="ln29"> </a>
+<a name="ln30">int dt_lua_check_print_error(lua_State* L, int result) </a>
+<a name="ln31">{</a>
+<a name="ln32">  if(result == LUA_OK) return result;</a>
+<a name="ln33">  if(darktable.unmuted &amp; DT_DEBUG_LUA)</a>
+<a name="ln34">  {</a>
+<a name="ln35">    dt_print(DT_DEBUG_LUA, &quot;LUA ERROR : %s\n&quot;, lua_tostring(L, -1));</a>
+<a name="ln36">  }</a>
+<a name="ln37">  lua_pop(L,1); // remove the error message, it has been handled</a>
+<a name="ln38">  return result;</a>
+<a name="ln39">}</a>
+<a name="ln40"> </a>
+<a name="ln41">static int create_backtrace(lua_State*L)</a>
+<a name="ln42">{</a>
+<a name="ln43">  luaL_traceback(L,L,lua_tostring(L,-1),0);</a>
+<a name="ln44">  return 1;</a>
+<a name="ln45">}</a>
+<a name="ln46"> </a>
+<a name="ln47">int dt_lua_treated_pcall(lua_State*L, int nargs, int nresults)</a>
+<a name="ln48">{</a>
+<a name="ln49">  lua_pushcfunction(L,create_backtrace);</a>
+<a name="ln50">  lua_insert(L,1);</a>
+<a name="ln51">  int result = dt_lua_check_print_error(L,lua_pcall(L,nargs,nresults,1));</a>
+<a name="ln52">  lua_remove(L,1);</a>
+<a name="ln53">  return result;</a>
+<a name="ln54">}</a>
+<a name="ln55"> </a>
+<a name="ln56"> </a>
+<a name="ln57">//#define _DEBUG 1</a>
+<a name="ln58">/*</a>
+<a name="ln59">   THREAD</a>
+<a name="ln60">   * threads are a way to store some work that will be done later</a>
+<a name="ln61">   * threads are saved in the table at REGISTRY_INDEX &quot;dt_lua_bg_thread&quot;, that table is manipulated with save_thread, get_thread, drop_thread. They have a unique integer ID</a>
+<a name="ln62">   * each thread is a lua_State with the following convention for its stack</a>
+<a name="ln63">      -- top of the stack --</a>
+<a name="ln64">      * args</a>
+<a name="ln65">      * lua function : function to call</a>
+<a name="ln66">      * int : nresults</a>
+<a name="ln67">      * void * : callback data</a>
+<a name="ln68">      * dt_lua_finish_callback : called when the thread is finished, with or without errors</a>
+<a name="ln69">      -- bottom of the stack --</a>
+<a name="ln70"> </a>
+<a name="ln71">  RUNNING A THREAD</a>
+<a name="ln72">  to run a thread, call run_async_thread which does the following</a>
+<a name="ln73">  * must be called with the lua lock taken</a>
+<a name="ln74">  * find/create a new gtk thread</a>
+<a name="ln75">  * run that thread which is in charge of doing the job</a>
+<a name="ln76">  * the ownership of the lock is transferred to the thread</a>
+<a name="ln77">  * wait for the thread to release the lock (the thread might not have finished</a>
+<a name="ln78">  * return to the caller</a>
+<a name="ln79"> </a>
+<a name="ln80">  QUEUING A JOB</a>
+<a name="ln81">  * there is a GTK thread in charge of running a LOOP of events</a>
+<a name="ln82">  * each job-queuing function has it own callback, but eventually call run_async_thread</a>
+<a name="ln83"> </a>
+<a name="ln84">  TODO</a>
+<a name="ln85">  * redo the old yield (override lua primitives)</a>
+<a name="ln86">  * check all call, pcall etc... sites</a>
+<a name="ln87">  * lua lock et recursivité</a>
+<a name="ln88">  * réimplémenter l'intégration avec la boucle gtk pour mieux faire le bounce</a>
+<a name="ln89">  ? add a name in the thread stack for debug purpose </a>
+<a name="ln90">  * two pcall with no tracebacks: call.c and lua.c</a>
+<a name="ln91"> </a>
+<a name="ln92">   */</a>
+<a name="ln93"> </a>
+<a name="ln94">static int save_thread(lua_State* L)</a>
+<a name="ln95">{</a>
+<a name="ln96">  lua_getfield(L, LUA_REGISTRYINDEX, &quot;dt_lua_bg_threads&quot;);</a>
+<a name="ln97">  lua_pushvalue(L,-2);</a>
+<a name="ln98">  const int thread_num = luaL_ref(L,-2);</a>
+<a name="ln99">  lua_pop(L,2);</a>
+<a name="ln100">  return thread_num;</a>
+<a name="ln101">}</a>
+<a name="ln102"> </a>
+<a name="ln103">static lua_State* get_thread(lua_State* L, int thread_num)</a>
+<a name="ln104">{</a>
+<a name="ln105">  lua_getfield(L, LUA_REGISTRYINDEX, &quot;dt_lua_bg_threads&quot;);</a>
+<a name="ln106">  lua_pushinteger(L,thread_num);</a>
+<a name="ln107">  lua_gettable(L,-2);</a>
+<a name="ln108">  lua_State* thread = lua_tothread(L,-1);</a>
+<a name="ln109">  lua_pop(L,2);</a>
+<a name="ln110">  return thread;</a>
+<a name="ln111">}</a>
+<a name="ln112"> </a>
+<a name="ln113"> </a>
+<a name="ln114">static void drop_thread(lua_State*L, int thread_num)</a>
+<a name="ln115">{</a>
+<a name="ln116">  lua_getfield(L, LUA_REGISTRYINDEX, &quot;dt_lua_bg_threads&quot;);</a>
+<a name="ln117">  lua_pushinteger(L,thread_num);</a>
+<a name="ln118">  lua_pushnil(L);</a>
+<a name="ln119">  lua_settable(L,-3);</a>
+<a name="ln120">  lua_pop(L,1);</a>
+<a name="ln121">}</a>
+<a name="ln122"> </a>
+<a name="ln123"> </a>
+<a name="ln124">static void run_async_thread_main(gpointer data,gpointer user_data)</a>
+<a name="ln125">{</a>
+<a name="ln126">  // lua lock ownership transferred from parent thread</a>
+<a name="ln127">  int thread_num = GPOINTER_TO_INT(data);</a>
+<a name="ln128">  lua_State*L = darktable.lua_state.state;</a>
+<a name="ln129">  lua_State* thread = get_thread(L,thread_num);</a>
+<a name="ln130">  if(!thread) {</a>
+<a name="ln131">    dt_print(DT_DEBUG_LUA, &quot;LUA ERROR : no thread found, this should never happen\n&quot;);</a>
+<a name="ln132">    return;</a>
+<a name="ln133">  }</a>
+<a name="ln134">  dt_lua_finish_callback  cb = lua_touserdata(thread,1);</a>
+<a name="ln135">  void * cb_data = lua_touserdata(thread,2);</a>
+<a name="ln136">  int nresults = lua_tointeger(thread, 3);</a>
+<a name="ln137">  lua_pushcfunction(thread,create_backtrace);</a>
+<a name="ln138">  lua_insert(thread,4);</a>
+<a name="ln139">  int thread_result = lua_pcall(thread,  lua_gettop(thread)-5,nresults,4);</a>
+<a name="ln140">  if(cb) {</a>
+<a name="ln141">    cb(thread,thread_result,cb_data);</a>
+<a name="ln142">  } else {</a>
+<a name="ln143">    dt_lua_check_print_error(thread,thread_result);</a>
+<a name="ln144">  }</a>
+<a name="ln145">  drop_thread(L,thread_num);</a>
+<a name="ln146">  dt_lua_unlock();</a>
+<a name="ln147">  return;</a>
+<a name="ln148"> </a>
+<a name="ln149">}</a>
+<a name="ln150"> </a>
+<a name="ln151"> </a>
+<a name="ln152">static void run_async_thread(lua_State* L, int thread_num)</a>
+<a name="ln153">{</a>
+<a name="ln154">  g_thread_pool_push(darktable.lua_state.pool,GINT_TO_POINTER(thread_num),NULL);</a>
+<a name="ln155">  // lock ownership is transferred to the new thread. We want to block until it is returned to us</a>
+<a name="ln156">  // either because the other thread finished or because it paused</a>
+<a name="ln157">  dt_lua_lock();</a>
+<a name="ln158">}</a>
+<a name="ln159"> </a>
+<a name="ln160"> </a>
+<a name="ln161">/*</a>
+<a name="ln162">   END JOB</a>
+<a name="ln163">   This is a source that deals with DT termination. it triggers when DT exits</a>
+<a name="ln164">   */</a>
+<a name="ln165">static gboolean end_job_prepare (GSource *source, gint    *timeout)</a>
+<a name="ln166">{</a>
+<a name="ln167">  return darktable.lua_state.ending;</a>
+<a name="ln168">}</a>
+<a name="ln169"> </a>
+<a name="ln170">static gboolean end_job_dispatch (GSource* source, GSourceFunc callback, gpointer user_data)</a>
+<a name="ln171">{</a>
+<a name="ln172">  g_main_loop_quit(darktable.lua_state.loop);</a>
+<a name="ln173">  g_thread_pool_free(darktable.lua_state.pool,false,true);</a>
+<a name="ln174">  return G_SOURCE_REMOVE;</a>
+<a name="ln175">}</a>
+<a name="ln176">static GSourceFuncs end_job_funcs =</a>
+<a name="ln177">{</a>
+<a name="ln178">  end_job_prepare,</a>
+<a name="ln179">  NULL,  /* check */</a>
+<a name="ln180">  end_job_dispatch,</a>
+<a name="ln181">  NULL,</a>
+<a name="ln182">};</a>
+<a name="ln183"> </a>
+<a name="ln184">static void end_job_init()</a>
+<a name="ln185">{</a>
+<a name="ln186">  GSource *source = g_source_new (&amp;end_job_funcs, sizeof (GSource));</a>
+<a name="ln187">  g_source_set_name (source, &quot;lua_end_job_source&quot;);</a>
+<a name="ln188">  // make sure to finish any non-blocking job before we quit</a>
+<a name="ln189">  g_source_set_priority(source,G_PRIORITY_DEFAULT_IDLE);</a>
+<a name="ln190">  g_source_attach(source,darktable.lua_state.context);</a>
+<a name="ln191">}</a>
+<a name="ln192"> </a>
+<a name="ln193">/*</a>
+<a name="ln194">   STACKED JOB</a>
+<a name="ln195">   This is a source that deals with lua jobs that are put on the stack to </a>
+<a name="ln196">   be run on the lua thread.</a>
+<a name="ln197">   */</a>
+<a name="ln198">static gboolean stacked_job_prepare (GSource *source, gint    *timeout)</a>
+<a name="ln199">{</a>
+<a name="ln200">  return (g_async_queue_length(darktable.lua_state.stacked_job_queue) &gt; 0);</a>
+<a name="ln201">}</a>
+<a name="ln202"> </a>
+<a name="ln203">static gboolean stacked_job_dispatch (GSource* source, GSourceFunc callback, gpointer user_data)</a>
+<a name="ln204">{</a>
+<a name="ln205">  gpointer message;</a>
+<a name="ln206">  message = g_async_queue_try_pop (darktable.lua_state.stacked_job_queue);</a>
+<a name="ln207">  if (message == NULL)</a>
+<a name="ln208">  {</a>
+<a name="ln209">    return TRUE;</a>
+<a name="ln210">  }</a>
+<a name="ln211"> </a>
+<a name="ln212">  dt_lua_lock();</a>
+<a name="ln213">  lua_State* L= darktable.lua_state.state;</a>
+<a name="ln214">  int reference = GPOINTER_TO_INT(message);</a>
+<a name="ln215">  run_async_thread(L,reference);</a>
+<a name="ln216">  dt_lua_unlock();</a>
+<a name="ln217">  return G_SOURCE_CONTINUE;</a>
+<a name="ln218">}</a>
+<a name="ln219">static void stacked_job_finalize (GSource *source)</a>
+<a name="ln220">{</a>
+<a name="ln221">  g_async_queue_unref(darktable.lua_state.stacked_job_queue);</a>
+<a name="ln222">  darktable.lua_state.stacked_job_queue = NULL;</a>
+<a name="ln223">}</a>
+<a name="ln224"> </a>
+<a name="ln225">static GSourceFuncs stacked_job_funcs =</a>
+<a name="ln226">{</a>
+<a name="ln227">  stacked_job_prepare,</a>
+<a name="ln228">  NULL,  /* check */</a>
+<a name="ln229">  stacked_job_dispatch,</a>
+<a name="ln230">  stacked_job_finalize,</a>
+<a name="ln231">};</a>
+<a name="ln232"> </a>
+<a name="ln233">static void stacked_job_init()</a>
+<a name="ln234">{</a>
+<a name="ln235">  darktable.lua_state.stacked_job_queue = g_async_queue_new();</a>
+<a name="ln236">  GSource *source = g_source_new (&amp;stacked_job_funcs, sizeof (GSource));</a>
+<a name="ln237">  g_source_set_name (source, &quot;lua_stacked_job_source&quot;);</a>
+<a name="ln238">  g_source_attach(source,darktable.lua_state.context);</a>
+<a name="ln239">}</a>
+<a name="ln240"> </a>
+<a name="ln241">/*</a>
+<a name="ln242">   ALIEN JOB</a>
+<a name="ln243">   This is a source that deals with lua jobs that are not on the stack but passed as</a>
+<a name="ln244">   varags. This is used to queue a lua job without owning the lua lock</a>
+<a name="ln245">   */</a>
+<a name="ln246"> </a>
+<a name="ln247">typedef struct {</a>
+<a name="ln248">  lua_CFunction pusher;</a>
+<a name="ln249">  GList* extra;</a>
+<a name="ln250">  dt_lua_finish_callback cb;</a>
+<a name="ln251">  void * cb_data;</a>
+<a name="ln252">  int nresults;</a>
+<a name="ln253"> </a>
+<a name="ln254">}async_call_data;</a>
+<a name="ln255"> </a>
+<a name="ln256">static gboolean alien_job_prepare (GSource *source, gint    *timeout)</a>
+<a name="ln257">{</a>
+<a name="ln258">  return (g_async_queue_length(darktable.lua_state.alien_job_queue) &gt; 0);</a>
+<a name="ln259">}</a>
+<a name="ln260"> </a>
+<a name="ln261">static void alien_job_destroy(void *data_ptr)</a>
+<a name="ln262">{</a>
+<a name="ln263">  async_call_data* data = data_ptr;</a>
+<a name="ln264"> </a>
+<a name="ln265">  GList* cur_elt = data-&gt;extra;</a>
+<a name="ln266">  while(cur_elt) {</a>
+<a name="ln267">    GList * type_type_elt = cur_elt;</a>
+<a name="ln268">    cur_elt = g_list_next(cur_elt);</a>
+<a name="ln269">    //GList * type_elt = cur_elt;</a>
+<a name="ln270">    cur_elt = g_list_next(cur_elt);</a>
+<a name="ln271">    GList * data_elt = cur_elt;</a>
+<a name="ln272">    cur_elt = g_list_next(cur_elt);</a>
+<a name="ln273">    switch(GPOINTER_TO_INT(type_type_elt-&gt;data)) {</a>
+<a name="ln274">      case LUA_ASYNC_TYPEID_WITH_FREE:</a>
+<a name="ln275">      case LUA_ASYNC_TYPENAME_WITH_FREE:</a>
+<a name="ln276">        {</a>
+<a name="ln277">          GList *destructor_elt = cur_elt;</a>
+<a name="ln278">          cur_elt = g_list_next(cur_elt);</a>
+<a name="ln279">          GValue to_free = G_VALUE_INIT;</a>
+<a name="ln280">          g_value_init(&amp;to_free,G_TYPE_POINTER);</a>
+<a name="ln281">          g_value_set_pointer(&amp;to_free,data_elt-&gt;data);</a>
+<a name="ln282">          g_closure_invoke(destructor_elt-&gt;data,NULL,1,&amp;to_free,NULL);</a>
+<a name="ln283">          g_closure_unref (destructor_elt-&gt;data);</a>
+<a name="ln284">        }</a>
+<a name="ln285">        break;</a>
+<a name="ln286">      case LUA_ASYNC_TYPEID:</a>
+<a name="ln287">      case LUA_ASYNC_TYPENAME:</a>
+<a name="ln288">        break;</a>
+<a name="ln289">      case LUA_ASYNC_DONE:</a>
+<a name="ln290">      default:</a>
+<a name="ln291">        // should never happen</a>
+<a name="ln292">        g_assert(false);</a>
+<a name="ln293">        break;</a>
+<a name="ln294">    }</a>
+<a name="ln295">  }</a>
+<a name="ln296">  g_list_free(data-&gt;extra);</a>
+<a name="ln297">  free(data);</a>
+<a name="ln298">}</a>
+<a name="ln299"> </a>
+<a name="ln300">static gboolean alien_job_dispatch (GSource* source, GSourceFunc callback, gpointer user_data)</a>
+<a name="ln301">{</a>
+<a name="ln302">  gpointer message;</a>
+<a name="ln303">  message = g_async_queue_try_pop (darktable.lua_state.alien_job_queue);</a>
+<a name="ln304">  if (message == NULL)</a>
+<a name="ln305">  {</a>
+<a name="ln306">    return TRUE;</a>
+<a name="ln307">  }</a>
+<a name="ln308"> </a>
+<a name="ln309">  async_call_data* data = (async_call_data*)message;</a>
+<a name="ln310">  dt_lua_lock();</a>
+<a name="ln311">  lua_State* L= darktable.lua_state.state;</a>
+<a name="ln312">  lua_State *new_thread = lua_newthread(L);</a>
+<a name="ln313">  int reference = save_thread(L);</a>
+<a name="ln314">  lua_pushlightuserdata(new_thread,data-&gt;cb);</a>
+<a name="ln315">  lua_pushlightuserdata(new_thread,data-&gt;cb_data);</a>
+<a name="ln316">  lua_pushinteger(new_thread,data-&gt;nresults);</a>
+<a name="ln317">  lua_pushcfunction(new_thread,data-&gt;pusher);</a>
+<a name="ln318"> </a>
+<a name="ln319">  GList* cur_elt = data-&gt;extra;</a>
+<a name="ln320">  while(cur_elt) {</a>
+<a name="ln321">    GList * type_type_elt = cur_elt;</a>
+<a name="ln322">    cur_elt = g_list_next(cur_elt);</a>
+<a name="ln323">    GList * type_elt = cur_elt;</a>
+<a name="ln324">    cur_elt = g_list_next(cur_elt);</a>
+<a name="ln325">    GList * data_elt = cur_elt;</a>
+<a name="ln326">    cur_elt = g_list_next(cur_elt);</a>
+<a name="ln327">    switch(GPOINTER_TO_INT(type_type_elt-&gt;data)) {</a>
+<a name="ln328">      case LUA_ASYNC_TYPEID_WITH_FREE:</a>
+<a name="ln329">        // skip the destructor</a>
+<a name="ln330">        cur_elt = g_list_next(cur_elt);</a>
+<a name="ln331">        // do not break</a>
+<a name="ln332">      case LUA_ASYNC_TYPEID:</a>
+<a name="ln333">        luaA_push_type(new_thread,GPOINTER_TO_INT(type_elt-&gt;data),data_elt-&gt;data);</a>
+<a name="ln334">        break;</a>
+<a name="ln335">      case LUA_ASYNC_TYPENAME_WITH_FREE:</a>
+<a name="ln336">        // skip the destructor</a>
+<a name="ln337">        cur_elt = g_list_next(cur_elt);</a>
+<a name="ln338">        // do not break</a>
+<a name="ln339">      case LUA_ASYNC_TYPENAME:</a>
+<a name="ln340">        luaA_push_type(new_thread,luaA_type_find(L,type_elt-&gt;data),&amp;data_elt-&gt;data);</a>
+<a name="ln341">        break;</a>
+<a name="ln342">      case LUA_ASYNC_DONE:</a>
+<a name="ln343">      default:</a>
+<a name="ln344">        // should never happen</a>
+<a name="ln345">        g_assert(false);</a>
+<a name="ln346">        break;</a>
+<a name="ln347">    }</a>
+<a name="ln348">  }</a>
+<a name="ln349">  run_async_thread(L,reference);</a>
+<a name="ln350">  dt_lua_unlock();</a>
+<a name="ln351">  alien_job_destroy(data);</a>
+<a name="ln352">  return G_SOURCE_CONTINUE;</a>
+<a name="ln353">}</a>
+<a name="ln354">static void alien_job_finalize (GSource *source)</a>
+<a name="ln355">{</a>
+<a name="ln356">  gpointer message = g_async_queue_try_pop (darktable.lua_state.alien_job_queue);</a>
+<a name="ln357">  while(message) {</a>
+<a name="ln358">    alien_job_destroy(message);</a>
+<a name="ln359">    message = g_async_queue_try_pop (darktable.lua_state.alien_job_queue);</a>
+<a name="ln360"> </a>
+<a name="ln361">  }</a>
+<a name="ln362">  g_async_queue_unref(darktable.lua_state.alien_job_queue);</a>
+<a name="ln363">  darktable.lua_state.alien_job_queue = NULL;</a>
+<a name="ln364">}</a>
+<a name="ln365"> </a>
+<a name="ln366">static GSourceFuncs alien_job_funcs =</a>
+<a name="ln367">{</a>
+<a name="ln368">  alien_job_prepare,</a>
+<a name="ln369">  NULL,  /* check */</a>
+<a name="ln370">  alien_job_dispatch,</a>
+<a name="ln371">  alien_job_finalize,</a>
+<a name="ln372">};</a>
+<a name="ln373"> </a>
+<a name="ln374">static void alien_job_init()</a>
+<a name="ln375">{</a>
+<a name="ln376">  darktable.lua_state.alien_job_queue = g_async_queue_new();</a>
+<a name="ln377">  GSource *source = g_source_new (&amp;alien_job_funcs, sizeof (GSource));</a>
+<a name="ln378">  g_source_set_name (source, &quot;lua_alien_job_source&quot;);</a>
+<a name="ln379">  g_source_attach(source,darktable.lua_state.context);</a>
+<a name="ln380">}</a>
+<a name="ln381"> </a>
+<a name="ln382">/*</a>
+<a name="ln383">   STRING JOB</a>
+<a name="ln384">   This is a source that deals with lua jobs that are gien as lua strings</a>
+<a name="ln385">   */</a>
+<a name="ln386"> </a>
+<a name="ln387">typedef struct {</a>
+<a name="ln388">  char* function;</a>
+<a name="ln389">  dt_lua_finish_callback cb;</a>
+<a name="ln390">  void * cb_data;</a>
+<a name="ln391">  int nresults;</a>
+<a name="ln392"> </a>
+<a name="ln393">}string_call_data;</a>
+<a name="ln394"> </a>
+<a name="ln395">static gboolean string_job_prepare (GSource *source, gint    *timeout)</a>
+<a name="ln396">{</a>
+<a name="ln397">  return (g_async_queue_length(darktable.lua_state.string_job_queue) &gt; 0);</a>
+<a name="ln398">}</a>
+<a name="ln399"> </a>
+<a name="ln400"> </a>
+<a name="ln401">static void string_data_destroy(string_call_data * data)</a>
+<a name="ln402">{</a>
+<a name="ln403">  free(data-&gt;function);</a>
+<a name="ln404">  free(data);</a>
+<a name="ln405">}</a>
+<a name="ln406"> </a>
+<a name="ln407">static gboolean string_job_dispatch (GSource* source, GSourceFunc callback, gpointer user_data)</a>
+<a name="ln408">{</a>
+<a name="ln409">  gpointer message;</a>
+<a name="ln410">  message = g_async_queue_try_pop (darktable.lua_state.string_job_queue);</a>
+<a name="ln411">  if (message == NULL)</a>
+<a name="ln412">  {</a>
+<a name="ln413">    return TRUE;</a>
+<a name="ln414">  }</a>
+<a name="ln415">  string_call_data* data = (string_call_data*)message;</a>
+<a name="ln416"> </a>
+<a name="ln417">  dt_lua_lock();</a>
+<a name="ln418">  lua_State* L= darktable.lua_state.state;</a>
+<a name="ln419">  lua_State *new_thread = lua_newthread(L);</a>
+<a name="ln420">  int reference = save_thread(L);</a>
+<a name="ln421">  lua_pushlightuserdata(new_thread,data-&gt;cb);</a>
+<a name="ln422">  lua_pushlightuserdata(new_thread,data-&gt;cb_data);</a>
+<a name="ln423">  lua_pushinteger(new_thread,data-&gt;nresults);</a>
+<a name="ln424"> </a>
+<a name="ln425">  int load_result = luaL_loadstring(new_thread, data-&gt;function);</a>
+<a name="ln426">  if(load_result != LUA_OK)</a>
+<a name="ln427">  {</a>
+<a name="ln428">    if(data-&gt;cb) {</a>
+<a name="ln429">      data-&gt;cb(new_thread,load_result,data-&gt;cb_data);</a>
+<a name="ln430">    } else {</a>
+<a name="ln431">      dt_lua_check_print_error(new_thread,load_result);</a>
+<a name="ln432">    }</a>
+<a name="ln433">    drop_thread(L,reference);</a>
+<a name="ln434">    dt_lua_unlock();</a>
+<a name="ln435">    string_data_destroy(data);</a>
+<a name="ln436">    return G_SOURCE_CONTINUE;</a>
+<a name="ln437">  }</a>
+<a name="ln438"> </a>
+<a name="ln439">  run_async_thread(L,reference);</a>
+<a name="ln440">  dt_lua_unlock();</a>
+<a name="ln441">  string_data_destroy(data);</a>
+<a name="ln442">  return G_SOURCE_CONTINUE;</a>
+<a name="ln443">}</a>
+<a name="ln444">static void string_job_finalize (GSource *source)</a>
+<a name="ln445">{</a>
+<a name="ln446">  gpointer message = g_async_queue_try_pop (darktable.lua_state.string_job_queue);</a>
+<a name="ln447">  while(message) {</a>
+<a name="ln448">    string_data_destroy(message);</a>
+<a name="ln449">    message = g_async_queue_try_pop (darktable.lua_state.string_job_queue);</a>
+<a name="ln450"> </a>
+<a name="ln451">  }</a>
+<a name="ln452">  g_async_queue_unref(darktable.lua_state.string_job_queue);</a>
+<a name="ln453">  darktable.lua_state.string_job_queue = NULL;</a>
+<a name="ln454">}</a>
+<a name="ln455"> </a>
+<a name="ln456">static GSourceFuncs string_job_funcs =</a>
+<a name="ln457">{</a>
+<a name="ln458">  string_job_prepare,</a>
+<a name="ln459">  NULL,  /* check */</a>
+<a name="ln460">  string_job_dispatch,</a>
+<a name="ln461">  string_job_finalize,</a>
+<a name="ln462">};</a>
+<a name="ln463"> </a>
+<a name="ln464">static void string_job_init()</a>
+<a name="ln465">{</a>
+<a name="ln466">  darktable.lua_state.string_job_queue = g_async_queue_new();</a>
+<a name="ln467">  GSource *source = g_source_new (&amp;string_job_funcs, sizeof (GSource));</a>
+<a name="ln468">  g_source_set_name (source, &quot;lua_string_job_source&quot;);</a>
+<a name="ln469">  g_source_attach(source,darktable.lua_state.context);</a>
+<a name="ln470">}</a>
+<a name="ln471"> </a>
+<a name="ln472">void dt_lua_async_call_internal(const char* function, int line,lua_State *L, int nargs,int nresults,dt_lua_finish_callback cb, void*data)</a>
+<a name="ln473">{</a>
+<a name="ln474">#ifdef _DEBUG</a>
+<a name="ln475">  dt_print(DT_DEBUG_LUA,&quot;LUA DEBUG : %s called from %s %d, nargs : %d\n&quot;,__FUNCTION__,function,line,nargs);</a>
+<a name="ln476">#endif</a>
+<a name="ln477">  </a>
+<a name="ln478">  lua_State *new_thread = lua_newthread(L);</a>
+<a name="ln479">  lua_pushlightuserdata(new_thread,cb);</a>
+<a name="ln480">  lua_pushlightuserdata(new_thread,data);</a>
+<a name="ln481">  lua_pushinteger(new_thread,nresults);</a>
+<a name="ln482">  int reference = save_thread(L);</a>
+<a name="ln483">  lua_xmove(L,new_thread,nargs+1);</a>
+<a name="ln484">  g_async_queue_push(darktable.lua_state.stacked_job_queue,GINT_TO_POINTER(reference));</a>
+<a name="ln485">  g_main_context_wakeup(darktable.lua_state.context);</a>
+<a name="ln486">}</a>
+<a name="ln487"> </a>
+<a name="ln488">void dt_lua_async_call_alien_internal(const char * call_function, int line,lua_CFunction pusher,int nresults,dt_lua_finish_callback cb, void*cb_data, dt_lua_async_call_arg_type arg_type,...)</a>
+<a name="ln489">{</a>
+<a name="ln490">  if(!darktable.lua_state.alien_job_queue) {</a>
+<a name="ln491">    // early call before lua has properly been initialized, ignore</a>
+<a name="ln492">#ifdef _DEBUG</a>
+<a name="ln493">  dt_print(DT_DEBUG_LUA,&quot;LUA DEBUG : %s called early. probably ok.\n&quot;,__FUNCTION__);</a>
+<a name="ln494">#endif</a>
+<a name="ln495">    return;</a>
+<a name="ln496">  }</a>
+<a name="ln497">#ifdef _DEBUG</a>
+<a name="ln498">  dt_print(DT_DEBUG_LUA,&quot;LUA DEBUG : %s called from %s %d\n&quot;,__FUNCTION__,call_function,line);</a>
+<a name="ln499">#endif</a>
+<a name="ln500">  async_call_data*data = malloc(sizeof(async_call_data));</a>
+<a name="ln501">  data-&gt;pusher = pusher;</a>
+<a name="ln502">  data-&gt;extra=NULL;</a>
+<a name="ln503">  data-&gt;cb = cb;</a>
+<a name="ln504">  data-&gt;cb_data = cb_data;</a>
+<a name="ln505">  data-&gt;nresults = nresults;</a>
+<a name="ln506">  va_list ap;</a>
+<a name="ln507">  va_start(ap,arg_type);</a>
+<a name="ln508">  dt_lua_async_call_arg_type cur_type = arg_type;</a>
+<a name="ln509">  while(cur_type != LUA_ASYNC_DONE){</a>
+<a name="ln510">    data-&gt;extra=g_list_append(data-&gt;extra,GINT_TO_POINTER(cur_type));</a>
+<a name="ln511">    switch(cur_type) {</a>
+<a name="ln512">      case LUA_ASYNC_TYPEID:</a>
+<a name="ln513">        data-&gt;extra=g_list_append(data-&gt;extra,GINT_TO_POINTER(va_arg(ap,luaA_Type)));</a>
+<a name="ln514">        data-&gt;extra=g_list_append(data-&gt;extra,va_arg(ap,gpointer));</a>
+<a name="ln515">        break;</a>
+<a name="ln516">      case LUA_ASYNC_TYPEID_WITH_FREE:</a>
+<a name="ln517">        {</a>
+<a name="ln518">          data-&gt;extra=g_list_append(data-&gt;extra,GINT_TO_POINTER(va_arg(ap,luaA_Type)));</a>
+<a name="ln519">          data-&gt;extra=g_list_append(data-&gt;extra,va_arg(ap,gpointer));</a>
+<a name="ln520">          GClosure* closure = va_arg(ap,GClosure*);</a>
+<a name="ln521">          g_closure_ref (closure);</a>
+<a name="ln522">          g_closure_sink (closure);</a>
+<a name="ln523">          g_closure_set_marshal(closure, g_cclosure_marshal_generic);</a>
+<a name="ln524">          data-&gt;extra=g_list_append(data-&gt;extra,closure);</a>
+<a name="ln525">        }</a>
+<a name="ln526">        break;</a>
+<a name="ln527">      case LUA_ASYNC_TYPENAME:</a>
+<a name="ln528">        data-&gt;extra=g_list_append(data-&gt;extra,va_arg(ap,char *));</a>
+<a name="ln529">        data-&gt;extra=g_list_append(data-&gt;extra,va_arg(ap,gpointer));</a>
+<a name="ln530">        break;</a>
+<a name="ln531">      case LUA_ASYNC_TYPENAME_WITH_FREE:</a>
+<a name="ln532">        {</a>
+<a name="ln533">          data-&gt;extra=g_list_append(data-&gt;extra,va_arg(ap,char *));</a>
+<a name="ln534">          data-&gt;extra=g_list_append(data-&gt;extra,va_arg(ap,gpointer));</a>
+<a name="ln535">          GClosure* closure = va_arg(ap,GClosure*);</a>
+<a name="ln536">          g_closure_ref (closure);</a>
+<a name="ln537">          g_closure_sink (closure);</a>
+<a name="ln538">          g_closure_set_marshal(closure, g_cclosure_marshal_generic);</a>
+<a name="ln539">          data-&gt;extra=g_list_append(data-&gt;extra,closure);</a>
+<a name="ln540">        }</a>
+<a name="ln541">        break;</a>
+<a name="ln542">      default:</a>
+<a name="ln543">        // should never happen</a>
+<a name="ln544">        g_assert(false);</a>
+<a name="ln545">        break;</a>
+<a name="ln546">    }</a>
+<a name="ln547">    cur_type = va_arg(ap,dt_lua_async_call_arg_type);</a>
+<a name="ln548">  }</a>
+<a name="ln549"> </a>
+<a name="ln550">  va_end(ap);</a>
+<a name="ln551"> </a>
+<a name="ln552">  g_async_queue_push(darktable.lua_state.alien_job_queue,(gpointer)data);</a>
+<a name="ln553">  g_main_context_wakeup(darktable.lua_state.context);</a>
+<a name="ln554">}</a>
+<a name="ln555"> </a>
+<a name="ln556"> </a>
+<a name="ln557">void dt_lua_async_call_string_internal(const char* function, int line,const char* lua_string,int nresults,dt_lua_finish_callback cb, void*cb_data)</a>
+<a name="ln558">{</a>
+<a name="ln559">#ifdef _DEBUG</a>
+<a name="ln560">  dt_print(DT_DEBUG_LUA,&quot;LUA DEBUG : %s called from %s %d, string %s\n&quot;,__FUNCTION__,function,line,lua_string);</a>
+<a name="ln561">#endif</a>
+<a name="ln562">  string_call_data*data = malloc(sizeof(string_call_data));</a>
+<a name="ln563">  data-&gt;function = strdup(lua_string);</a>
+<a name="ln564">  data-&gt;cb = cb;</a>
+<a name="ln565">  data-&gt;cb_data = cb_data;</a>
+<a name="ln566">  data-&gt;nresults = nresults;</a>
+<a name="ln567"> </a>
+<a name="ln568">  g_async_queue_push(darktable.lua_state.string_job_queue,(gpointer)data);</a>
+<a name="ln569">  g_main_context_wakeup(darktable.lua_state.context);</a>
+<a name="ln570">  </a>
+<a name="ln571">}</a>
+<a name="ln572"> </a>
+<a name="ln573"> </a>
+<a name="ln574"> </a>
+<a name="ln575">static gpointer lua_thread_main(gpointer data)</a>
+<a name="ln576">{</a>
+<a name="ln577">  darktable.lua_state.pool = g_thread_pool_new(run_async_thread_main,NULL,-1,false,NULL);</a>
+<a name="ln578">  darktable.lua_state.loop = g_main_loop_new(darktable.lua_state.context,false);</a>
+<a name="ln579">  g_main_loop_run(darktable.lua_state.loop);</a>
+<a name="ln580">  return 0;</a>
+<a name="ln581">}</a>
+<a name="ln582"> </a>
+<a name="ln583">static int dispatch_cb(lua_State *L)</a>
+<a name="ln584">{</a>
+<a name="ln585">  dt_lua_async_call(L,lua_gettop(L)-1,0,NULL,NULL);</a>
+<a name="ln586">  return 0;</a>
+<a name="ln587">}</a>
+<a name="ln588"> </a>
+<a name="ln589">static int ending_cb(lua_State *L)</a>
+<a name="ln590">{</a>
+<a name="ln591">  lua_pushboolean(L,darktable.lua_state.ending);</a>
+<a name="ln592">  return 1;</a>
+<a name="ln593">}</a>
+<a name="ln594"> </a>
+<a name="ln595"> </a>
+<a name="ln596">static int execute_cb(lua_State*L)</a>
+<a name="ln597">{</a>
+<a name="ln598">  const char *cmd = luaL_optstring(L, 1, NULL);</a>
+<a name="ln599">  dt_lua_unlock();</a>
+<a name="ln600">  int stat = system(cmd);</a>
+<a name="ln601">  dt_lua_lock();</a>
+<a name="ln602">  lua_pushinteger(L,stat);</a>
+<a name="ln603">  return 1;</a>
+<a name="ln604">}</a>
+<a name="ln605"> </a>
+<a name="ln606">static int sleep_cb(lua_State*L)</a>
+<a name="ln607">{</a>
+<a name="ln608">  const int delay = luaL_optinteger(L, 1, 0);</a>
+<a name="ln609">  dt_lua_unlock();</a>
+<a name="ln610">  g_usleep(delay*1000);</a>
+<a name="ln611">  dt_lua_lock();</a>
+<a name="ln612">  return 0;</a>
+<a name="ln613">}</a>
+<a name="ln614"> </a>
+<a name="ln615">#if !defined (_WIN32)</a>
+<a name="ln616">static int read_cb(lua_State*L)</a>
+<a name="ln617">{</a>
+<a name="ln618">  luaL_checkudata(L,1,LUA_FILEHANDLE);</a>
+<a name="ln619">  luaL_Stream *stream = lua_touserdata(L, 1);</a>
+<a name="ln620">  int myfileno = fileno(stream-&gt;f);</a>
+<a name="ln621">  fd_set fdset;</a>
+<a name="ln622">  FD_ZERO(&amp;fdset);</a>
+<a name="ln623">  FD_SET(myfileno, &amp;fdset);</a>
+<a name="ln624">  dt_lua_unlock();</a>
+<a name="ln625">  select(myfileno + 1, &amp;fdset, NULL, NULL, 0);</a>
+<a name="ln626">  dt_lua_lock();</a>
+<a name="ln627">  return 0;</a>
+<a name="ln628">}</a>
+<a name="ln629">#endif</a>
+<a name="ln630"> </a>
+<a name="ln631">typedef struct gtk_wrap_communication {</a>
+<a name="ln632">  GCond end_cond;</a>
+<a name="ln633">  GMutex end_mutex;</a>
+<a name="ln634">  lua_State *L;</a>
+<a name="ln635">  int retval;</a>
+<a name="ln636">} gtk_wrap_communication;</a>
+<a name="ln637"> </a>
+<a name="ln638">gboolean dt_lua_gtk_wrap_callback(gpointer data)</a>
+<a name="ln639">{</a>
+<a name="ln640">  dt_lua_lock_silent();</a>
+<a name="ln641">  gtk_wrap_communication *communication = (gtk_wrap_communication*)data;</a>
+<a name="ln642">  g_mutex_lock(&amp;communication-&gt;end_mutex);</a>
+<a name="ln643">  // TODO : propre stack unwinding</a>
+<a name="ln644">  communication-&gt;retval = lua_pcall(communication-&gt;L,lua_gettop(communication-&gt;L)-1,LUA_MULTRET,0);</a>
+<a name="ln645">  g_cond_signal(&amp;communication-&gt;end_cond);</a>
+<a name="ln646">  g_mutex_unlock(&amp;communication-&gt;end_mutex);</a>
+<a name="ln647">  dt_lua_unlock();</a>
+<a name="ln648">  return false;</a>
+<a name="ln649">} </a>
+<a name="ln650"> </a>
+<a name="ln651">static int gtk_wrap(lua_State*L)</a>
+<a name="ln652">{ </a>
+<a name="ln653">  lua_pushvalue(L,lua_upvalueindex(1));</a>
+<a name="ln654">  lua_insert(L,1);</a>
+<a name="ln655">  if(pthread_equal(darktable.control-&gt;gui_thread, pthread_self())) {</a>
+<a name="ln656">    lua_call(L, lua_gettop(L)-1, LUA_MULTRET);</a>
+<a name="ln657">    return lua_gettop(L);</a>
+<a name="ln658">  } else {</a>
+<a name="ln659">#ifdef _DEBUG</a>
+<a name="ln660">    dt_print(DT_DEBUG_LUA, &quot;LUA DEBUG : %s called from %s %llu\n&quot;, __FUNCTION__,</a>
+<a name="ln661">             lua_tostring(L, lua_upvalueindex(2)), lua_tointeger(L, lua_upvalueindex(3)));</a>
+<a name="ln662">#endif</a>
+<a name="ln663">    dt_lua_unlock();</a>
+<a name="ln664">    gtk_wrap_communication communication;</a>
+<a name="ln665">    g_mutex_init(&amp;communication.end_mutex);</a>
+<a name="ln666">    g_cond_init(&amp;communication.end_cond);</a>
+<a name="ln667">    communication.L = L;</a>
+<a name="ln668">    g_mutex_lock(&amp;communication.end_mutex);</a>
+<a name="ln669">    g_main_context_invoke(NULL,dt_lua_gtk_wrap_callback,&amp;communication);</a>
+<a name="ln670">    g_cond_wait(&amp;communication.end_cond,&amp;communication.end_mutex);</a>
+<a name="ln671">    g_mutex_unlock(&amp;communication.end_mutex);</a>
+<a name="ln672">    g_mutex_clear(&amp;communication.end_mutex);</a>
+<a name="ln673">    dt_lua_lock();</a>
+<a name="ln674">#ifdef _DEBUG</a>
+<a name="ln675">    dt_print(DT_DEBUG_LUA, &quot;LUA DEBUG : %s return for call from from %s %llu\n&quot;, __FUNCTION__,</a>
+<a name="ln676">             lua_tostring(L, lua_upvalueindex(2)), lua_tointeger(L, lua_upvalueindex(3)));</a>
+<a name="ln677">#endif</a>
+<a name="ln678">    if(communication.retval == LUA_OK) {</a>
+<a name="ln679">      return lua_gettop(L);</a>
+<a name="ln680">    } else {</a>
+<a name="ln681">      return lua_error(L);</a>
+<a name="ln682">    }</a>
+<a name="ln683">  }</a>
+<a name="ln684"> </a>
+<a name="ln685">}</a>
+<a name="ln686"> </a>
+<a name="ln687">void dt_lua_gtk_wrap_internal(lua_State*L,const char* function, int line)</a>
+<a name="ln688">{</a>
+<a name="ln689">  lua_pushstring(L,function);</a>
+<a name="ln690">  lua_pushinteger(L,line);</a>
+<a name="ln691">  lua_pushcclosure(L,gtk_wrap,3);</a>
+<a name="ln692">}</a>
+<a name="ln693">int dt_lua_init_call(lua_State *L)</a>
+<a name="ln694">{</a>
+<a name="ln695"> </a>
+<a name="ln696">  dt_lua_push_darktable_lib(L);</a>
+<a name="ln697">  luaA_Type type_id = dt_lua_init_singleton(L, &quot;control&quot;, NULL);</a>
+<a name="ln698">  lua_setfield(L, -2, &quot;control&quot;);</a>
+<a name="ln699">  lua_pop(L, 1);</a>
+<a name="ln700">  </a>
+<a name="ln701">  lua_pushcfunction(L, ending_cb);</a>
+<a name="ln702">  dt_lua_type_register_const_type(L, type_id, &quot;ending&quot;);</a>
+<a name="ln703">  lua_pushcfunction(L, dispatch_cb);</a>
+<a name="ln704">  lua_pushcclosure(L, dt_lua_type_member_common, 1);</a>
+<a name="ln705">  dt_lua_type_register_const_type(L, type_id, &quot;dispatch&quot;);</a>
+<a name="ln706">  lua_pushcfunction(L,execute_cb);</a>
+<a name="ln707">  lua_pushcclosure(L, dt_lua_type_member_common, 1);</a>
+<a name="ln708">  dt_lua_type_register_const_type(L, type_id, &quot;execute&quot;);</a>
+<a name="ln709">  lua_pushcfunction(L,sleep_cb);</a>
+<a name="ln710">  lua_pushcclosure(L, dt_lua_type_member_common, 1);</a>
+<a name="ln711">  dt_lua_type_register_const_type(L, type_id, &quot;sleep&quot;);</a>
+<a name="ln712">#if !defined (_WIN32)</a>
+<a name="ln713">  lua_pushcfunction(L,read_cb);</a>
+<a name="ln714">  lua_pushcclosure(L, dt_lua_type_member_common, 1);</a>
+<a name="ln715">  dt_lua_type_register_const_type(L, type_id, &quot;read&quot;);</a>
+<a name="ln716">#endif</a>
+<a name="ln717"> </a>
+<a name="ln718">  lua_newtable(L);</a>
+<a name="ln719">  lua_setfield(L, LUA_REGISTRYINDEX, &quot;dt_lua_bg_threads&quot;);</a>
+<a name="ln720">  // create stuff in init to avoid race conditions</a>
+<a name="ln721">  darktable.lua_state.context = g_main_context_new();</a>
+<a name="ln722">  stacked_job_init();</a>
+<a name="ln723">  alien_job_init();</a>
+<a name="ln724">  string_job_init();</a>
+<a name="ln725">  end_job_init();</a>
+<a name="ln726"> </a>
+<a name="ln727">  g_thread_new(&quot;lua thread&quot;,lua_thread_main,NULL);</a>
+<a name="ln728">  return 0;</a>
+<a name="ln729">}</a>
+<a name="ln730"> </a>
+<a name="ln731">// modelines: These editor modelines have been set for all relevant files by tools/update_modelines.sh</a>
+<a name="ln732">// vim: shiftwidth=2 expandtab tabstop=2 cindent</a>
+<a name="ln733">// kate: tab-indents: off; indent-width 2; replace-tabs on; indent-mode cstyle; remove-trailing-spaces modified;</a>
+
+</code></pre>
+<div class="balloon" rel="501"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v522/" target="_blank">V522</a> There might be dereferencing of a potential null pointer 'data'. Check lines: 501, 500.</p></div>
+<div class="balloon" rel="563"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v522/" target="_blank">V522</a> There might be dereferencing of a potential null pointer 'data'. Check lines: 563, 562.</p></div>
+
+<link rel="stylesheet" href="highlight.css">
+<script src="highlight.pack.js"></script>
+<script src="highlightjs-line-numbers.js"></script>
+<script>hljs.initHighlightingOnLoad();</script>
+<script>hljs.initLineNumbersOnLoad();</script>
+<script>
+  $(document).ready(function() {
+      $('.balloon').each(function () {
+          var bl = $(this);
+          var line = bl.attr('rel');
+          var text = $('a[name="ln'+line+'"]').text();
+
+          var space_count = 0;
+          for(var i = 0; i<text.length; i++){
+              var char = text[i];
+              if((char !== ' ')&&(char !== '\t'))break;
+              if(char === '\t')space_count++;
+              space_count++;
+          }
+
+          bl.css('margin-left', space_count*8);
+          $('a[name="ln'+line+'"]').after(bl);
+      });
+
+      window.location = window.location;
+  });
+</script>
+</body>
+</html>

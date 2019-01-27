@@ -1,0 +1,286 @@
+
+<html>
+<head>
+  <link rel="stylesheet" href="../style.css"/>
+  <script src="../jquery-3.2.1.min.js"></script>
+</head>
+<body>
+<pre><code class = "cpp">
+<a name="ln1">#ifdef HAVE_OPENCL</a>
+<a name="ln2">/*</a>
+<a name="ln3">    This file is part of darktable,</a>
+<a name="ln4">    copyright (c) 2016 johannes hanika.</a>
+<a name="ln5"> </a>
+<a name="ln6">    darktable is free software: you can redistribute it and/or modify</a>
+<a name="ln7">    it under the terms of the GNU General Public License as published by</a>
+<a name="ln8">    the Free Software Foundation, either version 3 of the License, or</a>
+<a name="ln9">    (at your option) any later version.</a>
+<a name="ln10"> </a>
+<a name="ln11">    darktable is distributed in the hope that it will be useful,</a>
+<a name="ln12">    but WITHOUT ANY WARRANTY; without even the implied warranty of</a>
+<a name="ln13">    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the</a>
+<a name="ln14">    GNU General Public License for more details.</a>
+<a name="ln15"> </a>
+<a name="ln16">    You should have received a copy of the GNU General Public License</a>
+<a name="ln17">    along with darktable.  If not, see &lt;http://www.gnu.org/licenses/&gt;.</a>
+<a name="ln18">*/</a>
+<a name="ln19">#include &quot;common/darktable.h&quot;</a>
+<a name="ln20">#include &quot;common/opencl.h&quot;</a>
+<a name="ln21">#include &quot;common/locallaplaciancl.h&quot;</a>
+<a name="ln22"> </a>
+<a name="ln23">#define max_levels 30</a>
+<a name="ln24">#define num_gamma 6</a>
+<a name="ln25"> </a>
+<a name="ln26">// downsample width/height to given level</a>
+<a name="ln27">static inline uint64_t dl(uint64_t size, const int level)</a>
+<a name="ln28">{</a>
+<a name="ln29">  for(int l=0;l&lt;level;l++)</a>
+<a name="ln30">    size = (size-1)/2+1;</a>
+<a name="ln31">  return size;</a>
+<a name="ln32">}</a>
+<a name="ln33"> </a>
+<a name="ln34">dt_local_laplacian_cl_global_t *dt_local_laplacian_init_cl_global()</a>
+<a name="ln35">{</a>
+<a name="ln36">  dt_local_laplacian_cl_global_t *g = (dt_local_laplacian_cl_global_t *)malloc(sizeof(dt_local_laplacian_cl_global_t));</a>
+<a name="ln37"> </a>
+<a name="ln38">  const int program = 19; // locallaplacian.cl, from programs.conf</a>
+<a name="ln39">  g-&gt;kernel_pad_input          = dt_opencl_create_kernel(program, &quot;pad_input&quot;);</a>
+<a name="ln40">  g-&gt;kernel_gauss_expand       = dt_opencl_create_kernel(program, &quot;gauss_expand&quot;);</a>
+<a name="ln41">  g-&gt;kernel_gauss_reduce       = dt_opencl_create_kernel(program, &quot;gauss_reduce&quot;);</a>
+<a name="ln42">  g-&gt;kernel_laplacian_assemble = dt_opencl_create_kernel(program, &quot;laplacian_assemble&quot;);</a>
+<a name="ln43">  g-&gt;kernel_process_curve      = dt_opencl_create_kernel(program, &quot;process_curve&quot;);</a>
+<a name="ln44">  g-&gt;kernel_write_back         = dt_opencl_create_kernel(program, &quot;write_back&quot;);</a>
+<a name="ln45">  return g;</a>
+<a name="ln46">}</a>
+<a name="ln47"> </a>
+<a name="ln48">void dt_local_laplacian_free_cl(dt_local_laplacian_cl_t *g)</a>
+<a name="ln49">{</a>
+<a name="ln50">  if(!g) return;</a>
+<a name="ln51">  // be sure we're done with the memory:</a>
+<a name="ln52">  dt_opencl_finish(g-&gt;devid);</a>
+<a name="ln53"> </a>
+<a name="ln54">  // free device mem</a>
+<a name="ln55">  for(int l=0;l&lt;max_levels;l++)</a>
+<a name="ln56">  {</a>
+<a name="ln57">    dt_opencl_release_mem_object(g-&gt;dev_padded[l]);</a>
+<a name="ln58">    dt_opencl_release_mem_object(g-&gt;dev_output[l]);</a>
+<a name="ln59">    for(int k=0;k&lt;num_gamma;k++)</a>
+<a name="ln60">      dt_opencl_release_mem_object(g-&gt;dev_processed[k][l]);</a>
+<a name="ln61">  }</a>
+<a name="ln62">  for(int k=0;k&lt;num_gamma;k++) free(g-&gt;dev_processed[k]);</a>
+<a name="ln63">  free(g-&gt;dev_padded);</a>
+<a name="ln64">  free(g-&gt;dev_output);</a>
+<a name="ln65">  free(g-&gt;dev_processed);</a>
+<a name="ln66">  g-&gt;dev_padded = g-&gt;dev_output = 0;</a>
+<a name="ln67">  g-&gt;dev_processed = 0;</a>
+<a name="ln68">  free(g);</a>
+<a name="ln69">}</a>
+<a name="ln70"> </a>
+<a name="ln71">dt_local_laplacian_cl_t *dt_local_laplacian_init_cl(</a>
+<a name="ln72">    const int devid,</a>
+<a name="ln73">    const int width,            // width of input image</a>
+<a name="ln74">    const int height,           // height of input image</a>
+<a name="ln75">    const float sigma,          // user param: separate shadows/midtones/highlights</a>
+<a name="ln76">    const float shadows,        // user param: lift shadows</a>
+<a name="ln77">    const float highlights,     // user param: compress highlights</a>
+<a name="ln78">    const float clarity)        // user param: increase clarity/local contrast</a>
+<a name="ln79">{</a>
+<a name="ln80">  dt_local_laplacian_cl_t *g = (dt_local_laplacian_cl_t *)malloc(sizeof(dt_local_laplacian_cl_t));</a>
+<a name="ln81">  if(!g) return 0;</a>
+<a name="ln82"> </a>
+<a name="ln83">  g-&gt;global = darktable.opencl-&gt;local_laplacian;</a>
+<a name="ln84">  g-&gt;devid = devid;</a>
+<a name="ln85">  g-&gt;width = width;</a>
+<a name="ln86">  g-&gt;height = height;</a>
+<a name="ln87">  g-&gt;sigma = sigma;</a>
+<a name="ln88">  g-&gt;shadows = shadows;</a>
+<a name="ln89">  g-&gt;highlights = highlights;</a>
+<a name="ln90">  g-&gt;clarity = clarity;</a>
+<a name="ln91">  g-&gt;dev_padded = (cl_mem *)calloc(max_levels, sizeof(cl_mem *));</a>
+<a name="ln92">  g-&gt;dev_output = (cl_mem *)calloc(max_levels, sizeof(cl_mem *));</a>
+<a name="ln93">  g-&gt;dev_processed = (cl_mem **)calloc(num_gamma, sizeof(cl_mem **));</a>
+<a name="ln94">  for(int k=0;k&lt;num_gamma;k++)</a>
+<a name="ln95">    g-&gt;dev_processed[k] = (cl_mem *)calloc(max_levels, sizeof(cl_mem *));</a>
+<a name="ln96"> </a>
+<a name="ln97">  g-&gt;num_levels = MIN(max_levels, 31-__builtin_clz(MIN(width,height)));</a>
+<a name="ln98">  const int max_supp = 1&lt;&lt;(g-&gt;num_levels-1);</a>
+<a name="ln99">  const int paddwd = width  + 2*max_supp;</a>
+<a name="ln100">  const int paddht = height + 2*max_supp;</a>
+<a name="ln101"> </a>
+<a name="ln102">  const size_t bwidth = ROUNDUPWD(paddwd);</a>
+<a name="ln103">  const size_t bheight = ROUNDUPWD(paddht);</a>
+<a name="ln104"> </a>
+<a name="ln105">  // get intermediate vector buffers with read-write access</a>
+<a name="ln106">  for(int l=0;l&lt;g-&gt;num_levels;l++)</a>
+<a name="ln107">  {</a>
+<a name="ln108">    g-&gt;dev_padded[l] = dt_opencl_alloc_device(devid, ROUNDUPWD(dl(bwidth, l)), ROUNDUPHT(dl(bheight, l)), sizeof(float));</a>
+<a name="ln109">    if(!g-&gt;dev_padded[l]) goto error;</a>
+<a name="ln110">    g-&gt;dev_output[l] = dt_opencl_alloc_device(devid, ROUNDUPWD(dl(bwidth, l)), ROUNDUPHT(dl(bheight, l)), sizeof(float));</a>
+<a name="ln111">    if(!g-&gt;dev_output[l]) goto error;</a>
+<a name="ln112">    for(int k=0;k&lt;num_gamma;k++)</a>
+<a name="ln113">    {</a>
+<a name="ln114">      g-&gt;dev_processed[k][l] = dt_opencl_alloc_device(devid, ROUNDUPWD(dl(bwidth, l)), ROUNDUPHT(dl(bheight, l)), sizeof(float));</a>
+<a name="ln115">      if(!g-&gt;dev_processed[k][l]) goto error;</a>
+<a name="ln116">    }</a>
+<a name="ln117">  }</a>
+<a name="ln118"> </a>
+<a name="ln119">  return g;</a>
+<a name="ln120"> </a>
+<a name="ln121">error:</a>
+<a name="ln122">  fprintf(stderr, &quot;[local laplacian cl] could not allocate temporary buffers\n&quot;);</a>
+<a name="ln123">  dt_local_laplacian_free_cl(g);</a>
+<a name="ln124">  return 0;</a>
+<a name="ln125">}</a>
+<a name="ln126"> </a>
+<a name="ln127">cl_int dt_local_laplacian_cl(</a>
+<a name="ln128">    dt_local_laplacian_cl_t *b, // opencl context with temp buffers</a>
+<a name="ln129">    cl_mem input,               // input buffer in some Labx or yuvx format</a>
+<a name="ln130">    cl_mem output)              // output buffer with colour</a>
+<a name="ln131">{</a>
+<a name="ln132">  const int max_supp = 1&lt;&lt;(b-&gt;num_levels-1);</a>
+<a name="ln133">  const int wd2 = 2*max_supp + b-&gt;width;</a>
+<a name="ln134">  const int ht2 = 2*max_supp + b-&gt;height;</a>
+<a name="ln135">  cl_int err = -666;</a>
+<a name="ln136"> </a>
+<a name="ln137">  size_t sizes_pad[] = { ROUNDUPWD(wd2), ROUNDUPHT(ht2), 1 };</a>
+<a name="ln138">  dt_opencl_set_kernel_arg(b-&gt;devid, b-&gt;global-&gt;kernel_pad_input, 0, sizeof(cl_mem), (void *)&amp;input);</a>
+<a name="ln139">  dt_opencl_set_kernel_arg(b-&gt;devid, b-&gt;global-&gt;kernel_pad_input, 1, sizeof(cl_mem), (void *)&amp;b-&gt;dev_padded[0]);</a>
+<a name="ln140">  dt_opencl_set_kernel_arg(b-&gt;devid, b-&gt;global-&gt;kernel_pad_input, 2, sizeof(int), (void *)&amp;b-&gt;width);</a>
+<a name="ln141">  dt_opencl_set_kernel_arg(b-&gt;devid, b-&gt;global-&gt;kernel_pad_input, 3, sizeof(int), (void *)&amp;b-&gt;height);</a>
+<a name="ln142">  dt_opencl_set_kernel_arg(b-&gt;devid, b-&gt;global-&gt;kernel_pad_input, 4, sizeof(int), (void *)&amp;max_supp);</a>
+<a name="ln143">  dt_opencl_set_kernel_arg(b-&gt;devid, b-&gt;global-&gt;kernel_pad_input, 5, sizeof(int), (void *)&amp;wd2);</a>
+<a name="ln144">  dt_opencl_set_kernel_arg(b-&gt;devid, b-&gt;global-&gt;kernel_pad_input, 6, sizeof(int), (void *)&amp;ht2);</a>
+<a name="ln145">  err = dt_opencl_enqueue_kernel_2d(b-&gt;devid, b-&gt;global-&gt;kernel_pad_input, sizes_pad);</a>
+<a name="ln146">  if(err != CL_SUCCESS) goto error;</a>
+<a name="ln147"> </a>
+<a name="ln148">  // create gauss pyramid of padded input, write coarse directly to output</a>
+<a name="ln149">  for(int l=1;l&lt;b-&gt;num_levels;l++)</a>
+<a name="ln150">  {</a>
+<a name="ln151">    const int wd = dl(wd2, l), ht = dl(ht2, l);</a>
+<a name="ln152">    size_t sizes[] = { ROUNDUPWD(wd), ROUNDUPHT(ht), 1 };</a>
+<a name="ln153">    dt_opencl_set_kernel_arg(b-&gt;devid, b-&gt;global-&gt;kernel_gauss_reduce, 0, sizeof(cl_mem), (void *)&amp;b-&gt;dev_padded[l-1]);</a>
+<a name="ln154">    if(l == b-&gt;num_levels-1)</a>
+<a name="ln155">      dt_opencl_set_kernel_arg(b-&gt;devid, b-&gt;global-&gt;kernel_gauss_reduce, 1, sizeof(cl_mem), (void *)&amp;b-&gt;dev_output[l]);</a>
+<a name="ln156">    else</a>
+<a name="ln157">      dt_opencl_set_kernel_arg(b-&gt;devid, b-&gt;global-&gt;kernel_gauss_reduce, 1, sizeof(cl_mem), (void *)&amp;b-&gt;dev_padded[l]);</a>
+<a name="ln158">    dt_opencl_set_kernel_arg(b-&gt;devid, b-&gt;global-&gt;kernel_gauss_reduce, 2, sizeof(int), (void *)&amp;wd);</a>
+<a name="ln159">    dt_opencl_set_kernel_arg(b-&gt;devid, b-&gt;global-&gt;kernel_gauss_reduce, 3, sizeof(int), (void *)&amp;ht);</a>
+<a name="ln160">    err = dt_opencl_enqueue_kernel_2d(b-&gt;devid, b-&gt;global-&gt;kernel_gauss_reduce, sizes);</a>
+<a name="ln161">    if(err != CL_SUCCESS) goto error;</a>
+<a name="ln162">  }</a>
+<a name="ln163"> </a>
+<a name="ln164">  for(int k=0;k&lt;num_gamma;k++)</a>
+<a name="ln165">  { // process images</a>
+<a name="ln166">    const float g = (k+.5f)/(float)num_gamma;</a>
+<a name="ln167">    dt_opencl_set_kernel_arg(b-&gt;devid, b-&gt;global-&gt;kernel_process_curve, 0, sizeof(cl_mem), (void *)&amp;b-&gt;dev_padded[0]);</a>
+<a name="ln168">    dt_opencl_set_kernel_arg(b-&gt;devid, b-&gt;global-&gt;kernel_process_curve, 1, sizeof(cl_mem), (void *)&amp;b-&gt;dev_processed[k][0]);</a>
+<a name="ln169">    dt_opencl_set_kernel_arg(b-&gt;devid, b-&gt;global-&gt;kernel_process_curve, 2, sizeof(float), (void *)&amp;g);</a>
+<a name="ln170">    dt_opencl_set_kernel_arg(b-&gt;devid, b-&gt;global-&gt;kernel_process_curve, 3, sizeof(float), (void *)&amp;b-&gt;sigma);</a>
+<a name="ln171">    dt_opencl_set_kernel_arg(b-&gt;devid, b-&gt;global-&gt;kernel_process_curve, 4, sizeof(float), (void *)&amp;b-&gt;shadows);</a>
+<a name="ln172">    dt_opencl_set_kernel_arg(b-&gt;devid, b-&gt;global-&gt;kernel_process_curve, 5, sizeof(float), (void *)&amp;b-&gt;highlights);</a>
+<a name="ln173">    dt_opencl_set_kernel_arg(b-&gt;devid, b-&gt;global-&gt;kernel_process_curve, 6, sizeof(float), (void *)&amp;b-&gt;clarity);</a>
+<a name="ln174">    dt_opencl_set_kernel_arg(b-&gt;devid, b-&gt;global-&gt;kernel_process_curve, 7, sizeof(int), (void *)&amp;wd2);</a>
+<a name="ln175">    dt_opencl_set_kernel_arg(b-&gt;devid, b-&gt;global-&gt;kernel_process_curve, 8, sizeof(int), (void *)&amp;ht2);</a>
+<a name="ln176">    err = dt_opencl_enqueue_kernel_2d(b-&gt;devid, b-&gt;global-&gt;kernel_process_curve, sizes_pad);</a>
+<a name="ln177">    if(err != CL_SUCCESS) goto error;</a>
+<a name="ln178"> </a>
+<a name="ln179">    // create gaussian pyramids</a>
+<a name="ln180">    for(int l=1;l&lt;b-&gt;num_levels;l++)</a>
+<a name="ln181">    {</a>
+<a name="ln182">      const int wd = dl(wd2, l), ht = dl(ht2, l);</a>
+<a name="ln183">      size_t sizes[] = { ROUNDUPWD(wd), ROUNDUPHT(ht), 1 };</a>
+<a name="ln184">      dt_opencl_set_kernel_arg(b-&gt;devid, b-&gt;global-&gt;kernel_gauss_reduce, 0, sizeof(cl_mem), (void *)&amp;b-&gt;dev_processed[k][l-1]);</a>
+<a name="ln185">      dt_opencl_set_kernel_arg(b-&gt;devid, b-&gt;global-&gt;kernel_gauss_reduce, 1, sizeof(cl_mem), (void *)&amp;b-&gt;dev_processed[k][l]);</a>
+<a name="ln186">      dt_opencl_set_kernel_arg(b-&gt;devid, b-&gt;global-&gt;kernel_gauss_reduce, 2, sizeof(int), (void *)&amp;wd);</a>
+<a name="ln187">      dt_opencl_set_kernel_arg(b-&gt;devid, b-&gt;global-&gt;kernel_gauss_reduce, 3, sizeof(int), (void *)&amp;ht);</a>
+<a name="ln188">      err = dt_opencl_enqueue_kernel_2d(b-&gt;devid, b-&gt;global-&gt;kernel_gauss_reduce, sizes);</a>
+<a name="ln189">      if(err != CL_SUCCESS) goto error;</a>
+<a name="ln190">    }</a>
+<a name="ln191">  }</a>
+<a name="ln192"> </a>
+<a name="ln193">  // assemble output pyramid coarse to fine</a>
+<a name="ln194">  for(int l=b-&gt;num_levels-2;l &gt;= 0; l--)</a>
+<a name="ln195">  {</a>
+<a name="ln196">    const int pw = dl(wd2,l), ph = dl(ht2,l);</a>
+<a name="ln197">    size_t sizes[] = { ROUNDUPWD(pw), ROUNDUPHT(ph), 1 };</a>
+<a name="ln198">    // this is so dumb:</a>
+<a name="ln199">    dt_opencl_set_kernel_arg(b-&gt;devid, b-&gt;global-&gt;kernel_laplacian_assemble,  0, sizeof(cl_mem), (void *)&amp;b-&gt;dev_padded[l]);</a>
+<a name="ln200">    dt_opencl_set_kernel_arg(b-&gt;devid, b-&gt;global-&gt;kernel_laplacian_assemble,  1, sizeof(cl_mem), (void *)&amp;b-&gt;dev_output[l+1]);</a>
+<a name="ln201">    dt_opencl_set_kernel_arg(b-&gt;devid, b-&gt;global-&gt;kernel_laplacian_assemble,  2, sizeof(cl_mem), (void *)&amp;b-&gt;dev_output[l]);</a>
+<a name="ln202">    dt_opencl_set_kernel_arg(b-&gt;devid, b-&gt;global-&gt;kernel_laplacian_assemble,  3, sizeof(cl_mem), (void *)&amp;b-&gt;dev_processed[0][l]);</a>
+<a name="ln203">    dt_opencl_set_kernel_arg(b-&gt;devid, b-&gt;global-&gt;kernel_laplacian_assemble,  4, sizeof(cl_mem), (void *)&amp;b-&gt;dev_processed[0][l+1]);</a>
+<a name="ln204">    dt_opencl_set_kernel_arg(b-&gt;devid, b-&gt;global-&gt;kernel_laplacian_assemble,  5, sizeof(cl_mem), (void *)&amp;b-&gt;dev_processed[1][l]);</a>
+<a name="ln205">    dt_opencl_set_kernel_arg(b-&gt;devid, b-&gt;global-&gt;kernel_laplacian_assemble,  6, sizeof(cl_mem), (void *)&amp;b-&gt;dev_processed[1][l+1]);</a>
+<a name="ln206">    dt_opencl_set_kernel_arg(b-&gt;devid, b-&gt;global-&gt;kernel_laplacian_assemble,  7, sizeof(cl_mem), (void *)&amp;b-&gt;dev_processed[2][l]);</a>
+<a name="ln207">    dt_opencl_set_kernel_arg(b-&gt;devid, b-&gt;global-&gt;kernel_laplacian_assemble,  8, sizeof(cl_mem), (void *)&amp;b-&gt;dev_processed[2][l+1]);</a>
+<a name="ln208">    dt_opencl_set_kernel_arg(b-&gt;devid, b-&gt;global-&gt;kernel_laplacian_assemble,  9, sizeof(cl_mem), (void *)&amp;b-&gt;dev_processed[3][l]);</a>
+<a name="ln209">    dt_opencl_set_kernel_arg(b-&gt;devid, b-&gt;global-&gt;kernel_laplacian_assemble, 10, sizeof(cl_mem), (void *)&amp;b-&gt;dev_processed[3][l+1]);</a>
+<a name="ln210">    dt_opencl_set_kernel_arg(b-&gt;devid, b-&gt;global-&gt;kernel_laplacian_assemble, 11, sizeof(cl_mem), (void *)&amp;b-&gt;dev_processed[4][l]);</a>
+<a name="ln211">    dt_opencl_set_kernel_arg(b-&gt;devid, b-&gt;global-&gt;kernel_laplacian_assemble, 12, sizeof(cl_mem), (void *)&amp;b-&gt;dev_processed[4][l+1]);</a>
+<a name="ln212">    dt_opencl_set_kernel_arg(b-&gt;devid, b-&gt;global-&gt;kernel_laplacian_assemble, 13, sizeof(cl_mem), (void *)&amp;b-&gt;dev_processed[5][l]);</a>
+<a name="ln213">    dt_opencl_set_kernel_arg(b-&gt;devid, b-&gt;global-&gt;kernel_laplacian_assemble, 14, sizeof(cl_mem), (void *)&amp;b-&gt;dev_processed[5][l+1]);</a>
+<a name="ln214">    // dt_opencl_set_kernel_arg(b-&gt;devid, b-&gt;global-&gt;kernel_laplacian_assemble, 15, sizeof(cl_mem), (void *)&amp;b-&gt;dev_processed[6][l]);</a>
+<a name="ln215">    // dt_opencl_set_kernel_arg(b-&gt;devid, b-&gt;global-&gt;kernel_laplacian_assemble, 16, sizeof(cl_mem), (void *)&amp;b-&gt;dev_processed[6][l+1]);</a>
+<a name="ln216">    // dt_opencl_set_kernel_arg(b-&gt;devid, b-&gt;global-&gt;kernel_laplacian_assemble, 17, sizeof(cl_mem), (void *)&amp;b-&gt;dev_processed[7][l]);</a>
+<a name="ln217">    // dt_opencl_set_kernel_arg(b-&gt;devid, b-&gt;global-&gt;kernel_laplacian_assemble, 18, sizeof(cl_mem), (void *)&amp;b-&gt;dev_processed[7][l+1]);</a>
+<a name="ln218">    dt_opencl_set_kernel_arg(b-&gt;devid, b-&gt;global-&gt;kernel_laplacian_assemble, 15, sizeof(int), (void *)&amp;pw);</a>
+<a name="ln219">    dt_opencl_set_kernel_arg(b-&gt;devid, b-&gt;global-&gt;kernel_laplacian_assemble, 16, sizeof(int), (void *)&amp;ph);</a>
+<a name="ln220">    err = dt_opencl_enqueue_kernel_2d(b-&gt;devid, b-&gt;global-&gt;kernel_laplacian_assemble, sizes);</a>
+<a name="ln221">    if(err != CL_SUCCESS) goto error;</a>
+<a name="ln222">  }</a>
+<a name="ln223"> </a>
+<a name="ln224">  // read back processed L channel and copy colours:</a>
+<a name="ln225">  size_t sizes[] = { ROUNDUPWD(b-&gt;width), ROUNDUPHT(b-&gt;height), 1 };</a>
+<a name="ln226">  dt_opencl_set_kernel_arg(b-&gt;devid, b-&gt;global-&gt;kernel_write_back, 0, sizeof(cl_mem), (void *)&amp;input);</a>
+<a name="ln227">  dt_opencl_set_kernel_arg(b-&gt;devid, b-&gt;global-&gt;kernel_write_back, 1, sizeof(cl_mem), (void *)&amp;b-&gt;dev_output[0]);</a>
+<a name="ln228">  dt_opencl_set_kernel_arg(b-&gt;devid, b-&gt;global-&gt;kernel_write_back, 2, sizeof(cl_mem), (void *)&amp;output);</a>
+<a name="ln229">  dt_opencl_set_kernel_arg(b-&gt;devid, b-&gt;global-&gt;kernel_write_back, 3, sizeof(int), (void *)&amp;max_supp);</a>
+<a name="ln230">  dt_opencl_set_kernel_arg(b-&gt;devid, b-&gt;global-&gt;kernel_write_back, 4, sizeof(int), (void *)&amp;b-&gt;width);</a>
+<a name="ln231">  dt_opencl_set_kernel_arg(b-&gt;devid, b-&gt;global-&gt;kernel_write_back, 5, sizeof(int), (void *)&amp;b-&gt;height);</a>
+<a name="ln232">  err = dt_opencl_enqueue_kernel_2d(b-&gt;devid, b-&gt;global-&gt;kernel_write_back, sizes);</a>
+<a name="ln233">  if(err != CL_SUCCESS) goto error;</a>
+<a name="ln234">  return CL_SUCCESS;</a>
+<a name="ln235">error:</a>
+<a name="ln236">  fprintf(stderr, &quot;[local laplacian cl] failed: %d\n&quot;, err);</a>
+<a name="ln237">  return err;</a>
+<a name="ln238">}</a>
+<a name="ln239">#undef max_levels</a>
+<a name="ln240">#undef num_gamma</a>
+<a name="ln241">#endif</a>
+
+</code></pre>
+<div class="balloon" rel="39"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v522/" target="_blank">V522</a> There might be dereferencing of a potential null pointer 'g'. Check lines: 39, 36.</p></div>
+<div class="balloon" rel="93"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v641/" target="_blank">V641</a> Memory for the buffer is allocated for pointers and not for elements of the actual type. Consider inspecting the 'sizeof (cl_mem * *)' expression.</p></div>
+<div class="balloon" rel="95"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v522/" target="_blank">V522</a> There might be dereferencing of a potential null pointer 'g->dev_processed'. Check lines: 95, 93.</p></div>
+<div class="balloon" rel="108"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v522/" target="_blank">V522</a> There might be dereferencing of a potential null pointer 'g->dev_padded'. Check lines: 108, 91.</p></div>
+<div class="balloon" rel="110"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v522/" target="_blank">V522</a> There might be dereferencing of a potential null pointer 'g->dev_output'. Check lines: 110, 92.</p></div>
+
+<link rel="stylesheet" href="highlight.css">
+<script src="highlight.pack.js"></script>
+<script src="highlightjs-line-numbers.js"></script>
+<script>hljs.initHighlightingOnLoad();</script>
+<script>hljs.initLineNumbersOnLoad();</script>
+<script>
+  $(document).ready(function() {
+      $('.balloon').each(function () {
+          var bl = $(this);
+          var line = bl.attr('rel');
+          var text = $('a[name="ln'+line+'"]').text();
+
+          var space_count = 0;
+          for(var i = 0; i<text.length; i++){
+              var char = text[i];
+              if((char !== ' ')&&(char !== '\t'))break;
+              if(char === '\t')space_count++;
+              space_count++;
+          }
+
+          bl.css('margin-left', space_count*8);
+          $('a[name="ln'+line+'"]').after(bl);
+      });
+
+      window.location = window.location;
+  });
+</script>
+</body>
+</html>

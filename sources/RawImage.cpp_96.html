@@ -1,0 +1,625 @@
+
+<html>
+<head>
+  <link rel="stylesheet" href="../style.css"/>
+  <script src="../jquery-3.2.1.min.js"></script>
+</head>
+<body>
+<pre><code class = "cpp">
+<a name="ln1">/*</a>
+<a name="ln2">    RawSpeed - RAW file decoder.</a>
+<a name="ln3"> </a>
+<a name="ln4">    Copyright (C) 2009-2014 Klaus Post</a>
+<a name="ln5"> </a>
+<a name="ln6">    This library is free software; you can redistribute it and/or</a>
+<a name="ln7">    modify it under the terms of the GNU Lesser General Public</a>
+<a name="ln8">    License as published by the Free Software Foundation; either</a>
+<a name="ln9">    version 2 of the License, or (at your option) any later version.</a>
+<a name="ln10"> </a>
+<a name="ln11">    This library is distributed in the hope that it will be useful,</a>
+<a name="ln12">    but WITHOUT ANY WARRANTY; without even the implied warranty of</a>
+<a name="ln13">    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU</a>
+<a name="ln14">    Lesser General Public License for more details.</a>
+<a name="ln15"> </a>
+<a name="ln16">    You should have received a copy of the GNU Lesser General Public</a>
+<a name="ln17">    License along with this library; if not, write to the Free Software</a>
+<a name="ln18">    Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA</a>
+<a name="ln19">*/</a>
+<a name="ln20"> </a>
+<a name="ln21">#include &quot;rawspeedconfig.h&quot;</a>
+<a name="ln22">#include &quot;common/RawImage.h&quot;</a>
+<a name="ln23">#include &quot;MemorySanitizer.h&quot;              // for MSan</a>
+<a name="ln24">#include &quot;common/Memory.h&quot;                // for alignedFree, alignedMalloc...</a>
+<a name="ln25">#include &quot;decoders/RawDecoderException.h&quot; // for ThrowRDE, RawDecoderException</a>
+<a name="ln26">#include &quot;io/IOException.h&quot;               // for IOException</a>
+<a name="ln27">#include &quot;parsers/TiffParserException.h&quot;  // for TiffParserException</a>
+<a name="ln28">#include &lt;algorithm&gt;                      // for fill_n, min</a>
+<a name="ln29">#include &lt;cassert&gt;                        // for assert</a>
+<a name="ln30">#include &lt;cmath&gt;                          // for NAN</a>
+<a name="ln31">#include &lt;cstdlib&gt;                        // for size_t</a>
+<a name="ln32">#include &lt;cstring&gt;                        // for memcpy, memset</a>
+<a name="ln33">#include &lt;limits&gt;                         // for numeric_limits</a>
+<a name="ln34">#include &lt;memory&gt;                         // for unique_ptr, make_unique</a>
+<a name="ln35">#include &lt;utility&gt;                        // for move, swap</a>
+<a name="ln36"> </a>
+<a name="ln37">#if __has_feature(address_sanitizer) || defined(__SANITIZE_ADDRESS__)</a>
+<a name="ln38">#include &quot;AddressSanitizer.h&quot; // for ASan::...</a>
+<a name="ln39">#endif</a>
+<a name="ln40"> </a>
+<a name="ln41">using std::string;</a>
+<a name="ln42"> </a>
+<a name="ln43">namespace rawspeed {</a>
+<a name="ln44"> </a>
+<a name="ln45">RawImageData::RawImageData() : cfa(iPoint2D(0, 0)) {</a>
+<a name="ln46">  blackLevelSeparate.fill(-1);</a>
+<a name="ln47">}</a>
+<a name="ln48"> </a>
+<a name="ln49">RawImageData::RawImageData(const iPoint2D&amp; _dim, uint32 _bpc, uint32 _cpp)</a>
+<a name="ln50">    : dim(_dim), isCFA(_cpp == 1), cfa(iPoint2D(0, 0)), cpp(_cpp) {</a>
+<a name="ln51">  assert(_bpc &gt; 0);</a>
+<a name="ln52"> </a>
+<a name="ln53">  if (cpp &gt; std::numeric_limits&lt;decltype(bpp)&gt;::max() / _bpc)</a>
+<a name="ln54">    ThrowRDE(&quot;Components-per-pixel is too large.&quot;);</a>
+<a name="ln55"> </a>
+<a name="ln56">  bpp = _bpc * _cpp;</a>
+<a name="ln57">  blackLevelSeparate.fill(-1);</a>
+<a name="ln58">  createData();</a>
+<a name="ln59">}</a>
+<a name="ln60"> </a>
+<a name="ln61">ImageMetaData::ImageMetaData() {</a>
+<a name="ln62">  subsampling.x = subsampling.y = 1;</a>
+<a name="ln63">  isoSpeed = 0;</a>
+<a name="ln64">  pixelAspectRatio = 1;</a>
+<a name="ln65">  fujiRotationPos = 0;</a>
+<a name="ln66">  wbCoeffs.fill(NAN);</a>
+<a name="ln67">}</a>
+<a name="ln68"> </a>
+<a name="ln69">RawImageData::~RawImageData() {</a>
+<a name="ln70">  assert(dataRefCount == 0);</a>
+<a name="ln71">  mOffset = iPoint2D(0, 0);</a>
+<a name="ln72"> </a>
+<a name="ln73">  destroyData();</a>
+<a name="ln74">}</a>
+<a name="ln75"> </a>
+<a name="ln76"> </a>
+<a name="ln77">void RawImageData::createData() {</a>
+<a name="ln78">  static constexpr const auto alignment = 16;</a>
+<a name="ln79"> </a>
+<a name="ln80">  if (dim.x &gt; 65535 || dim.y &gt; 65535)</a>
+<a name="ln81">    ThrowRDE(&quot;Dimensions too large for allocation.&quot;);</a>
+<a name="ln82">  if (dim.x &lt;= 0 || dim.y &lt;= 0)</a>
+<a name="ln83">    ThrowRDE(&quot;Dimension of one sides is less than 1 - cannot allocate image.&quot;);</a>
+<a name="ln84">  if (data)</a>
+<a name="ln85">    ThrowRDE(&quot;Duplicate data allocation in createData.&quot;);</a>
+<a name="ln86"> </a>
+<a name="ln87">  // want each line to start at 16-byte aligned address</a>
+<a name="ln88">  pitch = roundUp(static_cast&lt;size_t&gt;(dim.x) * bpp, alignment);</a>
+<a name="ln89">  assert(isAligned(pitch, alignment));</a>
+<a name="ln90"> </a>
+<a name="ln91">#if defined(DEBUG) || __has_feature(address_sanitizer) ||                      \</a>
+<a name="ln92">    defined(__SANITIZE_ADDRESS__)</a>
+<a name="ln93">  // want to ensure that we have some padding</a>
+<a name="ln94">  pitch += alignment * alignment;</a>
+<a name="ln95">  assert(isAligned(pitch, alignment));</a>
+<a name="ln96">#endif</a>
+<a name="ln97"> </a>
+<a name="ln98">  padding = pitch - dim.x * bpp;</a>
+<a name="ln99"> </a>
+<a name="ln100">#if defined(DEBUG) || __has_feature(address_sanitizer) ||                      \</a>
+<a name="ln101">    defined(__SANITIZE_ADDRESS__)</a>
+<a name="ln102">  assert(padding &gt; 0);</a>
+<a name="ln103">#endif</a>
+<a name="ln104"> </a>
+<a name="ln105">  data = alignedMallocArray&lt;uchar8, alignment&gt;(dim.y, pitch);</a>
+<a name="ln106"> </a>
+<a name="ln107">  if (!data)</a>
+<a name="ln108">    ThrowRDE(&quot;Memory Allocation failed.&quot;);</a>
+<a name="ln109"> </a>
+<a name="ln110">  uncropped_dim = dim;</a>
+<a name="ln111"> </a>
+<a name="ln112">#ifndef NDEBUG</a>
+<a name="ln113">  if (dim.y &gt; 1) {</a>
+<a name="ln114">    // padding is the size of the area after last pixel of line n</a>
+<a name="ln115">    // and before the first pixel of line n+1</a>
+<a name="ln116">    assert(getData(dim.x - 1, 0) + bpp + padding == getData(0, 1));</a>
+<a name="ln117">  }</a>
+<a name="ln118"> </a>
+<a name="ln119">  for (int j = 0; j &lt; dim.y; j++) {</a>
+<a name="ln120">    const uchar8* const line = getData(0, j);</a>
+<a name="ln121">    // each line is indeed 16-byte aligned</a>
+<a name="ln122">    assert(isAligned(line, alignment));</a>
+<a name="ln123">  }</a>
+<a name="ln124">#endif</a>
+<a name="ln125"> </a>
+<a name="ln126">  poisonPadding();</a>
+<a name="ln127">}</a>
+<a name="ln128"> </a>
+<a name="ln129">#if __has_feature(address_sanitizer) || defined(__SANITIZE_ADDRESS__)</a>
+<a name="ln130">void RawImageData::poisonPadding() {</a>
+<a name="ln131">  if (padding &lt;= 0)</a>
+<a name="ln132">    return;</a>
+<a name="ln133"> </a>
+<a name="ln134">  for (int j = 0; j &lt; uncropped_dim.y; j++) {</a>
+<a name="ln135">    const uchar8* const curr_line_end =</a>
+<a name="ln136">        getDataUncropped(uncropped_dim.x - 1, j) + bpp;</a>
+<a name="ln137"> </a>
+<a name="ln138">    // and now poison the padding.</a>
+<a name="ln139">    ASan::PoisonMemoryRegion(curr_line_end, padding);</a>
+<a name="ln140">  }</a>
+<a name="ln141">}</a>
+<a name="ln142">#else</a>
+<a name="ln143">void RawImageData::poisonPadding() {</a>
+<a name="ln144">  // if we are building without ASAN, then there is no need/way to poison.</a>
+<a name="ln145">  // however, i think it is better to have such an empty function rather</a>
+<a name="ln146">  // than making this whole function not exist in ASAN-less builds</a>
+<a name="ln147">}</a>
+<a name="ln148">#endif</a>
+<a name="ln149"> </a>
+<a name="ln150">#if __has_feature(address_sanitizer) || defined(__SANITIZE_ADDRESS__)</a>
+<a name="ln151">void RawImageData::unpoisonPadding() {</a>
+<a name="ln152">  if (padding &lt;= 0)</a>
+<a name="ln153">    return;</a>
+<a name="ln154"> </a>
+<a name="ln155">  for (int j = 0; j &lt; uncropped_dim.y; j++) {</a>
+<a name="ln156">    const uchar8* const curr_line_end =</a>
+<a name="ln157">        getDataUncropped(uncropped_dim.x - 1, j) + bpp;</a>
+<a name="ln158"> </a>
+<a name="ln159">    // and now unpoison the padding.</a>
+<a name="ln160">    ASan::UnPoisonMemoryRegion(curr_line_end, padding);</a>
+<a name="ln161">  }</a>
+<a name="ln162">}</a>
+<a name="ln163">#else</a>
+<a name="ln164">void RawImageData::unpoisonPadding() {</a>
+<a name="ln165">  // if we are building without ASAN, then there is no need/way to poison.</a>
+<a name="ln166">  // however, i think it is better to have such an empty function rather</a>
+<a name="ln167">  // than making this whole function not exist in ASAN-less builds</a>
+<a name="ln168">}</a>
+<a name="ln169">#endif</a>
+<a name="ln170"> </a>
+<a name="ln171">void RawImageData::checkRowIsInitialized(int row) {</a>
+<a name="ln172">  const auto rowsize = bpp * uncropped_dim.x;</a>
+<a name="ln173"> </a>
+<a name="ln174">  const uchar8* const curr_line = getDataUncropped(0, row);</a>
+<a name="ln175"> </a>
+<a name="ln176">  // and check that image line is initialized.</a>
+<a name="ln177">  // do note that we are avoiding padding here.</a>
+<a name="ln178">  MSan::CheckMemIsInitialized(curr_line, rowsize);</a>
+<a name="ln179">}</a>
+<a name="ln180"> </a>
+<a name="ln181">#if __has_feature(memory_sanitizer) || defined(__SANITIZE_MEMORY__)</a>
+<a name="ln182">void RawImageData::checkMemIsInitialized() {</a>
+<a name="ln183">  for (int j = 0; j &lt; uncropped_dim.y; j++)</a>
+<a name="ln184">    checkRowIsInitialized(j);</a>
+<a name="ln185">}</a>
+<a name="ln186">#else</a>
+<a name="ln187">void RawImageData::checkMemIsInitialized() {</a>
+<a name="ln188">  // While we could use the same version for non-MSAN build, even though it</a>
+<a name="ln189">  // does not do anything, i don't think it will be fully optimized away,</a>
+<a name="ln190">  // the getDataUncropped() call may still be there. To be re-evaluated.</a>
+<a name="ln191">}</a>
+<a name="ln192">#endif</a>
+<a name="ln193"> </a>
+<a name="ln194">void RawImageData::destroyData() {</a>
+<a name="ln195">  if (data)</a>
+<a name="ln196">    alignedFree(data);</a>
+<a name="ln197">  if (mBadPixelMap)</a>
+<a name="ln198">    alignedFree(mBadPixelMap);</a>
+<a name="ln199">  data = nullptr;</a>
+<a name="ln200">  mBadPixelMap = nullptr;</a>
+<a name="ln201">}</a>
+<a name="ln202"> </a>
+<a name="ln203">void RawImageData::setCpp(uint32 val) {</a>
+<a name="ln204">  if (data)</a>
+<a name="ln205">    ThrowRDE(&quot;Attempted to set Components per pixel after data allocation&quot;);</a>
+<a name="ln206">  if (val &gt; 4) {</a>
+<a name="ln207">    ThrowRDE(</a>
+<a name="ln208">        &quot;Only up to 4 components per pixel is support - attempted to set: %d&quot;,</a>
+<a name="ln209">        val);</a>
+<a name="ln210">  }</a>
+<a name="ln211"> </a>
+<a name="ln212">  bpp /= cpp;</a>
+<a name="ln213">  cpp = val;</a>
+<a name="ln214">  bpp *= val;</a>
+<a name="ln215">}</a>
+<a name="ln216"> </a>
+<a name="ln217">uchar8* RawImageData::getData() const {</a>
+<a name="ln218">  if (!data)</a>
+<a name="ln219">    ThrowRDE(&quot;Data not yet allocated.&quot;);</a>
+<a name="ln220">  return &amp;data[mOffset.y*pitch+mOffset.x*bpp];</a>
+<a name="ln221">}</a>
+<a name="ln222"> </a>
+<a name="ln223">uchar8* RawImageData::getData(uint32 x, uint32 y) {</a>
+<a name="ln224">  if (x &gt;= static_cast&lt;unsigned&gt;(uncropped_dim.x))</a>
+<a name="ln225">    ThrowRDE(&quot;X Position outside image requested.&quot;);</a>
+<a name="ln226">  if (y &gt;= static_cast&lt;unsigned&gt;(uncropped_dim.y))</a>
+<a name="ln227">    ThrowRDE(&quot;Y Position outside image requested.&quot;);</a>
+<a name="ln228"> </a>
+<a name="ln229">  x += mOffset.x;</a>
+<a name="ln230">  y += mOffset.y;</a>
+<a name="ln231"> </a>
+<a name="ln232">  if (!data)</a>
+<a name="ln233">    ThrowRDE(&quot;Data not yet allocated.&quot;);</a>
+<a name="ln234"> </a>
+<a name="ln235">  return &amp;data[static_cast&lt;size_t&gt;(y) * pitch + x * bpp];</a>
+<a name="ln236">}</a>
+<a name="ln237"> </a>
+<a name="ln238">uchar8* RawImageData::getDataUncropped(uint32 x, uint32 y) {</a>
+<a name="ln239">  if (x &gt;= static_cast&lt;unsigned&gt;(uncropped_dim.x))</a>
+<a name="ln240">    ThrowRDE(&quot;X Position outside image requested.&quot;);</a>
+<a name="ln241">  if (y &gt;= static_cast&lt;unsigned&gt;(uncropped_dim.y))</a>
+<a name="ln242">    ThrowRDE(&quot;Y Position outside image requested.&quot;);</a>
+<a name="ln243"> </a>
+<a name="ln244">  if (!data)</a>
+<a name="ln245">    ThrowRDE(&quot;Data not yet allocated.&quot;);</a>
+<a name="ln246"> </a>
+<a name="ln247">  return &amp;data[static_cast&lt;size_t&gt;(y) * pitch + x * bpp];</a>
+<a name="ln248">}</a>
+<a name="ln249"> </a>
+<a name="ln250">iPoint2D __attribute__((pure)) rawspeed::RawImageData::getUncroppedDim() const {</a>
+<a name="ln251">  return uncropped_dim;</a>
+<a name="ln252">}</a>
+<a name="ln253"> </a>
+<a name="ln254">iPoint2D __attribute__((pure)) RawImageData::getCropOffset() const {</a>
+<a name="ln255">  return mOffset;</a>
+<a name="ln256">}</a>
+<a name="ln257"> </a>
+<a name="ln258">void RawImageData::subFrame(iRectangle2D crop) {</a>
+<a name="ln259">  if (!crop.dim.isThisInside(dim - crop.pos)) {</a>
+<a name="ln260">    writeLog(DEBUG_PRIO_WARNING, &quot;WARNING: RawImageData::subFrame - Attempted &quot;</a>
+<a name="ln261">                                 &quot;to create new subframe larger than original &quot;</a>
+<a name="ln262">                                 &quot;size. Crop skipped.&quot;);</a>
+<a name="ln263">    return;</a>
+<a name="ln264">  }</a>
+<a name="ln265">  if (crop.pos.x &lt; 0 || crop.pos.y &lt; 0 || !crop.hasPositiveArea()) {</a>
+<a name="ln266">    writeLog(DEBUG_PRIO_WARNING, &quot;WARNING: RawImageData::subFrame - Negative &quot;</a>
+<a name="ln267">                                 &quot;crop offset. Crop skipped.&quot;);</a>
+<a name="ln268">    return;</a>
+<a name="ln269">  }</a>
+<a name="ln270"> </a>
+<a name="ln271">  // if CFA, and not X-Trans, adjust.</a>
+<a name="ln272">  if (isCFA &amp;&amp; cfa.getDcrawFilter() != 1 &amp;&amp; cfa.getDcrawFilter() != 9) {</a>
+<a name="ln273">    cfa.shiftLeft(crop.pos.x);</a>
+<a name="ln274">    cfa.shiftDown(crop.pos.y);</a>
+<a name="ln275">  }</a>
+<a name="ln276"> </a>
+<a name="ln277">  mOffset += crop.pos;</a>
+<a name="ln278">  dim = crop.dim;</a>
+<a name="ln279">}</a>
+<a name="ln280"> </a>
+<a name="ln281">void RawImageData::createBadPixelMap()</a>
+<a name="ln282">{</a>
+<a name="ln283">  if (!isAllocated())</a>
+<a name="ln284">    ThrowRDE(&quot;(internal) Bad pixel map cannot be allocated before image.&quot;);</a>
+<a name="ln285">  mBadPixelMapPitch = roundUp(roundUpDivision(uncropped_dim.x, 8), 16);</a>
+<a name="ln286">  mBadPixelMap =</a>
+<a name="ln287">      alignedMallocArray&lt;uchar8, 16&gt;(uncropped_dim.y, mBadPixelMapPitch);</a>
+<a name="ln288">  memset(mBadPixelMap, 0,</a>
+<a name="ln289">         static_cast&lt;size_t&gt;(mBadPixelMapPitch) * uncropped_dim.y);</a>
+<a name="ln290">  if (!mBadPixelMap)</a>
+<a name="ln291">    ThrowRDE(&quot;Memory Allocation failed.&quot;);</a>
+<a name="ln292">}</a>
+<a name="ln293"> </a>
+<a name="ln294">RawImage::RawImage(RawImageData* p) : p_(p) {</a>
+<a name="ln295">  MutexLocker guard(&amp;p_-&gt;mymutex);</a>
+<a name="ln296">  ++p_-&gt;dataRefCount;</a>
+<a name="ln297">}</a>
+<a name="ln298"> </a>
+<a name="ln299">RawImage::RawImage(const RawImage&amp; p) : p_(p.p_) {</a>
+<a name="ln300">  MutexLocker guard(&amp;p_-&gt;mymutex);</a>
+<a name="ln301">  ++p_-&gt;dataRefCount;</a>
+<a name="ln302">}</a>
+<a name="ln303"> </a>
+<a name="ln304">RawImage::~RawImage() {</a>
+<a name="ln305">  p_-&gt;mymutex.Lock();</a>
+<a name="ln306"> </a>
+<a name="ln307">  --p_-&gt;dataRefCount;</a>
+<a name="ln308"> </a>
+<a name="ln309">  if (p_-&gt;dataRefCount == 0) {</a>
+<a name="ln310">    p_-&gt;mymutex.Unlock();</a>
+<a name="ln311">    delete p_;</a>
+<a name="ln312">    return;</a>
+<a name="ln313">  }</a>
+<a name="ln314"> </a>
+<a name="ln315">  p_-&gt;mymutex.Unlock();</a>
+<a name="ln316">}</a>
+<a name="ln317"> </a>
+<a name="ln318">void RawImageData::transferBadPixelsToMap()</a>
+<a name="ln319">{</a>
+<a name="ln320">  MutexLocker guard(&amp;mBadPixelMutex);</a>
+<a name="ln321">  if (mBadPixelPositions.empty())</a>
+<a name="ln322">    return;</a>
+<a name="ln323"> </a>
+<a name="ln324">  if (!mBadPixelMap)</a>
+<a name="ln325">    createBadPixelMap();</a>
+<a name="ln326"> </a>
+<a name="ln327">  for (unsigned int pos : mBadPixelPositions) {</a>
+<a name="ln328">    ushort16 pos_x = pos &amp; 0xffff;</a>
+<a name="ln329">    ushort16 pos_y = pos &gt;&gt; 16;</a>
+<a name="ln330"> </a>
+<a name="ln331">    assert(pos_x &lt; static_cast&lt;ushort16&gt;(uncropped_dim.x));</a>
+<a name="ln332">    assert(pos_y &lt; static_cast&lt;ushort16&gt;(uncropped_dim.y));</a>
+<a name="ln333"> </a>
+<a name="ln334">    mBadPixelMap[mBadPixelMapPitch * pos_y + (pos_x &gt;&gt; 3)] |= 1 &lt;&lt; (pos_x&amp;7);</a>
+<a name="ln335">  }</a>
+<a name="ln336">  mBadPixelPositions.clear();</a>
+<a name="ln337">}</a>
+<a name="ln338"> </a>
+<a name="ln339">void RawImageData::fixBadPixels()</a>
+<a name="ln340">{</a>
+<a name="ln341">#if !defined (EMULATE_DCRAW_BAD_PIXELS)</a>
+<a name="ln342"> </a>
+<a name="ln343">  /* Transfer if not already done */</a>
+<a name="ln344">  transferBadPixelsToMap();</a>
+<a name="ln345"> </a>
+<a name="ln346">#if 0 // For testing purposes</a>
+<a name="ln347">  if (!mBadPixelMap)</a>
+<a name="ln348">    createBadPixelMap();</a>
+<a name="ln349">  for (int y = 400; y &lt; 700; y++){</a>
+<a name="ln350">    for (int x = 1200; x &lt; 1700; x++) {</a>
+<a name="ln351">      mBadPixelMap[mBadPixelMapPitch * y + (x &gt;&gt; 3)] |= 1 &lt;&lt; (x&amp;7);</a>
+<a name="ln352">    }</a>
+<a name="ln353">  }</a>
+<a name="ln354">#endif</a>
+<a name="ln355"> </a>
+<a name="ln356">  /* Process bad pixels, if any */</a>
+<a name="ln357">  if (mBadPixelMap)</a>
+<a name="ln358">    startWorker(RawImageWorker::FIX_BAD_PIXELS, false);</a>
+<a name="ln359"> </a>
+<a name="ln360">#else  // EMULATE_DCRAW_BAD_PIXELS - not recommended, testing purposes only</a>
+<a name="ln361"> </a>
+<a name="ln362">  for (vector&lt;uint32&gt;::iterator i=mBadPixelPositions.begin(); i != mBadPixelPositions.end(); ++i) {</a>
+<a name="ln363">    uint32 pos = *i;</a>
+<a name="ln364">    uint32 pos_x = pos&amp;0xffff;</a>
+<a name="ln365">    uint32 pos_y = pos&gt;&gt;16;</a>
+<a name="ln366">    uint32 total = 0;</a>
+<a name="ln367">    uint32 div = 0;</a>
+<a name="ln368">    // 0 side covered by unsignedness.</a>
+<a name="ln369">    for (uint32 r=pos_x-2; r&lt;=pos_x+2 &amp;&amp; r&lt;(uint32)uncropped_dim.x; r+=2) {</a>
+<a name="ln370">      for (uint32 c=pos_y-2; c&lt;=pos_y+2 &amp;&amp; c&lt;(uint32)uncropped_dim.y; c+=2) {</a>
+<a name="ln371">        ushort16* pix = (ushort16*)getDataUncropped(r,c);</a>
+<a name="ln372">        if (*pix) {</a>
+<a name="ln373">          total += *pix;</a>
+<a name="ln374">          div++;</a>
+<a name="ln375">        }</a>
+<a name="ln376">      }</a>
+<a name="ln377">    }</a>
+<a name="ln378">    ushort16* pix = (ushort16*)getDataUncropped(pos_x,pos_y);</a>
+<a name="ln379">    if (div) {</a>
+<a name="ln380">      pix[0] = total / div;</a>
+<a name="ln381">    }</a>
+<a name="ln382">  }</a>
+<a name="ln383">#endif</a>
+<a name="ln384"> </a>
+<a name="ln385">}</a>
+<a name="ln386"> </a>
+<a name="ln387">void RawImageData::startWorker(const RawImageWorker::RawImageWorkerTask task,</a>
+<a name="ln388">                               bool cropped) {</a>
+<a name="ln389">  const int height = [&amp;]() {</a>
+<a name="ln390">    int h = (cropped) ? dim.y : uncropped_dim.y;</a>
+<a name="ln391">    if (task &amp; RawImageWorker::FULL_IMAGE) {</a>
+<a name="ln392">      h = uncropped_dim.y;</a>
+<a name="ln393">    }</a>
+<a name="ln394">    return h;</a>
+<a name="ln395">  }();</a>
+<a name="ln396"> </a>
+<a name="ln397">  const int threads = rawspeed_get_number_of_processor_cores();</a>
+<a name="ln398">  const int y_per_thread = (height + threads - 1) / threads;</a>
+<a name="ln399"> </a>
+<a name="ln400">#ifdef HAVE_OPENMP</a>
+<a name="ln401">#pragma omp parallel for default(none)                                         \</a>
+<a name="ln402">    firstprivate(threads, y_per_thread, height, task) num_threads(threads)     \</a>
+<a name="ln403">        schedule(static)</a>
+<a name="ln404">#endif</a>
+<a name="ln405">  for (int i = 0; i &lt; threads; i++) {</a>
+<a name="ln406">    int y_offset = std::min(i * y_per_thread, height);</a>
+<a name="ln407">    int y_end = std::min((i + 1) * y_per_thread, height);</a>
+<a name="ln408"> </a>
+<a name="ln409">    RawImageWorker worker(this, task, y_offset, y_end);</a>
+<a name="ln410">  }</a>
+<a name="ln411">}</a>
+<a name="ln412"> </a>
+<a name="ln413">void RawImageData::fixBadPixelsThread(int start_y, int end_y) {</a>
+<a name="ln414">  int gw = (uncropped_dim.x + 15) / 32;</a>
+<a name="ln415"> </a>
+<a name="ln416">  for (int y = start_y; y &lt; end_y; y++) {</a>
+<a name="ln417">    auto* bad_map =</a>
+<a name="ln418">        reinterpret_cast&lt;const uint32*&gt;(&amp;mBadPixelMap[y * mBadPixelMapPitch]);</a>
+<a name="ln419">    for (int x = 0; x &lt; gw; x++) {</a>
+<a name="ln420">      // Test if there is a bad pixel within these 32 pixels</a>
+<a name="ln421">      if (bad_map[x] == 0)</a>
+<a name="ln422">        continue;</a>
+<a name="ln423">      auto* bad = reinterpret_cast&lt;const uchar8*&gt;(&amp;bad_map[x]);</a>
+<a name="ln424">      // Go through each pixel</a>
+<a name="ln425">      for (int i = 0; i &lt; 4; i++) {</a>
+<a name="ln426">        for (int j = 0; j &lt; 8; j++) {</a>
+<a name="ln427">          if (1 != ((bad[i] &gt;&gt; j) &amp; 1))</a>
+<a name="ln428">            continue;</a>
+<a name="ln429"> </a>
+<a name="ln430">          fixBadPixel(x * 32 + i * 8 + j, y, 0);</a>
+<a name="ln431">        }</a>
+<a name="ln432">      }</a>
+<a name="ln433">    }</a>
+<a name="ln434">  }</a>
+<a name="ln435">}</a>
+<a name="ln436"> </a>
+<a name="ln437">void RawImageData::blitFrom(const RawImage&amp; src, const iPoint2D&amp; srcPos,</a>
+<a name="ln438">                            const iPoint2D&amp; size, const iPoint2D&amp; destPos) {</a>
+<a name="ln439">  iRectangle2D src_rect(srcPos, size);</a>
+<a name="ln440">  iRectangle2D dest_rect(destPos, size);</a>
+<a name="ln441">  src_rect = src_rect.getOverlap(iRectangle2D(iPoint2D(0,0), src-&gt;dim));</a>
+<a name="ln442">  dest_rect = dest_rect.getOverlap(iRectangle2D(iPoint2D(0,0), dim));</a>
+<a name="ln443"> </a>
+<a name="ln444">  iPoint2D blitsize = src_rect.dim.getSmallest(dest_rect.dim);</a>
+<a name="ln445">  if (blitsize.area() &lt;= 0)</a>
+<a name="ln446">    return;</a>
+<a name="ln447"> </a>
+<a name="ln448">  // TODO: Move offsets after crop.</a>
+<a name="ln449">  copyPixels(getData(dest_rect.pos.x, dest_rect.pos.y), pitch,</a>
+<a name="ln450">             src-&gt;getData(src_rect.pos.x, src_rect.pos.y), src-&gt;pitch,</a>
+<a name="ln451">             blitsize.x * bpp, blitsize.y);</a>
+<a name="ln452">}</a>
+<a name="ln453"> </a>
+<a name="ln454">/* Does not take cfa into consideration */</a>
+<a name="ln455">void RawImageData::expandBorder(iRectangle2D validData)</a>
+<a name="ln456">{</a>
+<a name="ln457">  validData = validData.getOverlap(iRectangle2D(0,0,dim.x, dim.y));</a>
+<a name="ln458">  if (validData.pos.x &gt; 0) {</a>
+<a name="ln459">    for (int y = 0; y &lt; dim.y; y++ ) {</a>
+<a name="ln460">      uchar8* src_pos = getData(validData.pos.x, y);</a>
+<a name="ln461">      uchar8* dst_pos = getData(validData.pos.x-1, y);</a>
+<a name="ln462">      for (int x = validData.pos.x; x &gt;= 0; x--) {</a>
+<a name="ln463">        for (uint32 i = 0; i &lt; bpp; i++) {</a>
+<a name="ln464">          dst_pos[i] = src_pos[i];</a>
+<a name="ln465">        }</a>
+<a name="ln466">        dst_pos -= bpp;</a>
+<a name="ln467">      }</a>
+<a name="ln468">    }</a>
+<a name="ln469">  }</a>
+<a name="ln470"> </a>
+<a name="ln471">  if (validData.getRight() &lt; dim.x) {</a>
+<a name="ln472">    int pos = validData.getRight();</a>
+<a name="ln473">    for (int y = 0; y &lt; dim.y; y++ ) {</a>
+<a name="ln474">      uchar8* src_pos = getData(pos-1, y);</a>
+<a name="ln475">      uchar8* dst_pos = getData(pos, y);</a>
+<a name="ln476">      for (int x = pos; x &lt; dim.x; x++) {</a>
+<a name="ln477">        for (uint32 i = 0; i &lt; bpp; i++) {</a>
+<a name="ln478">          dst_pos[i] = src_pos[i];</a>
+<a name="ln479">        }</a>
+<a name="ln480">        dst_pos += bpp;</a>
+<a name="ln481">      }</a>
+<a name="ln482">    }</a>
+<a name="ln483">  }</a>
+<a name="ln484"> </a>
+<a name="ln485">  if (validData.pos.y &gt; 0) {</a>
+<a name="ln486">    uchar8* src_pos = getData(0, validData.pos.y);</a>
+<a name="ln487">    for (int y = 0; y &lt; validData.pos.y; y++ ) {</a>
+<a name="ln488">      uchar8* dst_pos = getData(0, y);</a>
+<a name="ln489">      memcpy(dst_pos, src_pos, static_cast&lt;size_t&gt;(dim.x) * bpp);</a>
+<a name="ln490">    }</a>
+<a name="ln491">  }</a>
+<a name="ln492">  if (validData.getBottom() &lt; dim.y) {</a>
+<a name="ln493">    uchar8* src_pos = getData(0, validData.getBottom()-1);</a>
+<a name="ln494">    for (int y = validData.getBottom(); y &lt; dim.y; y++ ) {</a>
+<a name="ln495">      uchar8* dst_pos = getData(0, y);</a>
+<a name="ln496">      memcpy(dst_pos, src_pos, static_cast&lt;size_t&gt;(dim.x) * bpp);</a>
+<a name="ln497">    }</a>
+<a name="ln498">  }</a>
+<a name="ln499">}</a>
+<a name="ln500"> </a>
+<a name="ln501">void RawImageData::clearArea( iRectangle2D area, uchar8 val /*= 0*/ )</a>
+<a name="ln502">{</a>
+<a name="ln503">  area = area.getOverlap(iRectangle2D(iPoint2D(0,0), dim));</a>
+<a name="ln504"> </a>
+<a name="ln505">  if (area.area() &lt;= 0)</a>
+<a name="ln506">    return;</a>
+<a name="ln507"> </a>
+<a name="ln508">  for (int y = area.getTop(); y &lt; area.getBottom(); y++)</a>
+<a name="ln509">    memset(getData(area.getLeft(), y), val,</a>
+<a name="ln510">           static_cast&lt;size_t&gt;(area.getWidth()) * bpp);</a>
+<a name="ln511">}</a>
+<a name="ln512"> </a>
+<a name="ln513">RawImage&amp; RawImage::operator=(RawImage&amp;&amp; rhs) noexcept {</a>
+<a name="ln514">  if (this == &amp;rhs)</a>
+<a name="ln515">    return *this;</a>
+<a name="ln516"> </a>
+<a name="ln517">  std::swap(p_, rhs.p_);</a>
+<a name="ln518"> </a>
+<a name="ln519">  return *this;</a>
+<a name="ln520">}</a>
+<a name="ln521"> </a>
+<a name="ln522">RawImage&amp; RawImage::operator=(const RawImage&amp; rhs) noexcept {</a>
+<a name="ln523">  if (this == &amp;rhs)</a>
+<a name="ln524">    return *this;</a>
+<a name="ln525"> </a>
+<a name="ln526">  RawImage tmp(rhs);</a>
+<a name="ln527">  *this = std::move(tmp);</a>
+<a name="ln528"> </a>
+<a name="ln529">  return *this;</a>
+<a name="ln530">}</a>
+<a name="ln531"> </a>
+<a name="ln532">RawImageWorker::RawImageWorker(RawImageData* _img, RawImageWorkerTask _task,</a>
+<a name="ln533">                               int _start_y, int _end_y) noexcept</a>
+<a name="ln534">    : data(_img), task(_task), start_y(_start_y), end_y(_end_y) {</a>
+<a name="ln535">  performTask();</a>
+<a name="ln536">}</a>
+<a name="ln537"> </a>
+<a name="ln538">void RawImageWorker::performTask() noexcept {</a>
+<a name="ln539">  try {</a>
+<a name="ln540">    switch(task)</a>
+<a name="ln541">    {</a>
+<a name="ln542">    case SCALE_VALUES:</a>
+<a name="ln543">      data-&gt;scaleValues(start_y, end_y);</a>
+<a name="ln544">      break;</a>
+<a name="ln545">    case FIX_BAD_PIXELS:</a>
+<a name="ln546">      data-&gt;fixBadPixelsThread(start_y, end_y);</a>
+<a name="ln547">      break;</a>
+<a name="ln548">    case APPLY_LOOKUP:</a>
+<a name="ln549">      data-&gt;doLookup(start_y, end_y);</a>
+<a name="ln550">      break;</a>
+<a name="ln551">    default:</a>
+<a name="ln552">      assert(false);</a>
+<a name="ln553">    }</a>
+<a name="ln554">  } catch (RawDecoderException &amp;e) {</a>
+<a name="ln555">    data-&gt;setError(e.what());</a>
+<a name="ln556">  } catch (TiffParserException &amp;e) {</a>
+<a name="ln557">    data-&gt;setError(e.what());</a>
+<a name="ln558">  } catch (IOException &amp;e) {</a>
+<a name="ln559">    data-&gt;setError(e.what());</a>
+<a name="ln560">  }</a>
+<a name="ln561">}</a>
+<a name="ln562"> </a>
+<a name="ln563">void RawImageData::sixteenBitLookup() {</a>
+<a name="ln564">  if (table == nullptr) {</a>
+<a name="ln565">    return;</a>
+<a name="ln566">  }</a>
+<a name="ln567">  startWorker(RawImageWorker::APPLY_LOOKUP, true);</a>
+<a name="ln568">}</a>
+<a name="ln569"> </a>
+<a name="ln570">void RawImageData::setTable(std::unique_ptr&lt;TableLookUp&gt; t) {</a>
+<a name="ln571">  table = std::move(t);</a>
+<a name="ln572">}</a>
+<a name="ln573"> </a>
+<a name="ln574">void RawImageData::setTable(const std::vector&lt;ushort16&gt;&amp; table_, bool dither) {</a>
+<a name="ln575">  assert(!table_.empty());</a>
+<a name="ln576"> </a>
+<a name="ln577">  auto t = std::make_unique&lt;TableLookUp&gt;(1, dither);</a>
+<a name="ln578">  t-&gt;setTable(0, table_);</a>
+<a name="ln579">  this-&gt;setTable(std::move(t));</a>
+<a name="ln580">}</a>
+<a name="ln581"> </a>
+<a name="ln582">} // namespace rawspeed</a>
+
+</code></pre>
+<div class="balloon" rel="288"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v595/" target="_blank">V595</a> The 'mBadPixelMap' pointer was utilized before it was verified against nullptr. Check lines: 288, 290.</p></div>
+<div class="balloon" rel="45"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v730/" target="_blank">V730</a> Not all members of a class are initialized inside the constructor. Consider inspecting: dataType.</p></div>
+<div class="balloon" rel="49"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v730/" target="_blank">V730</a> It is possible that not all members of a class are initialized inside the constructor. Consider inspecting: dataType.</p></div>
+
+<link rel="stylesheet" href="highlight.css">
+<script src="highlight.pack.js"></script>
+<script src="highlightjs-line-numbers.js"></script>
+<script>hljs.initHighlightingOnLoad();</script>
+<script>hljs.initLineNumbersOnLoad();</script>
+<script>
+  $(document).ready(function() {
+      $('.balloon').each(function () {
+          var bl = $(this);
+          var line = bl.attr('rel');
+          var text = $('a[name="ln'+line+'"]').text();
+
+          var space_count = 0;
+          for(var i = 0; i<text.length; i++){
+              var char = text[i];
+              if((char !== ' ')&&(char !== '\t'))break;
+              if(char === '\t')space_count++;
+              space_count++;
+          }
+
+          bl.css('margin-left', space_count*8);
+          $('a[name="ln'+line+'"]').after(bl);
+      });
+
+      window.location = window.location;
+  });
+</script>
+</body>
+</html>

@@ -1,0 +1,1018 @@
+
+<html>
+<head>
+  <link rel="stylesheet" href="../style.css"/>
+  <script src="../jquery-3.2.1.min.js"></script>
+</head>
+<body>
+<pre><code class = "cpp">
+<a name="ln1">/*</a>
+<a name="ln2">    This file is part of darktable,</a>
+<a name="ln3">    copyright (c) 2009--2010 johannes hanika.</a>
+<a name="ln4">    copyright (c) 2014-2016 Roman Lebedev.</a>
+<a name="ln5"> </a>
+<a name="ln6">    darktable is free software: you can redistribute it and/or modify</a>
+<a name="ln7">    it under the terms of the GNU General Public License as published by</a>
+<a name="ln8">    the Free Software Foundation, either version 3 of the License, or</a>
+<a name="ln9">    (at your option) any later version.</a>
+<a name="ln10"> </a>
+<a name="ln11">    darktable is distributed in the hope that it will be useful,</a>
+<a name="ln12">    but WITHOUT ANY WARRANTY; without even the implied warranty of</a>
+<a name="ln13">    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the</a>
+<a name="ln14">    GNU General Public License for more details.</a>
+<a name="ln15"> </a>
+<a name="ln16">    You should have received a copy of the GNU General Public License</a>
+<a name="ln17">    along with darktable.  If not, see &lt;http://www.gnu.org/licenses/&gt;.</a>
+<a name="ln18">*/</a>
+<a name="ln19">#ifdef HAVE_CONFIG_H</a>
+<a name="ln20">#include &quot;config.h&quot;</a>
+<a name="ln21">#endif</a>
+<a name="ln22"> </a>
+<a name="ln23">#include &lt;assert.h&gt;</a>
+<a name="ln24">#include &lt;math.h&gt;</a>
+<a name="ln25">#include &lt;stdint.h&gt;</a>
+<a name="ln26">#include &lt;stdlib.h&gt;</a>
+<a name="ln27">#include &lt;string.h&gt;</a>
+<a name="ln28">#if defined(__SSE__)</a>
+<a name="ln29">#include &lt;xmmintrin.h&gt;</a>
+<a name="ln30">#endif</a>
+<a name="ln31"> </a>
+<a name="ln32">#include &quot;bauhaus/bauhaus.h&quot;</a>
+<a name="ln33">#include &quot;common/histogram.h&quot;</a>
+<a name="ln34">#include &quot;common/image_cache.h&quot;</a>
+<a name="ln35">#include &quot;common/mipmap_cache.h&quot;</a>
+<a name="ln36">#include &quot;common/opencl.h&quot;</a>
+<a name="ln37">#include &quot;control/control.h&quot;</a>
+<a name="ln38">#include &quot;develop/develop.h&quot;</a>
+<a name="ln39">#include &quot;develop/imageop.h&quot;</a>
+<a name="ln40">#include &quot;develop/imageop_math.h&quot;</a>
+<a name="ln41">#include &quot;develop/pixelpipe.h&quot;</a>
+<a name="ln42">#include &quot;dtgtk/paint.h&quot;</a>
+<a name="ln43">#include &quot;dtgtk/resetlabel.h&quot;</a>
+<a name="ln44">#include &quot;gui/accelerators.h&quot;</a>
+<a name="ln45">#include &quot;gui/gtk.h&quot;</a>
+<a name="ln46">#include &quot;gui/presets.h&quot;</a>
+<a name="ln47">#include &quot;iop/iop_api.h&quot;</a>
+<a name="ln48"> </a>
+<a name="ln49">#define exposure2white(x) exp2f(-(x))</a>
+<a name="ln50">#define white2exposure(x) -dt_log2f(fmaxf(1e-20f, x))</a>
+<a name="ln51"> </a>
+<a name="ln52">DT_MODULE_INTROSPECTION(5, dt_iop_exposure_params_t)</a>
+<a name="ln53"> </a>
+<a name="ln54">typedef enum dt_iop_exposure_mode_t</a>
+<a name="ln55">{</a>
+<a name="ln56">  EXPOSURE_MODE_MANUAL,</a>
+<a name="ln57">  EXPOSURE_MODE_DEFLICKER</a>
+<a name="ln58">} dt_iop_exposure_mode_t;</a>
+<a name="ln59"> </a>
+<a name="ln60">// uint16_t pixel can have any value in range [0, 65535], thus, there is</a>
+<a name="ln61">// 65536 possible values.</a>
+<a name="ln62">#define DEFLICKER_BINS_COUNT (UINT16_MAX + 1)</a>
+<a name="ln63"> </a>
+<a name="ln64">typedef struct dt_iop_exposure_params_t</a>
+<a name="ln65">{</a>
+<a name="ln66">  dt_iop_exposure_mode_t mode;</a>
+<a name="ln67">  float black;</a>
+<a name="ln68">  float exposure;</a>
+<a name="ln69">  float deflicker_percentile, deflicker_target_level;</a>
+<a name="ln70">} dt_iop_exposure_params_t;</a>
+<a name="ln71"> </a>
+<a name="ln72">typedef struct dt_iop_exposure_gui_data_t</a>
+<a name="ln73">{</a>
+<a name="ln74">  GList *modes;</a>
+<a name="ln75">  GtkWidget *mode;</a>
+<a name="ln76">  GtkWidget *black;</a>
+<a name="ln77">  GtkWidget *mode_stack;</a>
+<a name="ln78">  GtkWidget *exposure;</a>
+<a name="ln79">  GtkWidget *autoexpp;</a>
+<a name="ln80">  GtkWidget *deflicker_percentile;</a>
+<a name="ln81">  GtkWidget *deflicker_target_level;</a>
+<a name="ln82">  uint32_t *deflicker_histogram; // used to cache histogram of source file</a>
+<a name="ln83">  dt_dev_histogram_stats_t deflicker_histogram_stats;</a>
+<a name="ln84">  GtkLabel *deflicker_used_EC;</a>
+<a name="ln85">  float deflicker_computed_exposure;</a>
+<a name="ln86">  dt_pthread_mutex_t lock;</a>
+<a name="ln87">} dt_iop_exposure_gui_data_t;</a>
+<a name="ln88"> </a>
+<a name="ln89">typedef struct dt_iop_exposure_data_t</a>
+<a name="ln90">{</a>
+<a name="ln91">  dt_iop_exposure_params_t params;</a>
+<a name="ln92">  int deflicker;</a>
+<a name="ln93">  float black;</a>
+<a name="ln94">  float scale;</a>
+<a name="ln95">} dt_iop_exposure_data_t;</a>
+<a name="ln96"> </a>
+<a name="ln97">typedef struct dt_iop_exposure_global_data_t</a>
+<a name="ln98">{</a>
+<a name="ln99">  int kernel_exposure;</a>
+<a name="ln100">} dt_iop_exposure_global_data_t;</a>
+<a name="ln101"> </a>
+<a name="ln102"> </a>
+<a name="ln103">const char *name()</a>
+<a name="ln104">{</a>
+<a name="ln105">  return _(&quot;exposure&quot;);</a>
+<a name="ln106">}</a>
+<a name="ln107"> </a>
+<a name="ln108">int default_group()</a>
+<a name="ln109">{</a>
+<a name="ln110">  return IOP_GROUP_BASIC;</a>
+<a name="ln111">}</a>
+<a name="ln112"> </a>
+<a name="ln113">int flags()</a>
+<a name="ln114">{</a>
+<a name="ln115">  return IOP_FLAGS_ALLOW_TILING | IOP_FLAGS_SUPPORTS_BLENDING;</a>
+<a name="ln116">}</a>
+<a name="ln117"> </a>
+<a name="ln118">void init_key_accels(dt_iop_module_so_t *self)</a>
+<a name="ln119">{</a>
+<a name="ln120">  dt_accel_register_slider_iop(self, FALSE, NC_(&quot;accel&quot;, &quot;mode&quot;));</a>
+<a name="ln121">  dt_accel_register_slider_iop(self, FALSE, NC_(&quot;accel&quot;, &quot;black&quot;));</a>
+<a name="ln122">  dt_accel_register_slider_iop(self, FALSE, NC_(&quot;accel&quot;, &quot;exposure&quot;));</a>
+<a name="ln123">  dt_accel_register_slider_iop(self, FALSE, NC_(&quot;accel&quot;, &quot;auto-exposure&quot;));</a>
+<a name="ln124">  dt_accel_register_slider_iop(self, FALSE, NC_(&quot;accel&quot;, &quot;percentile&quot;));</a>
+<a name="ln125">  dt_accel_register_slider_iop(self, FALSE, NC_(&quot;accel&quot;, &quot;target level&quot;));</a>
+<a name="ln126">}</a>
+<a name="ln127"> </a>
+<a name="ln128">void connect_key_accels(dt_iop_module_t *self)</a>
+<a name="ln129">{</a>
+<a name="ln130">  dt_iop_exposure_gui_data_t *g = (dt_iop_exposure_gui_data_t *)self-&gt;gui_data;</a>
+<a name="ln131"> </a>
+<a name="ln132">  dt_accel_connect_slider_iop(self, &quot;mode&quot;, GTK_WIDGET(g-&gt;mode));</a>
+<a name="ln133">  dt_accel_connect_slider_iop(self, &quot;black&quot;, GTK_WIDGET(g-&gt;black));</a>
+<a name="ln134">  dt_accel_connect_slider_iop(self, &quot;exposure&quot;, GTK_WIDGET(g-&gt;exposure));</a>
+<a name="ln135">  dt_accel_connect_slider_iop(self, &quot;auto-exposure&quot;, GTK_WIDGET(g-&gt;autoexpp));</a>
+<a name="ln136">  dt_accel_connect_slider_iop(self, &quot;percentile&quot;, GTK_WIDGET(g-&gt;deflicker_percentile));</a>
+<a name="ln137">  dt_accel_connect_slider_iop(self, &quot;target level&quot;, GTK_WIDGET(g-&gt;deflicker_target_level));</a>
+<a name="ln138">}</a>
+<a name="ln139"> </a>
+<a name="ln140">int legacy_params(dt_iop_module_t *self, const void *const old_params, const int old_version,</a>
+<a name="ln141">                  void *new_params, const int new_version)</a>
+<a name="ln142">{</a>
+<a name="ln143">  if(old_version == 2 &amp;&amp; new_version == 5)</a>
+<a name="ln144">  {</a>
+<a name="ln145">    typedef struct dt_iop_exposure_params_v2_t</a>
+<a name="ln146">    {</a>
+<a name="ln147">      float black, exposure, gain;</a>
+<a name="ln148">    } dt_iop_exposure_params_v2_t;</a>
+<a name="ln149"> </a>
+<a name="ln150">    dt_iop_exposure_params_v2_t *o = (dt_iop_exposure_params_v2_t *)old_params;</a>
+<a name="ln151">    dt_iop_exposure_params_t *n = (dt_iop_exposure_params_t *)new_params;</a>
+<a name="ln152">    dt_iop_exposure_params_t *d = (dt_iop_exposure_params_t *)self-&gt;default_params;</a>
+<a name="ln153"> </a>
+<a name="ln154">    *n = *d; // start with a fresh copy of default parameters</a>
+<a name="ln155"> </a>
+<a name="ln156">    n-&gt;black = o-&gt;black;</a>
+<a name="ln157">    n-&gt;exposure = o-&gt;exposure;</a>
+<a name="ln158">    return 0;</a>
+<a name="ln159">  }</a>
+<a name="ln160">  if(old_version == 3 &amp;&amp; new_version == 5)</a>
+<a name="ln161">  {</a>
+<a name="ln162">    typedef struct dt_iop_exposure_params_v3_t</a>
+<a name="ln163">    {</a>
+<a name="ln164">      float black, exposure;</a>
+<a name="ln165">      gboolean deflicker;</a>
+<a name="ln166">      float deflicker_percentile, deflicker_target_level;</a>
+<a name="ln167">    } dt_iop_exposure_params_v3_t;</a>
+<a name="ln168"> </a>
+<a name="ln169">    dt_iop_exposure_params_v3_t *o = (dt_iop_exposure_params_v3_t *)old_params;</a>
+<a name="ln170">    dt_iop_exposure_params_t *n = (dt_iop_exposure_params_t *)new_params;</a>
+<a name="ln171">    dt_iop_exposure_params_t *d = (dt_iop_exposure_params_t *)self-&gt;default_params;</a>
+<a name="ln172"> </a>
+<a name="ln173">    *n = *d; // start with a fresh copy of default parameters</a>
+<a name="ln174"> </a>
+<a name="ln175">    n-&gt;mode = o-&gt;deflicker ? EXPOSURE_MODE_DEFLICKER : EXPOSURE_MODE_MANUAL;</a>
+<a name="ln176">    n-&gt;black = o-&gt;black;</a>
+<a name="ln177">    n-&gt;exposure = o-&gt;exposure;</a>
+<a name="ln178">    n-&gt;deflicker_percentile = o-&gt;deflicker_percentile;</a>
+<a name="ln179">    n-&gt;deflicker_target_level = o-&gt;deflicker_target_level;</a>
+<a name="ln180">    return 0;</a>
+<a name="ln181">  }</a>
+<a name="ln182">  if(old_version == 4 &amp;&amp; new_version == 5)</a>
+<a name="ln183">  {</a>
+<a name="ln184">    typedef enum dt_iop_exposure_deflicker_histogram_source_t {</a>
+<a name="ln185">      DEFLICKER_HISTOGRAM_SOURCE_THUMBNAIL,</a>
+<a name="ln186">      DEFLICKER_HISTOGRAM_SOURCE_SOURCEFILE</a>
+<a name="ln187">    } dt_iop_exposure_deflicker_histogram_source_t;</a>
+<a name="ln188"> </a>
+<a name="ln189">    typedef struct dt_iop_exposure_params_v4_t</a>
+<a name="ln190">    {</a>
+<a name="ln191">      dt_iop_exposure_mode_t mode;</a>
+<a name="ln192">      float black;</a>
+<a name="ln193">      float exposure;</a>
+<a name="ln194">      float deflicker_percentile, deflicker_target_level;</a>
+<a name="ln195">      dt_iop_exposure_deflicker_histogram_source_t deflicker_histogram_source;</a>
+<a name="ln196">    } dt_iop_exposure_params_v4_t;</a>
+<a name="ln197"> </a>
+<a name="ln198">    dt_iop_exposure_params_v4_t *o = (dt_iop_exposure_params_v4_t *)old_params;</a>
+<a name="ln199">    dt_iop_exposure_params_t *n = (dt_iop_exposure_params_t *)new_params;</a>
+<a name="ln200">    dt_iop_exposure_params_t *d = (dt_iop_exposure_params_t *)self-&gt;default_params;</a>
+<a name="ln201"> </a>
+<a name="ln202">    *n = *d; // start with a fresh copy of default parameters</a>
+<a name="ln203"> </a>
+<a name="ln204">    n-&gt;mode = o-&gt;mode;</a>
+<a name="ln205">    n-&gt;black = o-&gt;black;</a>
+<a name="ln206">    n-&gt;exposure = o-&gt;exposure;</a>
+<a name="ln207">    n-&gt;deflicker_percentile = o-&gt;deflicker_percentile;</a>
+<a name="ln208">    n-&gt;deflicker_target_level = o-&gt;deflicker_target_level;</a>
+<a name="ln209">    // deflicker_histogram_source is dropped. this does change output,</a>
+<a name="ln210">    // but deflicker still was not publicly released at that point</a>
+<a name="ln211">    return 0;</a>
+<a name="ln212">  }</a>
+<a name="ln213">  return 1;</a>
+<a name="ln214">}</a>
+<a name="ln215"> </a>
+<a name="ln216">void init_presets (dt_iop_module_so_t *self)</a>
+<a name="ln217">{</a>
+<a name="ln218">  DT_DEBUG_SQLITE3_EXEC(dt_database_get(darktable.db), &quot;BEGIN&quot;, NULL, NULL, NULL);</a>
+<a name="ln219"> </a>
+<a name="ln220">  dt_gui_presets_add_generic(_(&quot;magic lantern defaults&quot;), self-&gt;op, self-&gt;version(),</a>
+<a name="ln221">                             &amp;(dt_iop_exposure_params_t){.mode = EXPOSURE_MODE_DEFLICKER,</a>
+<a name="ln222">                                                         .black = 0.0f,</a>
+<a name="ln223">                                                         .exposure = 0.0f,</a>
+<a name="ln224">                                                         .deflicker_percentile = 50.0f,</a>
+<a name="ln225">                                                         .deflicker_target_level = -4.0f },</a>
+<a name="ln226">                             sizeof(dt_iop_exposure_params_t), 1);</a>
+<a name="ln227"> </a>
+<a name="ln228">  DT_DEBUG_SQLITE3_EXEC(dt_database_get(darktable.db), &quot;COMMIT&quot;, NULL, NULL, NULL);</a>
+<a name="ln229">}</a>
+<a name="ln230"> </a>
+<a name="ln231">static void deflicker_prepare_histogram(dt_iop_module_t *self, uint32_t **histogram,</a>
+<a name="ln232">                                        dt_dev_histogram_stats_t *histogram_stats)</a>
+<a name="ln233">{</a>
+<a name="ln234">  const dt_image_t *img = dt_image_cache_get(darktable.image_cache, self-&gt;dev-&gt;image_storage.id, 'r');</a>
+<a name="ln235">  dt_image_t image = *img;</a>
+<a name="ln236">  dt_image_cache_read_release(darktable.image_cache, img);</a>
+<a name="ln237"> </a>
+<a name="ln238">  if(image.buf_dsc.channels != 1 || image.buf_dsc.datatype != TYPE_UINT16) return;</a>
+<a name="ln239"> </a>
+<a name="ln240">  dt_mipmap_buffer_t buf;</a>
+<a name="ln241">  dt_mipmap_cache_get(darktable.mipmap_cache, &amp;buf, self-&gt;dev-&gt;image_storage.id, DT_MIPMAP_FULL,</a>
+<a name="ln242">                      DT_MIPMAP_BLOCKING, 'r');</a>
+<a name="ln243">  if(!buf.buf)</a>
+<a name="ln244">  {</a>
+<a name="ln245">    dt_control_log(_(&quot;failed to get raw buffer from image `%s'&quot;), image.filename);</a>
+<a name="ln246">    dt_mipmap_cache_release(darktable.mipmap_cache, &amp;buf);</a>
+<a name="ln247">    return;</a>
+<a name="ln248">  }</a>
+<a name="ln249"> </a>
+<a name="ln250">  dt_dev_histogram_collection_params_t histogram_params = { 0 };</a>
+<a name="ln251"> </a>
+<a name="ln252">  dt_histogram_roi_t histogram_roi = {.width = image.width,</a>
+<a name="ln253">                                      .height = image.height,</a>
+<a name="ln254"> </a>
+<a name="ln255">                                      // FIXME: get those from rawprepare IOP somehow !!!</a>
+<a name="ln256">                                      .crop_x = image.crop_x,</a>
+<a name="ln257">                                      .crop_y = image.crop_y,</a>
+<a name="ln258">                                      .crop_width = image.crop_width,</a>
+<a name="ln259">                                      .crop_height = image.crop_height };</a>
+<a name="ln260"> </a>
+<a name="ln261">  histogram_params.roi = &amp;histogram_roi;</a>
+<a name="ln262">  histogram_params.bins_count = DEFLICKER_BINS_COUNT;</a>
+<a name="ln263"> </a>
+<a name="ln264">  dt_histogram_worker(&amp;histogram_params, histogram_stats, buf.buf, histogram,</a>
+<a name="ln265">                      dt_histogram_helper_cs_RAW_uint16);</a>
+<a name="ln266">  histogram_stats-&gt;ch = 1u;</a>
+<a name="ln267"> </a>
+<a name="ln268">  dt_mipmap_cache_release(darktable.mipmap_cache, &amp;buf);</a>
+<a name="ln269">}</a>
+<a name="ln270"> </a>
+<a name="ln271">/* input: 0 - 65535 (valid range: from black level to white level) */</a>
+<a name="ln272">/* output: -16 ... 0 */</a>
+<a name="ln273">static double raw_to_ev(uint32_t raw, uint32_t black_level, uint32_t white_level)</a>
+<a name="ln274">{</a>
+<a name="ln275">  const uint32_t raw_max = white_level - black_level;</a>
+<a name="ln276"> </a>
+<a name="ln277">  // we are working on data without black clipping,</a>
+<a name="ln278">  // so we can get values which are lower than the black level !!!</a>
+<a name="ln279">  const int64_t raw_val = MAX((int64_t)raw - (int64_t)black_level, 1);</a>
+<a name="ln280"> </a>
+<a name="ln281">  const double raw_ev = -log2(raw_max) + log2(raw_val);</a>
+<a name="ln282"> </a>
+<a name="ln283">  return raw_ev;</a>
+<a name="ln284">}</a>
+<a name="ln285"> </a>
+<a name="ln286">static void compute_correction(dt_iop_module_t *self, dt_iop_params_t *p1, dt_dev_pixelpipe_t *pipe,</a>
+<a name="ln287">                               const uint32_t *const histogram,</a>
+<a name="ln288">                               const dt_dev_histogram_stats_t *const histogram_stats, float *correction)</a>
+<a name="ln289">{</a>
+<a name="ln290">  const dt_iop_exposure_params_t *const p = (const dt_iop_exposure_params_t *const)p1;</a>
+<a name="ln291"> </a>
+<a name="ln292">  *correction = NAN;</a>
+<a name="ln293"> </a>
+<a name="ln294">  if(histogram == NULL) return;</a>
+<a name="ln295"> </a>
+<a name="ln296">  const size_t total = (size_t)histogram_stats-&gt;ch * histogram_stats-&gt;pixels;</a>
+<a name="ln297"> </a>
+<a name="ln298">  const double thr</a>
+<a name="ln299">      = CLAMP(((double)total * (double)p-&gt;deflicker_percentile / (double)100.0), 0.0, (double)total);</a>
+<a name="ln300"> </a>
+<a name="ln301">  size_t n = 0;</a>
+<a name="ln302">  uint32_t raw = 0;</a>
+<a name="ln303"> </a>
+<a name="ln304">  for(uint32_t i = 0; i &lt; histogram_stats-&gt;bins_count; i++)</a>
+<a name="ln305">  {</a>
+<a name="ln306">    for(uint32_t k = 0; k &lt; histogram_stats-&gt;ch; k++) n += histogram[4 * i + k];</a>
+<a name="ln307"> </a>
+<a name="ln308">    if((double)n &gt;= thr)</a>
+<a name="ln309">    {</a>
+<a name="ln310">      raw = i;</a>
+<a name="ln311">      break;</a>
+<a name="ln312">    }</a>
+<a name="ln313">  }</a>
+<a name="ln314"> </a>
+<a name="ln315">  const double ev</a>
+<a name="ln316">      = raw_to_ev(raw, (uint32_t)pipe-&gt;dsc.rawprepare.raw_black_level, pipe-&gt;dsc.rawprepare.raw_white_point);</a>
+<a name="ln317"> </a>
+<a name="ln318">  *correction = p-&gt;deflicker_target_level - ev;</a>
+<a name="ln319">}</a>
+<a name="ln320"> </a>
+<a name="ln321">static void process_common_setup(dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece)</a>
+<a name="ln322">{</a>
+<a name="ln323">  dt_iop_exposure_gui_data_t *g = self-&gt;gui_data;</a>
+<a name="ln324">  dt_iop_exposure_data_t *d = piece-&gt;data;</a>
+<a name="ln325"> </a>
+<a name="ln326">  d-&gt;black = d-&gt;params.black;</a>
+<a name="ln327">  float exposure = d-&gt;params.exposure;</a>
+<a name="ln328"> </a>
+<a name="ln329">  if(d-&gt;deflicker)</a>
+<a name="ln330">  {</a>
+<a name="ln331">    if(g)</a>
+<a name="ln332">    {</a>
+<a name="ln333">      // histogram is precomputed and cached</a>
+<a name="ln334">      compute_correction(self, &amp;d-&gt;params, piece-&gt;pipe, g-&gt;deflicker_histogram, &amp;g-&gt;deflicker_histogram_stats,</a>
+<a name="ln335">                         &amp;exposure);</a>
+<a name="ln336">    }</a>
+<a name="ln337">    else</a>
+<a name="ln338">    {</a>
+<a name="ln339">      uint32_t *histogram = NULL;</a>
+<a name="ln340">      dt_dev_histogram_stats_t histogram_stats;</a>
+<a name="ln341">      deflicker_prepare_histogram(self, &amp;histogram, &amp;histogram_stats);</a>
+<a name="ln342">      compute_correction(self, &amp;d-&gt;params, piece-&gt;pipe, histogram, &amp;histogram_stats, &amp;exposure);</a>
+<a name="ln343">      free(histogram);</a>
+<a name="ln344">    }</a>
+<a name="ln345"> </a>
+<a name="ln346">    // second, show computed correction in UI.</a>
+<a name="ln347">    if(g &amp;&amp; piece-&gt;pipe-&gt;type == DT_DEV_PIXELPIPE_PREVIEW)</a>
+<a name="ln348">    {</a>
+<a name="ln349">      dt_pthread_mutex_lock(&amp;g-&gt;lock);</a>
+<a name="ln350">      g-&gt;deflicker_computed_exposure = exposure;</a>
+<a name="ln351">      dt_pthread_mutex_unlock(&amp;g-&gt;lock);</a>
+<a name="ln352">    }</a>
+<a name="ln353">  }</a>
+<a name="ln354"> </a>
+<a name="ln355">  const float white = exposure2white(exposure);</a>
+<a name="ln356">  d-&gt;scale = 1.0 / (white - d-&gt;black);</a>
+<a name="ln357">}</a>
+<a name="ln358"> </a>
+<a name="ln359">#ifdef HAVE_OPENCL</a>
+<a name="ln360">int process_cl(struct dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, cl_mem dev_in, cl_mem dev_out,</a>
+<a name="ln361">               const dt_iop_roi_t *const roi_in, const dt_iop_roi_t *const roi_out)</a>
+<a name="ln362">{</a>
+<a name="ln363">  dt_iop_exposure_data_t *d = (dt_iop_exposure_data_t *)piece-&gt;data;</a>
+<a name="ln364">  dt_iop_exposure_global_data_t *gd = (dt_iop_exposure_global_data_t *)self-&gt;data;</a>
+<a name="ln365"> </a>
+<a name="ln366">  process_common_setup(self, piece);</a>
+<a name="ln367"> </a>
+<a name="ln368">  cl_int err = -999;</a>
+<a name="ln369">  const int devid = piece-&gt;pipe-&gt;devid;</a>
+<a name="ln370">  const int width = roi_in-&gt;width;</a>
+<a name="ln371">  const int height = roi_in-&gt;height;</a>
+<a name="ln372"> </a>
+<a name="ln373">  size_t sizes[] = { ROUNDUPWD(width), ROUNDUPHT(height), 1 };</a>
+<a name="ln374">  dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_exposure, 0, sizeof(cl_mem), (void *)&amp;dev_in);</a>
+<a name="ln375">  dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_exposure, 1, sizeof(cl_mem), (void *)&amp;dev_out);</a>
+<a name="ln376">  dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_exposure, 2, sizeof(int), (void *)&amp;width);</a>
+<a name="ln377">  dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_exposure, 3, sizeof(int), (void *)&amp;height);</a>
+<a name="ln378">  dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_exposure, 4, sizeof(float), (void *)&amp;(d-&gt;black));</a>
+<a name="ln379">  dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_exposure, 5, sizeof(float), (void *)&amp;(d-&gt;scale));</a>
+<a name="ln380">  err = dt_opencl_enqueue_kernel_2d(devid, gd-&gt;kernel_exposure, sizes);</a>
+<a name="ln381">  if(err != CL_SUCCESS) goto error;</a>
+<a name="ln382">  for(int k = 0; k &lt; 3; k++) piece-&gt;pipe-&gt;dsc.processed_maximum[k] *= d-&gt;scale;</a>
+<a name="ln383"> </a>
+<a name="ln384">  return TRUE;</a>
+<a name="ln385"> </a>
+<a name="ln386">error:</a>
+<a name="ln387">  dt_print(DT_DEBUG_OPENCL, &quot;[opencl_exposure] couldn't enqueue kernel! %d\n&quot;, err);</a>
+<a name="ln388">  return FALSE;</a>
+<a name="ln389">}</a>
+<a name="ln390">#endif</a>
+<a name="ln391"> </a>
+<a name="ln392">void process(struct dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, const void *const i, void *const o,</a>
+<a name="ln393">             const dt_iop_roi_t *const roi_in, const dt_iop_roi_t *const roi_out)</a>
+<a name="ln394">{</a>
+<a name="ln395">  const dt_iop_exposure_data_t *const d = (const dt_iop_exposure_data_t *const)piece-&gt;data;</a>
+<a name="ln396"> </a>
+<a name="ln397">  process_common_setup(self, piece);</a>
+<a name="ln398"> </a>
+<a name="ln399">  const int ch = piece-&gt;colors;</a>
+<a name="ln400"> </a>
+<a name="ln401">#ifdef _OPENMP</a>
+<a name="ln402">#pragma omp parallel for SIMD() default(none) schedule(static)</a>
+<a name="ln403">#endif</a>
+<a name="ln404">  for(size_t k = 0; k &lt; (size_t)ch * roi_out-&gt;width * roi_out-&gt;height; k++)</a>
+<a name="ln405">  {</a>
+<a name="ln406">    ((float *)o)[k] = (((float *)i)[k] - d-&gt;black) * d-&gt;scale;</a>
+<a name="ln407">  }</a>
+<a name="ln408"> </a>
+<a name="ln409">  if(piece-&gt;pipe-&gt;mask_display &amp; DT_DEV_PIXELPIPE_DISPLAY_MASK) dt_iop_alpha_copy(i, o, roi_out-&gt;width, roi_out-&gt;height);</a>
+<a name="ln410"> </a>
+<a name="ln411">  for(int k = 0; k &lt; 3; k++) piece-&gt;pipe-&gt;dsc.processed_maximum[k] *= d-&gt;scale;</a>
+<a name="ln412">}</a>
+<a name="ln413"> </a>
+<a name="ln414">#if defined(__SSE__)</a>
+<a name="ln415">void process_sse2(struct dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, const void *const i,</a>
+<a name="ln416">                  void *const o, const dt_iop_roi_t *const roi_in, const dt_iop_roi_t *const roi_out)</a>
+<a name="ln417">{</a>
+<a name="ln418">  const dt_iop_exposure_data_t *const d = (const dt_iop_exposure_data_t *const)piece-&gt;data;</a>
+<a name="ln419"> </a>
+<a name="ln420">  process_common_setup(self, piece);</a>
+<a name="ln421"> </a>
+<a name="ln422">  const int ch = piece-&gt;colors;</a>
+<a name="ln423">  const __m128 blackv = _mm_set1_ps(d-&gt;black);</a>
+<a name="ln424">  const __m128 scalev = _mm_set1_ps(d-&gt;scale);</a>
+<a name="ln425"> </a>
+<a name="ln426">#ifdef _OPENMP</a>
+<a name="ln427">#pragma omp parallel for default(none) schedule(static)</a>
+<a name="ln428">#endif</a>
+<a name="ln429">  for(int k = 0; k &lt; roi_out-&gt;height; k++)</a>
+<a name="ln430">  {</a>
+<a name="ln431">    const float *in = ((float *)i) + (size_t)ch * k * roi_out-&gt;width;</a>
+<a name="ln432">    float *out = ((float *)o) + (size_t)ch * k * roi_out-&gt;width;</a>
+<a name="ln433">    for(int j = 0; j &lt; roi_out-&gt;width; j++, in += 4, out += 4)</a>
+<a name="ln434">      _mm_store_ps(out, _mm_mul_ps(_mm_sub_ps(_mm_load_ps(in), blackv), scalev));</a>
+<a name="ln435">  }</a>
+<a name="ln436"> </a>
+<a name="ln437">  if(piece-&gt;pipe-&gt;mask_display &amp; DT_DEV_PIXELPIPE_DISPLAY_MASK) dt_iop_alpha_copy(i, o, roi_out-&gt;width, roi_out-&gt;height);</a>
+<a name="ln438"> </a>
+<a name="ln439">  for(int k = 0; k &lt; 3; k++) piece-&gt;pipe-&gt;dsc.processed_maximum[k] *= d-&gt;scale;</a>
+<a name="ln440">}</a>
+<a name="ln441">#endif</a>
+<a name="ln442"> </a>
+<a name="ln443">void commit_params(struct dt_iop_module_t *self, dt_iop_params_t *p1, dt_dev_pixelpipe_t *pipe,</a>
+<a name="ln444">                   dt_dev_pixelpipe_iop_t *piece)</a>
+<a name="ln445">{</a>
+<a name="ln446">  dt_iop_exposure_params_t *p = (dt_iop_exposure_params_t *)p1;</a>
+<a name="ln447">  dt_iop_exposure_data_t *d = (dt_iop_exposure_data_t *)piece-&gt;data;</a>
+<a name="ln448"> </a>
+<a name="ln449">  d-&gt;params = *p;</a>
+<a name="ln450"> </a>
+<a name="ln451">  d-&gt;deflicker = 0;</a>
+<a name="ln452"> </a>
+<a name="ln453">  if(p-&gt;mode == EXPOSURE_MODE_DEFLICKER &amp;&amp; dt_image_is_raw(&amp;self-&gt;dev-&gt;image_storage)</a>
+<a name="ln454">     &amp;&amp; self-&gt;dev-&gt;image_storage.buf_dsc.channels == 1 &amp;&amp; self-&gt;dev-&gt;image_storage.buf_dsc.datatype == TYPE_UINT16)</a>
+<a name="ln455">  {</a>
+<a name="ln456">    d-&gt;deflicker = 1;</a>
+<a name="ln457">  }</a>
+<a name="ln458">}</a>
+<a name="ln459"> </a>
+<a name="ln460">void init_pipe(struct dt_iop_module_t *self, dt_dev_pixelpipe_t *pipe, dt_dev_pixelpipe_iop_t *piece)</a>
+<a name="ln461">{</a>
+<a name="ln462">  piece-&gt;data = malloc(sizeof(dt_iop_exposure_data_t));</a>
+<a name="ln463">  self-&gt;commit_params(self, self-&gt;default_params, pipe, piece);</a>
+<a name="ln464">}</a>
+<a name="ln465"> </a>
+<a name="ln466">void cleanup_pipe(struct dt_iop_module_t *self, dt_dev_pixelpipe_t *pipe, dt_dev_pixelpipe_iop_t *piece)</a>
+<a name="ln467">{</a>
+<a name="ln468">  free(piece-&gt;data);</a>
+<a name="ln469">  piece-&gt;data = NULL;</a>
+<a name="ln470">}</a>
+<a name="ln471"> </a>
+<a name="ln472">static void autoexp_disable(dt_iop_module_t *self)</a>
+<a name="ln473">{</a>
+<a name="ln474">  if(self-&gt;request_color_pick != DT_REQUEST_COLORPICK_MODULE) return;</a>
+<a name="ln475"> </a>
+<a name="ln476">  self-&gt;request_color_pick = DT_REQUEST_COLORPICK_OFF;</a>
+<a name="ln477">}</a>
+<a name="ln478"> </a>
+<a name="ln479">void gui_update(struct dt_iop_module_t *self)</a>
+<a name="ln480">{</a>
+<a name="ln481">  dt_iop_exposure_gui_data_t *g = (dt_iop_exposure_gui_data_t *)self-&gt;gui_data;</a>
+<a name="ln482">  dt_iop_exposure_params_t *p = (dt_iop_exposure_params_t *)self-&gt;params;</a>
+<a name="ln483"> </a>
+<a name="ln484">  if(!dt_image_is_raw(&amp;self-&gt;dev-&gt;image_storage) || self-&gt;dev-&gt;image_storage.buf_dsc.channels != 1</a>
+<a name="ln485">     || self-&gt;dev-&gt;image_storage.buf_dsc.datatype != TYPE_UINT16)</a>
+<a name="ln486">  {</a>
+<a name="ln487">    gtk_widget_set_sensitive(GTK_WIDGET(g-&gt;mode), FALSE);</a>
+<a name="ln488">    p-&gt;mode = EXPOSURE_MODE_MANUAL;</a>
+<a name="ln489">    dt_dev_add_history_item(darktable.develop, self, TRUE);</a>
+<a name="ln490">  }</a>
+<a name="ln491">  else</a>
+<a name="ln492">  {</a>
+<a name="ln493">    gtk_widget_set_sensitive(GTK_WIDGET(g-&gt;mode), TRUE);</a>
+<a name="ln494">  }</a>
+<a name="ln495"> </a>
+<a name="ln496">  dt_bauhaus_combobox_set(g-&gt;mode, g_list_index(g-&gt;modes, GUINT_TO_POINTER(p-&gt;mode)));</a>
+<a name="ln497"> </a>
+<a name="ln498">  dt_bauhaus_slider_set_soft(g-&gt;black, p-&gt;black);</a>
+<a name="ln499">  dt_bauhaus_slider_set_soft(g-&gt;exposure, p-&gt;exposure);</a>
+<a name="ln500"> </a>
+<a name="ln501">  dt_bauhaus_slider_set(g-&gt;autoexpp, 0.01);</a>
+<a name="ln502">  dt_bauhaus_widget_set_quad_active(g-&gt;autoexpp, FALSE);</a>
+<a name="ln503"> </a>
+<a name="ln504">  dt_bauhaus_slider_set(g-&gt;deflicker_percentile, p-&gt;deflicker_percentile);</a>
+<a name="ln505">  dt_bauhaus_slider_set(g-&gt;deflicker_target_level, p-&gt;deflicker_target_level);</a>
+<a name="ln506"> </a>
+<a name="ln507">  self-&gt;request_color_pick = DT_REQUEST_COLORPICK_OFF;</a>
+<a name="ln508"> </a>
+<a name="ln509">  free(g-&gt;deflicker_histogram);</a>
+<a name="ln510">  g-&gt;deflicker_histogram = NULL;</a>
+<a name="ln511"> </a>
+<a name="ln512">  gtk_label_set_text(g-&gt;deflicker_used_EC, &quot;&quot;);</a>
+<a name="ln513">  dt_pthread_mutex_lock(&amp;g-&gt;lock);</a>
+<a name="ln514">  g-&gt;deflicker_computed_exposure = NAN;</a>
+<a name="ln515">  dt_pthread_mutex_unlock(&amp;g-&gt;lock);</a>
+<a name="ln516"> </a>
+<a name="ln517">  switch(p-&gt;mode)</a>
+<a name="ln518">  {</a>
+<a name="ln519">    case EXPOSURE_MODE_DEFLICKER:</a>
+<a name="ln520">      autoexp_disable(self);</a>
+<a name="ln521">      gtk_stack_set_visible_child_name(GTK_STACK(g-&gt;mode_stack), &quot;deflicker&quot;);</a>
+<a name="ln522">      deflicker_prepare_histogram(self, &amp;g-&gt;deflicker_histogram, &amp;g-&gt;deflicker_histogram_stats);</a>
+<a name="ln523">      break;</a>
+<a name="ln524">    case EXPOSURE_MODE_MANUAL:</a>
+<a name="ln525">    default:</a>
+<a name="ln526">      gtk_stack_set_visible_child_name(GTK_STACK(g-&gt;mode_stack), &quot;manual&quot;);</a>
+<a name="ln527">      break;</a>
+<a name="ln528">  }</a>
+<a name="ln529">}</a>
+<a name="ln530"> </a>
+<a name="ln531">void gui_focus(struct dt_iop_module_t *self, gboolean in)</a>
+<a name="ln532">{</a>
+<a name="ln533">  // switch off auto exposure when we lose focus (switching images etc)</a>
+<a name="ln534">  dt_iop_exposure_gui_data_t *g = (dt_iop_exposure_gui_data_t *)self-&gt;gui_data;</a>
+<a name="ln535"> </a>
+<a name="ln536">  dt_bauhaus_slider_set(g-&gt;autoexpp, 0.01);</a>
+<a name="ln537">}</a>
+<a name="ln538"> </a>
+<a name="ln539">void init(dt_iop_module_t *module)</a>
+<a name="ln540">{</a>
+<a name="ln541">  module-&gt;params = calloc(1, sizeof(dt_iop_exposure_params_t));</a>
+<a name="ln542">  module-&gt;default_params = calloc(1, sizeof(dt_iop_exposure_params_t));</a>
+<a name="ln543">  module-&gt;default_enabled = 0;</a>
+<a name="ln544">  module-&gt;priority = 157; // module order created by iop_dependencies.py, do not edit!</a>
+<a name="ln545">  module-&gt;params_size = sizeof(dt_iop_exposure_params_t);</a>
+<a name="ln546">  module-&gt;gui_data = NULL;</a>
+<a name="ln547">}</a>
+<a name="ln548"> </a>
+<a name="ln549">void reload_defaults(dt_iop_module_t *module)</a>
+<a name="ln550">{</a>
+<a name="ln551">  dt_iop_exposure_params_t tmp = (dt_iop_exposure_params_t){.mode = EXPOSURE_MODE_MANUAL,</a>
+<a name="ln552">                                                            .black = 0.0f,</a>
+<a name="ln553">                                                            .exposure = 0.0f,</a>
+<a name="ln554">                                                            .deflicker_percentile = 50.0f,</a>
+<a name="ln555">                                                            .deflicker_target_level = -4.0f</a>
+<a name="ln556">  };</a>
+<a name="ln557"> </a>
+<a name="ln558">  memcpy(module-&gt;params, &amp;tmp, sizeof(dt_iop_exposure_params_t));</a>
+<a name="ln559">  memcpy(module-&gt;default_params, &amp;tmp, sizeof(dt_iop_exposure_params_t));</a>
+<a name="ln560">}</a>
+<a name="ln561"> </a>
+<a name="ln562">void init_global(dt_iop_module_so_t *module)</a>
+<a name="ln563">{</a>
+<a name="ln564">  const int program = 2; // from programs.conf: basic.cl</a>
+<a name="ln565">  dt_iop_exposure_global_data_t *gd</a>
+<a name="ln566">      = (dt_iop_exposure_global_data_t *)malloc(sizeof(dt_iop_exposure_global_data_t));</a>
+<a name="ln567">  module-&gt;data = gd;</a>
+<a name="ln568">  gd-&gt;kernel_exposure = dt_opencl_create_kernel(program, &quot;exposure&quot;);</a>
+<a name="ln569">}</a>
+<a name="ln570"> </a>
+<a name="ln571">void cleanup(dt_iop_module_t *module)</a>
+<a name="ln572">{</a>
+<a name="ln573">  free(module-&gt;params);</a>
+<a name="ln574">  module-&gt;params = NULL;</a>
+<a name="ln575">}</a>
+<a name="ln576"> </a>
+<a name="ln577">void cleanup_global(dt_iop_module_so_t *module)</a>
+<a name="ln578">{</a>
+<a name="ln579">  dt_iop_exposure_global_data_t *gd = (dt_iop_exposure_global_data_t *)module-&gt;data;</a>
+<a name="ln580">  dt_opencl_free_kernel(gd-&gt;kernel_exposure);</a>
+<a name="ln581">  free(module-&gt;data);</a>
+<a name="ln582">  module-&gt;data = NULL;</a>
+<a name="ln583">}</a>
+<a name="ln584"> </a>
+<a name="ln585">static void mode_callback(GtkWidget *combo, gpointer user_data)</a>
+<a name="ln586">{</a>
+<a name="ln587">  dt_iop_module_t *self = (dt_iop_module_t *)user_data;</a>
+<a name="ln588"> </a>
+<a name="ln589">  if(darktable.gui-&gt;reset) return;</a>
+<a name="ln590"> </a>
+<a name="ln591">  dt_iop_exposure_gui_data_t *g = (dt_iop_exposure_gui_data_t *)self-&gt;gui_data;</a>
+<a name="ln592">  dt_iop_exposure_params_t *p = (dt_iop_exposure_params_t *)self-&gt;params;</a>
+<a name="ln593"> </a>
+<a name="ln594">  const dt_iop_exposure_mode_t new_mode</a>
+<a name="ln595">      = GPOINTER_TO_UINT(g_list_nth_data(g-&gt;modes, dt_bauhaus_combobox_get(combo)));</a>
+<a name="ln596"> </a>
+<a name="ln597">  free(g-&gt;deflicker_histogram);</a>
+<a name="ln598">  g-&gt;deflicker_histogram = NULL;</a>
+<a name="ln599"> </a>
+<a name="ln600">  switch(new_mode)</a>
+<a name="ln601">  {</a>
+<a name="ln602">    case EXPOSURE_MODE_DEFLICKER:</a>
+<a name="ln603">      autoexp_disable(self);</a>
+<a name="ln604">      if(!dt_image_is_raw(&amp;self-&gt;dev-&gt;image_storage) || self-&gt;dev-&gt;image_storage.buf_dsc.channels != 1</a>
+<a name="ln605">         || self-&gt;dev-&gt;image_storage.buf_dsc.datatype != TYPE_UINT16)</a>
+<a name="ln606">      {</a>
+<a name="ln607">        dt_bauhaus_combobox_set(g-&gt;mode, g_list_index(g-&gt;modes, GUINT_TO_POINTER(EXPOSURE_MODE_MANUAL)));</a>
+<a name="ln608">        gtk_widget_set_sensitive(GTK_WIDGET(g-&gt;mode), FALSE);</a>
+<a name="ln609">        break;</a>
+<a name="ln610">      }</a>
+<a name="ln611">      p-&gt;mode = EXPOSURE_MODE_DEFLICKER;</a>
+<a name="ln612">      gtk_stack_set_visible_child_name(GTK_STACK(g-&gt;mode_stack), &quot;deflicker&quot;);</a>
+<a name="ln613">      deflicker_prepare_histogram(self, &amp;g-&gt;deflicker_histogram, &amp;g-&gt;deflicker_histogram_stats);</a>
+<a name="ln614">      break;</a>
+<a name="ln615">    case EXPOSURE_MODE_MANUAL:</a>
+<a name="ln616">    default:</a>
+<a name="ln617">      p-&gt;mode = EXPOSURE_MODE_MANUAL;</a>
+<a name="ln618">      gtk_stack_set_visible_child_name(GTK_STACK(g-&gt;mode_stack), &quot;manual&quot;);</a>
+<a name="ln619">      break;</a>
+<a name="ln620">  }</a>
+<a name="ln621"> </a>
+<a name="ln622">  dt_dev_add_history_item(darktable.develop, self, TRUE);</a>
+<a name="ln623">}</a>
+<a name="ln624"> </a>
+<a name="ln625">static void exposure_set_black(struct dt_iop_module_t *self, const float black);</a>
+<a name="ln626"> </a>
+<a name="ln627">static void exposure_set_white(struct dt_iop_module_t *self, const float white)</a>
+<a name="ln628">{</a>
+<a name="ln629">  dt_iop_exposure_params_t *p = (dt_iop_exposure_params_t *)self-&gt;params;</a>
+<a name="ln630"> </a>
+<a name="ln631">  float exposure = white2exposure(white);</a>
+<a name="ln632">  if(p-&gt;exposure == exposure) return;</a>
+<a name="ln633"> </a>
+<a name="ln634">  p-&gt;exposure = exposure;</a>
+<a name="ln635">  if(p-&gt;black &gt;= white) exposure_set_black(self, white - 0.01);</a>
+<a name="ln636"> </a>
+<a name="ln637">  dt_iop_exposure_gui_data_t *g = (dt_iop_exposure_gui_data_t *)self-&gt;gui_data;</a>
+<a name="ln638"> </a>
+<a name="ln639">  darktable.gui-&gt;reset = 1;</a>
+<a name="ln640">  dt_bauhaus_slider_set_soft(g-&gt;exposure, p-&gt;exposure);</a>
+<a name="ln641">  darktable.gui-&gt;reset = 0;</a>
+<a name="ln642">  dt_dev_add_history_item(darktable.develop, self, TRUE);</a>
+<a name="ln643">}</a>
+<a name="ln644"> </a>
+<a name="ln645">static void dt_iop_exposure_set_exposure(struct dt_iop_module_t *self, const float exposure)</a>
+<a name="ln646">{</a>
+<a name="ln647">  dt_iop_exposure_params_t *p = (dt_iop_exposure_params_t *)self-&gt;params;</a>
+<a name="ln648"> </a>
+<a name="ln649">  if(p-&gt;mode == EXPOSURE_MODE_DEFLICKER)</a>
+<a name="ln650">  {</a>
+<a name="ln651">    dt_iop_exposure_gui_data_t *g = (dt_iop_exposure_gui_data_t *)self-&gt;gui_data;</a>
+<a name="ln652"> </a>
+<a name="ln653">    p-&gt;deflicker_target_level = exposure;</a>
+<a name="ln654"> </a>
+<a name="ln655">    darktable.gui-&gt;reset = 1;</a>
+<a name="ln656">    dt_bauhaus_slider_set(g-&gt;deflicker_target_level, p-&gt;deflicker_target_level);</a>
+<a name="ln657">    darktable.gui-&gt;reset = 0;</a>
+<a name="ln658"> </a>
+<a name="ln659">    dt_dev_add_history_item(darktable.develop, self, TRUE);</a>
+<a name="ln660">  }</a>
+<a name="ln661">  else</a>
+<a name="ln662">  {</a>
+<a name="ln663">    float white = exposure2white(exposure);</a>
+<a name="ln664">    exposure_set_white(self, white);</a>
+<a name="ln665">    autoexp_disable(self);</a>
+<a name="ln666">  }</a>
+<a name="ln667">}</a>
+<a name="ln668"> </a>
+<a name="ln669">static float dt_iop_exposure_get_exposure(struct dt_iop_module_t *self)</a>
+<a name="ln670">{</a>
+<a name="ln671">  dt_iop_exposure_params_t *p = (dt_iop_exposure_params_t *)self-&gt;params;</a>
+<a name="ln672"> </a>
+<a name="ln673">  if(p-&gt;mode == EXPOSURE_MODE_DEFLICKER)</a>
+<a name="ln674">  {</a>
+<a name="ln675">    return p-&gt;deflicker_target_level;</a>
+<a name="ln676">  }</a>
+<a name="ln677">  else</a>
+<a name="ln678">  {</a>
+<a name="ln679">    return p-&gt;exposure;</a>
+<a name="ln680">  }</a>
+<a name="ln681">}</a>
+<a name="ln682"> </a>
+<a name="ln683">static void exposure_set_black(struct dt_iop_module_t *self, const float black)</a>
+<a name="ln684">{</a>
+<a name="ln685">  dt_iop_exposure_params_t *p = (dt_iop_exposure_params_t *)self-&gt;params;</a>
+<a name="ln686"> </a>
+<a name="ln687">  if(p-&gt;black == black) return;</a>
+<a name="ln688"> </a>
+<a name="ln689">  p-&gt;black = black;</a>
+<a name="ln690">  if(p-&gt;black &gt;= exposure2white(p-&gt;exposure))</a>
+<a name="ln691">  {</a>
+<a name="ln692">    exposure_set_white(self, p-&gt;black + 0.01);</a>
+<a name="ln693">  }</a>
+<a name="ln694"> </a>
+<a name="ln695">  dt_iop_exposure_gui_data_t *g = (dt_iop_exposure_gui_data_t *)self-&gt;gui_data;</a>
+<a name="ln696">  darktable.gui-&gt;reset = 1;</a>
+<a name="ln697">  dt_bauhaus_slider_set_soft(g-&gt;black, p-&gt;black);</a>
+<a name="ln698">  darktable.gui-&gt;reset = 0;</a>
+<a name="ln699">  dt_dev_add_history_item(darktable.develop, self, TRUE);</a>
+<a name="ln700">}</a>
+<a name="ln701"> </a>
+<a name="ln702">static void dt_iop_exposure_set_black(struct dt_iop_module_t *self, const float black)</a>
+<a name="ln703">{</a>
+<a name="ln704">  autoexp_disable(self);</a>
+<a name="ln705">  exposure_set_black(self, black);</a>
+<a name="ln706">}</a>
+<a name="ln707"> </a>
+<a name="ln708">static float dt_iop_exposure_get_black(struct dt_iop_module_t *self)</a>
+<a name="ln709">{</a>
+<a name="ln710">  dt_iop_exposure_params_t *p = (dt_iop_exposure_params_t *)self-&gt;params;</a>
+<a name="ln711">  return p-&gt;black;</a>
+<a name="ln712">}</a>
+<a name="ln713"> </a>
+<a name="ln714">static void autoexp_callback(GtkWidget *button, gpointer user_data)</a>
+<a name="ln715">{</a>
+<a name="ln716">  dt_iop_module_t *self = (dt_iop_module_t *)user_data;</a>
+<a name="ln717">  if(self-&gt;dt-&gt;gui-&gt;reset) return;</a>
+<a name="ln718"> </a>
+<a name="ln719">  if(self-&gt;request_color_pick == DT_REQUEST_COLORPICK_OFF)</a>
+<a name="ln720">    self-&gt;request_color_pick = DT_REQUEST_COLORPICK_MODULE;</a>
+<a name="ln721">  else</a>
+<a name="ln722">    self-&gt;request_color_pick = DT_REQUEST_COLORPICK_OFF;</a>
+<a name="ln723"> </a>
+<a name="ln724">  dt_iop_request_focus(self);</a>
+<a name="ln725"> </a>
+<a name="ln726">  if(self-&gt;request_color_pick == DT_REQUEST_COLORPICK_MODULE)</a>
+<a name="ln727">  {</a>
+<a name="ln728">    dt_lib_colorpicker_set_area(darktable.lib, 0.99);</a>
+<a name="ln729">    dt_dev_reprocess_all(self-&gt;dev);</a>
+<a name="ln730">  }</a>
+<a name="ln731">  else</a>
+<a name="ln732">    dt_control_queue_redraw();</a>
+<a name="ln733"> </a>
+<a name="ln734">  dt_dev_add_history_item(darktable.develop, self, TRUE);</a>
+<a name="ln735">}</a>
+<a name="ln736"> </a>
+<a name="ln737">static void autoexpp_callback(GtkWidget *slider, gpointer user_data)</a>
+<a name="ln738">{</a>
+<a name="ln739">  dt_iop_module_t *self = (dt_iop_module_t *)user_data;</a>
+<a name="ln740">  if(self-&gt;dt-&gt;gui-&gt;reset) return;</a>
+<a name="ln741">  if(self-&gt;request_color_pick != DT_REQUEST_COLORPICK_MODULE || self-&gt;picked_color_max[0] &lt; 0.0f) return;</a>
+<a name="ln742"> </a>
+<a name="ln743">  dt_iop_exposure_gui_data_t *g = (dt_iop_exposure_gui_data_t *)self-&gt;gui_data;</a>
+<a name="ln744">  const float white = fmaxf(fmaxf(self-&gt;picked_color_max[0], self-&gt;picked_color_max[1]),</a>
+<a name="ln745">                            self-&gt;picked_color_max[2]) * (1.0 - dt_bauhaus_slider_get(g-&gt;autoexpp));</a>
+<a name="ln746">  exposure_set_white(self, white);</a>
+<a name="ln747">}</a>
+<a name="ln748"> </a>
+<a name="ln749">static void deflicker_params_callback(GtkWidget *slider, gpointer user_data)</a>
+<a name="ln750">{</a>
+<a name="ln751">  dt_iop_module_t *self = (dt_iop_module_t *)user_data;</a>
+<a name="ln752">  if(self-&gt;dt-&gt;gui-&gt;reset) return;</a>
+<a name="ln753"> </a>
+<a name="ln754">  if(!dt_image_is_raw(&amp;self-&gt;dev-&gt;image_storage) || self-&gt;dev-&gt;image_storage.buf_dsc.channels != 1</a>
+<a name="ln755">     || self-&gt;dev-&gt;image_storage.buf_dsc.datatype != TYPE_UINT16)</a>
+<a name="ln756">    return;</a>
+<a name="ln757"> </a>
+<a name="ln758">  dt_iop_exposure_gui_data_t *g = (dt_iop_exposure_gui_data_t *)self-&gt;gui_data;</a>
+<a name="ln759">  dt_iop_exposure_params_t *p = (dt_iop_exposure_params_t *)self-&gt;params;</a>
+<a name="ln760"> </a>
+<a name="ln761">  if(p-&gt;mode != EXPOSURE_MODE_DEFLICKER) return;</a>
+<a name="ln762"> </a>
+<a name="ln763">  p-&gt;deflicker_percentile = dt_bauhaus_slider_get(g-&gt;deflicker_percentile);</a>
+<a name="ln764">  p-&gt;deflicker_target_level = dt_bauhaus_slider_get(g-&gt;deflicker_target_level);</a>
+<a name="ln765"> </a>
+<a name="ln766">  dt_dev_add_history_item(darktable.develop, self, TRUE);</a>
+<a name="ln767">}</a>
+<a name="ln768"> </a>
+<a name="ln769">static void exposure_callback(GtkWidget *slider, gpointer user_data)</a>
+<a name="ln770">{</a>
+<a name="ln771">  dt_iop_module_t *self = (dt_iop_module_t *)user_data;</a>
+<a name="ln772">  if(self-&gt;dt-&gt;gui-&gt;reset) return;</a>
+<a name="ln773"> </a>
+<a name="ln774">  autoexp_disable(self);</a>
+<a name="ln775"> </a>
+<a name="ln776">  const float exposure = dt_bauhaus_slider_get(slider);</a>
+<a name="ln777">  dt_iop_exposure_set_exposure(self, exposure);</a>
+<a name="ln778">}</a>
+<a name="ln779"> </a>
+<a name="ln780">static void black_callback(GtkWidget *slider, gpointer user_data)</a>
+<a name="ln781">{</a>
+<a name="ln782">  dt_iop_module_t *self = (dt_iop_module_t *)user_data;</a>
+<a name="ln783">  if(self-&gt;dt-&gt;gui-&gt;reset) return;</a>
+<a name="ln784"> </a>
+<a name="ln785">  const float black = dt_bauhaus_slider_get(slider);</a>
+<a name="ln786">  dt_iop_exposure_set_black(self, black);</a>
+<a name="ln787">}</a>
+<a name="ln788"> </a>
+<a name="ln789">static gboolean draw(GtkWidget *widget, cairo_t *cr, dt_iop_module_t *self)</a>
+<a name="ln790">{</a>
+<a name="ln791">  if(darktable.gui-&gt;reset) return FALSE;</a>
+<a name="ln792"> </a>
+<a name="ln793">  dt_iop_exposure_gui_data_t *g = (dt_iop_exposure_gui_data_t *)self-&gt;gui_data;</a>
+<a name="ln794"> </a>
+<a name="ln795">  dt_pthread_mutex_lock(&amp;g-&gt;lock);</a>
+<a name="ln796">  if(!isnan(g-&gt;deflicker_computed_exposure))</a>
+<a name="ln797">  {</a>
+<a name="ln798">    gchar *str = g_strdup_printf(&quot;%.2fEV&quot;, g-&gt;deflicker_computed_exposure);</a>
+<a name="ln799"> </a>
+<a name="ln800">    darktable.gui-&gt;reset = 1;</a>
+<a name="ln801">    gtk_label_set_text(g-&gt;deflicker_used_EC, str);</a>
+<a name="ln802">    darktable.gui-&gt;reset = 0;</a>
+<a name="ln803"> </a>
+<a name="ln804">    g_free(str);</a>
+<a name="ln805">  }</a>
+<a name="ln806">  dt_pthread_mutex_unlock(&amp;g-&gt;lock);</a>
+<a name="ln807"> </a>
+<a name="ln808">  if(self-&gt;request_color_pick != DT_REQUEST_COLORPICK_MODULE) return FALSE;</a>
+<a name="ln809"> </a>
+<a name="ln810">  if(self-&gt;picked_color_max[0] &lt; 0.0f) return FALSE;</a>
+<a name="ln811"> </a>
+<a name="ln812">  const float white = fmaxf(fmaxf(self-&gt;picked_color_max[0], self-&gt;picked_color_max[1]),</a>
+<a name="ln813">                            self-&gt;picked_color_max[2]) * (1.0 - dt_bauhaus_slider_get(g-&gt;autoexpp));</a>
+<a name="ln814">  const float black</a>
+<a name="ln815">      = fminf(fminf(self-&gt;picked_color_min[0], self-&gt;picked_color_min[1]), self-&gt;picked_color_min[2]);</a>
+<a name="ln816"> </a>
+<a name="ln817">  exposure_set_white(self, white);</a>
+<a name="ln818">  exposure_set_black(self, black);</a>
+<a name="ln819">  return FALSE;</a>
+<a name="ln820">}</a>
+<a name="ln821"> </a>
+<a name="ln822">void gui_init(struct dt_iop_module_t *self)</a>
+<a name="ln823">{</a>
+<a name="ln824">  self-&gt;gui_data = malloc(sizeof(dt_iop_exposure_gui_data_t));</a>
+<a name="ln825">  dt_iop_exposure_gui_data_t *g = (dt_iop_exposure_gui_data_t *)self-&gt;gui_data;</a>
+<a name="ln826">  dt_iop_exposure_params_t *p = (dt_iop_exposure_params_t *)self-&gt;params;</a>
+<a name="ln827"> </a>
+<a name="ln828">  g-&gt;modes = NULL;</a>
+<a name="ln829"> </a>
+<a name="ln830">  g-&gt;deflicker_histogram = NULL;</a>
+<a name="ln831"> </a>
+<a name="ln832">  dt_pthread_mutex_init(&amp;g-&gt;lock, NULL);</a>
+<a name="ln833"> </a>
+<a name="ln834">  /* register hooks with current dev so that  histogram</a>
+<a name="ln835">     can interact with this module.</a>
+<a name="ln836">   */</a>
+<a name="ln837">  dt_dev_proxy_exposure_t *instance = g_malloc0(sizeof(dt_dev_proxy_exposure_t));</a>
+<a name="ln838">  instance-&gt;module = self;</a>
+<a name="ln839">  instance-&gt;set_exposure = dt_iop_exposure_set_exposure;</a>
+<a name="ln840">  instance-&gt;get_exposure = dt_iop_exposure_get_exposure;</a>
+<a name="ln841">  instance-&gt;set_black = dt_iop_exposure_set_black;</a>
+<a name="ln842">  instance-&gt;get_black = dt_iop_exposure_get_black;</a>
+<a name="ln843">  darktable.develop-&gt;proxy.exposure</a>
+<a name="ln844">      = g_list_insert_sorted(darktable.develop-&gt;proxy.exposure, instance, dt_dev_exposure_hooks_sort);</a>
+<a name="ln845"> </a>
+<a name="ln846">  self-&gt;request_color_pick = DT_REQUEST_COLORPICK_OFF;</a>
+<a name="ln847"> </a>
+<a name="ln848">  self-&gt;widget = GTK_WIDGET(gtk_box_new(GTK_ORIENTATION_VERTICAL, DT_BAUHAUS_SPACE));</a>
+<a name="ln849">  dt_gui_add_help_link(self-&gt;widget, dt_get_help_url(self-&gt;op));</a>
+<a name="ln850"> </a>
+<a name="ln851">  g-&gt;mode = dt_bauhaus_combobox_new(self);</a>
+<a name="ln852">  dt_bauhaus_widget_set_label(g-&gt;mode, NULL, _(&quot;mode&quot;));</a>
+<a name="ln853"> </a>
+<a name="ln854">  dt_bauhaus_combobox_add(g-&gt;mode, C_(&quot;mode&quot;, &quot;manual&quot;));</a>
+<a name="ln855">  g-&gt;modes = g_list_append(g-&gt;modes, GUINT_TO_POINTER(EXPOSURE_MODE_MANUAL));</a>
+<a name="ln856"> </a>
+<a name="ln857">  dt_bauhaus_combobox_add(g-&gt;mode, _(&quot;automatic&quot;));</a>
+<a name="ln858">  g-&gt;modes = g_list_append(g-&gt;modes, GUINT_TO_POINTER(EXPOSURE_MODE_DEFLICKER));</a>
+<a name="ln859"> </a>
+<a name="ln860">  dt_bauhaus_combobox_set_default(g-&gt;mode, 0);</a>
+<a name="ln861">  dt_bauhaus_combobox_set(g-&gt;mode, g_list_index(g-&gt;modes, GUINT_TO_POINTER(p-&gt;mode)));</a>
+<a name="ln862"> </a>
+<a name="ln863">  gtk_box_pack_start(GTK_BOX(self-&gt;widget), GTK_WIDGET(g-&gt;mode), TRUE, TRUE, 0);</a>
+<a name="ln864"> </a>
+<a name="ln865">  g-&gt;black = dt_bauhaus_slider_new_with_range(self, -0.1, 0.1, .001, p-&gt;black, 4);</a>
+<a name="ln866">  gtk_widget_set_tooltip_text(g-&gt;black, _(&quot;adjust the black level to unclip negative RGB values.\n&quot;</a>
+<a name="ln867">                                          &quot;you should never use it to add more density in blacks!\n&quot;</a>
+<a name="ln868">                                          &quot;if poorly set, it will clip near-black colors out of gamut\n&quot;</a>
+<a name="ln869">                                          &quot;by pushing RGB values into negatives.&quot;));</a>
+<a name="ln870">  dt_bauhaus_slider_set_format(g-&gt;black, &quot;%.4f&quot;);</a>
+<a name="ln871">  dt_bauhaus_widget_set_label(g-&gt;black, NULL, _(&quot;black level correction&quot;));</a>
+<a name="ln872">  dt_bauhaus_slider_enable_soft_boundaries(g-&gt;black, -1.0, 1.0);</a>
+<a name="ln873">  gtk_box_pack_start(GTK_BOX(self-&gt;widget), GTK_WIDGET(g-&gt;black), TRUE, TRUE, 0);</a>
+<a name="ln874"> </a>
+<a name="ln875">  g-&gt;mode_stack = gtk_stack_new();</a>
+<a name="ln876">  gtk_stack_set_homogeneous(GTK_STACK(g-&gt;mode_stack),FALSE);</a>
+<a name="ln877">  gtk_box_pack_start(GTK_BOX(self-&gt;widget), g-&gt;mode_stack, TRUE, TRUE, 0);</a>
+<a name="ln878"> </a>
+<a name="ln879">  GtkWidget *vbox_manual = GTK_WIDGET(gtk_box_new(GTK_ORIENTATION_VERTICAL, DT_BAUHAUS_SPACE));</a>
+<a name="ln880"> </a>
+<a name="ln881">  g-&gt;exposure = dt_bauhaus_slider_new_with_range(self, -3.0, 3.0, .02, p-&gt;exposure, 3);</a>
+<a name="ln882">  gtk_widget_set_tooltip_text(g-&gt;exposure, _(&quot;adjust the exposure correction&quot;));</a>
+<a name="ln883">  dt_bauhaus_slider_set_format(g-&gt;exposure, &quot;%.2fEV&quot;);</a>
+<a name="ln884">  dt_bauhaus_widget_set_label(g-&gt;exposure, NULL, _(&quot;exposure&quot;));</a>
+<a name="ln885">  dt_bauhaus_slider_enable_soft_boundaries(g-&gt;exposure, -18.0, 18.0);</a>
+<a name="ln886">  gtk_box_pack_start(GTK_BOX(vbox_manual), GTK_WIDGET(g-&gt;exposure), TRUE, TRUE, 0);</a>
+<a name="ln887"> </a>
+<a name="ln888">  g-&gt;autoexpp = dt_bauhaus_slider_new_with_range(self, 0.0, 0.2, .001, 0.01, 3);</a>
+<a name="ln889">  gtk_widget_set_tooltip_text(g-&gt;autoexpp, _(&quot;percentage of bright values clipped out, toggle color picker to activate&quot;));</a>
+<a name="ln890">  dt_bauhaus_slider_set_format(g-&gt;autoexpp, &quot;%.3f%%&quot;);</a>
+<a name="ln891">  dt_bauhaus_widget_set_label(g-&gt;autoexpp, NULL, _(&quot;clipping threshold&quot;));</a>
+<a name="ln892">  dt_bauhaus_widget_set_quad_paint(g-&gt;autoexpp, dtgtk_cairo_paint_colorpicker, CPF_STYLE_FLAT | CPF_DO_NOT_USE_BORDER, NULL);</a>
+<a name="ln893">  dt_bauhaus_widget_set_quad_toggle(g-&gt;autoexpp, TRUE);</a>
+<a name="ln894">  gtk_box_pack_start(GTK_BOX(vbox_manual), GTK_WIDGET(g-&gt;autoexpp), TRUE, TRUE, 0);</a>
+<a name="ln895"> </a>
+<a name="ln896">  gtk_widget_show_all(vbox_manual);</a>
+<a name="ln897">  gtk_stack_add_named(GTK_STACK(g-&gt;mode_stack), vbox_manual, &quot;manual&quot;);</a>
+<a name="ln898"> </a>
+<a name="ln899">  GtkWidget *vbox_deflicker = GTK_WIDGET(gtk_box_new(GTK_ORIENTATION_VERTICAL, DT_BAUHAUS_SPACE));</a>
+<a name="ln900"> </a>
+<a name="ln901">  g-&gt;deflicker_percentile = dt_bauhaus_slider_new_with_range(self, 0, 100, 1.0, p-&gt;deflicker_percentile, 3);</a>
+<a name="ln902">  dt_bauhaus_widget_set_label(g-&gt;deflicker_percentile, NULL, _(&quot;percentile&quot;));</a>
+<a name="ln903">  dt_bauhaus_slider_set_format(g-&gt;deflicker_percentile, &quot;%.2f%%&quot;);</a>
+<a name="ln904">  gtk_widget_set_tooltip_text(g-&gt;deflicker_percentile,</a>
+<a name="ln905">                              // xgettext:no-c-format</a>
+<a name="ln906">                              _(&quot;where in the histogram to meter for deflicking. E.g. 50% is median&quot;));</a>
+<a name="ln907">  gtk_box_pack_start(GTK_BOX(vbox_deflicker), GTK_WIDGET(g-&gt;deflicker_percentile), TRUE, TRUE, 0);</a>
+<a name="ln908"> </a>
+<a name="ln909">  g-&gt;deflicker_target_level</a>
+<a name="ln910">      = dt_bauhaus_slider_new_with_range(self, -18.0, 18.0, .01, p-&gt;deflicker_target_level, 3);</a>
+<a name="ln911">  dt_bauhaus_widget_set_label(g-&gt;deflicker_target_level, NULL, _(&quot;target level&quot;));</a>
+<a name="ln912">  dt_bauhaus_slider_set_format(g-&gt;deflicker_target_level, &quot;%.2fEV&quot;);</a>
+<a name="ln913">  gtk_widget_set_tooltip_text(g-&gt;deflicker_target_level,</a>
+<a name="ln914">                              _(&quot;where to place the exposure level for processed pics, EV below overexposure.&quot;));</a>
+<a name="ln915">  gtk_box_pack_start(GTK_BOX(vbox_deflicker), GTK_WIDGET(g-&gt;deflicker_target_level), TRUE, TRUE, 0);</a>
+<a name="ln916"> </a>
+<a name="ln917">  GtkBox *hbox1 = GTK_BOX(gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0));</a>
+<a name="ln918">  GtkLabel *label = GTK_LABEL(gtk_label_new(_(&quot;computed EC: &quot;)));</a>
+<a name="ln919">  gtk_box_pack_start(GTK_BOX(hbox1), GTK_WIDGET(label), FALSE, FALSE, 0);</a>
+<a name="ln920"> </a>
+<a name="ln921">  g-&gt;deflicker_used_EC = GTK_LABEL(gtk_label_new(&quot;&quot;)); // This gets filled in by process</a>
+<a name="ln922">  gtk_widget_set_tooltip_text(GTK_WIDGET(g-&gt;deflicker_used_EC), _(&quot;what exposure correction has actually been used&quot;));</a>
+<a name="ln923">  gtk_box_pack_start(GTK_BOX(hbox1), GTK_WIDGET(g-&gt;deflicker_used_EC), FALSE, FALSE, 0);</a>
+<a name="ln924"> </a>
+<a name="ln925">  dt_pthread_mutex_lock(&amp;g-&gt;lock);</a>
+<a name="ln926">  g-&gt;deflicker_computed_exposure = NAN;</a>
+<a name="ln927">  dt_pthread_mutex_unlock(&amp;g-&gt;lock);</a>
+<a name="ln928"> </a>
+<a name="ln929">  gtk_box_pack_start(GTK_BOX(vbox_deflicker), GTK_WIDGET(hbox1), FALSE, FALSE, 0);</a>
+<a name="ln930"> </a>
+<a name="ln931">  gtk_widget_show_all(vbox_deflicker);</a>
+<a name="ln932">  gtk_stack_add_named(GTK_STACK(g-&gt;mode_stack), vbox_deflicker, &quot;deflicker&quot;);</a>
+<a name="ln933"> </a>
+<a name="ln934">  g_signal_connect(G_OBJECT(g-&gt;mode), &quot;value-changed&quot;, G_CALLBACK(mode_callback), self);</a>
+<a name="ln935">  g_signal_connect(G_OBJECT(g-&gt;black), &quot;value-changed&quot;, G_CALLBACK(black_callback), self);</a>
+<a name="ln936">  g_signal_connect(G_OBJECT(g-&gt;exposure), &quot;value-changed&quot;, G_CALLBACK(exposure_callback), self);</a>
+<a name="ln937">  g_signal_connect(G_OBJECT(g-&gt;autoexpp), &quot;value-changed&quot;, G_CALLBACK(autoexpp_callback), self);</a>
+<a name="ln938">  g_signal_connect(G_OBJECT(g-&gt;autoexpp), &quot;quad-pressed&quot;, G_CALLBACK(autoexp_callback), self);</a>
+<a name="ln939">  g_signal_connect(G_OBJECT(g-&gt;deflicker_percentile), &quot;value-changed&quot;, G_CALLBACK(deflicker_params_callback),</a>
+<a name="ln940">                   self);</a>
+<a name="ln941">  g_signal_connect(G_OBJECT(g-&gt;deflicker_target_level), &quot;value-changed&quot;,</a>
+<a name="ln942">                   G_CALLBACK(deflicker_params_callback), self);</a>
+<a name="ln943">  g_signal_connect(G_OBJECT(self-&gt;widget), &quot;draw&quot;, G_CALLBACK(draw), self);</a>
+<a name="ln944">}</a>
+<a name="ln945"> </a>
+<a name="ln946">void gui_cleanup(struct dt_iop_module_t *self)</a>
+<a name="ln947">{</a>
+<a name="ln948">  dt_iop_exposure_gui_data_t *g = (dt_iop_exposure_gui_data_t *)self-&gt;gui_data;</a>
+<a name="ln949"> </a>
+<a name="ln950">  GList *instances = darktable.develop-&gt;proxy.exposure;</a>
+<a name="ln951">  while(instances != NULL)</a>
+<a name="ln952">  {</a>
+<a name="ln953">    GList *next = g_list_next(instances);</a>
+<a name="ln954">    dt_dev_proxy_exposure_t *instance = (dt_dev_proxy_exposure_t *)instances-&gt;data;</a>
+<a name="ln955">    if(instance-&gt;module == self)</a>
+<a name="ln956">    {</a>
+<a name="ln957">      g_free(instance);</a>
+<a name="ln958">      darktable.develop-&gt;proxy.exposure = g_list_delete_link(darktable.develop-&gt;proxy.exposure, instances);</a>
+<a name="ln959">    }</a>
+<a name="ln960">    instances = next;</a>
+<a name="ln961">  }</a>
+<a name="ln962"> </a>
+<a name="ln963">  free(g-&gt;deflicker_histogram);</a>
+<a name="ln964">  g-&gt;deflicker_histogram = NULL;</a>
+<a name="ln965">  g_list_free(g-&gt;modes);</a>
+<a name="ln966"> </a>
+<a name="ln967">  dt_pthread_mutex_destroy(&amp;g-&gt;lock);</a>
+<a name="ln968"> </a>
+<a name="ln969">  free(self-&gt;gui_data);</a>
+<a name="ln970">  self-&gt;gui_data = NULL;</a>
+<a name="ln971">}</a>
+<a name="ln972"> </a>
+<a name="ln973">// modelines: These editor modelines have been set for all relevant files by tools/update_modelines.sh</a>
+<a name="ln974">// vim: shiftwidth=2 expandtab tabstop=2 cindent</a>
+<a name="ln975">// kate: tab-indents: off; indent-width 2; replace-tabs on; indent-mode cstyle; remove-trailing-spaces modified;</a>
+
+</code></pre>
+<div class="balloon" rel="568"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v522/" target="_blank">V522</a> There might be dereferencing of a potential null pointer 'gd'. Check lines: 568, 566.</p></div>
+<div class="balloon" rel="607"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v575/" target="_blank">V575</a> The null pointer is passed into 'g_list_index' function. Inspect the second argument.</p></div>
+<div class="balloon" rel="828"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v522/" target="_blank">V522</a> There might be dereferencing of a potential null pointer 'g'. Check lines: 828, 824.</p></div>
+
+<link rel="stylesheet" href="highlight.css">
+<script src="highlight.pack.js"></script>
+<script src="highlightjs-line-numbers.js"></script>
+<script>hljs.initHighlightingOnLoad();</script>
+<script>hljs.initLineNumbersOnLoad();</script>
+<script>
+  $(document).ready(function() {
+      $('.balloon').each(function () {
+          var bl = $(this);
+          var line = bl.attr('rel');
+          var text = $('a[name="ln'+line+'"]').text();
+
+          var space_count = 0;
+          for(var i = 0; i<text.length; i++){
+              var char = text[i];
+              if((char !== ' ')&&(char !== '\t'))break;
+              if(char === '\t')space_count++;
+              space_count++;
+          }
+
+          bl.css('margin-left', space_count*8);
+          $('a[name="ln'+line+'"]').after(bl);
+      });
+
+      window.location = window.location;
+  });
+</script>
+</body>
+</html>

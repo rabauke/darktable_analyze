@@ -1,0 +1,463 @@
+
+<html>
+<head>
+  <link rel="stylesheet" href="../style.css"/>
+  <script src="../jquery-3.2.1.min.js"></script>
+</head>
+<body>
+<pre><code class = "cpp">
+<a name="ln1">/*</a>
+<a name="ln2">    This file is part of darktable,</a>
+<a name="ln3">    copyright (c) 2016 Roman Lebedev.</a>
+<a name="ln4"> </a>
+<a name="ln5">    darktable is free software: you can redistribute it and/or modify</a>
+<a name="ln6">    it under the terms of the GNU General Public License as published by</a>
+<a name="ln7">    the Free Software Foundation, either version 3 of the License, or</a>
+<a name="ln8">    (at your option) any later version.</a>
+<a name="ln9"> </a>
+<a name="ln10">    darktable is distributed in the hope that it will be useful,</a>
+<a name="ln11">    but WITHOUT ANY WARRANTY; without even the implied warranty of</a>
+<a name="ln12">    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the</a>
+<a name="ln13">    GNU General Public License for more details.</a>
+<a name="ln14"> </a>
+<a name="ln15">    You should have received a copy of the GNU General Public License</a>
+<a name="ln16">    along with darktable.  If not, see &lt;http://www.gnu.org/licenses/&gt;.</a>
+<a name="ln17">*/</a>
+<a name="ln18"> </a>
+<a name="ln19">#include &quot;common/color_picker.h&quot;</a>
+<a name="ln20">#include &quot;common/darktable.h&quot;</a>
+<a name="ln21">#include &quot;develop/format.h&quot;</a>
+<a name="ln22">#include &quot;develop/imageop.h&quot;</a>
+<a name="ln23">#include &quot;develop/imageop_math.h&quot;</a>
+<a name="ln24"> </a>
+<a name="ln25">static void color_picker_helper_4ch_seq(const dt_iop_buffer_dsc_t *dsc, const float *const pixel,</a>
+<a name="ln26">                                        const dt_iop_roi_t *roi, const int *const box, float *const picked_color,</a>
+<a name="ln27">                                        float *const picked_color_min, float *const picked_color_max)</a>
+<a name="ln28">{</a>
+<a name="ln29">  const int width = roi-&gt;width;</a>
+<a name="ln30"> </a>
+<a name="ln31">  const size_t size = ((box[3] - box[1]) * (box[2] - box[0]));</a>
+<a name="ln32"> </a>
+<a name="ln33">  const float w = 1.0f / (float)size;</a>
+<a name="ln34"> </a>
+<a name="ln35">  // code path for small region, especially for color picker point mode</a>
+<a name="ln36">  for(size_t j = box[1]; j &lt; box[3]; j++)</a>
+<a name="ln37">  {</a>
+<a name="ln38">    for(size_t i = box[0]; i &lt; box[2]; i++)</a>
+<a name="ln39">    {</a>
+<a name="ln40">      const size_t k = 4 * (width * j + i);</a>
+<a name="ln41">      const float L = pixel[k];</a>
+<a name="ln42">      const float a = pixel[k + 1];</a>
+<a name="ln43">      const float b = pixel[k + 2];</a>
+<a name="ln44">      picked_color[0] += w * L;</a>
+<a name="ln45">      picked_color[1] += w * a;</a>
+<a name="ln46">      picked_color[2] += w * b;</a>
+<a name="ln47">      picked_color_min[0] = fminf(picked_color_min[0], L);</a>
+<a name="ln48">      picked_color_min[1] = fminf(picked_color_min[1], a);</a>
+<a name="ln49">      picked_color_min[2] = fminf(picked_color_min[2], b);</a>
+<a name="ln50">      picked_color_max[0] = fmaxf(picked_color_max[0], L);</a>
+<a name="ln51">      picked_color_max[1] = fmaxf(picked_color_max[1], a);</a>
+<a name="ln52">      picked_color_max[2] = fmaxf(picked_color_max[2], b);</a>
+<a name="ln53">    }</a>
+<a name="ln54">  }</a>
+<a name="ln55">}</a>
+<a name="ln56"> </a>
+<a name="ln57">static void color_picker_helper_4ch_parallel(const dt_iop_buffer_dsc_t *dsc, const float *const pixel,</a>
+<a name="ln58">                                             const dt_iop_roi_t *roi, const int *const box,</a>
+<a name="ln59">                                             float *const picked_color, float *const picked_color_min,</a>
+<a name="ln60">                                             float *const picked_color_max)</a>
+<a name="ln61">{</a>
+<a name="ln62">  const int width = roi-&gt;width;</a>
+<a name="ln63"> </a>
+<a name="ln64">  const size_t size = ((box[3] - box[1]) * (box[2] - box[0]));</a>
+<a name="ln65"> </a>
+<a name="ln66">  const float w = 1.0f / (float)size;</a>
+<a name="ln67"> </a>
+<a name="ln68">  const int numthreads = dt_get_num_threads();</a>
+<a name="ln69"> </a>
+<a name="ln70">  float *const mean = malloc((size_t)3 * numthreads * sizeof(float));</a>
+<a name="ln71">  float *const mmin = malloc((size_t)3 * numthreads * sizeof(float));</a>
+<a name="ln72">  float *const mmax = malloc((size_t)3 * numthreads * sizeof(float));</a>
+<a name="ln73"> </a>
+<a name="ln74">  for(int n = 0; n &lt; 3 * numthreads; n++)</a>
+<a name="ln75">  {</a>
+<a name="ln76">    mean[n] = 0.0f;</a>
+<a name="ln77">    mmin[n] = INFINITY;</a>
+<a name="ln78">    mmax[n] = -INFINITY;</a>
+<a name="ln79">  }</a>
+<a name="ln80"> </a>
+<a name="ln81">#ifdef _OPENMP</a>
+<a name="ln82">#pragma omp parallel default(none)</a>
+<a name="ln83">#endif</a>
+<a name="ln84">  {</a>
+<a name="ln85">    const int tnum = dt_get_thread_num();</a>
+<a name="ln86"> </a>
+<a name="ln87">    float *const tmean = mean + 3 * tnum;</a>
+<a name="ln88">    float *const tmmin = mmin + 3 * tnum;</a>
+<a name="ln89">    float *const tmmax = mmax + 3 * tnum;</a>
+<a name="ln90"> </a>
+<a name="ln91">#ifdef _OPENMP</a>
+<a name="ln92">#pragma omp for schedule(static) collapse(2)</a>
+<a name="ln93">#endif</a>
+<a name="ln94">    for(size_t j = box[1]; j &lt; box[3]; j++)</a>
+<a name="ln95">    {</a>
+<a name="ln96">      for(size_t i = box[0]; i &lt; box[2]; i++)</a>
+<a name="ln97">      {</a>
+<a name="ln98">        const size_t k = 4 * (width * j + i);</a>
+<a name="ln99">        const float L = pixel[k];</a>
+<a name="ln100">        const float a = pixel[k + 1];</a>
+<a name="ln101">        const float b = pixel[k + 2];</a>
+<a name="ln102">        tmean[0] += w * L;</a>
+<a name="ln103">        tmean[1] += w * a;</a>
+<a name="ln104">        tmean[2] += w * b;</a>
+<a name="ln105">        tmmin[0] = fminf(tmmin[0], L);</a>
+<a name="ln106">        tmmin[1] = fminf(tmmin[1], a);</a>
+<a name="ln107">        tmmin[2] = fminf(tmmin[2], b);</a>
+<a name="ln108">        tmmax[0] = fmaxf(tmmax[0], L);</a>
+<a name="ln109">        tmmax[1] = fmaxf(tmmax[1], a);</a>
+<a name="ln110">        tmmax[2] = fmaxf(tmmax[2], b);</a>
+<a name="ln111">      }</a>
+<a name="ln112">    }</a>
+<a name="ln113">  }</a>
+<a name="ln114"> </a>
+<a name="ln115">  for(int n = 0; n &lt; numthreads; n++)</a>
+<a name="ln116">  {</a>
+<a name="ln117">    for(int k = 0; k &lt; 3; k++)</a>
+<a name="ln118">    {</a>
+<a name="ln119">      picked_color[k] += mean[3 * n + k];</a>
+<a name="ln120">      picked_color_min[k] = fminf(picked_color_min[k], mmin[3 * n + k]);</a>
+<a name="ln121">      picked_color_max[k] = fmaxf(picked_color_max[k], mmax[3 * n + k]);</a>
+<a name="ln122">    }</a>
+<a name="ln123">  }</a>
+<a name="ln124"> </a>
+<a name="ln125">  free(mmax);</a>
+<a name="ln126">  free(mmin);</a>
+<a name="ln127">  free(mean);</a>
+<a name="ln128">}</a>
+<a name="ln129"> </a>
+<a name="ln130">static void color_picker_helper_4ch(const dt_iop_buffer_dsc_t *dsc, const float *const pixel,</a>
+<a name="ln131">                                    const dt_iop_roi_t *roi, const int *const box, float *const picked_color,</a>
+<a name="ln132">                                    float *const picked_color_min, float *const picked_color_max)</a>
+<a name="ln133">{</a>
+<a name="ln134">  const size_t size = ((box[3] - box[1]) * (box[2] - box[0]));</a>
+<a name="ln135"> </a>
+<a name="ln136">  if(size &gt; 100) // avoid inefficient multi-threading in case of small region size (arbitrary limit)</a>
+<a name="ln137">    return color_picker_helper_4ch_parallel(dsc, pixel, roi, box, picked_color, picked_color_min, picked_color_max);</a>
+<a name="ln138">  else</a>
+<a name="ln139">    return color_picker_helper_4ch_seq(dsc, pixel, roi, box, picked_color, picked_color_min, picked_color_max);</a>
+<a name="ln140">}</a>
+<a name="ln141"> </a>
+<a name="ln142">static void color_picker_helper_bayer_seq(const dt_iop_buffer_dsc_t *const dsc, const float *const pixel,</a>
+<a name="ln143">                                          const dt_iop_roi_t *const roi, const int *const box,</a>
+<a name="ln144">                                          float *const picked_color, float *const picked_color_min,</a>
+<a name="ln145">                                          float *const picked_color_max)</a>
+<a name="ln146">{</a>
+<a name="ln147">  const int width = roi-&gt;width;</a>
+<a name="ln148">  const uint32_t filters = dsc-&gt;filters;</a>
+<a name="ln149"> </a>
+<a name="ln150">  uint32_t weights[4] = { 0u, 0u, 0u, 0u };</a>
+<a name="ln151"> </a>
+<a name="ln152">  // code path for small region, especially for color picker point mode</a>
+<a name="ln153">  for(size_t j = box[1]; j &lt; box[3]; j++)</a>
+<a name="ln154">  {</a>
+<a name="ln155">    for(size_t i = box[0]; i &lt; box[2]; i++)</a>
+<a name="ln156">    {</a>
+<a name="ln157">      const int c = FC(j + roi-&gt;y, i + roi-&gt;x, filters);</a>
+<a name="ln158">      const size_t k = width * j + i;</a>
+<a name="ln159"> </a>
+<a name="ln160">      const float v = pixel[k];</a>
+<a name="ln161"> </a>
+<a name="ln162">      picked_color[c] += v;</a>
+<a name="ln163">      picked_color_min[c] = fminf(picked_color_min[c], v);</a>
+<a name="ln164">      picked_color_max[c] = fmaxf(picked_color_max[c], v);</a>
+<a name="ln165">      weights[c]++;</a>
+<a name="ln166">    }</a>
+<a name="ln167">  }</a>
+<a name="ln168"> </a>
+<a name="ln169">  // and finally normalize data. For bayer, there is twice as much green.</a>
+<a name="ln170">  for(int c = 0; c &lt; 4; c++)</a>
+<a name="ln171">  {</a>
+<a name="ln172">    picked_color[c] = weights[c] ? (picked_color[c] / (float)weights[c]) : 0.0f;</a>
+<a name="ln173">  }</a>
+<a name="ln174">}</a>
+<a name="ln175"> </a>
+<a name="ln176">static void color_picker_helper_bayer_parallel(const dt_iop_buffer_dsc_t *const dsc, const float *const pixel,</a>
+<a name="ln177">                                               const dt_iop_roi_t *const roi, const int *const box,</a>
+<a name="ln178">                                               float *const picked_color, float *const picked_color_min,</a>
+<a name="ln179">                                               float *const picked_color_max)</a>
+<a name="ln180">{</a>
+<a name="ln181">  const int width = roi-&gt;width;</a>
+<a name="ln182">  const uint32_t filters = dsc-&gt;filters;</a>
+<a name="ln183"> </a>
+<a name="ln184">  uint32_t weights[4] = { 0u, 0u, 0u, 0u };</a>
+<a name="ln185"> </a>
+<a name="ln186">  const int numthreads = dt_get_num_threads();</a>
+<a name="ln187"> </a>
+<a name="ln188">  float *const msum = malloc((size_t)4 * numthreads * sizeof(float));</a>
+<a name="ln189">  float *const mmin = malloc((size_t)4 * numthreads * sizeof(float));</a>
+<a name="ln190">  float *const mmax = malloc((size_t)4 * numthreads * sizeof(float));</a>
+<a name="ln191">  uint32_t *const cnt = malloc((size_t)4 * numthreads * sizeof(uint32_t));</a>
+<a name="ln192"> </a>
+<a name="ln193">  for(int n = 0; n &lt; 4 * numthreads; n++)</a>
+<a name="ln194">  {</a>
+<a name="ln195">    msum[n] = 0.0f;</a>
+<a name="ln196">    mmin[n] = INFINITY;</a>
+<a name="ln197">    mmax[n] = -INFINITY;</a>
+<a name="ln198">    cnt[n] = 0u;</a>
+<a name="ln199">  }</a>
+<a name="ln200"> </a>
+<a name="ln201">#ifdef _OPENMP</a>
+<a name="ln202">#pragma omp parallel default(none)</a>
+<a name="ln203">#endif</a>
+<a name="ln204">  {</a>
+<a name="ln205">    const int tnum = dt_get_thread_num();</a>
+<a name="ln206"> </a>
+<a name="ln207">    float *const tsum = msum + 4 * tnum;</a>
+<a name="ln208">    float *const tmmin = mmin + 4 * tnum;</a>
+<a name="ln209">    float *const tmmax = mmax + 4 * tnum;</a>
+<a name="ln210">    uint32_t *const tcnt = cnt + 4 * tnum;</a>
+<a name="ln211"> </a>
+<a name="ln212">#ifdef _OPENMP</a>
+<a name="ln213">#pragma omp for schedule(static) collapse(2)</a>
+<a name="ln214">#endif</a>
+<a name="ln215">    for(size_t j = box[1]; j &lt; box[3]; j++)</a>
+<a name="ln216">    {</a>
+<a name="ln217">      for(size_t i = box[0]; i &lt; box[2]; i++)</a>
+<a name="ln218">      {</a>
+<a name="ln219">        const int c = FC(j + roi-&gt;y, i + roi-&gt;x, filters);</a>
+<a name="ln220">        const size_t k = width * j + i;</a>
+<a name="ln221"> </a>
+<a name="ln222">        const float v = pixel[k];</a>
+<a name="ln223"> </a>
+<a name="ln224">        tsum[c] += v;</a>
+<a name="ln225">        tmmin[c] = fminf(tmmin[c], v);</a>
+<a name="ln226">        tmmax[c] = fmaxf(tmmax[c], v);</a>
+<a name="ln227">        tcnt[c]++;</a>
+<a name="ln228">      }</a>
+<a name="ln229">    }</a>
+<a name="ln230">  }</a>
+<a name="ln231"> </a>
+<a name="ln232">  for(int n = 0; n &lt; numthreads; n++)</a>
+<a name="ln233">  {</a>
+<a name="ln234">    for(int c = 0; c &lt; 4; c++)</a>
+<a name="ln235">    {</a>
+<a name="ln236">      picked_color[c] += msum[4 * n + c];</a>
+<a name="ln237">      picked_color_min[c] = fminf(picked_color_min[c], mmin[4 * n + c]);</a>
+<a name="ln238">      picked_color_max[c] = fmaxf(picked_color_max[c], mmax[4 * n + c]);</a>
+<a name="ln239">      weights[c] += cnt[4 * n + c];</a>
+<a name="ln240">    }</a>
+<a name="ln241">  }</a>
+<a name="ln242"> </a>
+<a name="ln243">  free(cnt);</a>
+<a name="ln244">  free(mmax);</a>
+<a name="ln245">  free(mmin);</a>
+<a name="ln246">  free(msum);</a>
+<a name="ln247"> </a>
+<a name="ln248">  // and finally normalize data. For bayer, there is twice as much green.</a>
+<a name="ln249">  for(int c = 0; c &lt; 4; c++)</a>
+<a name="ln250">  {</a>
+<a name="ln251">    picked_color[c] = weights[c] ? (picked_color[c] / (float)weights[c]) : 0.0f;</a>
+<a name="ln252">  }</a>
+<a name="ln253">}</a>
+<a name="ln254"> </a>
+<a name="ln255">static void color_picker_helper_bayer(const dt_iop_buffer_dsc_t *dsc, const float *const pixel,</a>
+<a name="ln256">                                      const dt_iop_roi_t *roi, const int *const box, float *const picked_color,</a>
+<a name="ln257">                                      float *const picked_color_min, float *const picked_color_max)</a>
+<a name="ln258">{</a>
+<a name="ln259">  const size_t size = ((box[3] - box[1]) * (box[2] - box[0]));</a>
+<a name="ln260"> </a>
+<a name="ln261">  if(size &gt; 100) // avoid inefficient multi-threading in case of small region size (arbitrary limit)</a>
+<a name="ln262">    return color_picker_helper_bayer_parallel(dsc, pixel, roi, box, picked_color, picked_color_min,</a>
+<a name="ln263">                                              picked_color_max);</a>
+<a name="ln264">  else</a>
+<a name="ln265">    return color_picker_helper_bayer_seq(dsc, pixel, roi, box, picked_color, picked_color_min, picked_color_max);</a>
+<a name="ln266">}</a>
+<a name="ln267"> </a>
+<a name="ln268">static void color_picker_helper_xtrans_seq(const dt_iop_buffer_dsc_t *const dsc, const float *const pixel,</a>
+<a name="ln269">                                           const dt_iop_roi_t *const roi, const int *const box,</a>
+<a name="ln270">                                           float *const picked_color, float *const picked_color_min,</a>
+<a name="ln271">                                           float *const picked_color_max)</a>
+<a name="ln272">{</a>
+<a name="ln273">  const int width = roi-&gt;width;</a>
+<a name="ln274">  const uint8_t(*const xtrans)[6] = (const uint8_t(*const)[6])dsc-&gt;xtrans;</a>
+<a name="ln275"> </a>
+<a name="ln276">  uint32_t weights[3] = { 0u, 0u, 0u };</a>
+<a name="ln277"> </a>
+<a name="ln278">  // code path for small region, especially for color picker point mode</a>
+<a name="ln279">  for(size_t j = box[1]; j &lt; box[3]; j++)</a>
+<a name="ln280">  {</a>
+<a name="ln281">    for(size_t i = box[0]; i &lt; box[2]; i++)</a>
+<a name="ln282">    {</a>
+<a name="ln283">      const int c = FCxtrans(j, i, roi, xtrans);</a>
+<a name="ln284">      const size_t k = width * j + i;</a>
+<a name="ln285"> </a>
+<a name="ln286">      const float v = pixel[k];</a>
+<a name="ln287"> </a>
+<a name="ln288">      picked_color[c] += v;</a>
+<a name="ln289">      picked_color_min[c] = fminf(picked_color_min[c], v);</a>
+<a name="ln290">      picked_color_max[c] = fmaxf(picked_color_max[c], v);</a>
+<a name="ln291">      weights[c]++;</a>
+<a name="ln292">    }</a>
+<a name="ln293">  }</a>
+<a name="ln294"> </a>
+<a name="ln295">  // and finally normalize data.</a>
+<a name="ln296">  // X-Trans RGB weighting averages to 2:5:2 for each 3x3 cell</a>
+<a name="ln297">  for(int c = 0; c &lt; 3; c++)</a>
+<a name="ln298">  {</a>
+<a name="ln299">    picked_color[c] /= (float)weights[c];</a>
+<a name="ln300">  }</a>
+<a name="ln301">}</a>
+<a name="ln302"> </a>
+<a name="ln303">static void color_picker_helper_xtrans_parallel(const dt_iop_buffer_dsc_t *const dsc, const float *const pixel,</a>
+<a name="ln304">                                                const dt_iop_roi_t *const roi, const int *const box,</a>
+<a name="ln305">                                                float *const picked_color, float *const picked_color_min,</a>
+<a name="ln306">                                                float *const picked_color_max)</a>
+<a name="ln307">{</a>
+<a name="ln308">  const int width = roi-&gt;width;</a>
+<a name="ln309">  const uint8_t(*const xtrans)[6] = (const uint8_t(*const)[6])dsc-&gt;xtrans;</a>
+<a name="ln310"> </a>
+<a name="ln311">  uint32_t weights[3] = { 0u, 0u, 0u };</a>
+<a name="ln312"> </a>
+<a name="ln313">  const int numthreads = dt_get_num_threads();</a>
+<a name="ln314"> </a>
+<a name="ln315">  float *const msum = malloc((size_t)3 * numthreads * sizeof(float));</a>
+<a name="ln316">  float *const mmin = malloc((size_t)3 * numthreads * sizeof(float));</a>
+<a name="ln317">  float *const mmax = malloc((size_t)3 * numthreads * sizeof(float));</a>
+<a name="ln318">  uint32_t *const cnt = malloc((size_t)3 * numthreads * sizeof(uint32_t));</a>
+<a name="ln319"> </a>
+<a name="ln320">  for(int n = 0; n &lt; 3 * numthreads; n++)</a>
+<a name="ln321">  {</a>
+<a name="ln322">    msum[n] = 0.0f;</a>
+<a name="ln323">    mmin[n] = INFINITY;</a>
+<a name="ln324">    mmax[n] = -INFINITY;</a>
+<a name="ln325">    cnt[n] = 0u;</a>
+<a name="ln326">  }</a>
+<a name="ln327"> </a>
+<a name="ln328">#ifdef _OPENMP</a>
+<a name="ln329">#pragma omp parallel default(none)</a>
+<a name="ln330">#endif</a>
+<a name="ln331">  {</a>
+<a name="ln332">    const int tnum = dt_get_thread_num();</a>
+<a name="ln333"> </a>
+<a name="ln334">    float *const tsum = msum + 3 * tnum;</a>
+<a name="ln335">    float *const tmmin = mmin + 3 * tnum;</a>
+<a name="ln336">    float *const tmmax = mmax + 3 * tnum;</a>
+<a name="ln337">    uint32_t *const tcnt = cnt + 3 * tnum;</a>
+<a name="ln338"> </a>
+<a name="ln339">#ifdef _OPENMP</a>
+<a name="ln340">#pragma omp for schedule(static) collapse(2)</a>
+<a name="ln341">#endif</a>
+<a name="ln342">    for(size_t j = box[1]; j &lt; box[3]; j++)</a>
+<a name="ln343">    {</a>
+<a name="ln344">      for(size_t i = box[0]; i &lt; box[2]; i++)</a>
+<a name="ln345">      {</a>
+<a name="ln346">        const int c = FCxtrans(j, i, roi, xtrans);</a>
+<a name="ln347">        const size_t k = width * j + i;</a>
+<a name="ln348"> </a>
+<a name="ln349">        const float v = pixel[k];</a>
+<a name="ln350"> </a>
+<a name="ln351">        tsum[c] += v;</a>
+<a name="ln352">        tmmin[c] = fminf(tmmin[c], v);</a>
+<a name="ln353">        tmmax[c] = fmaxf(tmmax[c], v);</a>
+<a name="ln354">        tcnt[c]++;</a>
+<a name="ln355">      }</a>
+<a name="ln356">    }</a>
+<a name="ln357">  }</a>
+<a name="ln358"> </a>
+<a name="ln359">  for(int n = 0; n &lt; numthreads; n++)</a>
+<a name="ln360">  {</a>
+<a name="ln361">    for(int c = 0; c &lt; 3; c++)</a>
+<a name="ln362">    {</a>
+<a name="ln363">      picked_color[c] += msum[3 * n + c];</a>
+<a name="ln364">      picked_color_min[c] = fminf(picked_color_min[c], mmin[3 * n + c]);</a>
+<a name="ln365">      picked_color_max[c] = fmaxf(picked_color_max[c], mmax[3 * n + c]);</a>
+<a name="ln366">      weights[c] += cnt[3 * n + c];</a>
+<a name="ln367">    }</a>
+<a name="ln368">  }</a>
+<a name="ln369"> </a>
+<a name="ln370">  free(cnt);</a>
+<a name="ln371">  free(mmax);</a>
+<a name="ln372">  free(mmin);</a>
+<a name="ln373">  free(msum);</a>
+<a name="ln374"> </a>
+<a name="ln375">  // and finally normalize data.</a>
+<a name="ln376">  // X-Trans RGB weighting averages to 2:5:2 for each 3x3 cell</a>
+<a name="ln377">  for(int c = 0; c &lt; 3; c++)</a>
+<a name="ln378">  {</a>
+<a name="ln379">    picked_color[c] /= (float)weights[c];</a>
+<a name="ln380">  }</a>
+<a name="ln381">}</a>
+<a name="ln382"> </a>
+<a name="ln383">static void color_picker_helper_xtrans(const dt_iop_buffer_dsc_t *dsc, const float *const pixel,</a>
+<a name="ln384">                                       const dt_iop_roi_t *roi, const int *const box, float *const picked_color,</a>
+<a name="ln385">                                       float *const picked_color_min, float *const picked_color_max)</a>
+<a name="ln386">{</a>
+<a name="ln387">  const size_t size = ((box[3] - box[1]) * (box[2] - box[0]));</a>
+<a name="ln388"> </a>
+<a name="ln389">  if(size &gt; 100) // avoid inefficient multi-threading in case of small region size (arbitrary limit)</a>
+<a name="ln390">    return color_picker_helper_xtrans_parallel(dsc, pixel, roi, box, picked_color, picked_color_min,</a>
+<a name="ln391">                                               picked_color_max);</a>
+<a name="ln392">  else</a>
+<a name="ln393">    return color_picker_helper_xtrans_seq(dsc, pixel, roi, box, picked_color, picked_color_min, picked_color_max);</a>
+<a name="ln394">}</a>
+<a name="ln395"> </a>
+<a name="ln396">void dt_color_picker_helper(const dt_iop_buffer_dsc_t *dsc, const float *const pixel, const dt_iop_roi_t *roi,</a>
+<a name="ln397">                            const int *const box, float *const picked_color, float *const picked_color_min,</a>
+<a name="ln398">                            float *const picked_color_max)</a>
+<a name="ln399">{</a>
+<a name="ln400">  if(dsc-&gt;channels == 4u)</a>
+<a name="ln401">    color_picker_helper_4ch(dsc, pixel, roi, box, picked_color, picked_color_min, picked_color_max);</a>
+<a name="ln402">  else if(dsc-&gt;channels == 1u &amp;&amp; dsc-&gt;filters &amp;&amp; dsc-&gt;filters != 9u)</a>
+<a name="ln403">    color_picker_helper_bayer(dsc, pixel, roi, box, picked_color, picked_color_min, picked_color_max);</a>
+<a name="ln404">  else if(dsc-&gt;channels == 1u &amp;&amp; dsc-&gt;filters &amp;&amp; dsc-&gt;filters == 9u)</a>
+<a name="ln405">    color_picker_helper_xtrans(dsc, pixel, roi, box, picked_color, picked_color_min, picked_color_max);</a>
+<a name="ln406">  else</a>
+<a name="ln407">    dt_unreachable_codepath();</a>
+<a name="ln408">}</a>
+<a name="ln409"> </a>
+<a name="ln410">// modelines: These editor modelines have been set for all relevant files by tools/update_modelines.sh</a>
+<a name="ln411">// vim: shiftwidth=2 expandtab tabstop=2 cindent</a>
+<a name="ln412">// kate: tab-indents: off; indent-width 2; replace-tabs on; indent-mode cstyle; remove-trailing-spaces modified;</a>
+
+</code></pre>
+<div class="balloon" rel="76"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v522/" target="_blank">V522</a> There might be dereferencing of a potential null pointer 'mean'. Check lines: 76, 70.</p></div>
+<div class="balloon" rel="77"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v522/" target="_blank">V522</a> There might be dereferencing of a potential null pointer 'mmin'. Check lines: 77, 71.</p></div>
+<div class="balloon" rel="78"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v522/" target="_blank">V522</a> There might be dereferencing of a potential null pointer 'mmax'. Check lines: 78, 72.</p></div>
+<div class="balloon" rel="195"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v522/" target="_blank">V522</a> There might be dereferencing of a potential null pointer 'msum'. Check lines: 195, 188.</p></div>
+<div class="balloon" rel="196"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v522/" target="_blank">V522</a> There might be dereferencing of a potential null pointer 'mmin'. Check lines: 196, 189.</p></div>
+<div class="balloon" rel="197"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v522/" target="_blank">V522</a> There might be dereferencing of a potential null pointer 'mmax'. Check lines: 197, 190.</p></div>
+<div class="balloon" rel="198"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v522/" target="_blank">V522</a> There might be dereferencing of a potential null pointer 'cnt'. Check lines: 198, 191.</p></div>
+<div class="balloon" rel="322"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v522/" target="_blank">V522</a> There might be dereferencing of a potential null pointer 'msum'. Check lines: 322, 315.</p></div>
+<div class="balloon" rel="323"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v522/" target="_blank">V522</a> There might be dereferencing of a potential null pointer 'mmin'. Check lines: 323, 316.</p></div>
+<div class="balloon" rel="324"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v522/" target="_blank">V522</a> There might be dereferencing of a potential null pointer 'mmax'. Check lines: 324, 317.</p></div>
+<div class="balloon" rel="325"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v522/" target="_blank">V522</a> There might be dereferencing of a potential null pointer 'cnt'. Check lines: 325, 318.</p></div>
+
+<link rel="stylesheet" href="highlight.css">
+<script src="highlight.pack.js"></script>
+<script src="highlightjs-line-numbers.js"></script>
+<script>hljs.initHighlightingOnLoad();</script>
+<script>hljs.initLineNumbersOnLoad();</script>
+<script>
+  $(document).ready(function() {
+      $('.balloon').each(function () {
+          var bl = $(this);
+          var line = bl.attr('rel');
+          var text = $('a[name="ln'+line+'"]').text();
+
+          var space_count = 0;
+          for(var i = 0; i<text.length; i++){
+              var char = text[i];
+              if((char !== ' ')&&(char !== '\t'))break;
+              if(char === '\t')space_count++;
+              space_count++;
+          }
+
+          bl.css('margin-left', space_count*8);
+          $('a[name="ln'+line+'"]').after(bl);
+      });
+
+      window.location = window.location;
+  });
+</script>
+</body>
+</html>

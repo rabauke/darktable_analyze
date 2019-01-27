@@ -1,0 +1,1253 @@
+
+<html>
+<head>
+  <link rel="stylesheet" href="../style.css"/>
+  <script src="../jquery-3.2.1.min.js"></script>
+</head>
+<body>
+<pre><code class = "cpp">
+<a name="ln1">/*</a>
+<a name="ln2">    This file is part of darktable,</a>
+<a name="ln3">    copyright (c) 2009--2010 johannes hanika.</a>
+<a name="ln4">    copyright (c) 2011 Henrik Andersson.</a>
+<a name="ln5"> </a>
+<a name="ln6">    darktable is free software: you can redistribute it and/or modify</a>
+<a name="ln7">    it under the terms of the GNU General Public License as published by</a>
+<a name="ln8">    the Free Software Foundation, either version 3 of the License, or</a>
+<a name="ln9">    (at your option) any later version.</a>
+<a name="ln10"> </a>
+<a name="ln11">    darktable is distributed in the hope that it will be useful,</a>
+<a name="ln12">    but WITHOUT ANY WARRANTY; without even the implied warranty of</a>
+<a name="ln13">    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the</a>
+<a name="ln14">    GNU General Public License for more details.</a>
+<a name="ln15"> </a>
+<a name="ln16">    You should have received a copy of the GNU General Public License</a>
+<a name="ln17">    along with darktable.  If not, see &lt;http://www.gnu.org/licenses/&gt;.</a>
+<a name="ln18">*/</a>
+<a name="ln19">#include &quot;libs/lib.h&quot;</a>
+<a name="ln20">#include &quot;common/debug.h&quot;</a>
+<a name="ln21">#include &quot;common/module.h&quot;</a>
+<a name="ln22">#include &quot;control/conf.h&quot;</a>
+<a name="ln23">#include &quot;control/control.h&quot;</a>
+<a name="ln24">#include &quot;dtgtk/button.h&quot;</a>
+<a name="ln25">#include &quot;dtgtk/expander.h&quot;</a>
+<a name="ln26">#include &quot;dtgtk/icon.h&quot;</a>
+<a name="ln27">#include &quot;gui/accelerators.h&quot;</a>
+<a name="ln28">#include &quot;gui/gtk.h&quot;</a>
+<a name="ln29">#ifdef GDK_WINDOWING_QUARTZ</a>
+<a name="ln30">#include &quot;osx/osx.h&quot;</a>
+<a name="ln31">#endif</a>
+<a name="ln32">#include &lt;stdbool.h&gt;</a>
+<a name="ln33">#include &lt;stdlib.h&gt;</a>
+<a name="ln34"> </a>
+<a name="ln35">typedef struct dt_lib_module_info_t</a>
+<a name="ln36">{</a>
+<a name="ln37">  char *plugin_name;</a>
+<a name="ln38">  int32_t version;</a>
+<a name="ln39">  char *params;</a>
+<a name="ln40">  int params_size;</a>
+<a name="ln41">  dt_lib_module_t *module;</a>
+<a name="ln42">} dt_lib_module_info_t;</a>
+<a name="ln43"> </a>
+<a name="ln44">typedef struct dt_lib_presets_edit_dialog_t</a>
+<a name="ln45">{</a>
+<a name="ln46">  GtkEntry *name, *description;</a>
+<a name="ln47">  char plugin_name[128];</a>
+<a name="ln48">  int32_t version;</a>
+<a name="ln49">  void *params;</a>
+<a name="ln50">  int32_t params_size;</a>
+<a name="ln51">  gchar *original_name;</a>
+<a name="ln52">  dt_lib_module_t *module;</a>
+<a name="ln53">  gint old_id;</a>
+<a name="ln54">} dt_lib_presets_edit_dialog_t;</a>
+<a name="ln55"> </a>
+<a name="ln56">gboolean dt_lib_is_visible_in_view(dt_lib_module_t *module, const dt_view_t *view)</a>
+<a name="ln57">{</a>
+<a name="ln58">  if(!module-&gt;views)</a>
+<a name="ln59">  {</a>
+<a name="ln60">    fprintf(stderr, &quot;module %s doesn't have views flags\n&quot;, module-&gt;name(module));</a>
+<a name="ln61">    return FALSE;</a>
+<a name="ln62">  }</a>
+<a name="ln63"> </a>
+<a name="ln64">  const char **views = module-&gt;views(module);</a>
+<a name="ln65">  for(const char **iter = views; *iter; iter++)</a>
+<a name="ln66">  {</a>
+<a name="ln67">    if(!strcmp(*iter, &quot;*&quot;) || !strcmp(*iter, view-&gt;module_name)) return TRUE;</a>
+<a name="ln68">  }</a>
+<a name="ln69">  return FALSE;</a>
+<a name="ln70">}</a>
+<a name="ln71"> </a>
+<a name="ln72">/** calls module-&gt;cleanup and closes the dl connection. */</a>
+<a name="ln73">static void dt_lib_unload_module(dt_lib_module_t *module);</a>
+<a name="ln74"> </a>
+<a name="ln75">static gchar *get_active_preset_name(dt_lib_module_info_t *minfo)</a>
+<a name="ln76">{</a>
+<a name="ln77">  sqlite3_stmt *stmt;</a>
+<a name="ln78">  DT_DEBUG_SQLITE3_PREPARE_V2(</a>
+<a name="ln79">      dt_database_get(darktable.db),</a>
+<a name="ln80">      &quot;SELECT name, op_params, writeprotect FROM data.presets WHERE operation=?1 AND op_version=?2&quot;, -1, &amp;stmt,</a>
+<a name="ln81">      NULL);</a>
+<a name="ln82">  DT_DEBUG_SQLITE3_BIND_TEXT(stmt, 1, minfo-&gt;plugin_name, -1, SQLITE_TRANSIENT);</a>
+<a name="ln83">  DT_DEBUG_SQLITE3_BIND_INT(stmt, 2, minfo-&gt;version);</a>
+<a name="ln84">  gchar *name = NULL;</a>
+<a name="ln85">  // collect all presets for op from db</a>
+<a name="ln86">  while(sqlite3_step(stmt) == SQLITE_ROW)</a>
+<a name="ln87">  {</a>
+<a name="ln88">    void *op_params = (void *)sqlite3_column_blob(stmt, 1);</a>
+<a name="ln89">    int32_t op_params_size = sqlite3_column_bytes(stmt, 1);</a>
+<a name="ln90">    if(op_params_size == minfo-&gt;params_size &amp;&amp; !memcmp(minfo-&gt;params, op_params, op_params_size))</a>
+<a name="ln91">    {</a>
+<a name="ln92">      name = g_strdup((char *)sqlite3_column_text(stmt, 0));</a>
+<a name="ln93">      break;</a>
+<a name="ln94">    }</a>
+<a name="ln95">  }</a>
+<a name="ln96">  sqlite3_finalize(stmt);</a>
+<a name="ln97">  return name;</a>
+<a name="ln98">}</a>
+<a name="ln99"> </a>
+<a name="ln100">static void edit_preset_response(GtkDialog *dialog, gint response_id, dt_lib_presets_edit_dialog_t *g)</a>
+<a name="ln101">{</a>
+<a name="ln102">  gint dlg_ret;</a>
+<a name="ln103">  gint is_new = 0;</a>
+<a name="ln104"> </a>
+<a name="ln105">  if(response_id == GTK_RESPONSE_ACCEPT)</a>
+<a name="ln106">  {</a>
+<a name="ln107">    sqlite3_stmt *stmt;</a>
+<a name="ln108"> </a>
+<a name="ln109">    // now delete preset, so we can re-insert the new values:</a>
+<a name="ln110">    DT_DEBUG_SQLITE3_PREPARE_V2(dt_database_get(darktable.db),</a>
+<a name="ln111">                                &quot;DELETE FROM data.presets WHERE name=?1 AND operation=?2 AND op_version=?3&quot;, -1,</a>
+<a name="ln112">                                &amp;stmt, NULL);</a>
+<a name="ln113">    DT_DEBUG_SQLITE3_BIND_TEXT(stmt, 1, g-&gt;original_name, -1, SQLITE_TRANSIENT);</a>
+<a name="ln114">    DT_DEBUG_SQLITE3_BIND_TEXT(stmt, 2, g-&gt;plugin_name, -1, SQLITE_TRANSIENT);</a>
+<a name="ln115">    DT_DEBUG_SQLITE3_BIND_INT(stmt, 3, g-&gt;version);</a>
+<a name="ln116">    sqlite3_step(stmt);</a>
+<a name="ln117">    sqlite3_finalize(stmt);</a>
+<a name="ln118"> </a>
+<a name="ln119">    const char *name = gtk_entry_get_text(g-&gt;name);</a>
+<a name="ln120">    if(((g-&gt;old_id &gt;= 0) &amp;&amp; (strcmp(g-&gt;original_name, name) != 0)) || (g-&gt;old_id &lt; 0))</a>
+<a name="ln121">    {</a>
+<a name="ln122"> </a>
+<a name="ln123">      // editing existing preset with different name or store new preset -&gt; check for a preset with the same</a>
+<a name="ln124">      // name:</a>
+<a name="ln125"> </a>
+<a name="ln126">      DT_DEBUG_SQLITE3_PREPARE_V2(</a>
+<a name="ln127">          dt_database_get(darktable.db),</a>
+<a name="ln128">          &quot;SELECT name FROM data.presets WHERE name = ?1 AND operation=?2 AND op_version=?3&quot;, -1, &amp;stmt, NULL);</a>
+<a name="ln129">      DT_DEBUG_SQLITE3_BIND_TEXT(stmt, 1, name, -1, SQLITE_TRANSIENT);</a>
+<a name="ln130">      DT_DEBUG_SQLITE3_BIND_TEXT(stmt, 2, g-&gt;plugin_name, -1, SQLITE_TRANSIENT);</a>
+<a name="ln131">      DT_DEBUG_SQLITE3_BIND_INT(stmt, 3, g-&gt;version);</a>
+<a name="ln132"> </a>
+<a name="ln133">      if(sqlite3_step(stmt) == SQLITE_ROW)</a>
+<a name="ln134">      {</a>
+<a name="ln135">        sqlite3_finalize(stmt);</a>
+<a name="ln136"> </a>
+<a name="ln137">        GtkWidget *window = dt_ui_main_window(darktable.gui-&gt;ui);</a>
+<a name="ln138">        GtkWidget *dlg_overwrite = gtk_message_dialog_new(</a>
+<a name="ln139">            GTK_WINDOW(window), GTK_DIALOG_DESTROY_WITH_PARENT, GTK_MESSAGE_WARNING, GTK_BUTTONS_YES_NO,</a>
+<a name="ln140">            _(&quot;preset `%s' already exists.\ndo you want to overwrite?&quot;), name);</a>
+<a name="ln141">#ifdef GDK_WINDOWING_QUARTZ</a>
+<a name="ln142">        dt_osx_disallow_fullscreen(dlg_overwrite);</a>
+<a name="ln143">#endif</a>
+<a name="ln144">        gtk_window_set_title(GTK_WINDOW(dlg_overwrite), _(&quot;overwrite preset?&quot;));</a>
+<a name="ln145">        dlg_ret = gtk_dialog_run(GTK_DIALOG(dlg_overwrite));</a>
+<a name="ln146">        gtk_widget_destroy(dlg_overwrite);</a>
+<a name="ln147"> </a>
+<a name="ln148">        // if result is BUTTON_NO exit without destroy dialog, to permit other name</a>
+<a name="ln149">        if(dlg_ret == GTK_RESPONSE_NO) return;</a>
+<a name="ln150">      }</a>
+<a name="ln151">      else</a>
+<a name="ln152">      {</a>
+<a name="ln153">        is_new = 1;</a>
+<a name="ln154">        sqlite3_finalize(stmt);</a>
+<a name="ln155">      }</a>
+<a name="ln156">    }</a>
+<a name="ln157"> </a>
+<a name="ln158">    if(is_new == 0)</a>
+<a name="ln159">    {</a>
+<a name="ln160">      // delete preset, so we can re-insert the new values:</a>
+<a name="ln161">      DT_DEBUG_SQLITE3_PREPARE_V2(dt_database_get(darktable.db),</a>
+<a name="ln162">                                  &quot;DELETE FROM data.presets WHERE name=?1 AND operation=?2 AND op_version=?3&quot;, -1,</a>
+<a name="ln163">                                  &amp;stmt, NULL);</a>
+<a name="ln164">      DT_DEBUG_SQLITE3_BIND_TEXT(stmt, 1, name, -1, SQLITE_TRANSIENT);</a>
+<a name="ln165">      DT_DEBUG_SQLITE3_BIND_TEXT(stmt, 2, g-&gt;plugin_name, -1, SQLITE_TRANSIENT);</a>
+<a name="ln166">      DT_DEBUG_SQLITE3_BIND_INT(stmt, 3, g-&gt;version);</a>
+<a name="ln167">      sqlite3_step(stmt);</a>
+<a name="ln168">      sqlite3_finalize(stmt);</a>
+<a name="ln169">    }</a>
+<a name="ln170"> </a>
+<a name="ln171"> </a>
+<a name="ln172">    // commit all the user input fields</a>
+<a name="ln173">    char path[1024];</a>
+<a name="ln174">    snprintf(path, sizeof(path), &quot;preset/%s&quot;, g-&gt;original_name);</a>
+<a name="ln175">    dt_accel_rename_preset_lib(g-&gt;module, path, name);</a>
+<a name="ln176">    DT_DEBUG_SQLITE3_PREPARE_V2(dt_database_get(darktable.db),</a>
+<a name="ln177">                                &quot;INSERT INTO data.presets (name, description, operation, op_version, op_params, &quot;</a>
+<a name="ln178">                                &quot;blendop_params, blendop_version, enabled, model, maker, lens, &quot;</a>
+<a name="ln179">                                &quot;iso_min, iso_max, exposure_min, exposure_max, aperture_min, aperture_max, &quot;</a>
+<a name="ln180">                                &quot;focal_length_min, focal_length_max, writeprotect, &quot;</a>
+<a name="ln181">                                &quot;autoapply, filter, def, format) VALUES (?1, ?2, ?3, ?4, ?5, NULL, 0, 1, &quot;</a>
+<a name="ln182">                                &quot;'%', '%', '%', 0, 340282346638528859812000000000000000000, 0, 100000000, 0, &quot;</a>
+<a name="ln183">                                &quot;100000000, 0, 1000, 0, 0, 0, 0, &quot;</a>
+<a name="ln184">                                &quot;0)&quot;,</a>
+<a name="ln185">                                -1, &amp;stmt, NULL);</a>
+<a name="ln186">    DT_DEBUG_SQLITE3_BIND_TEXT(stmt, 1, name, -1, SQLITE_TRANSIENT);</a>
+<a name="ln187">    DT_DEBUG_SQLITE3_BIND_TEXT(stmt, 2, gtk_entry_get_text(g-&gt;description), -1, SQLITE_TRANSIENT);</a>
+<a name="ln188">    DT_DEBUG_SQLITE3_BIND_TEXT(stmt, 3, g-&gt;plugin_name, -1, SQLITE_TRANSIENT);</a>
+<a name="ln189">    DT_DEBUG_SQLITE3_BIND_INT(stmt, 4, g-&gt;version);</a>
+<a name="ln190">    DT_DEBUG_SQLITE3_BIND_BLOB(stmt, 5, g-&gt;params, g-&gt;params_size, SQLITE_TRANSIENT);</a>
+<a name="ln191">    sqlite3_step(stmt);</a>
+<a name="ln192">    sqlite3_finalize(stmt);</a>
+<a name="ln193"> </a>
+<a name="ln194">    dt_gui_store_last_preset(name);</a>
+<a name="ln195">  }</a>
+<a name="ln196">  gtk_widget_destroy(GTK_WIDGET(dialog));</a>
+<a name="ln197">  g_free(g-&gt;original_name);</a>
+<a name="ln198">  free(g);</a>
+<a name="ln199">}</a>
+<a name="ln200"> </a>
+<a name="ln201">static void edit_preset(const char *name_in, dt_lib_module_info_t *minfo)</a>
+<a name="ln202">{</a>
+<a name="ln203">  gchar *name = NULL;</a>
+<a name="ln204">  if(name_in == NULL)</a>
+<a name="ln205">  {</a>
+<a name="ln206">    name = get_active_preset_name(minfo);</a>
+<a name="ln207">    if(name == NULL) return;</a>
+<a name="ln208">  }</a>
+<a name="ln209">  else</a>
+<a name="ln210">    name = g_strdup(name_in);</a>
+<a name="ln211"> </a>
+<a name="ln212">  GtkWidget *dialog;</a>
+<a name="ln213">  /* Create the widgets */</a>
+<a name="ln214">  char title[1024];</a>
+<a name="ln215">  GtkWidget *window = dt_ui_main_window(darktable.gui-&gt;ui);</a>
+<a name="ln216">  snprintf(title, sizeof(title), _(&quot;edit `%s'&quot;), name);</a>
+<a name="ln217">  dialog = gtk_dialog_new_with_buttons(title, GTK_WINDOW(window), GTK_DIALOG_DESTROY_WITH_PARENT, _(&quot;_ok&quot;),</a>
+<a name="ln218">                                       GTK_RESPONSE_ACCEPT, _(&quot;_cancel&quot;), GTK_RESPONSE_REJECT, NULL);</a>
+<a name="ln219">#ifdef GDK_WINDOWING_QUARTZ</a>
+<a name="ln220">  dt_osx_disallow_fullscreen(dialog);</a>
+<a name="ln221">#endif</a>
+<a name="ln222">  GtkContainer *content_area = GTK_CONTAINER(gtk_dialog_get_content_area(GTK_DIALOG(dialog)));</a>
+<a name="ln223">  GtkBox *box = GTK_BOX(gtk_box_new(GTK_ORIENTATION_VERTICAL, 5));</a>
+<a name="ln224">  gtk_widget_set_margin_start(GTK_WIDGET(box), DT_PIXEL_APPLY_DPI(10));</a>
+<a name="ln225">  gtk_widget_set_margin_end(GTK_WIDGET(box), DT_PIXEL_APPLY_DPI(10));</a>
+<a name="ln226">  gtk_widget_set_margin_top(GTK_WIDGET(box), DT_PIXEL_APPLY_DPI(10));</a>
+<a name="ln227">  gtk_widget_set_margin_bottom(GTK_WIDGET(box), DT_PIXEL_APPLY_DPI(10));</a>
+<a name="ln228">  gtk_container_add(content_area, GTK_WIDGET(box));</a>
+<a name="ln229"> </a>
+<a name="ln230">  dt_lib_presets_edit_dialog_t *g</a>
+<a name="ln231">      = (dt_lib_presets_edit_dialog_t *)g_malloc0(sizeof(dt_lib_presets_edit_dialog_t));</a>
+<a name="ln232">  g-&gt;old_id = -1;</a>
+<a name="ln233">  g_strlcpy(g-&gt;plugin_name, minfo-&gt;plugin_name, sizeof(g-&gt;plugin_name));</a>
+<a name="ln234">  g-&gt;version = minfo-&gt;version;</a>
+<a name="ln235">  g-&gt;params_size = minfo-&gt;params_size;</a>
+<a name="ln236">  g-&gt;params = minfo-&gt;params;</a>
+<a name="ln237">  g-&gt;name = GTK_ENTRY(gtk_entry_new());</a>
+<a name="ln238">  g-&gt;module = minfo-&gt;module;</a>
+<a name="ln239">  g-&gt;original_name = name;</a>
+<a name="ln240">  gtk_entry_set_text(g-&gt;name, name);</a>
+<a name="ln241">  gtk_box_pack_start(box, GTK_WIDGET(g-&gt;name), FALSE, FALSE, 0);</a>
+<a name="ln242">  gtk_widget_set_tooltip_text(GTK_WIDGET(g-&gt;name), _(&quot;name of the preset&quot;));</a>
+<a name="ln243"> </a>
+<a name="ln244">  g-&gt;description = GTK_ENTRY(gtk_entry_new());</a>
+<a name="ln245">  gtk_box_pack_start(box, GTK_WIDGET(g-&gt;description), FALSE, FALSE, 0);</a>
+<a name="ln246">  gtk_widget_set_tooltip_text(GTK_WIDGET(g-&gt;description), _(&quot;description or further information&quot;));</a>
+<a name="ln247"> </a>
+<a name="ln248">  sqlite3_stmt *stmt;</a>
+<a name="ln249">  DT_DEBUG_SQLITE3_PREPARE_V2(</a>
+<a name="ln250">      dt_database_get(darktable.db),</a>
+<a name="ln251">      &quot;SELECT rowid, description FROM data.presets WHERE name = ?1 AND operation = ?2 AND op_version = ?3&quot;, -1,</a>
+<a name="ln252">      &amp;stmt, NULL);</a>
+<a name="ln253">  DT_DEBUG_SQLITE3_BIND_TEXT(stmt, 1, name, -1, SQLITE_TRANSIENT);</a>
+<a name="ln254">  DT_DEBUG_SQLITE3_BIND_TEXT(stmt, 2, minfo-&gt;plugin_name, -1, SQLITE_TRANSIENT);</a>
+<a name="ln255">  DT_DEBUG_SQLITE3_BIND_INT(stmt, 3, minfo-&gt;version);</a>
+<a name="ln256">  if(sqlite3_step(stmt) == SQLITE_ROW)</a>
+<a name="ln257">  {</a>
+<a name="ln258">    g-&gt;old_id = sqlite3_column_int(stmt, 0);</a>
+<a name="ln259">    gtk_entry_set_text(g-&gt;description, (const char *)sqlite3_column_text(stmt, 1));</a>
+<a name="ln260">  }</a>
+<a name="ln261">  sqlite3_finalize(stmt);</a>
+<a name="ln262"> </a>
+<a name="ln263">  g_signal_connect(dialog, &quot;response&quot;, G_CALLBACK(edit_preset_response), g);</a>
+<a name="ln264">  gtk_widget_show_all(dialog);</a>
+<a name="ln265">}</a>
+<a name="ln266"> </a>
+<a name="ln267">static void menuitem_update_preset(GtkMenuItem *menuitem, dt_lib_module_info_t *minfo)</a>
+<a name="ln268">{</a>
+<a name="ln269">  char *name = g_object_get_data(G_OBJECT(menuitem), &quot;dt-preset-name&quot;);</a>
+<a name="ln270"> </a>
+<a name="ln271">  // commit all the module fields</a>
+<a name="ln272">  sqlite3_stmt *stmt;</a>
+<a name="ln273">  DT_DEBUG_SQLITE3_PREPARE_V2(dt_database_get(darktable.db),</a>
+<a name="ln274">                              &quot;UPDATE data.presets SET operation=?1, op_version=?2, op_params=?3 WHERE name=?4&quot;,</a>
+<a name="ln275">                              -1, &amp;stmt, NULL);</a>
+<a name="ln276"> </a>
+<a name="ln277">  DT_DEBUG_SQLITE3_BIND_TEXT(stmt, 1, minfo-&gt;plugin_name, -1, SQLITE_TRANSIENT);</a>
+<a name="ln278">  DT_DEBUG_SQLITE3_BIND_INT(stmt, 2, minfo-&gt;version);</a>
+<a name="ln279">  DT_DEBUG_SQLITE3_BIND_BLOB(stmt, 3, minfo-&gt;params, minfo-&gt;params_size, SQLITE_TRANSIENT);</a>
+<a name="ln280">  DT_DEBUG_SQLITE3_BIND_TEXT(stmt, 4, name, -1, SQLITE_TRANSIENT);</a>
+<a name="ln281">  sqlite3_step(stmt);</a>
+<a name="ln282">  sqlite3_finalize(stmt);</a>
+<a name="ln283">}</a>
+<a name="ln284"> </a>
+<a name="ln285">static void menuitem_new_preset(GtkMenuItem *menuitem, dt_lib_module_info_t *minfo)</a>
+<a name="ln286">{</a>
+<a name="ln287">  // add new preset</a>
+<a name="ln288">  sqlite3_stmt *stmt;</a>
+<a name="ln289">  DT_DEBUG_SQLITE3_PREPARE_V2(dt_database_get(darktable.db),</a>
+<a name="ln290">                              &quot;DELETE FROM data.presets WHERE name=?1 AND operation=?2 AND op_version=?3&quot;, -1,</a>
+<a name="ln291">                              &amp;stmt, NULL);</a>
+<a name="ln292">  DT_DEBUG_SQLITE3_BIND_TEXT(stmt, 1, _(&quot;new preset&quot;), -1, SQLITE_STATIC);</a>
+<a name="ln293">  DT_DEBUG_SQLITE3_BIND_TEXT(stmt, 2, minfo-&gt;plugin_name, -1, SQLITE_TRANSIENT);</a>
+<a name="ln294">  DT_DEBUG_SQLITE3_BIND_INT(stmt, 3, minfo-&gt;version);</a>
+<a name="ln295">  sqlite3_step(stmt);</a>
+<a name="ln296">  sqlite3_finalize(stmt);</a>
+<a name="ln297">  DT_DEBUG_SQLITE3_PREPARE_V2(</a>
+<a name="ln298">      dt_database_get(darktable.db),</a>
+<a name="ln299">      &quot;INSERT INTO data.presets (name, description, operation, op_version, op_params, &quot;</a>
+<a name="ln300">      &quot;blendop_params, blendop_version, enabled, model, maker, lens, &quot;</a>
+<a name="ln301">      &quot;iso_min, iso_max, exposure_min, exposure_max, aperture_min, aperture_max, &quot;</a>
+<a name="ln302">      &quot;focal_length_min, focal_length_max, writeprotect, &quot;</a>
+<a name="ln303">      &quot;autoapply, filter, def, format) VALUES (?1, '', ?2, ?3, ?4, NULL, 0, 1, '%', &quot;</a>
+<a name="ln304">      &quot;'%', '%', 0, 340282346638528859812000000000000000000, 0, 100000000, 0, 100000000, 0, 1000, 0, 0, 0, 0, 0)&quot;,</a>
+<a name="ln305">      -1, &amp;stmt, NULL);</a>
+<a name="ln306">  DT_DEBUG_SQLITE3_BIND_TEXT(stmt, 1, _(&quot;new preset&quot;), -1, SQLITE_STATIC);</a>
+<a name="ln307">  DT_DEBUG_SQLITE3_BIND_TEXT(stmt, 2, minfo-&gt;plugin_name, -1, SQLITE_TRANSIENT);</a>
+<a name="ln308">  DT_DEBUG_SQLITE3_BIND_INT(stmt, 3, minfo-&gt;version);</a>
+<a name="ln309">  DT_DEBUG_SQLITE3_BIND_BLOB(stmt, 4, minfo-&gt;params, minfo-&gt;params_size, SQLITE_TRANSIENT);</a>
+<a name="ln310">  sqlite3_step(stmt);</a>
+<a name="ln311">  sqlite3_finalize(stmt);</a>
+<a name="ln312">  // create a shortcut for the new entry</a>
+<a name="ln313">  char path[1024];</a>
+<a name="ln314">  snprintf(path, sizeof(path), &quot;%s/%s&quot;, _(&quot;preset&quot;), _(&quot;new preset&quot;));</a>
+<a name="ln315">  dt_accel_register_lib(minfo-&gt;module, path, 0, 0);</a>
+<a name="ln316">  dt_accel_connect_preset_lib(minfo-&gt;module, _(&quot;new preset&quot;));</a>
+<a name="ln317">  // then show edit dialog</a>
+<a name="ln318">  edit_preset(_(&quot;new preset&quot;), minfo);</a>
+<a name="ln319">}</a>
+<a name="ln320"> </a>
+<a name="ln321">static void menuitem_edit_preset(GtkMenuItem *menuitem, dt_lib_module_info_t *minfo)</a>
+<a name="ln322">{</a>
+<a name="ln323">  edit_preset(NULL, minfo);</a>
+<a name="ln324">}</a>
+<a name="ln325"> </a>
+<a name="ln326">static void menuitem_delete_preset(GtkMenuItem *menuitem, dt_lib_module_info_t *minfo)</a>
+<a name="ln327">{</a>
+<a name="ln328">  sqlite3_stmt *stmt;</a>
+<a name="ln329">  gchar *name = get_active_preset_name(minfo);</a>
+<a name="ln330">  if(name == NULL) return;</a>
+<a name="ln331">  GtkWidget *window = dt_ui_main_window(darktable.gui-&gt;ui);</a>
+<a name="ln332">  GtkWidget *dialog</a>
+<a name="ln333">      = gtk_message_dialog_new(GTK_WINDOW(window), GTK_DIALOG_DESTROY_WITH_PARENT, GTK_MESSAGE_QUESTION,</a>
+<a name="ln334">                               GTK_BUTTONS_YES_NO, _(&quot;do you really want to delete the preset `%s'?&quot;), name);</a>
+<a name="ln335">#ifdef GDK_WINDOWING_QUARTZ</a>
+<a name="ln336">  dt_osx_disallow_fullscreen(dialog);</a>
+<a name="ln337">#endif</a>
+<a name="ln338">  gtk_window_set_title(GTK_WINDOW(dialog), _(&quot;delete preset?&quot;));</a>
+<a name="ln339">  if(gtk_dialog_run(GTK_DIALOG(dialog)) == GTK_RESPONSE_YES)</a>
+<a name="ln340">  {</a>
+<a name="ln341">    char tmp_path[1024];</a>
+<a name="ln342">    snprintf(tmp_path, sizeof(tmp_path), &quot;%s/%s&quot;, _(&quot;preset&quot;), name);</a>
+<a name="ln343">    dt_accel_deregister_lib(minfo-&gt;module, tmp_path);</a>
+<a name="ln344">    DT_DEBUG_SQLITE3_PREPARE_V2(</a>
+<a name="ln345">        dt_database_get(darktable.db),</a>
+<a name="ln346">        &quot;DELETE FROM data.presets WHERE name=?1 AND operation=?2 AND op_version=?3 AND writeprotect=0&quot;, -1, &amp;stmt,</a>
+<a name="ln347">        NULL);</a>
+<a name="ln348">    DT_DEBUG_SQLITE3_BIND_TEXT(stmt, 1, name, -1, SQLITE_TRANSIENT);</a>
+<a name="ln349">    DT_DEBUG_SQLITE3_BIND_TEXT(stmt, 2, minfo-&gt;plugin_name, -1, SQLITE_TRANSIENT);</a>
+<a name="ln350">    DT_DEBUG_SQLITE3_BIND_INT(stmt, 3, minfo-&gt;version);</a>
+<a name="ln351">    sqlite3_step(stmt);</a>
+<a name="ln352">    sqlite3_finalize(stmt);</a>
+<a name="ln353">  }</a>
+<a name="ln354">  g_free(name);</a>
+<a name="ln355">  gtk_widget_destroy(dialog);</a>
+<a name="ln356">}</a>
+<a name="ln357"> </a>
+<a name="ln358">static void pick_callback(GtkMenuItem *menuitem, dt_lib_module_info_t *minfo)</a>
+<a name="ln359">{</a>
+<a name="ln360">  // apply preset via set_params</a>
+<a name="ln361">  char *pn = g_object_get_data(G_OBJECT(menuitem), &quot;dt-preset-name&quot;);</a>
+<a name="ln362">  sqlite3_stmt *stmt;</a>
+<a name="ln363">  DT_DEBUG_SQLITE3_PREPARE_V2(</a>
+<a name="ln364">      dt_database_get(darktable.db),</a>
+<a name="ln365">      &quot;SELECT op_params, writeprotect FROM data.presets WHERE operation = ?1 AND op_version = ?2 AND name = ?3&quot;,</a>
+<a name="ln366">      -1, &amp;stmt, NULL);</a>
+<a name="ln367">  DT_DEBUG_SQLITE3_BIND_TEXT(stmt, 1, minfo-&gt;plugin_name, -1, SQLITE_TRANSIENT);</a>
+<a name="ln368">  DT_DEBUG_SQLITE3_BIND_INT(stmt, 2, minfo-&gt;version);</a>
+<a name="ln369">  DT_DEBUG_SQLITE3_BIND_TEXT(stmt, 3, pn, -1, SQLITE_TRANSIENT);</a>
+<a name="ln370"> </a>
+<a name="ln371">  int res = 0;</a>
+<a name="ln372">  if(sqlite3_step(stmt) == SQLITE_ROW)</a>
+<a name="ln373">  {</a>
+<a name="ln374">    const void *blob = sqlite3_column_blob(stmt, 0);</a>
+<a name="ln375">    int length = sqlite3_column_bytes(stmt, 0);</a>
+<a name="ln376">    int writeprotect = sqlite3_column_int(stmt, 1);</a>
+<a name="ln377">    if(blob)</a>
+<a name="ln378">    {</a>
+<a name="ln379">      GList *it = darktable.lib-&gt;plugins;</a>
+<a name="ln380">      while(it)</a>
+<a name="ln381">      {</a>
+<a name="ln382">        dt_lib_module_t *module = (dt_lib_module_t *)it-&gt;data;</a>
+<a name="ln383">        if(!strncmp(module-&gt;plugin_name, minfo-&gt;plugin_name, 128))</a>
+<a name="ln384">        {</a>
+<a name="ln385">          res = module-&gt;set_params(module, blob, length);</a>
+<a name="ln386">          break;</a>
+<a name="ln387">        }</a>
+<a name="ln388">        it = g_list_next(it);</a>
+<a name="ln389">      }</a>
+<a name="ln390">    }</a>
+<a name="ln391"> </a>
+<a name="ln392">    if(!writeprotect) dt_gui_store_last_preset(pn);</a>
+<a name="ln393">  }</a>
+<a name="ln394">  sqlite3_finalize(stmt);</a>
+<a name="ln395">  if(res)</a>
+<a name="ln396">  {</a>
+<a name="ln397">    dt_control_log(_(&quot;deleting preset for obsolete module&quot;));</a>
+<a name="ln398">    DT_DEBUG_SQLITE3_PREPARE_V2(dt_database_get(darktable.db),</a>
+<a name="ln399">                                &quot;DELETE FROM data.presets WHERE operation = ?1 AND op_version = ?2 AND name = ?3&quot;,</a>
+<a name="ln400">                                -1, &amp;stmt, NULL);</a>
+<a name="ln401">    DT_DEBUG_SQLITE3_BIND_TEXT(stmt, 1, minfo-&gt;plugin_name, -1, SQLITE_TRANSIENT);</a>
+<a name="ln402">    DT_DEBUG_SQLITE3_BIND_INT(stmt, 2, minfo-&gt;version);</a>
+<a name="ln403">    DT_DEBUG_SQLITE3_BIND_TEXT(stmt, 3, pn, -1, SQLITE_TRANSIENT);</a>
+<a name="ln404">    sqlite3_step(stmt);</a>
+<a name="ln405">    sqlite3_finalize(stmt);</a>
+<a name="ln406">  }</a>
+<a name="ln407">}</a>
+<a name="ln408"> </a>
+<a name="ln409">static void free_module_info(GtkWidget *widget, gpointer user_data)</a>
+<a name="ln410">{</a>
+<a name="ln411">  dt_lib_module_info_t *minfo = (dt_lib_module_info_t *)user_data;</a>
+<a name="ln412">  g_free(minfo-&gt;plugin_name);</a>
+<a name="ln413">  free(minfo-&gt;params);</a>
+<a name="ln414">  free(minfo);</a>
+<a name="ln415">}</a>
+<a name="ln416"> </a>
+<a name="ln417">static void dt_lib_presets_popup_menu_show(dt_lib_module_info_t *minfo)</a>
+<a name="ln418">{</a>
+<a name="ln419">  GtkMenu *menu = darktable.gui-&gt;presets_popup_menu;</a>
+<a name="ln420">  if(menu) gtk_widget_destroy(GTK_WIDGET(menu));</a>
+<a name="ln421">  darktable.gui-&gt;presets_popup_menu = GTK_MENU(gtk_menu_new());</a>
+<a name="ln422">  menu = darktable.gui-&gt;presets_popup_menu;</a>
+<a name="ln423"> </a>
+<a name="ln424">  g_signal_connect(G_OBJECT(menu), &quot;destroy&quot;, G_CALLBACK(free_module_info), minfo);</a>
+<a name="ln425"> </a>
+<a name="ln426">  GtkWidget *mi;</a>
+<a name="ln427">  int active_preset = -1, cnt = 0, writeprotect = 0;</a>
+<a name="ln428">  sqlite3_stmt *stmt;</a>
+<a name="ln429">  // order: get shipped defaults first</a>
+<a name="ln430">  DT_DEBUG_SQLITE3_PREPARE_V2(dt_database_get(darktable.db),</a>
+<a name="ln431">                              &quot;SELECT name, op_params, writeprotect, description FROM data.presets WHERE &quot;</a>
+<a name="ln432">                              &quot;operation=?1 AND op_version=?2 ORDER BY writeprotect DESC, name, rowid&quot;,</a>
+<a name="ln433">                              -1, &amp;stmt, NULL);</a>
+<a name="ln434">  DT_DEBUG_SQLITE3_BIND_TEXT(stmt, 1, minfo-&gt;plugin_name, -1, SQLITE_TRANSIENT);</a>
+<a name="ln435">  DT_DEBUG_SQLITE3_BIND_INT(stmt, 2, minfo-&gt;version);</a>
+<a name="ln436"> </a>
+<a name="ln437">  // collect all presets for op from db</a>
+<a name="ln438">  int found = 0;</a>
+<a name="ln439">  while(sqlite3_step(stmt) == SQLITE_ROW)</a>
+<a name="ln440">  {</a>
+<a name="ln441">    void *op_params = (void *)sqlite3_column_blob(stmt, 1);</a>
+<a name="ln442">    int32_t op_params_size = sqlite3_column_bytes(stmt, 1);</a>
+<a name="ln443">    const char *name = (char *)sqlite3_column_text(stmt, 0);</a>
+<a name="ln444"> </a>
+<a name="ln445">    if(darktable.gui-&gt;last_preset &amp;&amp; strcmp(darktable.gui-&gt;last_preset, name) == 0) found = 1;</a>
+<a name="ln446"> </a>
+<a name="ln447">    // selected in bold:</a>
+<a name="ln448">    // printf(&quot;comparing %d bytes to %d\n&quot;, op_params_size, minfo-&gt;params_size);</a>
+<a name="ln449">    // for(int k=0;k&lt;op_params_size &amp;&amp; !memcmp(minfo-&gt;params, op_params, k);k++) printf(&quot;compare [%c %c] %d:</a>
+<a name="ln450">    // %d\n&quot;,</a>
+<a name="ln451">    // ((const char*)(minfo-&gt;params))[k],</a>
+<a name="ln452">    // ((const char*)(op_params))[k],</a>
+<a name="ln453">    // k, memcmp(minfo-&gt;params, op_params, k));</a>
+<a name="ln454">    if(op_params_size == minfo-&gt;params_size &amp;&amp; !memcmp(minfo-&gt;params, op_params, op_params_size))</a>
+<a name="ln455">    {</a>
+<a name="ln456">      active_preset = cnt;</a>
+<a name="ln457">      writeprotect = sqlite3_column_int(stmt, 2);</a>
+<a name="ln458">      char *markup;</a>
+<a name="ln459">      mi = gtk_menu_item_new_with_label(&quot;&quot;);</a>
+<a name="ln460">      markup = g_markup_printf_escaped(&quot;&lt;span weight=\&quot;bold\&quot;&gt;%s&lt;/span&gt;&quot;, name);</a>
+<a name="ln461">      gtk_label_set_markup(GTK_LABEL(gtk_bin_get_child(GTK_BIN(mi))), markup);</a>
+<a name="ln462">      g_free(markup);</a>
+<a name="ln463">    }</a>
+<a name="ln464">    else</a>
+<a name="ln465">    {</a>
+<a name="ln466">      mi = gtk_menu_item_new_with_label((const char *)name);</a>
+<a name="ln467">    }</a>
+<a name="ln468">    g_object_set_data_full(G_OBJECT(mi), &quot;dt-preset-name&quot;, g_strdup(name), g_free);</a>
+<a name="ln469">    g_signal_connect(G_OBJECT(mi), &quot;activate&quot;, G_CALLBACK(pick_callback), minfo);</a>
+<a name="ln470">    gtk_widget_set_tooltip_text(mi, (const char *)sqlite3_column_text(stmt, 3));</a>
+<a name="ln471">    gtk_menu_shell_append(GTK_MENU_SHELL(menu), mi);</a>
+<a name="ln472">    cnt++;</a>
+<a name="ln473">  }</a>
+<a name="ln474">  sqlite3_finalize(stmt);</a>
+<a name="ln475"> </a>
+<a name="ln476">  if(cnt &gt; 0) gtk_menu_shell_append(GTK_MENU_SHELL(menu), gtk_separator_menu_item_new());</a>
+<a name="ln477"> </a>
+<a name="ln478">  // FIXME: this doesn't seem to work.</a>
+<a name="ln479">  if(active_preset &gt;= 0)</a>
+<a name="ln480">  {</a>
+<a name="ln481">    if(!writeprotect)</a>
+<a name="ln482">    {</a>
+<a name="ln483">      mi = gtk_menu_item_new_with_label(_(&quot;edit this preset..&quot;));</a>
+<a name="ln484">      g_signal_connect(G_OBJECT(mi), &quot;activate&quot;, G_CALLBACK(menuitem_edit_preset), minfo);</a>
+<a name="ln485">      gtk_menu_shell_append(GTK_MENU_SHELL(menu), mi);</a>
+<a name="ln486"> </a>
+<a name="ln487">      mi = gtk_menu_item_new_with_label(_(&quot;delete this preset&quot;));</a>
+<a name="ln488">      g_signal_connect(G_OBJECT(mi), &quot;activate&quot;, G_CALLBACK(menuitem_delete_preset), minfo);</a>
+<a name="ln489">      gtk_menu_shell_append(GTK_MENU_SHELL(menu), mi);</a>
+<a name="ln490">    }</a>
+<a name="ln491">  }</a>
+<a name="ln492">  else</a>
+<a name="ln493">  {</a>
+<a name="ln494">    mi = gtk_menu_item_new_with_label(_(&quot;store new preset..&quot;));</a>
+<a name="ln495">    if(minfo-&gt;params_size == 0)</a>
+<a name="ln496">    {</a>
+<a name="ln497">      gtk_widget_set_sensitive(mi, FALSE);</a>
+<a name="ln498">      gtk_widget_set_tooltip_text(mi, _(&quot;nothing to save&quot;));</a>
+<a name="ln499">    }</a>
+<a name="ln500">    else</a>
+<a name="ln501">      g_signal_connect(G_OBJECT(mi), &quot;activate&quot;, G_CALLBACK(menuitem_new_preset), minfo);</a>
+<a name="ln502">    gtk_menu_shell_append(GTK_MENU_SHELL(menu), mi);</a>
+<a name="ln503"> </a>
+<a name="ln504">    if(darktable.gui-&gt;last_preset &amp;&amp; found)</a>
+<a name="ln505">    {</a>
+<a name="ln506">      char *markup = g_markup_printf_escaped(&quot;%s &lt;span weight=\&quot;bold\&quot;&gt;%s&lt;/span&gt;&quot;, _(&quot;update preset&quot;),</a>
+<a name="ln507">                                             darktable.gui-&gt;last_preset);</a>
+<a name="ln508">      mi = gtk_menu_item_new_with_label(&quot;&quot;);</a>
+<a name="ln509">      gtk_widget_set_sensitive(mi, minfo-&gt;params_size &gt; 0);</a>
+<a name="ln510">      gtk_label_set_markup(GTK_LABEL(gtk_bin_get_child(GTK_BIN(mi))), markup);</a>
+<a name="ln511">      g_object_set_data_full(G_OBJECT(mi), &quot;dt-preset-name&quot;, g_strdup(darktable.gui-&gt;last_preset), g_free);</a>
+<a name="ln512">      g_signal_connect(G_OBJECT(mi), &quot;activate&quot;, G_CALLBACK(menuitem_update_preset), minfo);</a>
+<a name="ln513">      gtk_menu_shell_append(GTK_MENU_SHELL(menu), mi);</a>
+<a name="ln514">      g_free(markup);</a>
+<a name="ln515">    }</a>
+<a name="ln516">  }</a>
+<a name="ln517">}</a>
+<a name="ln518"> </a>
+<a name="ln519">gint dt_lib_sort_plugins(gconstpointer a, gconstpointer b)</a>
+<a name="ln520">{</a>
+<a name="ln521">  const dt_lib_module_t *am = (const dt_lib_module_t *)a;</a>
+<a name="ln522">  const dt_lib_module_t *bm = (const dt_lib_module_t *)b;</a>
+<a name="ln523">  const int apos = am-&gt;position ? am-&gt;position(am) : 0;</a>
+<a name="ln524">  const int bpos = bm-&gt;position ? bm-&gt;position(bm) : 0;</a>
+<a name="ln525">  return apos - bpos;</a>
+<a name="ln526">}</a>
+<a name="ln527"> </a>
+<a name="ln528">/* default expandable implementation */</a>
+<a name="ln529">static int _lib_default_expandable()</a>
+<a name="ln530">{</a>
+<a name="ln531">  return 1;</a>
+<a name="ln532">}</a>
+<a name="ln533"> </a>
+<a name="ln534">static int dt_lib_load_module(void *m, const char *libname, const char *plugin_name)</a>
+<a name="ln535">{</a>
+<a name="ln536">  dt_lib_module_t *module = (dt_lib_module_t *)m;</a>
+<a name="ln537">  module-&gt;dt = &amp;darktable;</a>
+<a name="ln538">  module-&gt;widget = NULL;</a>
+<a name="ln539">  module-&gt;expander = NULL;</a>
+<a name="ln540">  g_strlcpy(module-&gt;plugin_name, plugin_name, sizeof(module-&gt;plugin_name));</a>
+<a name="ln541">  dt_print(DT_DEBUG_CONTROL, &quot;[lib_load_module] loading lib `%s' from %s\n&quot;, plugin_name, libname);</a>
+<a name="ln542">  module-&gt;module = g_module_open(libname, G_MODULE_BIND_LAZY | G_MODULE_BIND_LOCAL);</a>
+<a name="ln543">  if(!module-&gt;module) goto error;</a>
+<a name="ln544">  int (*version)();</a>
+<a name="ln545">  if(!g_module_symbol(module-&gt;module, &quot;dt_module_dt_version&quot;, (gpointer) &amp; (version))) goto error;</a>
+<a name="ln546">  if(version() != dt_version())</a>
+<a name="ln547">  {</a>
+<a name="ln548">    fprintf(stderr,</a>
+<a name="ln549">            &quot;[lib_load_module] `%s' is compiled for another version of dt (module %d (%s) != dt %d (%s)) !\n&quot;,</a>
+<a name="ln550">            libname, abs(version()), version() &lt; 0 ? &quot;debug&quot; : &quot;opt&quot;, abs(dt_version()),</a>
+<a name="ln551">            dt_version() &lt; 0 ? &quot;debug&quot; : &quot;opt&quot;);</a>
+<a name="ln552">    goto error;</a>
+<a name="ln553">  }</a>
+<a name="ln554">  if(!g_module_symbol(module-&gt;module, &quot;dt_module_mod_version&quot;, (gpointer) &amp; (module-&gt;version))) goto error;</a>
+<a name="ln555">  if(!g_module_symbol(module-&gt;module, &quot;name&quot;, (gpointer) &amp; (module-&gt;name))) goto error;</a>
+<a name="ln556">  if(!g_module_symbol(module-&gt;module, &quot;views&quot;, (gpointer) &amp; (module-&gt;views))) goto error;</a>
+<a name="ln557">  if(!g_module_symbol(module-&gt;module, &quot;container&quot;, (gpointer) &amp; (module-&gt;container))) goto error;</a>
+<a name="ln558">  if(!g_module_symbol(module-&gt;module, &quot;expandable&quot;, (gpointer) &amp; (module-&gt;expandable)))</a>
+<a name="ln559">    module-&gt;expandable = _lib_default_expandable;</a>
+<a name="ln560">  if(!g_module_symbol(module-&gt;module, &quot;init&quot;, (gpointer) &amp; (module-&gt;init))) module-&gt;init = NULL;</a>
+<a name="ln561"> </a>
+<a name="ln562">  if(!g_module_symbol(module-&gt;module, &quot;gui_reset&quot;, (gpointer) &amp; (module-&gt;gui_reset)))</a>
+<a name="ln563">    module-&gt;gui_reset = NULL;</a>
+<a name="ln564">  if(!g_module_symbol(module-&gt;module, &quot;gui_init&quot;, (gpointer) &amp; (module-&gt;gui_init))) goto error;</a>
+<a name="ln565">  if(!g_module_symbol(module-&gt;module, &quot;gui_cleanup&quot;, (gpointer) &amp; (module-&gt;gui_cleanup))) goto error;</a>
+<a name="ln566"> </a>
+<a name="ln567">  if(!g_module_symbol(module-&gt;module, &quot;gui_post_expose&quot;, (gpointer) &amp; (module-&gt;gui_post_expose)))</a>
+<a name="ln568">    module-&gt;gui_post_expose = NULL;</a>
+<a name="ln569"> </a>
+<a name="ln570">  if(!g_module_symbol(module-&gt;module, &quot;view_enter&quot;, (gpointer) &amp; (module-&gt;view_enter))) module-&gt;view_enter = NULL;</a>
+<a name="ln571">  if(!g_module_symbol(module-&gt;module, &quot;view_leave&quot;, (gpointer) &amp; (module-&gt;view_leave))) module-&gt;view_leave = NULL;</a>
+<a name="ln572"> </a>
+<a name="ln573">  if(!g_module_symbol(module-&gt;module, &quot;mouse_leave&quot;, (gpointer) &amp; (module-&gt;mouse_leave)))</a>
+<a name="ln574">    module-&gt;mouse_leave = NULL;</a>
+<a name="ln575">  if(!g_module_symbol(module-&gt;module, &quot;mouse_moved&quot;, (gpointer) &amp; (module-&gt;mouse_moved)))</a>
+<a name="ln576">    module-&gt;mouse_moved = NULL;</a>
+<a name="ln577">  if(!g_module_symbol(module-&gt;module, &quot;button_released&quot;, (gpointer) &amp; (module-&gt;button_released)))</a>
+<a name="ln578">    module-&gt;button_released = NULL;</a>
+<a name="ln579">  if(!g_module_symbol(module-&gt;module, &quot;button_pressed&quot;, (gpointer) &amp; (module-&gt;button_pressed)))</a>
+<a name="ln580">    module-&gt;button_pressed = NULL;</a>
+<a name="ln581">  if(!g_module_symbol(module-&gt;module, &quot;configure&quot;, (gpointer) &amp; (module-&gt;configure)))</a>
+<a name="ln582">    module-&gt;configure = NULL;</a>
+<a name="ln583">  if(!g_module_symbol(module-&gt;module, &quot;scrolled&quot;, (gpointer) &amp; (module-&gt;scrolled))) module-&gt;scrolled = NULL;</a>
+<a name="ln584">  if(!g_module_symbol(module-&gt;module, &quot;position&quot;, (gpointer) &amp; (module-&gt;position))) module-&gt;position = NULL;</a>
+<a name="ln585">  if(!g_module_symbol(module-&gt;module, &quot;legacy_params&quot;, (gpointer) &amp; (module-&gt;legacy_params)))</a>
+<a name="ln586">    module-&gt;legacy_params = NULL;</a>
+<a name="ln587">  if((!g_module_symbol(module-&gt;module, &quot;get_params&quot;, (gpointer) &amp; (module-&gt;get_params)))</a>
+<a name="ln588">     || (!g_module_symbol(module-&gt;module, &quot;set_params&quot;, (gpointer) &amp; (module-&gt;set_params)))</a>
+<a name="ln589">     || (!g_module_symbol(module-&gt;module, &quot;init_presets&quot;, (gpointer) &amp; (module-&gt;init_presets))))</a>
+<a name="ln590">  {</a>
+<a name="ln591">    // need all at the same time, or none.</a>
+<a name="ln592">    module-&gt;legacy_params = NULL;</a>
+<a name="ln593">    module-&gt;set_params = NULL;</a>
+<a name="ln594">    module-&gt;get_params = NULL;</a>
+<a name="ln595">    module-&gt;init_presets = NULL;</a>
+<a name="ln596">  }</a>
+<a name="ln597">  if(!g_module_symbol(module-&gt;module, &quot;init_key_accels&quot;, (gpointer) &amp; (module-&gt;init_key_accels)))</a>
+<a name="ln598">    module-&gt;init_key_accels = NULL;</a>
+<a name="ln599">  if(!g_module_symbol(module-&gt;module, &quot;connect_key_accels&quot;, (gpointer) &amp; (module-&gt;connect_key_accels)))</a>
+<a name="ln600">    module-&gt;connect_key_accels = NULL;</a>
+<a name="ln601"> </a>
+<a name="ln602">  module-&gt;accel_closures = NULL;</a>
+<a name="ln603">  module-&gt;reset_button = NULL;</a>
+<a name="ln604">  module-&gt;presets_button = NULL;</a>
+<a name="ln605"> </a>
+<a name="ln606">  if(module-&gt;gui_reset)</a>
+<a name="ln607">  {</a>
+<a name="ln608">    dt_accel_register_lib(module, NC_(&quot;accel&quot;, &quot;reset module parameters&quot;), 0, 0);</a>
+<a name="ln609">  }</a>
+<a name="ln610">  if(module-&gt;get_params)</a>
+<a name="ln611">  {</a>
+<a name="ln612">    dt_accel_register_lib(module, NC_(&quot;accel&quot;, &quot;show preset menu&quot;), 0, 0);</a>
+<a name="ln613">  }</a>
+<a name="ln614">#ifdef USE_LUA</a>
+<a name="ln615">  dt_lua_lib_register(darktable.lua_state.state, module);</a>
+<a name="ln616">#endif</a>
+<a name="ln617">  if(module-&gt;init) module-&gt;init(module);</a>
+<a name="ln618"> </a>
+<a name="ln619">  return 0;</a>
+<a name="ln620">error:</a>
+<a name="ln621">  fprintf(stderr, &quot;[lib_load_module] failed to open operation `%s': %s\n&quot;, plugin_name, g_module_error());</a>
+<a name="ln622">  if(module-&gt;module) g_module_close(module-&gt;module);</a>
+<a name="ln623">  return 1;</a>
+<a name="ln624">}</a>
+<a name="ln625"> </a>
+<a name="ln626">static void *_update_params(dt_lib_module_t *module,</a>
+<a name="ln627">                            const void *const old_params, size_t old_params_size, int old_version,</a>
+<a name="ln628">                            int target_version, size_t *new_size)</a>
+<a name="ln629">{</a>
+<a name="ln630">  // make a copy of the old params so we can free it in the loop</a>
+<a name="ln631">  void *params = malloc(old_params_size);</a>
+<a name="ln632">  if(params == NULL) return NULL;</a>
+<a name="ln633">  memcpy(params, old_params, old_params_size);</a>
+<a name="ln634">  while(old_version &lt; target_version)</a>
+<a name="ln635">  {</a>
+<a name="ln636">    size_t size;</a>
+<a name="ln637">    int version;</a>
+<a name="ln638">    void *new_params = module-&gt;legacy_params(module, params, old_params_size, old_version, &amp;version, &amp;size);</a>
+<a name="ln639">    free(params);</a>
+<a name="ln640">    if(new_params == NULL) return NULL;</a>
+<a name="ln641">    params = new_params;</a>
+<a name="ln642">    old_version = version;</a>
+<a name="ln643">    old_params_size = size;</a>
+<a name="ln644">  }</a>
+<a name="ln645">  *new_size = old_params_size;</a>
+<a name="ln646">  return params;</a>
+<a name="ln647">}</a>
+<a name="ln648"> </a>
+<a name="ln649">void dt_lib_init_presets(dt_lib_module_t *module)</a>
+<a name="ln650">{</a>
+<a name="ln651">  // since lighttable presets can't end up in styles or any other place outside of the presets table it is</a>
+<a name="ln652">  // sufficient</a>
+<a name="ln653">  // to update that very table here and assume that everything is up to date elsewhere.</a>
+<a name="ln654">  // the intended logic is as follows:</a>
+<a name="ln655">  // - no set_params -&gt; delete all presets</a>
+<a name="ln656">  // - op_version &gt;= module_version -&gt; done</a>
+<a name="ln657">  // - op_version &lt; module_version -&gt;</a>
+<a name="ln658">  //   - module has legacy_params -&gt; try to update</a>
+<a name="ln659">  //   - module doesn't have legacy_params -&gt; delete it</a>
+<a name="ln660"> </a>
+<a name="ln661">  if(module-&gt;set_params == NULL)</a>
+<a name="ln662">  {</a>
+<a name="ln663">    sqlite3_stmt *stmt;</a>
+<a name="ln664">    DT_DEBUG_SQLITE3_PREPARE_V2(dt_database_get(darktable.db), &quot;DELETE FROM data.presets WHERE operation=?1&quot;, -1,</a>
+<a name="ln665">                                &amp;stmt, NULL);</a>
+<a name="ln666">    DT_DEBUG_SQLITE3_BIND_TEXT(stmt, 1, module-&gt;plugin_name, -1, SQLITE_TRANSIENT);</a>
+<a name="ln667">    sqlite3_step(stmt);</a>
+<a name="ln668">    sqlite3_finalize(stmt);</a>
+<a name="ln669">  }</a>
+<a name="ln670">  else</a>
+<a name="ln671">  {</a>
+<a name="ln672">    sqlite3_stmt *stmt;</a>
+<a name="ln673">    DT_DEBUG_SQLITE3_PREPARE_V2(dt_database_get(darktable.db),</a>
+<a name="ln674">                                &quot;SELECT rowid, op_version, op_params, name FROM data.presets WHERE operation=?1&quot;,</a>
+<a name="ln675">                                -1, &amp;stmt, NULL);</a>
+<a name="ln676">    DT_DEBUG_SQLITE3_BIND_TEXT(stmt, 1, module-&gt;plugin_name, -1, SQLITE_TRANSIENT);</a>
+<a name="ln677">    while(sqlite3_step(stmt) == SQLITE_ROW)</a>
+<a name="ln678">    {</a>
+<a name="ln679">      int rowid = sqlite3_column_int(stmt, 0);</a>
+<a name="ln680">      int op_version = sqlite3_column_int(stmt, 1);</a>
+<a name="ln681">      void *op_params = (void *)sqlite3_column_blob(stmt, 2);</a>
+<a name="ln682">      size_t op_params_size = sqlite3_column_bytes(stmt, 2);</a>
+<a name="ln683">      const char *name = (char *)sqlite3_column_text(stmt, 3);</a>
+<a name="ln684"> </a>
+<a name="ln685">      int version = module-&gt;version(module);</a>
+<a name="ln686"> </a>
+<a name="ln687">      if(op_version &lt; version)</a>
+<a name="ln688">      {</a>
+<a name="ln689">        size_t new_params_size = 0;</a>
+<a name="ln690">        void *new_params = NULL;</a>
+<a name="ln691"> </a>
+<a name="ln692">        if(module-&gt;legacy_params</a>
+<a name="ln693">          &amp;&amp; (new_params = _update_params(module, op_params, op_params_size, op_version, version, &amp;new_params_size)))</a>
+<a name="ln694">        {</a>
+<a name="ln695">          // write the updated preset back to db</a>
+<a name="ln696">          fprintf(stderr,</a>
+<a name="ln697">                  &quot;[lighttable_init_presets] updating '%s' preset '%s' from version %d to version %d\n&quot;,</a>
+<a name="ln698">                  module-&gt;plugin_name, name, op_version, version);</a>
+<a name="ln699">          sqlite3_stmt *innerstmt;</a>
+<a name="ln700">          DT_DEBUG_SQLITE3_PREPARE_V2(dt_database_get(darktable.db),</a>
+<a name="ln701">                                      &quot;UPDATE data.presets SET op_version=?1, op_params=?2 WHERE rowid=?3&quot;, -1,</a>
+<a name="ln702">                                      &amp;innerstmt, NULL);</a>
+<a name="ln703">          DT_DEBUG_SQLITE3_BIND_INT(innerstmt, 1, version);</a>
+<a name="ln704">          DT_DEBUG_SQLITE3_BIND_BLOB(innerstmt, 2, new_params, new_params_size, SQLITE_TRANSIENT);</a>
+<a name="ln705">          DT_DEBUG_SQLITE3_BIND_INT(innerstmt, 3, rowid);</a>
+<a name="ln706">          sqlite3_step(innerstmt);</a>
+<a name="ln707">          sqlite3_finalize(innerstmt);</a>
+<a name="ln708">        }</a>
+<a name="ln709">        else</a>
+<a name="ln710">        {</a>
+<a name="ln711">          // delete the preset</a>
+<a name="ln712">          fprintf(stderr, &quot;[lighttable_init_presets] Can't upgrade '%s' preset '%s' from version %d to %d, &quot;</a>
+<a name="ln713">                          &quot;no legacy_params() implemented or unable to update\n&quot;,</a>
+<a name="ln714">                  module-&gt;plugin_name, name, op_version, version);</a>
+<a name="ln715">          sqlite3_stmt *innerstmt;</a>
+<a name="ln716">          DT_DEBUG_SQLITE3_PREPARE_V2(dt_database_get(darktable.db), &quot;DELETE FROM data.presets WHERE rowid=?1&quot;, -1,</a>
+<a name="ln717">                                      &amp;innerstmt, NULL);</a>
+<a name="ln718">          DT_DEBUG_SQLITE3_BIND_INT(innerstmt, 1, rowid);</a>
+<a name="ln719">          sqlite3_step(innerstmt);</a>
+<a name="ln720">          sqlite3_finalize(innerstmt);</a>
+<a name="ln721">        }</a>
+<a name="ln722">        free(new_params);</a>
+<a name="ln723">      }</a>
+<a name="ln724">    }</a>
+<a name="ln725">    sqlite3_finalize(stmt);</a>
+<a name="ln726">  }</a>
+<a name="ln727"> </a>
+<a name="ln728">  if(module-&gt;init_presets) module-&gt;init_presets(module);</a>
+<a name="ln729">}</a>
+<a name="ln730"> </a>
+<a name="ln731">static void dt_lib_init_module(void *m)</a>
+<a name="ln732">{</a>
+<a name="ln733">  dt_lib_module_t *module = (dt_lib_module_t *)m;</a>
+<a name="ln734">  dt_lib_init_presets(module);</a>
+<a name="ln735">  // Calling the keyboard shortcut initialization callback if present</a>
+<a name="ln736">  // do not init accelerators if there is no gui</a>
+<a name="ln737">  if(darktable.gui)</a>
+<a name="ln738">  {</a>
+<a name="ln739">    if(module-&gt;init_key_accels) module-&gt;init_key_accels(module);</a>
+<a name="ln740">    module-&gt;gui_init(module);</a>
+<a name="ln741">    g_object_ref_sink(module-&gt;widget);</a>
+<a name="ln742">  }</a>
+<a name="ln743">}</a>
+<a name="ln744"> </a>
+<a name="ln745">void dt_lib_unload_module(dt_lib_module_t *module)</a>
+<a name="ln746">{</a>
+<a name="ln747">  if(module-&gt;module) g_module_close(module-&gt;module);</a>
+<a name="ln748">}</a>
+<a name="ln749"> </a>
+<a name="ln750">static void dt_lib_gui_reset_callback(GtkButton *button, gpointer user_data)</a>
+<a name="ln751">{</a>
+<a name="ln752">  dt_lib_module_t *module = (dt_lib_module_t *)user_data;</a>
+<a name="ln753">  module-&gt;gui_reset(module);</a>
+<a name="ln754">}</a>
+<a name="ln755"> </a>
+<a name="ln756">#if !GTK_CHECK_VERSION(3, 22, 0)</a>
+<a name="ln757">static void _preset_popup_posistion(GtkMenu *menu, gint *x, gint *y, gboolean *push_in, gpointer data)</a>
+<a name="ln758">{</a>
+<a name="ln759">  gint w;</a>
+<a name="ln760">  gint ww;</a>
+<a name="ln761">  GtkRequisition requisition = { 0 };</a>
+<a name="ln762"> </a>
+<a name="ln763">  w = gdk_window_get_width(gtk_widget_get_window(GTK_WIDGET(data)));</a>
+<a name="ln764">  ww = gdk_window_get_width(gtk_widget_get_window(dt_ui_main_window(darktable.gui-&gt;ui)));</a>
+<a name="ln765"> </a>
+<a name="ln766">  gdk_window_get_origin(gtk_widget_get_window(GTK_WIDGET(data)), x, y);</a>
+<a name="ln767"> </a>
+<a name="ln768">  gtk_widget_get_preferred_size(GTK_WIDGET(menu), &amp;requisition, NULL);</a>
+<a name="ln769"> </a>
+<a name="ln770">  /* align left panel popupmenu to right edge */</a>
+<a name="ln771">  if(*x &lt; ww / 2) (*x) += w - requisition.width;</a>
+<a name="ln772"> </a>
+<a name="ln773">  GtkAllocation allocation_data;</a>
+<a name="ln774">  gtk_widget_get_allocation(GTK_WIDGET(data), &amp;allocation_data);</a>
+<a name="ln775">  (*y) += allocation_data.height;</a>
+<a name="ln776">}</a>
+<a name="ln777">#endif</a>
+<a name="ln778"> </a>
+<a name="ln779">static void popup_callback(GtkButton *button, GdkEventButton *event, dt_lib_module_t *module)</a>
+<a name="ln780">{</a>
+<a name="ln781">  if(event-&gt;button != 1 &amp;&amp; event-&gt;button != 2) return;</a>
+<a name="ln782"> </a>
+<a name="ln783">  dt_lib_module_info_t *mi = (dt_lib_module_info_t *)calloc(1, sizeof(dt_lib_module_info_t));</a>
+<a name="ln784"> </a>
+<a name="ln785">  mi-&gt;plugin_name = g_strdup(module-&gt;plugin_name);</a>
+<a name="ln786">  mi-&gt;version = module-&gt;version(module);</a>
+<a name="ln787">  mi-&gt;module = module;</a>
+<a name="ln788">  mi-&gt;params = module-&gt;get_params(module, &amp;mi-&gt;params_size);</a>
+<a name="ln789"> </a>
+<a name="ln790">  if(!mi-&gt;params)</a>
+<a name="ln791">  {</a>
+<a name="ln792">    // this is a valid case, for example in location.c when nothing got selected</a>
+<a name="ln793">    // fprintf(stderr, &quot;something went wrong: &amp;params=%p, size=%i\n&quot;, mi-&gt;params, mi-&gt;params_size);</a>
+<a name="ln794">    mi-&gt;params_size = 0;</a>
+<a name="ln795">  }</a>
+<a name="ln796">  dt_lib_presets_popup_menu_show(mi);</a>
+<a name="ln797"> </a>
+<a name="ln798">  gtk_widget_show_all(GTK_WIDGET(darktable.gui-&gt;presets_popup_menu));</a>
+<a name="ln799"> </a>
+<a name="ln800">#if GTK_CHECK_VERSION(3, 22, 0)</a>
+<a name="ln801">  int c = module-&gt;container(module);</a>
+<a name="ln802"> </a>
+<a name="ln803">  GdkGravity widget_gravity, menu_gravity;</a>
+<a name="ln804"> </a>
+<a name="ln805">  if((c == DT_UI_CONTAINER_PANEL_LEFT_TOP) || (c == DT_UI_CONTAINER_PANEL_LEFT_CENTER)</a>
+<a name="ln806">     || (c == DT_UI_CONTAINER_PANEL_LEFT_BOTTOM))</a>
+<a name="ln807">  {</a>
+<a name="ln808">    widget_gravity = GDK_GRAVITY_SOUTH_EAST;</a>
+<a name="ln809">    menu_gravity = GDK_GRAVITY_NORTH_EAST;</a>
+<a name="ln810">  }</a>
+<a name="ln811">  else</a>
+<a name="ln812">  {</a>
+<a name="ln813">    widget_gravity = GDK_GRAVITY_SOUTH_WEST;</a>
+<a name="ln814">    menu_gravity = GDK_GRAVITY_NORTH_WEST;</a>
+<a name="ln815">  }</a>
+<a name="ln816"> </a>
+<a name="ln817">  gtk_menu_popup_at_widget(darktable.gui-&gt;presets_popup_menu,</a>
+<a name="ln818">                           dtgtk_expander_get_header(DTGTK_EXPANDER(module-&gt;expander)), widget_gravity,</a>
+<a name="ln819">                           menu_gravity, NULL);</a>
+<a name="ln820">#else</a>
+<a name="ln821">  gtk_menu_popup(darktable.gui-&gt;presets_popup_menu, NULL, NULL, _preset_popup_posistion, button, 0,</a>
+<a name="ln822">                 gtk_get_current_event_time());</a>
+<a name="ln823">  gtk_menu_reposition(GTK_MENU(darktable.gui-&gt;presets_popup_menu));</a>
+<a name="ln824">#endif</a>
+<a name="ln825"> </a>
+<a name="ln826">  dtgtk_button_set_active(DTGTK_BUTTON(button), FALSE);</a>
+<a name="ln827">}</a>
+<a name="ln828"> </a>
+<a name="ln829">void dt_lib_gui_set_expanded(dt_lib_module_t *module, gboolean expanded)</a>
+<a name="ln830">{</a>
+<a name="ln831">  if(!module-&gt;expander) return;</a>
+<a name="ln832"> </a>
+<a name="ln833">  dtgtk_expander_set_expanded(DTGTK_EXPANDER(module-&gt;expander), expanded);</a>
+<a name="ln834"> </a>
+<a name="ln835">  /* update expander arrow state */</a>
+<a name="ln836">  GtkWidget *icon;</a>
+<a name="ln837">  GtkWidget *header = dtgtk_expander_get_header(DTGTK_EXPANDER(module-&gt;expander));</a>
+<a name="ln838">  gint flags = CPF_DIRECTION_DOWN;</a>
+<a name="ln839">  int c = module-&gt;container(module);</a>
+<a name="ln840"> </a>
+<a name="ln841">  GList *header_childs = gtk_container_get_children(GTK_CONTAINER(header));</a>
+<a name="ln842"> </a>
+<a name="ln843">  if((c == DT_UI_CONTAINER_PANEL_LEFT_TOP) || (c == DT_UI_CONTAINER_PANEL_LEFT_CENTER)</a>
+<a name="ln844">     || (c == DT_UI_CONTAINER_PANEL_LEFT_BOTTOM))</a>
+<a name="ln845">  {</a>
+<a name="ln846">    icon = g_list_nth_data(header_childs, 0);</a>
+<a name="ln847">    if(!expanded) flags = CPF_DIRECTION_RIGHT;</a>
+<a name="ln848">  }</a>
+<a name="ln849">  else</a>
+<a name="ln850">  {</a>
+<a name="ln851">    icon = g_list_last(header_childs)-&gt;data;</a>
+<a name="ln852">    if(!expanded) flags = CPF_DIRECTION_LEFT;</a>
+<a name="ln853">  }</a>
+<a name="ln854"> </a>
+<a name="ln855">  g_list_free(header_childs);</a>
+<a name="ln856"> </a>
+<a name="ln857">  dtgtk_icon_set_paint(icon, dtgtk_cairo_paint_solid_arrow, flags, NULL);</a>
+<a name="ln858"> </a>
+<a name="ln859">  /* show / hide plugin widget */</a>
+<a name="ln860">  if(expanded)</a>
+<a name="ln861">  {</a>
+<a name="ln862">    /* register to receive draw events */</a>
+<a name="ln863">    darktable.lib-&gt;gui_module = module;</a>
+<a name="ln864"> </a>
+<a name="ln865">    /* focus the current module */</a>
+<a name="ln866">    for(int k = 0; k &lt; DT_UI_CONTAINER_SIZE; k++)</a>
+<a name="ln867">      dt_ui_container_focus_widget(darktable.gui-&gt;ui, k, GTK_WIDGET(module-&gt;expander));</a>
+<a name="ln868">  }</a>
+<a name="ln869">  else</a>
+<a name="ln870">  {</a>
+<a name="ln871">    if(darktable.lib-&gt;gui_module == module)</a>
+<a name="ln872">    {</a>
+<a name="ln873">      darktable.lib-&gt;gui_module = NULL;</a>
+<a name="ln874">      dt_control_queue_redraw();</a>
+<a name="ln875">    }</a>
+<a name="ln876">  }</a>
+<a name="ln877"> </a>
+<a name="ln878">  /* store expanded state of module */</a>
+<a name="ln879">  char var[1024];</a>
+<a name="ln880">  const dt_view_t *current_view = dt_view_manager_get_current_view(darktable.view_manager);</a>
+<a name="ln881">  snprintf(var, sizeof(var), &quot;plugins/%s/%s/expanded&quot;, current_view-&gt;module_name, module-&gt;plugin_name);</a>
+<a name="ln882">  dt_conf_set_bool(var, expanded);</a>
+<a name="ln883">}</a>
+<a name="ln884"> </a>
+<a name="ln885">gboolean dt_lib_gui_get_expanded(dt_lib_module_t *module)</a>
+<a name="ln886">{</a>
+<a name="ln887">  if(!module-&gt;expandable(module)) return true;</a>
+<a name="ln888">  if(!module-&gt;expander) return true;</a>
+<a name="ln889">  if(!module-&gt;widget)</a>
+<a name="ln890">  {</a>
+<a name="ln891">    char var[1024];</a>
+<a name="ln892">    const dt_view_t *current_view = dt_view_manager_get_current_view(darktable.view_manager);</a>
+<a name="ln893">    snprintf(var, sizeof(var), &quot;plugins/%s/%s/expanded&quot;, current_view-&gt;module_name, module-&gt;plugin_name);</a>
+<a name="ln894">    return dt_conf_get_bool(var);</a>
+<a name="ln895">  }</a>
+<a name="ln896">  return dtgtk_expander_get_expanded(DTGTK_EXPANDER(module-&gt;expander));</a>
+<a name="ln897">}</a>
+<a name="ln898"> </a>
+<a name="ln899">static gboolean _lib_plugin_header_button_press(GtkWidget *w, GdkEventButton *e, gpointer user_data)</a>
+<a name="ln900">{</a>
+<a name="ln901">  if(e-&gt;type == GDK_2BUTTON_PRESS || e-&gt;type == GDK_3BUTTON_PRESS) return TRUE;</a>
+<a name="ln902"> </a>
+<a name="ln903">  dt_lib_module_t *module = (dt_lib_module_t *)user_data;</a>
+<a name="ln904"> </a>
+<a name="ln905">  if(e-&gt;button == 1)</a>
+<a name="ln906">  {</a>
+<a name="ln907">    /* bail out if module is static */</a>
+<a name="ln908">    if(!module-&gt;expandable(module)) return FALSE;</a>
+<a name="ln909"> </a>
+<a name="ln910">    // make gtk scroll to the module once it updated its allocation size</a>
+<a name="ln911">    uint32_t container = module-&gt;container(module);</a>
+<a name="ln912">    if(dt_conf_get_bool(&quot;lighttable/ui/scroll_to_module&quot;))</a>
+<a name="ln913">    {</a>
+<a name="ln914">      if(container == DT_UI_CONTAINER_PANEL_LEFT_CENTER)</a>
+<a name="ln915">        darktable.gui-&gt;scroll_to[0] = module-&gt;expander;</a>
+<a name="ln916">      else if(container == DT_UI_CONTAINER_PANEL_RIGHT_CENTER)</a>
+<a name="ln917">        darktable.gui-&gt;scroll_to[1] = module-&gt;expander;</a>
+<a name="ln918">    }</a>
+<a name="ln919"> </a>
+<a name="ln920">    /* handle shiftclick on expander, hide all except this */</a>
+<a name="ln921">    if(!dt_conf_get_bool(&quot;lighttable/ui/single_module&quot;) != !(e-&gt;state &amp; GDK_SHIFT_MASK))</a>
+<a name="ln922">    {</a>
+<a name="ln923">      GList *it = g_list_first(darktable.lib-&gt;plugins);</a>
+<a name="ln924">      const dt_view_t *v = dt_view_manager_get_current_view(darktable.view_manager);</a>
+<a name="ln925">      gboolean all_other_closed = TRUE;</a>
+<a name="ln926">      while(it)</a>
+<a name="ln927">      {</a>
+<a name="ln928">        dt_lib_module_t *m = (dt_lib_module_t *)it-&gt;data;</a>
+<a name="ln929"> </a>
+<a name="ln930">        if(m != module &amp;&amp; container == m-&gt;container(m) &amp;&amp; m-&gt;expandable(m) &amp;&amp; dt_lib_is_visible_in_view(m, v))</a>
+<a name="ln931">        {</a>
+<a name="ln932">          all_other_closed = all_other_closed &amp;&amp; !dtgtk_expander_get_expanded(DTGTK_EXPANDER(m-&gt;expander));</a>
+<a name="ln933">          dt_lib_gui_set_expanded(m, FALSE);</a>
+<a name="ln934">        }</a>
+<a name="ln935"> </a>
+<a name="ln936">        it = g_list_next(it);</a>
+<a name="ln937">      }</a>
+<a name="ln938">      if(all_other_closed)</a>
+<a name="ln939">        dt_lib_gui_set_expanded(module, !dtgtk_expander_get_expanded(DTGTK_EXPANDER(module-&gt;expander)));</a>
+<a name="ln940">      else</a>
+<a name="ln941">        dt_lib_gui_set_expanded(module, TRUE);</a>
+<a name="ln942">    }</a>
+<a name="ln943">    else</a>
+<a name="ln944">    {</a>
+<a name="ln945">      /* else just toggle */</a>
+<a name="ln946">      dt_lib_gui_set_expanded(module, !dtgtk_expander_get_expanded(DTGTK_EXPANDER(module-&gt;expander)));</a>
+<a name="ln947">    }</a>
+<a name="ln948"> </a>
+<a name="ln949">    return TRUE;</a>
+<a name="ln950">  }</a>
+<a name="ln951">  else if(e-&gt;button == 2)</a>
+<a name="ln952">  {</a>
+<a name="ln953">    /* show preset popup if any preset for module */</a>
+<a name="ln954"> </a>
+<a name="ln955">    return TRUE;</a>
+<a name="ln956">  }</a>
+<a name="ln957">  return FALSE;</a>
+<a name="ln958">}</a>
+<a name="ln959"> </a>
+<a name="ln960">GtkWidget *dt_lib_gui_get_expander(dt_lib_module_t *module)</a>
+<a name="ln961">{</a>
+<a name="ln962">  /* check if module is expandable */</a>
+<a name="ln963">  if(!module-&gt;expandable(module))</a>
+<a name="ln964">  {</a>
+<a name="ln965">    module-&gt;expander = NULL;</a>
+<a name="ln966">    return NULL;</a>
+<a name="ln967">  }</a>
+<a name="ln968"> </a>
+<a name="ln969">  int bs = DT_PIXEL_APPLY_DPI(12);</a>
+<a name="ln970"> </a>
+<a name="ln971">  GtkWidget *header = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);</a>
+<a name="ln972">  GtkWidget *expander = dtgtk_expander_new(header, module-&gt;widget);</a>
+<a name="ln973">  GtkWidget *header_evb = dtgtk_expander_get_header_event_box(DTGTK_EXPANDER(expander));</a>
+<a name="ln974">  GtkWidget *pluginui_frame = dtgtk_expander_get_frame(DTGTK_EXPANDER(expander));</a>
+<a name="ln975"> </a>
+<a name="ln976">  /* setup the header box */</a>
+<a name="ln977">  g_signal_connect(G_OBJECT(header_evb), &quot;button-press-event&quot;, G_CALLBACK(_lib_plugin_header_button_press),</a>
+<a name="ln978">                   module);</a>
+<a name="ln979"> </a>
+<a name="ln980">  /* setup plugin content frame */</a>
+<a name="ln981">  gtk_frame_set_shadow_type(GTK_FRAME(pluginui_frame), GTK_SHADOW_IN);</a>
+<a name="ln982"> </a>
+<a name="ln983">  /*</a>
+<a name="ln984">   * initialize the header widgets</a>
+<a name="ln985">   */</a>
+<a name="ln986">  int idx = 0;</a>
+<a name="ln987">  GtkWidget *hw[5] = { NULL, NULL, NULL, NULL, NULL };</a>
+<a name="ln988"> </a>
+<a name="ln989">  /* add the expand indicator icon */</a>
+<a name="ln990">  hw[idx] = dtgtk_icon_new(dtgtk_cairo_paint_solid_arrow, CPF_DIRECTION_LEFT, NULL);</a>
+<a name="ln991">  gtk_widget_set_size_request(GTK_WIDGET(hw[idx++]), bs, bs);</a>
+<a name="ln992"> </a>
+<a name="ln993">  /* add module label */</a>
+<a name="ln994">  char label[128];</a>
+<a name="ln995">  g_snprintf(label, sizeof(label), &quot;&lt;span size=\&quot;larger\&quot;&gt;%s&lt;/span&gt;&quot;, module-&gt;name(module));</a>
+<a name="ln996">  hw[idx] = gtk_label_new(&quot;&quot;);</a>
+<a name="ln997">  gtk_widget_set_name(hw[idx], &quot;panel_label&quot;);</a>
+<a name="ln998">  gtk_label_set_markup(GTK_LABEL(hw[idx]), label);</a>
+<a name="ln999">  gtk_widget_set_tooltip_text(hw[idx], module-&gt;name(module));</a>
+<a name="ln1000">  gtk_label_set_ellipsize(GTK_LABEL(hw[idx++]), PANGO_ELLIPSIZE_MIDDLE);</a>
+<a name="ln1001"> </a>
+<a name="ln1002">  /* add reset button if module has implementation */</a>
+<a name="ln1003">  if(module-&gt;gui_reset)</a>
+<a name="ln1004">  {</a>
+<a name="ln1005">    hw[idx] = dtgtk_button_new(dtgtk_cairo_paint_reset, CPF_STYLE_FLAT | CPF_DO_NOT_USE_BORDER, NULL);</a>
+<a name="ln1006">    module-&gt;reset_button = GTK_WIDGET(hw[idx]);</a>
+<a name="ln1007">    gtk_widget_set_tooltip_text(hw[idx], _(&quot;reset parameters&quot;));</a>
+<a name="ln1008">    g_signal_connect(G_OBJECT(hw[idx]), &quot;clicked&quot;, G_CALLBACK(dt_lib_gui_reset_callback), module);</a>
+<a name="ln1009">  }</a>
+<a name="ln1010">  else</a>
+<a name="ln1011">    hw[idx] = gtk_fixed_new();</a>
+<a name="ln1012">  gtk_widget_set_size_request(GTK_WIDGET(hw[idx++]), bs, bs);</a>
+<a name="ln1013"> </a>
+<a name="ln1014">  /* add preset button if module has implementation */</a>
+<a name="ln1015">  if(module-&gt;get_params)</a>
+<a name="ln1016">  {</a>
+<a name="ln1017">    hw[idx] = dtgtk_button_new(dtgtk_cairo_paint_presets, CPF_STYLE_FLAT | CPF_DO_NOT_USE_BORDER, NULL);</a>
+<a name="ln1018">    module-&gt;presets_button = GTK_WIDGET(hw[idx]);</a>
+<a name="ln1019">    gtk_widget_set_tooltip_text(hw[idx], _(&quot;presets&quot;));</a>
+<a name="ln1020">    g_signal_connect(G_OBJECT(hw[idx]), &quot;button-press-event&quot;, G_CALLBACK(popup_callback), module);</a>
+<a name="ln1021">  }</a>
+<a name="ln1022">  else</a>
+<a name="ln1023">    hw[idx] = gtk_fixed_new();</a>
+<a name="ln1024">  gtk_widget_set_size_request(GTK_WIDGET(hw[idx++]), bs, bs);</a>
+<a name="ln1025"> </a>
+<a name="ln1026">  /* add a spacer to align buttons with iop buttons (enabled button) */</a>
+<a name="ln1027">  hw[idx] = gtk_fixed_new();</a>
+<a name="ln1028">  gtk_widget_set_size_request(GTK_WIDGET(hw[idx++]), bs, bs);</a>
+<a name="ln1029"> </a>
+<a name="ln1030">  /* lets order header elements depending on left/right side panel placement */</a>
+<a name="ln1031">  int c = module-&gt;container(module);</a>
+<a name="ln1032">  if((c == DT_UI_CONTAINER_PANEL_LEFT_TOP) || (c == DT_UI_CONTAINER_PANEL_LEFT_CENTER)</a>
+<a name="ln1033">     || (c == DT_UI_CONTAINER_PANEL_LEFT_BOTTOM))</a>
+<a name="ln1034">  {</a>
+<a name="ln1035">    for(int i = 0; i &lt;= 4; i++)</a>
+<a name="ln1036">      if(hw[i]) gtk_box_pack_start(GTK_BOX(header), hw[i], i == 1 ? TRUE : FALSE, i == 1 ? TRUE : FALSE, 2);</a>
+<a name="ln1037">    gtk_widget_set_halign(hw[1], GTK_ALIGN_START);</a>
+<a name="ln1038">    dtgtk_icon_set_paint(hw[0], dtgtk_cairo_paint_solid_arrow, CPF_DIRECTION_RIGHT, NULL);</a>
+<a name="ln1039">  }</a>
+<a name="ln1040">  else</a>
+<a name="ln1041">  {</a>
+<a name="ln1042">    for(int i = 4; i &gt;= 0; i--)</a>
+<a name="ln1043">      if(hw[i]) gtk_box_pack_start(GTK_BOX(header), hw[i], i == 1 ? TRUE : FALSE, i == 1 ? TRUE : FALSE, 2);</a>
+<a name="ln1044">    gtk_widget_set_halign(hw[1], GTK_ALIGN_END);</a>
+<a name="ln1045">    dtgtk_icon_set_paint(hw[0], dtgtk_cairo_paint_solid_arrow, CPF_DIRECTION_LEFT, NULL);</a>
+<a name="ln1046">  }</a>
+<a name="ln1047"> </a>
+<a name="ln1048">  /* add empty space around widget */</a>
+<a name="ln1049">  gtk_widget_set_margin_start(module-&gt;widget, DT_PIXEL_APPLY_DPI(8));</a>
+<a name="ln1050">  gtk_widget_set_margin_end(module-&gt;widget, DT_PIXEL_APPLY_DPI(8));</a>
+<a name="ln1051">  gtk_widget_set_margin_top(module-&gt;widget, DT_PIXEL_APPLY_DPI(8));</a>
+<a name="ln1052">  gtk_widget_set_margin_bottom(module-&gt;widget, DT_PIXEL_APPLY_DPI(8));</a>
+<a name="ln1053">  gtk_widget_show_all(module-&gt;widget);</a>
+<a name="ln1054">  gtk_widget_set_name(pluginui_frame, &quot;lib-plugin-ui&quot;);</a>
+<a name="ln1055">  module-&gt;expander = expander;</a>
+<a name="ln1056"> </a>
+<a name="ln1057">  gtk_widget_set_hexpand(module-&gt;widget, FALSE);</a>
+<a name="ln1058">  gtk_widget_set_vexpand(module-&gt;widget, FALSE);</a>
+<a name="ln1059"> </a>
+<a name="ln1060">  return module-&gt;expander;</a>
+<a name="ln1061">}</a>
+<a name="ln1062"> </a>
+<a name="ln1063">void dt_lib_init(dt_lib_t *lib)</a>
+<a name="ln1064">{</a>
+<a name="ln1065">  // Setting everything to null initially</a>
+<a name="ln1066">  memset(lib, 0, sizeof(dt_lib_t));</a>
+<a name="ln1067">  darktable.lib-&gt;plugins = dt_module_load_modules(&quot;/plugins/lighttable&quot;, sizeof(dt_lib_module_t),</a>
+<a name="ln1068">                                                  dt_lib_load_module, dt_lib_init_module, dt_lib_sort_plugins);</a>
+<a name="ln1069">}</a>
+<a name="ln1070"> </a>
+<a name="ln1071">void dt_lib_cleanup(dt_lib_t *lib)</a>
+<a name="ln1072">{</a>
+<a name="ln1073">  while(lib-&gt;plugins)</a>
+<a name="ln1074">  {</a>
+<a name="ln1075">    dt_lib_module_t *module = (dt_lib_module_t *)(lib-&gt;plugins-&gt;data);</a>
+<a name="ln1076">    if(module)</a>
+<a name="ln1077">    {</a>
+<a name="ln1078">      if(module-&gt;data != NULL)</a>
+<a name="ln1079">      {</a>
+<a name="ln1080">        module-&gt;gui_cleanup(module);</a>
+<a name="ln1081">        module-&gt;data = NULL;</a>
+<a name="ln1082">      }</a>
+<a name="ln1083">      dt_lib_unload_module(module);</a>
+<a name="ln1084">      free(module);</a>
+<a name="ln1085">    }</a>
+<a name="ln1086">    lib-&gt;plugins = g_list_delete_link(lib-&gt;plugins, lib-&gt;plugins);</a>
+<a name="ln1087">  }</a>
+<a name="ln1088">}</a>
+<a name="ln1089"> </a>
+<a name="ln1090">void dt_lib_presets_add(const char *name, const char *plugin_name, const int32_t version, const void *params,</a>
+<a name="ln1091">                        const int32_t params_size)</a>
+<a name="ln1092">{</a>
+<a name="ln1093">  sqlite3_stmt *stmt;</a>
+<a name="ln1094">  DT_DEBUG_SQLITE3_PREPARE_V2(dt_database_get(darktable.db),</a>
+<a name="ln1095">                              &quot;DELETE FROM data.presets WHERE name=?1 AND operation=?2 AND op_version=?3&quot;, -1,</a>
+<a name="ln1096">                              &amp;stmt, NULL);</a>
+<a name="ln1097">  DT_DEBUG_SQLITE3_BIND_TEXT(stmt, 1, name, -1, SQLITE_TRANSIENT);</a>
+<a name="ln1098">  DT_DEBUG_SQLITE3_BIND_TEXT(stmt, 2, plugin_name, -1, SQLITE_TRANSIENT);</a>
+<a name="ln1099">  DT_DEBUG_SQLITE3_BIND_INT(stmt, 3, version);</a>
+<a name="ln1100">  sqlite3_step(stmt);</a>
+<a name="ln1101">  sqlite3_finalize(stmt);</a>
+<a name="ln1102">  DT_DEBUG_SQLITE3_PREPARE_V2(</a>
+<a name="ln1103">      dt_database_get(darktable.db),</a>
+<a name="ln1104">      &quot;INSERT INTO data.presets (name, description, operation, op_version, op_params, &quot;</a>
+<a name="ln1105">      &quot;blendop_params, blendop_version, enabled, model, maker, lens, &quot;</a>
+<a name="ln1106">      &quot;iso_min, iso_max, exposure_min, exposure_max, aperture_min, aperture_max, &quot;</a>
+<a name="ln1107">      &quot;focal_length_min, focal_length_max, writeprotect, &quot;</a>
+<a name="ln1108">      &quot;autoapply, filter, def, format) VALUES (?1, '', ?2, ?3, ?4, NULL, 0, 1, '%', &quot;</a>
+<a name="ln1109">      &quot;'%', '%', 0, 340282346638528859812000000000000000000, 0, 10000000, 0, 100000000, 0, 1000, 1, 0, 0, 0, 0)&quot;,</a>
+<a name="ln1110">      -1, &amp;stmt, NULL);</a>
+<a name="ln1111">  DT_DEBUG_SQLITE3_BIND_TEXT(stmt, 1, name, -1, SQLITE_TRANSIENT);</a>
+<a name="ln1112">  DT_DEBUG_SQLITE3_BIND_TEXT(stmt, 2, plugin_name, -1, SQLITE_TRANSIENT);</a>
+<a name="ln1113">  DT_DEBUG_SQLITE3_BIND_INT(stmt, 3, version);</a>
+<a name="ln1114">  DT_DEBUG_SQLITE3_BIND_BLOB(stmt, 4, params, params_size, SQLITE_TRANSIENT);</a>
+<a name="ln1115">  sqlite3_step(stmt);</a>
+<a name="ln1116">  sqlite3_finalize(stmt);</a>
+<a name="ln1117">}</a>
+<a name="ln1118"> </a>
+<a name="ln1119">gboolean dt_lib_is_visible(dt_lib_module_t *module)</a>
+<a name="ln1120">{</a>
+<a name="ln1121">  char key[512];</a>
+<a name="ln1122">  g_snprintf(key, sizeof(key), &quot;plugins/lighttable/%s/visible&quot;, module-&gt;plugin_name);</a>
+<a name="ln1123">  if(dt_conf_key_exists(key)) return dt_conf_get_bool(key);</a>
+<a name="ln1124"> </a>
+<a name="ln1125">  /* if not key found, always make module visible */</a>
+<a name="ln1126">  return TRUE;</a>
+<a name="ln1127">}</a>
+<a name="ln1128"> </a>
+<a name="ln1129">void dt_lib_set_visible(dt_lib_module_t *module, gboolean visible)</a>
+<a name="ln1130">{</a>
+<a name="ln1131">  char key[512];</a>
+<a name="ln1132">  g_snprintf(key, sizeof(key), &quot;plugins/lighttable/%s/visible&quot;, module-&gt;plugin_name);</a>
+<a name="ln1133">  dt_conf_set_bool(key, visible);</a>
+<a name="ln1134">  if(module-&gt;widget)</a>
+<a name="ln1135">  {</a>
+<a name="ln1136">    if(module-&gt;expander)</a>
+<a name="ln1137">    {</a>
+<a name="ln1138">      dtgtk_expander_set_expanded(DTGTK_EXPANDER(module-&gt;expander), visible);</a>
+<a name="ln1139">    }</a>
+<a name="ln1140">    else</a>
+<a name="ln1141">    {</a>
+<a name="ln1142">      if(visible)</a>
+<a name="ln1143">        gtk_widget_show_all(GTK_WIDGET(module-&gt;widget));</a>
+<a name="ln1144">      else</a>
+<a name="ln1145">        gtk_widget_hide(GTK_WIDGET(module-&gt;widget));</a>
+<a name="ln1146">    }</a>
+<a name="ln1147">  }</a>
+<a name="ln1148">}</a>
+<a name="ln1149"> </a>
+<a name="ln1150">void dt_lib_connect_common_accels(dt_lib_module_t *module)</a>
+<a name="ln1151">{</a>
+<a name="ln1152">  if(module-&gt;reset_button)</a>
+<a name="ln1153">    dt_accel_connect_button_lib(module, &quot;reset module parameters&quot;, module-&gt;reset_button);</a>
+<a name="ln1154">  if(module-&gt;presets_button) dt_accel_connect_button_lib(module, &quot;show preset menu&quot;, module-&gt;presets_button);</a>
+<a name="ln1155">  if(module-&gt;init_presets)</a>
+<a name="ln1156">  {</a>
+<a name="ln1157">    sqlite3_stmt *stmt;</a>
+<a name="ln1158">    DT_DEBUG_SQLITE3_PREPARE_V2(dt_database_get(darktable.db), &quot;SELECT name FROM data.presets WHERE operation=?1 &quot;</a>
+<a name="ln1159">                                                               &quot;AND op_version=?2 ORDER BY writeprotect DESC, &quot;</a>
+<a name="ln1160">                                                               &quot;name, rowid&quot;,</a>
+<a name="ln1161">                                -1, &amp;stmt, NULL);</a>
+<a name="ln1162">    DT_DEBUG_SQLITE3_BIND_TEXT(stmt, 1, module-&gt;plugin_name, -1, SQLITE_TRANSIENT);</a>
+<a name="ln1163">    DT_DEBUG_SQLITE3_BIND_INT(stmt, 2, module-&gt;version());</a>
+<a name="ln1164">    while(sqlite3_step(stmt) == SQLITE_ROW)</a>
+<a name="ln1165">    {</a>
+<a name="ln1166">      char path[1024];</a>
+<a name="ln1167">      snprintf(path, sizeof(path), &quot;%s/%s&quot;, _(&quot;preset&quot;), (char *)sqlite3_column_text(stmt, 0));</a>
+<a name="ln1168">      dt_accel_register_lib(module, path, 0, 0);</a>
+<a name="ln1169">      dt_accel_connect_preset_lib(module, (char *)sqlite3_column_text(stmt, 0));</a>
+<a name="ln1170">    }</a>
+<a name="ln1171">    sqlite3_finalize(stmt);</a>
+<a name="ln1172">  }</a>
+<a name="ln1173">}</a>
+<a name="ln1174"> </a>
+<a name="ln1175">gchar *dt_lib_get_localized_name(const gchar *plugin_name)</a>
+<a name="ln1176">{</a>
+<a name="ln1177">  // Prepare mapping op -&gt; localized name</a>
+<a name="ln1178">  static GHashTable *module_names = NULL;</a>
+<a name="ln1179">  if(module_names == NULL)</a>
+<a name="ln1180">  {</a>
+<a name="ln1181">    module_names = g_hash_table_new(g_str_hash, g_str_equal);</a>
+<a name="ln1182">    GList *lib = g_list_first(darktable.lib-&gt;plugins);</a>
+<a name="ln1183">    if(lib != NULL)</a>
+<a name="ln1184">    {</a>
+<a name="ln1185">      do</a>
+<a name="ln1186">      {</a>
+<a name="ln1187">        dt_lib_module_t *module = (dt_lib_module_t *)lib-&gt;data;</a>
+<a name="ln1188">        g_hash_table_insert(module_names, module-&gt;plugin_name, g_strdup(module-&gt;name(module)));</a>
+<a name="ln1189">      } while((lib = g_list_next(lib)) != NULL);</a>
+<a name="ln1190">    }</a>
+<a name="ln1191">  }</a>
+<a name="ln1192"> </a>
+<a name="ln1193">  return (gchar *)g_hash_table_lookup(module_names, plugin_name);</a>
+<a name="ln1194">}</a>
+<a name="ln1195"> </a>
+<a name="ln1196">void dt_lib_colorpicker_set_area(dt_lib_t *lib, float size)</a>
+<a name="ln1197">{</a>
+<a name="ln1198">  if(!lib-&gt;proxy.colorpicker.module || !lib-&gt;proxy.colorpicker.set_sample_area) return;</a>
+<a name="ln1199">  lib-&gt;proxy.colorpicker.set_sample_area(lib-&gt;proxy.colorpicker.module, size);</a>
+<a name="ln1200">  gtk_widget_grab_focus(dt_ui_center(darktable.gui-&gt;ui));</a>
+<a name="ln1201">}</a>
+<a name="ln1202"> </a>
+<a name="ln1203">void dt_lib_colorpicker_set_point(dt_lib_t *lib, float x, float y)</a>
+<a name="ln1204">{</a>
+<a name="ln1205">  if(!lib-&gt;proxy.colorpicker.module || !lib-&gt;proxy.colorpicker.set_sample_point) return;</a>
+<a name="ln1206">  lib-&gt;proxy.colorpicker.set_sample_point(lib-&gt;proxy.colorpicker.module, x, y);</a>
+<a name="ln1207">  gtk_widget_grab_focus(dt_ui_center(darktable.gui-&gt;ui));</a>
+<a name="ln1208">}</a>
+<a name="ln1209"> </a>
+<a name="ln1210">// modelines: These editor modelines have been set for all relevant files by tools/update_modelines.sh</a>
+<a name="ln1211">// vim: shiftwidth=2 expandtab tabstop=2 cindent</a>
+<a name="ln1212">// kate: tab-indents: off; indent-width 2; replace-tabs on; indent-mode cstyle; remove-trailing-spaces modified;</a>
+
+</code></pre>
+<div class="balloon" rel="785"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v522/" target="_blank">V522</a> There might be dereferencing of a potential null pointer 'mi'. Check lines: 785, 783.</p></div>
+
+<link rel="stylesheet" href="highlight.css">
+<script src="highlight.pack.js"></script>
+<script src="highlightjs-line-numbers.js"></script>
+<script>hljs.initHighlightingOnLoad();</script>
+<script>hljs.initLineNumbersOnLoad();</script>
+<script>
+  $(document).ready(function() {
+      $('.balloon').each(function () {
+          var bl = $(this);
+          var line = bl.attr('rel');
+          var text = $('a[name="ln'+line+'"]').text();
+
+          var space_count = 0;
+          for(var i = 0; i<text.length; i++){
+              var char = text[i];
+              if((char !== ' ')&&(char !== '\t'))break;
+              if(char === '\t')space_count++;
+              space_count++;
+          }
+
+          bl.css('margin-left', space_count*8);
+          $('a[name="ln'+line+'"]').after(bl);
+      });
+
+      window.location = window.location;
+  });
+</script>
+</body>
+</html>

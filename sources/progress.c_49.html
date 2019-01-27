@@ -1,0 +1,512 @@
+
+<html>
+<head>
+  <link rel="stylesheet" href="../style.css"/>
+  <script src="../jquery-3.2.1.min.js"></script>
+</head>
+<body>
+<pre><code class = "cpp">
+<a name="ln1">/*</a>
+<a name="ln2">    This file is part of darktable,</a>
+<a name="ln3">    copyright (c) 2014 tobias ellinghaus.</a>
+<a name="ln4"> </a>
+<a name="ln5">    darktable is free software: you can redistribute it and/or modify</a>
+<a name="ln6">    it under the terms of the GNU General Public License as published by</a>
+<a name="ln7">    the Free Software Foundation, either version 3 of the License, or</a>
+<a name="ln8">    (at your option) any later version.</a>
+<a name="ln9"> </a>
+<a name="ln10">    darktable is distributed in the hope that it will be useful,</a>
+<a name="ln11">    but WITHOUT ANY WARRANTY; without even the implied warranty of</a>
+<a name="ln12">    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the</a>
+<a name="ln13">    GNU General Public License for more details.</a>
+<a name="ln14"> </a>
+<a name="ln15">    You should have received a copy of the GNU General Public License</a>
+<a name="ln16">    along with darktable.  If not, see &lt;http://www.gnu.org/licenses/&gt;.</a>
+<a name="ln17">*/</a>
+<a name="ln18"> </a>
+<a name="ln19">#include &quot;common/dbus.h&quot;</a>
+<a name="ln20">#include &quot;control/progress.h&quot;</a>
+<a name="ln21">#include &quot;control/control.h&quot;</a>
+<a name="ln22"> </a>
+<a name="ln23">#ifdef HAVE_UNITY</a>
+<a name="ln24">#include &lt;unity/unity/unity.h&gt;</a>
+<a name="ln25">#endif</a>
+<a name="ln26">#ifdef MAC_INTEGRATION</a>
+<a name="ln27">#include &lt;gtkosxapplication.h&gt;</a>
+<a name="ln28">#endif</a>
+<a name="ln29"> </a>
+<a name="ln30">#ifdef _WIN32</a>
+<a name="ln31">#include &lt;gdk/gdkwin32.h&gt;</a>
+<a name="ln32">#ifndef ITaskbarList3_SetProgressValue</a>
+<a name="ln33">  #define ITaskbarList3_SetProgressValue(This,hwnd,ullCompleted,ullTotal) (This)-&gt;lpVtbl-&gt;SetProgressValue(This,hwnd,ullCompleted,ullTotal)</a>
+<a name="ln34">#endif</a>
+<a name="ln35">#ifndef ITaskbarList3_SetProgressState</a>
+<a name="ln36">  #define ITaskbarList3_SetProgressState(This,hwnd,tbpFlags) (This)-&gt;lpVtbl-&gt;SetProgressState(This,hwnd,tbpFlags)</a>
+<a name="ln37">#endif</a>
+<a name="ln38">#ifndef ITaskbarList3_HrInit</a>
+<a name="ln39">  #define ITaskbarList3_HrInit(This) (This)-&gt;lpVtbl-&gt;HrInit(This)</a>
+<a name="ln40">#endif</a>
+<a name="ln41">#endif</a>
+<a name="ln42"> </a>
+<a name="ln43"> </a>
+<a name="ln44">typedef struct _dt_progress_t</a>
+<a name="ln45">{</a>
+<a name="ln46">  double progress;</a>
+<a name="ln47">  gchar *message;</a>
+<a name="ln48">  gboolean has_progress_bar;</a>
+<a name="ln49">  dt_pthread_mutex_t mutex;</a>
+<a name="ln50">  void *gui_data;</a>
+<a name="ln51"> </a>
+<a name="ln52">  // cancel callback and its data</a>
+<a name="ln53">  dt_progress_cancel_callback_t cancel;</a>
+<a name="ln54">  void *cancel_data;</a>
+<a name="ln55"> </a>
+<a name="ln56">#ifdef HAVE_UNITY</a>
+<a name="ln57">  UnityLauncherEntry *darktable_launcher;</a>
+<a name="ln58">#endif</a>
+<a name="ln59"> </a>
+<a name="ln60">} _dt_progress_t;</a>
+<a name="ln61"> </a>
+<a name="ln62">static void global_progress_start(dt_control_t *control, dt_progress_t *progress)</a>
+<a name="ln63">{</a>
+<a name="ln64">  control-&gt;progress_system.n_progress_bar++;</a>
+<a name="ln65"> </a>
+<a name="ln66">#ifndef _WIN32</a>
+<a name="ln67"> </a>
+<a name="ln68">#ifdef HAVE_UNITY</a>
+<a name="ln69"> </a>
+<a name="ln70">  progress-&gt;darktable_launcher = unity_launcher_entry_get_for_desktop_id(&quot;darktable.desktop&quot;);</a>
+<a name="ln71">  unity_launcher_entry_set_progress(progress-&gt;darktable_launcher, 0.0);</a>
+<a name="ln72">  unity_launcher_entry_set_progress_visible(progress-&gt;darktable_launcher, TRUE);</a>
+<a name="ln73"> </a>
+<a name="ln74">#else</a>
+<a name="ln75"> </a>
+<a name="ln76">  // this should work for unity as well as kde</a>
+<a name="ln77">  // https://wiki.ubuntu.com/Unity/LauncherAPI#Low_level_DBus_API:_com.canonical.Unity.LauncherEntry</a>
+<a name="ln78">  if(darktable.dbus-&gt;dbus_connection)</a>
+<a name="ln79">  {</a>
+<a name="ln80">    GError *error = NULL;</a>
+<a name="ln81">    g_object_ref(G_OBJECT(darktable.dbus-&gt;dbus_connection));</a>
+<a name="ln82"> </a>
+<a name="ln83">    GVariantBuilder builder;</a>
+<a name="ln84">    g_variant_builder_init(&amp;builder, G_VARIANT_TYPE(&quot;a{sv}&quot;));</a>
+<a name="ln85">    g_variant_builder_add(&amp;builder, &quot;{sv}&quot;, &quot;progress&quot;, g_variant_new_double(control-&gt;progress_system.global_progress));</a>
+<a name="ln86">    g_variant_builder_add(&amp;builder, &quot;{sv}&quot;, &quot;progress-visible&quot;, g_variant_new_boolean(TRUE));</a>
+<a name="ln87">    GVariant *params = g_variant_new(&quot;(sa{sv})&quot;, &quot;application://darktable.desktop&quot;, &amp;builder);</a>
+<a name="ln88"> </a>
+<a name="ln89">    g_dbus_connection_emit_signal(darktable.dbus-&gt;dbus_connection,</a>
+<a name="ln90">                                  &quot;com.canonical.Unity&quot;,</a>
+<a name="ln91">                                  &quot;/darktable&quot;,</a>
+<a name="ln92">                                  &quot;com.canonical.Unity.LauncherEntry&quot;,</a>
+<a name="ln93">                                  &quot;Update&quot;,</a>
+<a name="ln94">                                  params,</a>
+<a name="ln95">                                  &amp;error);</a>
+<a name="ln96">    if(error)</a>
+<a name="ln97">    {</a>
+<a name="ln98">      fprintf(stderr, &quot;[progress_create] dbus error: %s\n&quot;, error-&gt;message);</a>
+<a name="ln99">      g_error_free(error);</a>
+<a name="ln100">    }</a>
+<a name="ln101">  }</a>
+<a name="ln102"> </a>
+<a name="ln103">#endif // HAVE_UNITY</a>
+<a name="ln104"> </a>
+<a name="ln105">#else // _WIN32</a>
+<a name="ln106"> </a>
+<a name="ln107">  // we can't init this in dt_control_progress_init as it's run too early :/</a>
+<a name="ln108">  if(!control-&gt;progress_system.taskbarlist)</a>
+<a name="ln109">  {</a>
+<a name="ln110">    void *taskbarlist;</a>
+<a name="ln111">    if(CoCreateInstance(&amp;CLSID_TaskbarList, NULL, CLSCTX_INPROC_SERVER, &amp;IID_ITaskbarList3, (void **)&amp;taskbarlist) == S_OK)</a>
+<a name="ln112">      if(ITaskbarList3_HrInit((ITaskbarList3 *)taskbarlist) == S_OK)</a>
+<a name="ln113">        control-&gt;progress_system.taskbarlist = taskbarlist;</a>
+<a name="ln114">  }</a>
+<a name="ln115"> </a>
+<a name="ln116">  if(control-&gt;progress_system.taskbarlist)</a>
+<a name="ln117">  {</a>
+<a name="ln118">    HWND hwnd = GDK_WINDOW_HWND(gtk_widget_get_window(dt_ui_main_window(darktable.gui-&gt;ui)));</a>
+<a name="ln119">    if(ITaskbarList3_SetProgressState(control-&gt;progress_system.taskbarlist, hwnd, TBPF_NORMAL) != S_OK)</a>
+<a name="ln120">      fprintf(stderr, &quot;[progress_create] SetProgressState failed\n&quot;);</a>
+<a name="ln121">    if(ITaskbarList3_SetProgressValue(control-&gt;progress_system.taskbarlist, hwnd, control-&gt;progress_system.global_progress * 100, 100) != S_OK)</a>
+<a name="ln122">      fprintf(stderr, &quot;[progress_create] SetProgressValue failed\n&quot;);</a>
+<a name="ln123">  }</a>
+<a name="ln124"> </a>
+<a name="ln125">#endif</a>
+<a name="ln126">}</a>
+<a name="ln127"> </a>
+<a name="ln128">static void global_progress_set(dt_control_t *control, dt_progress_t *progress, double value)</a>
+<a name="ln129">{</a>
+<a name="ln130">  control-&gt;progress_system.global_progress = MAX(control-&gt;progress_system.global_progress, value);</a>
+<a name="ln131"> </a>
+<a name="ln132">#ifndef _WIN32</a>
+<a name="ln133"> </a>
+<a name="ln134">#ifdef HAVE_UNITY</a>
+<a name="ln135"> </a>
+<a name="ln136">  unity_launcher_entry_set_progress(progress-&gt;darktable_launcher, value);</a>
+<a name="ln137"> </a>
+<a name="ln138">#else</a>
+<a name="ln139"> </a>
+<a name="ln140">  if(darktable.dbus-&gt;dbus_connection)</a>
+<a name="ln141">  {</a>
+<a name="ln142">    GError *error = NULL;</a>
+<a name="ln143"> </a>
+<a name="ln144">    GVariantBuilder builder;</a>
+<a name="ln145">    g_variant_builder_init(&amp;builder, G_VARIANT_TYPE(&quot;a{sv}&quot;));</a>
+<a name="ln146">    g_variant_builder_add(&amp;builder, &quot;{sv}&quot;, &quot;progress&quot;, g_variant_new_double(control-&gt;progress_system.global_progress));</a>
+<a name="ln147">    GVariant *params = g_variant_new(&quot;(sa{sv})&quot;, &quot;application://darktable.desktop&quot;, &amp;builder);</a>
+<a name="ln148"> </a>
+<a name="ln149">    g_dbus_connection_emit_signal(darktable.dbus-&gt;dbus_connection,</a>
+<a name="ln150">                                  &quot;com.canonical.Unity&quot;,</a>
+<a name="ln151">                                  &quot;/darktable&quot;,</a>
+<a name="ln152">                                  &quot;com.canonical.Unity.LauncherEntry&quot;,</a>
+<a name="ln153">                                  &quot;Update&quot;,</a>
+<a name="ln154">                                  params,</a>
+<a name="ln155">                                  &amp;error);</a>
+<a name="ln156">    if(error)</a>
+<a name="ln157">    {</a>
+<a name="ln158">      fprintf(stderr, &quot;[progress_set] dbus error: %s\n&quot;, error-&gt;message);</a>
+<a name="ln159">      g_error_free(error);</a>
+<a name="ln160">    }</a>
+<a name="ln161">  }</a>
+<a name="ln162"> </a>
+<a name="ln163">#endif // HAVE_UNITY</a>
+<a name="ln164"> </a>
+<a name="ln165">#else // _WIN32</a>
+<a name="ln166"> </a>
+<a name="ln167">  if(control-&gt;progress_system.taskbarlist)</a>
+<a name="ln168">  {</a>
+<a name="ln169">    HWND hwnd = GDK_WINDOW_HWND(gtk_widget_get_window(dt_ui_main_window(darktable.gui-&gt;ui)));</a>
+<a name="ln170">    if(ITaskbarList3_SetProgressValue(control-&gt;progress_system.taskbarlist, hwnd, control-&gt;progress_system.global_progress * 100, 100) != S_OK)</a>
+<a name="ln171">      fprintf(stderr, &quot;[progress_create] SetProgressValue failed\n&quot;);</a>
+<a name="ln172">  }</a>
+<a name="ln173"> </a>
+<a name="ln174">#endif</a>
+<a name="ln175">}</a>
+<a name="ln176"> </a>
+<a name="ln177">static void global_progress_end(dt_control_t *control, dt_progress_t *progress)</a>
+<a name="ln178">{</a>
+<a name="ln179">  control-&gt;progress_system.n_progress_bar--;</a>
+<a name="ln180"> </a>
+<a name="ln181">  // find the biggest progress value among the remaining progress bars</a>
+<a name="ln182">  control-&gt;progress_system.global_progress = 0.0;</a>
+<a name="ln183">  for(GList *iter = control-&gt;progress_system.list; iter; iter = g_list_next(iter))</a>
+<a name="ln184">  {</a>
+<a name="ln185">    // this is called after the current progress got removed from the list!</a>
+<a name="ln186">    dt_progress_t *p = (dt_progress_t *)iter-&gt;data;</a>
+<a name="ln187">    double value = dt_control_progress_get_progress(p);</a>
+<a name="ln188">    control-&gt;progress_system.global_progress = MAX(control-&gt;progress_system.global_progress, value);</a>
+<a name="ln189">  }</a>
+<a name="ln190"> </a>
+<a name="ln191">#ifndef _WIN32</a>
+<a name="ln192"> </a>
+<a name="ln193">#ifdef HAVE_UNITY</a>
+<a name="ln194"> </a>
+<a name="ln195">  unity_launcher_entry_set_progress(progress-&gt;darktable_launcher, 1.0);</a>
+<a name="ln196">  unity_launcher_entry_set_progress_visible(progress-&gt;darktable_launcher, FALSE);</a>
+<a name="ln197"> </a>
+<a name="ln198">#else</a>
+<a name="ln199"> </a>
+<a name="ln200">  if(darktable.dbus-&gt;dbus_connection)</a>
+<a name="ln201">  {</a>
+<a name="ln202">    GError *error = NULL;</a>
+<a name="ln203"> </a>
+<a name="ln204">    GVariantBuilder builder;</a>
+<a name="ln205">    g_variant_builder_init(&amp;builder, G_VARIANT_TYPE(&quot;a{sv}&quot;));</a>
+<a name="ln206">    if(control-&gt;progress_system.n_progress_bar == 0)</a>
+<a name="ln207">      g_variant_builder_add(&amp;builder, &quot;{sv}&quot;, &quot;progress-visible&quot;, g_variant_new_boolean(FALSE));</a>
+<a name="ln208">    g_variant_builder_add(&amp;builder, &quot;{sv}&quot;, &quot;progress&quot;, g_variant_new_double(control-&gt;progress_system.global_progress));</a>
+<a name="ln209">    GVariant *params = g_variant_new(&quot;(sa{sv})&quot;, &quot;application://darktable.desktop&quot;, &amp;builder);</a>
+<a name="ln210"> </a>
+<a name="ln211">    g_dbus_connection_emit_signal(darktable.dbus-&gt;dbus_connection,</a>
+<a name="ln212">                                  &quot;com.canonical.Unity&quot;,</a>
+<a name="ln213">                                  &quot;/darktable&quot;,</a>
+<a name="ln214">                                  &quot;com.canonical.Unity.LauncherEntry&quot;,</a>
+<a name="ln215">                                  &quot;Update&quot;,</a>
+<a name="ln216">                                  params,</a>
+<a name="ln217">                                  &amp;error);</a>
+<a name="ln218">    if(error)</a>
+<a name="ln219">    {</a>
+<a name="ln220">      fprintf(stderr, &quot;[progress_destroy] dbus error: %s\n&quot;, error-&gt;message);</a>
+<a name="ln221">      g_error_free(error);</a>
+<a name="ln222">    }</a>
+<a name="ln223"> </a>
+<a name="ln224">    g_object_unref(G_OBJECT(darktable.dbus-&gt;dbus_connection));</a>
+<a name="ln225">  }</a>
+<a name="ln226"> </a>
+<a name="ln227">#endif // HAVE_UNITY</a>
+<a name="ln228"> </a>
+<a name="ln229">#else // _WIN32</a>
+<a name="ln230"> </a>
+<a name="ln231">  if(control-&gt;progress_system.taskbarlist)</a>
+<a name="ln232">  {</a>
+<a name="ln233">    HWND hwnd = GDK_WINDOW_HWND(gtk_widget_get_window(dt_ui_main_window(darktable.gui-&gt;ui)));</a>
+<a name="ln234">    if(control-&gt;progress_system.n_progress_bar == 0)</a>
+<a name="ln235">    {</a>
+<a name="ln236">      if(ITaskbarList3_SetProgressState(control-&gt;progress_system.taskbarlist, hwnd, TBPF_NOPROGRESS) != S_OK)</a>
+<a name="ln237">        fprintf(stderr, &quot;[progress_create] SetProgressState failed\n&quot;);</a>
+<a name="ln238">    }</a>
+<a name="ln239">    else</a>
+<a name="ln240">    {</a>
+<a name="ln241">      if(ITaskbarList3_SetProgressValue(control-&gt;progress_system.taskbarlist, hwnd,</a>
+<a name="ln242">                                        control-&gt;progress_system.global_progress * 100, 100) != S_OK)</a>
+<a name="ln243">        fprintf(stderr, &quot;[progress_create] SetProgressValue failed\n&quot;);</a>
+<a name="ln244">    }</a>
+<a name="ln245">  }</a>
+<a name="ln246"> </a>
+<a name="ln247">#endif</a>
+<a name="ln248">}</a>
+<a name="ln249"> </a>
+<a name="ln250">void dt_control_progress_init(struct dt_control_t *control)</a>
+<a name="ln251">{</a>
+<a name="ln252">#ifndef _WIN32</a>
+<a name="ln253"> </a>
+<a name="ln254">#ifdef HAVE_UNITY</a>
+<a name="ln255"> </a>
+<a name="ln256">  UnityLauncherEntry *darktable_launcher = unity_launcher_entry_get_for_desktop_id(&quot;darktable.desktop&quot;);</a>
+<a name="ln257">  unity_launcher_entry_set_progress_visible(darktable_launcher, FALSE);</a>
+<a name="ln258"> </a>
+<a name="ln259">#else</a>
+<a name="ln260"> </a>
+<a name="ln261">  if(darktable.dbus-&gt;dbus_connection)</a>
+<a name="ln262">  {</a>
+<a name="ln263">    GError *error = NULL;</a>
+<a name="ln264"> </a>
+<a name="ln265">    GVariantBuilder builder;</a>
+<a name="ln266">    g_variant_builder_init(&amp;builder, G_VARIANT_TYPE(&quot;a{sv}&quot;));</a>
+<a name="ln267">    g_variant_builder_add(&amp;builder, &quot;{sv}&quot;, &quot;progress-visible&quot;, g_variant_new_boolean(FALSE));</a>
+<a name="ln268">    GVariant *params = g_variant_new(&quot;(sa{sv})&quot;, &quot;application://darktable.desktop&quot;, &amp;builder);</a>
+<a name="ln269"> </a>
+<a name="ln270">    g_dbus_connection_emit_signal(darktable.dbus-&gt;dbus_connection,</a>
+<a name="ln271">                                  &quot;com.canonical.Unity&quot;,</a>
+<a name="ln272">                                  &quot;/darktable&quot;,</a>
+<a name="ln273">                                  &quot;com.canonical.Unity.LauncherEntry&quot;,</a>
+<a name="ln274">                                  &quot;Update&quot;,</a>
+<a name="ln275">                                  params,</a>
+<a name="ln276">                                  &amp;error);</a>
+<a name="ln277">    if(error)</a>
+<a name="ln278">    {</a>
+<a name="ln279">      fprintf(stderr, &quot;[progress_init] dbus error: %s\n&quot;, error-&gt;message);</a>
+<a name="ln280">      g_error_free(error);</a>
+<a name="ln281">    }</a>
+<a name="ln282"> </a>
+<a name="ln283">    g_object_unref(G_OBJECT(darktable.dbus-&gt;dbus_connection));</a>
+<a name="ln284">  }</a>
+<a name="ln285"> </a>
+<a name="ln286">#endif // HAVE_UNITY</a>
+<a name="ln287"> </a>
+<a name="ln288">#else // _WIN32</a>
+<a name="ln289"> </a>
+<a name="ln290">  // initializing control-&gt;progress_system.taskbarlist in here doesn't work,</a>
+<a name="ln291">  // it seems to only succeed after dt_gui_gtk_init</a>
+<a name="ln292"> </a>
+<a name="ln293">#endif // _WIN32</a>
+<a name="ln294">}</a>
+<a name="ln295"> </a>
+<a name="ln296">dt_progress_t *dt_control_progress_create(dt_control_t *control, gboolean has_progress_bar,</a>
+<a name="ln297">                                          const gchar *message)</a>
+<a name="ln298">{</a>
+<a name="ln299">  // create the object</a>
+<a name="ln300">  dt_progress_t *progress = (dt_progress_t *)calloc(1, sizeof(dt_progress_t));</a>
+<a name="ln301">  dt_pthread_mutex_init(&amp;(progress-&gt;mutex), NULL);</a>
+<a name="ln302"> </a>
+<a name="ln303">  // fill it with values</a>
+<a name="ln304">  progress-&gt;message = g_strdup(message);</a>
+<a name="ln305">  progress-&gt;has_progress_bar = has_progress_bar;</a>
+<a name="ln306"> </a>
+<a name="ln307">  dt_pthread_mutex_lock(&amp;control-&gt;progress_system.mutex);</a>
+<a name="ln308"> </a>
+<a name="ln309">  // add it to the global list</a>
+<a name="ln310">  control-&gt;progress_system.list = g_list_append(control-&gt;progress_system.list, progress);</a>
+<a name="ln311">  control-&gt;progress_system.list_length++;</a>
+<a name="ln312">  if(has_progress_bar) global_progress_start(control, progress);</a>
+<a name="ln313"> </a>
+<a name="ln314">  // tell the gui</a>
+<a name="ln315">  if(control-&gt;progress_system.proxy.module != NULL)</a>
+<a name="ln316">    progress-&gt;gui_data = control-&gt;progress_system.proxy.added(control-&gt;progress_system.proxy.module,</a>
+<a name="ln317">                                                              has_progress_bar, message);</a>
+<a name="ln318"> </a>
+<a name="ln319">  dt_pthread_mutex_unlock(&amp;control-&gt;progress_system.mutex);</a>
+<a name="ln320"> </a>
+<a name="ln321">  return progress;</a>
+<a name="ln322">}</a>
+<a name="ln323"> </a>
+<a name="ln324">void dt_control_progress_destroy(dt_control_t *control, dt_progress_t *progress)</a>
+<a name="ln325">{</a>
+<a name="ln326">  dt_pthread_mutex_lock(&amp;control-&gt;progress_system.mutex);</a>
+<a name="ln327"> </a>
+<a name="ln328">  // tell the gui</a>
+<a name="ln329">  if(control-&gt;progress_system.proxy.module != NULL)</a>
+<a name="ln330">    control-&gt;progress_system.proxy.destroyed(control-&gt;progress_system.proxy.module, progress-&gt;gui_data);</a>
+<a name="ln331"> </a>
+<a name="ln332">  // remove the object from the global list</a>
+<a name="ln333">  control-&gt;progress_system.list = g_list_remove(control-&gt;progress_system.list, progress);</a>
+<a name="ln334">  control-&gt;progress_system.list_length--;</a>
+<a name="ln335">  if(progress-&gt;has_progress_bar) global_progress_end(control, progress);</a>
+<a name="ln336"> </a>
+<a name="ln337">  dt_pthread_mutex_unlock(&amp;control-&gt;progress_system.mutex);</a>
+<a name="ln338"> </a>
+<a name="ln339">  // free the object</a>
+<a name="ln340">  dt_pthread_mutex_destroy(&amp;progress-&gt;mutex);</a>
+<a name="ln341">  g_free(progress-&gt;message);</a>
+<a name="ln342">  free(progress);</a>
+<a name="ln343">}</a>
+<a name="ln344"> </a>
+<a name="ln345">void dt_control_progress_make_cancellable(struct dt_control_t *control, dt_progress_t *progress,</a>
+<a name="ln346">                                          dt_progress_cancel_callback_t cancel, void *data)</a>
+<a name="ln347">{</a>
+<a name="ln348">  // set the value</a>
+<a name="ln349">  dt_pthread_mutex_lock(&amp;progress-&gt;mutex);</a>
+<a name="ln350">  progress-&gt;cancel = cancel;</a>
+<a name="ln351">  progress-&gt;cancel_data = data;</a>
+<a name="ln352">  dt_pthread_mutex_unlock(&amp;progress-&gt;mutex);</a>
+<a name="ln353"> </a>
+<a name="ln354">  // tell the gui</a>
+<a name="ln355">  dt_pthread_mutex_lock(&amp;control-&gt;progress_system.mutex);</a>
+<a name="ln356">  if(control-&gt;progress_system.proxy.module != NULL)</a>
+<a name="ln357">    control-&gt;progress_system.proxy.cancellable(control-&gt;progress_system.proxy.module, progress-&gt;gui_data,</a>
+<a name="ln358">                                               progress);</a>
+<a name="ln359">  dt_pthread_mutex_unlock(&amp;control-&gt;progress_system.mutex);</a>
+<a name="ln360">}</a>
+<a name="ln361"> </a>
+<a name="ln362">static void dt_control_progress_cancel_callback(dt_progress_t *progress, void *data)</a>
+<a name="ln363">{</a>
+<a name="ln364">  dt_control_job_cancel((dt_job_t *)data);</a>
+<a name="ln365">}</a>
+<a name="ln366"> </a>
+<a name="ln367">void dt_control_progress_attach_job(dt_control_t *control, dt_progress_t *progress, dt_job_t *job)</a>
+<a name="ln368">{</a>
+<a name="ln369">  dt_control_progress_make_cancellable(control, progress, &amp;dt_control_progress_cancel_callback, job);</a>
+<a name="ln370">}</a>
+<a name="ln371"> </a>
+<a name="ln372">void dt_control_progress_cancel(dt_control_t *control, dt_progress_t *progress)</a>
+<a name="ln373">{</a>
+<a name="ln374">  dt_pthread_mutex_lock(&amp;progress-&gt;mutex);</a>
+<a name="ln375">  if(progress-&gt;cancel == NULL)</a>
+<a name="ln376">  {</a>
+<a name="ln377">    dt_pthread_mutex_unlock(&amp;progress-&gt;mutex);</a>
+<a name="ln378">    return;</a>
+<a name="ln379">  }</a>
+<a name="ln380"> </a>
+<a name="ln381">  // call the cancel callback</a>
+<a name="ln382">  progress-&gt;cancel(progress, progress-&gt;cancel_data);</a>
+<a name="ln383"> </a>
+<a name="ln384">  dt_pthread_mutex_unlock(&amp;progress-&gt;mutex);</a>
+<a name="ln385"> </a>
+<a name="ln386">  // the gui doesn't need to know I guess, it wouldn't to anything with that bit of information</a>
+<a name="ln387">}</a>
+<a name="ln388"> </a>
+<a name="ln389">void dt_control_progress_set_progress(dt_control_t *control, dt_progress_t *progress, double value)</a>
+<a name="ln390">{</a>
+<a name="ln391">  // set the value</a>
+<a name="ln392">  value = CLAMP(value, 0.0, 1.0);</a>
+<a name="ln393">  dt_pthread_mutex_lock(&amp;progress-&gt;mutex);</a>
+<a name="ln394">  progress-&gt;progress = value;</a>
+<a name="ln395">  dt_pthread_mutex_unlock(&amp;progress-&gt;mutex);</a>
+<a name="ln396"> </a>
+<a name="ln397">  // tell the gui</a>
+<a name="ln398">  dt_pthread_mutex_lock(&amp;control-&gt;progress_system.mutex);</a>
+<a name="ln399">  if(control-&gt;progress_system.proxy.module != NULL)</a>
+<a name="ln400">    control-&gt;progress_system.proxy.updated(control-&gt;progress_system.proxy.module, progress-&gt;gui_data, value);</a>
+<a name="ln401"> </a>
+<a name="ln402">  if(progress-&gt;has_progress_bar) global_progress_set(control, progress, value);</a>
+<a name="ln403"> </a>
+<a name="ln404">  dt_pthread_mutex_unlock(&amp;control-&gt;progress_system.mutex);</a>
+<a name="ln405">}</a>
+<a name="ln406"> </a>
+<a name="ln407">double dt_control_progress_get_progress(dt_progress_t *progress)</a>
+<a name="ln408">{</a>
+<a name="ln409">  dt_pthread_mutex_lock(&amp;progress-&gt;mutex);</a>
+<a name="ln410">  double res = progress-&gt;progress;</a>
+<a name="ln411">  dt_pthread_mutex_unlock(&amp;progress-&gt;mutex);</a>
+<a name="ln412">  return res;</a>
+<a name="ln413">}</a>
+<a name="ln414"> </a>
+<a name="ln415">const gchar *dt_control_progress_get_message(dt_progress_t *progress)</a>
+<a name="ln416">{</a>
+<a name="ln417">  dt_pthread_mutex_lock(&amp;progress-&gt;mutex);</a>
+<a name="ln418">  const gchar *res = progress-&gt;message;</a>
+<a name="ln419">  dt_pthread_mutex_unlock(&amp;progress-&gt;mutex);</a>
+<a name="ln420">  return res;</a>
+<a name="ln421">}</a>
+<a name="ln422"> </a>
+<a name="ln423">void dt_control_progress_set_message(dt_control_t *control, dt_progress_t *progress, const char *message)</a>
+<a name="ln424">{</a>
+<a name="ln425">  dt_pthread_mutex_lock(&amp;progress-&gt;mutex);</a>
+<a name="ln426">  g_free(progress-&gt;message);</a>
+<a name="ln427">  progress-&gt;message = g_strdup(message);</a>
+<a name="ln428">  dt_pthread_mutex_unlock(&amp;progress-&gt;mutex);</a>
+<a name="ln429"> </a>
+<a name="ln430">  // tell the gui</a>
+<a name="ln431">  dt_pthread_mutex_lock(&amp;control-&gt;progress_system.mutex);</a>
+<a name="ln432">  if(control-&gt;progress_system.proxy.module != NULL)</a>
+<a name="ln433">    control-&gt;progress_system.proxy.message_updated(control-&gt;progress_system.proxy.module, progress-&gt;gui_data,</a>
+<a name="ln434">                                                   message);</a>
+<a name="ln435">  dt_pthread_mutex_unlock(&amp;control-&gt;progress_system.mutex);</a>
+<a name="ln436">}</a>
+<a name="ln437"> </a>
+<a name="ln438">void dt_control_progress_set_gui_data(dt_progress_t *progress, void *data)</a>
+<a name="ln439">{</a>
+<a name="ln440">  dt_pthread_mutex_lock(&amp;progress-&gt;mutex);</a>
+<a name="ln441">  progress-&gt;gui_data = data;</a>
+<a name="ln442">  dt_pthread_mutex_unlock(&amp;progress-&gt;mutex);</a>
+<a name="ln443">}</a>
+<a name="ln444"> </a>
+<a name="ln445">void *dt_control_progress_get_gui_data(dt_progress_t *progress)</a>
+<a name="ln446">{</a>
+<a name="ln447">  dt_pthread_mutex_lock(&amp;progress-&gt;mutex);</a>
+<a name="ln448">  void *res = progress-&gt;gui_data;</a>
+<a name="ln449">  dt_pthread_mutex_unlock(&amp;progress-&gt;mutex);</a>
+<a name="ln450">  return res;</a>
+<a name="ln451">}</a>
+<a name="ln452"> </a>
+<a name="ln453">gboolean dt_control_progress_has_progress_bar(dt_progress_t *progress)</a>
+<a name="ln454">{</a>
+<a name="ln455">  dt_pthread_mutex_lock(&amp;progress-&gt;mutex);</a>
+<a name="ln456">  gboolean res = progress-&gt;has_progress_bar;</a>
+<a name="ln457">  dt_pthread_mutex_unlock(&amp;progress-&gt;mutex);</a>
+<a name="ln458">  return res;</a>
+<a name="ln459">}</a>
+<a name="ln460"> </a>
+<a name="ln461">gboolean dt_control_progress_cancellable(dt_progress_t *progress)</a>
+<a name="ln462">{</a>
+<a name="ln463">  dt_pthread_mutex_lock(&amp;progress-&gt;mutex);</a>
+<a name="ln464">  gboolean res = progress-&gt;cancel != NULL;</a>
+<a name="ln465">  dt_pthread_mutex_unlock(&amp;progress-&gt;mutex);</a>
+<a name="ln466">  return res;</a>
+<a name="ln467">}</a>
+<a name="ln468"> </a>
+<a name="ln469">// modelines: These editor modelines have been set for all relevant files by tools/update_modelines.sh</a>
+<a name="ln470">// vim: shiftwidth=2 expandtab tabstop=2 cindent</a>
+<a name="ln471">// kate: tab-indents: off; indent-width 2; replace-tabs on; indent-mode cstyle; remove-trailing-spaces modified;</a>
+
+</code></pre>
+<div class="balloon" rel="301"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v522/" target="_blank">V522</a> There might be dereferencing of a potential null pointer 'progress'. Check lines: 301, 300.</p></div>
+
+<link rel="stylesheet" href="highlight.css">
+<script src="highlight.pack.js"></script>
+<script src="highlightjs-line-numbers.js"></script>
+<script>hljs.initHighlightingOnLoad();</script>
+<script>hljs.initLineNumbersOnLoad();</script>
+<script>
+  $(document).ready(function() {
+      $('.balloon').each(function () {
+          var bl = $(this);
+          var line = bl.attr('rel');
+          var text = $('a[name="ln'+line+'"]').text();
+
+          var space_count = 0;
+          for(var i = 0; i<text.length; i++){
+              var char = text[i];
+              if((char !== ' ')&&(char !== '\t'))break;
+              if(char === '\t')space_count++;
+              space_count++;
+          }
+
+          bl.css('margin-left', space_count*8);
+          $('a[name="ln'+line+'"]').after(bl);
+      });
+
+      window.location = window.location;
+  });
+</script>
+</body>
+</html>

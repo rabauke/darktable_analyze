@@ -1,0 +1,1468 @@
+
+<html>
+<head>
+  <link rel="stylesheet" href="../style.css"/>
+  <script src="../jquery-3.2.1.min.js"></script>
+</head>
+<body>
+<pre><code class = "cpp">
+<a name="ln1">/*</a>
+<a name="ln2">  This file is part of darktable,</a>
+<a name="ln3">  copyright (c) 2015 Ulrich Pegelow.</a>
+<a name="ln4"> </a>
+<a name="ln5">  darktable is free software: you can redistribute it and/or modify</a>
+<a name="ln6">  it under the terms of the GNU General Public License as published by</a>
+<a name="ln7">  the Free Software Foundation, either version 3 of the License, or</a>
+<a name="ln8">  (at your option) any later version.</a>
+<a name="ln9"> </a>
+<a name="ln10">  darktable is distributed in the hope that it will be useful,</a>
+<a name="ln11">  but WITHOUT ANY WARRANTY; without even the implied warranty of</a>
+<a name="ln12">  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the</a>
+<a name="ln13">  GNU General Public License for more details.</a>
+<a name="ln14"> </a>
+<a name="ln15">  You should have received a copy of the GNU General Public License</a>
+<a name="ln16">  along with darktable.  If not, see &lt;http://www.gnu.org/licenses/&gt;.</a>
+<a name="ln17">*/</a>
+<a name="ln18"> </a>
+<a name="ln19">#ifdef HAVE_CONFIG_H</a>
+<a name="ln20">#include &quot;config.h&quot;</a>
+<a name="ln21">#endif</a>
+<a name="ln22">#include &quot;bauhaus/bauhaus.h&quot;</a>
+<a name="ln23">#include &quot;common/colorspaces_inline_conversions.h&quot;</a>
+<a name="ln24">#include &quot;common/debug.h&quot;</a>
+<a name="ln25">#include &quot;common/opencl.h&quot;</a>
+<a name="ln26">#include &quot;control/control.h&quot;</a>
+<a name="ln27">#include &quot;develop/develop.h&quot;</a>
+<a name="ln28">#include &quot;develop/imageop.h&quot;</a>
+<a name="ln29">#include &quot;develop/tiling.h&quot;</a>
+<a name="ln30">#include &quot;gui/accelerators.h&quot;</a>
+<a name="ln31">#include &quot;gui/gtk.h&quot;</a>
+<a name="ln32">#include &quot;gui/presets.h&quot;</a>
+<a name="ln33">#include &quot;iop/iop_api.h&quot;</a>
+<a name="ln34"> </a>
+<a name="ln35">#include &lt;assert.h&gt;</a>
+<a name="ln36">#include &lt;gtk/gtk.h&gt;</a>
+<a name="ln37">#include &lt;inttypes.h&gt;</a>
+<a name="ln38">#include &lt;math.h&gt;</a>
+<a name="ln39">#include &lt;stdlib.h&gt;</a>
+<a name="ln40">#include &lt;string.h&gt;</a>
+<a name="ln41"> </a>
+<a name="ln42">#define DT_COLORRECONSTRUCT_BILATERAL_MAX_RES_S 500</a>
+<a name="ln43">#define DT_COLORRECONSTRUCT_BILATERAL_MAX_RES_R 100</a>
+<a name="ln44">#define DT_COLORRECONSTRUCT_SPATIAL_APPROX 100.0f</a>
+<a name="ln45"> </a>
+<a name="ln46">DT_MODULE_INTROSPECTION(3, dt_iop_colorreconstruct_params_t)</a>
+<a name="ln47"> </a>
+<a name="ln48">typedef enum dt_iop_colorreconstruct_precedence_t</a>
+<a name="ln49">{</a>
+<a name="ln50">  COLORRECONSTRUCT_PRECEDENCE_NONE,             // same weighting factor for all pixels</a>
+<a name="ln51">  COLORRECONSTRUCT_PRECEDENCE_CHROMA,           // use chromaticy as weighting factor -&gt; prefers saturated colors</a>
+<a name="ln52">  COLORRECONSTRUCT_PRECEDENCE_HUE               // use a specific hue as weighting factor</a>
+<a name="ln53">} dt_iop_colorreconstruct_precedence_t;</a>
+<a name="ln54"> </a>
+<a name="ln55">typedef struct dt_iop_colorreconstruct_params1_t</a>
+<a name="ln56">{</a>
+<a name="ln57">  float threshold;</a>
+<a name="ln58">  float spatial;</a>
+<a name="ln59">  float range;</a>
+<a name="ln60">} dt_iop_colorreconstruct_params1_t;</a>
+<a name="ln61"> </a>
+<a name="ln62">typedef struct dt_iop_colorreconstruct_params2_t</a>
+<a name="ln63">{</a>
+<a name="ln64">  float threshold;</a>
+<a name="ln65">  float spatial;</a>
+<a name="ln66">  float range;</a>
+<a name="ln67">  dt_iop_colorreconstruct_precedence_t precedence;</a>
+<a name="ln68">} dt_iop_colorreconstruct_params2_t;</a>
+<a name="ln69"> </a>
+<a name="ln70">typedef struct dt_iop_colorreconstruct_params_t</a>
+<a name="ln71">{</a>
+<a name="ln72">  float threshold;</a>
+<a name="ln73">  float spatial;</a>
+<a name="ln74">  float range;</a>
+<a name="ln75">  float hue;</a>
+<a name="ln76">  dt_iop_colorreconstruct_precedence_t precedence;</a>
+<a name="ln77">} dt_iop_colorreconstruct_params_t;</a>
+<a name="ln78"> </a>
+<a name="ln79">typedef struct dt_iop_colorreconstruct_Lab_t</a>
+<a name="ln80">{</a>
+<a name="ln81">  float L;</a>
+<a name="ln82">  float a;</a>
+<a name="ln83">  float b;</a>
+<a name="ln84">  float weight;</a>
+<a name="ln85">} dt_iop_colorreconstruct_Lab_t;</a>
+<a name="ln86"> </a>
+<a name="ln87">typedef struct dt_iop_colorreconstruct_bilateral_frozen_t</a>
+<a name="ln88">{</a>
+<a name="ln89">  size_t size_x, size_y, size_z;</a>
+<a name="ln90">  int width, height, x, y;</a>
+<a name="ln91">  float scale;</a>
+<a name="ln92">  float sigma_s, sigma_r;</a>
+<a name="ln93">  dt_iop_colorreconstruct_Lab_t *buf;</a>
+<a name="ln94">} dt_iop_colorreconstruct_bilateral_frozen_t;</a>
+<a name="ln95"> </a>
+<a name="ln96">typedef struct dt_iop_colorreconstruct_gui_data_t</a>
+<a name="ln97">{</a>
+<a name="ln98">  GtkWidget *threshold;</a>
+<a name="ln99">  GtkWidget *spatial;</a>
+<a name="ln100">  GtkWidget *range;</a>
+<a name="ln101">  GtkWidget *precedence;</a>
+<a name="ln102">  GtkWidget *hue;</a>
+<a name="ln103">  dt_iop_colorreconstruct_bilateral_frozen_t *can;</a>
+<a name="ln104">  uint64_t hash;</a>
+<a name="ln105">  dt_pthread_mutex_t lock;</a>
+<a name="ln106">} dt_iop_colorreconstruct_gui_data_t;</a>
+<a name="ln107"> </a>
+<a name="ln108">typedef struct dt_iop_colorreconstruct_data_t</a>
+<a name="ln109">{</a>
+<a name="ln110">  float threshold;</a>
+<a name="ln111">  float spatial;</a>
+<a name="ln112">  float range;</a>
+<a name="ln113">  float hue;</a>
+<a name="ln114">  dt_iop_colorreconstruct_precedence_t precedence;</a>
+<a name="ln115">} dt_iop_colorreconstruct_data_t;</a>
+<a name="ln116"> </a>
+<a name="ln117">typedef struct dt_iop_colorreconstruct_global_data_t</a>
+<a name="ln118">{</a>
+<a name="ln119">  int kernel_colorreconstruct_zero;</a>
+<a name="ln120">  int kernel_colorreconstruct_splat;</a>
+<a name="ln121">  int kernel_colorreconstruct_blur_line;</a>
+<a name="ln122">  int kernel_colorreconstruct_slice;</a>
+<a name="ln123">} dt_iop_colorreconstruct_global_data_t;</a>
+<a name="ln124"> </a>
+<a name="ln125"> </a>
+<a name="ln126">const char *name()</a>
+<a name="ln127">{</a>
+<a name="ln128">  return _(&quot;color reconstruction&quot;);</a>
+<a name="ln129">}</a>
+<a name="ln130"> </a>
+<a name="ln131">int flags()</a>
+<a name="ln132">{</a>
+<a name="ln133">  // we do not allow tiling. reason: this module needs to see the full surrounding of highlights.</a>
+<a name="ln134">  // if we would split into tiles, each tile would result in different color corrections</a>
+<a name="ln135">  return IOP_FLAGS_INCLUDE_IN_STYLES | IOP_FLAGS_SUPPORTS_BLENDING;</a>
+<a name="ln136">}</a>
+<a name="ln137"> </a>
+<a name="ln138">int default_group()</a>
+<a name="ln139">{</a>
+<a name="ln140">  return IOP_GROUP_BASIC;</a>
+<a name="ln141">}</a>
+<a name="ln142"> </a>
+<a name="ln143">int legacy_params(dt_iop_module_t *self, const void *const old_params, const int old_version,</a>
+<a name="ln144">                  void *new_params, const int new_version)</a>
+<a name="ln145">{</a>
+<a name="ln146">  if(old_version == 1 &amp;&amp; new_version == 3)</a>
+<a name="ln147">  {</a>
+<a name="ln148">    const dt_iop_colorreconstruct_params1_t *old = old_params;</a>
+<a name="ln149">    dt_iop_colorreconstruct_params_t *new = new_params;</a>
+<a name="ln150">    new-&gt;threshold = old-&gt;threshold;</a>
+<a name="ln151">    new-&gt;spatial = old-&gt;spatial;</a>
+<a name="ln152">    new-&gt;range = old-&gt;range;</a>
+<a name="ln153">    new-&gt;precedence = COLORRECONSTRUCT_PRECEDENCE_NONE;</a>
+<a name="ln154">    new-&gt;hue = 0.66f;</a>
+<a name="ln155">    return 0;</a>
+<a name="ln156">  }</a>
+<a name="ln157">  else if(old_version == 2 &amp;&amp; new_version == 3)</a>
+<a name="ln158">  {</a>
+<a name="ln159">    const dt_iop_colorreconstruct_params2_t *old = old_params;</a>
+<a name="ln160">    dt_iop_colorreconstruct_params_t *new = new_params;</a>
+<a name="ln161">    new-&gt;threshold = old-&gt;threshold;</a>
+<a name="ln162">    new-&gt;spatial = old-&gt;spatial;</a>
+<a name="ln163">    new-&gt;range = old-&gt;range;</a>
+<a name="ln164">    new-&gt;precedence = old-&gt;precedence;</a>
+<a name="ln165">    new-&gt;hue = 0.66f;</a>
+<a name="ln166">    return 0;</a>
+<a name="ln167">  }</a>
+<a name="ln168">  return 1;</a>
+<a name="ln169">}</a>
+<a name="ln170"> </a>
+<a name="ln171">void init_key_accels(dt_iop_module_so_t *self)</a>
+<a name="ln172">{</a>
+<a name="ln173">  dt_accel_register_slider_iop(self, FALSE, NC_(&quot;accel&quot;, &quot;threshold&quot;));</a>
+<a name="ln174">  dt_accel_register_slider_iop(self, FALSE, NC_(&quot;accel&quot;, &quot;spatial extent&quot;));</a>
+<a name="ln175">  dt_accel_register_slider_iop(self, FALSE, NC_(&quot;accel&quot;, &quot;range extent&quot;));</a>
+<a name="ln176">  dt_accel_register_slider_iop(self, FALSE, NC_(&quot;accel&quot;, &quot;hue&quot;));</a>
+<a name="ln177">}</a>
+<a name="ln178"> </a>
+<a name="ln179">void connect_key_accels(dt_iop_module_t *self)</a>
+<a name="ln180">{</a>
+<a name="ln181">  dt_iop_colorreconstruct_gui_data_t *g = (dt_iop_colorreconstruct_gui_data_t *)self-&gt;gui_data;</a>
+<a name="ln182"> </a>
+<a name="ln183">  dt_accel_connect_slider_iop(self, &quot;threshold&quot;, GTK_WIDGET(g-&gt;threshold));</a>
+<a name="ln184">  dt_accel_connect_slider_iop(self, &quot;spatial extent&quot;, GTK_WIDGET(g-&gt;spatial));</a>
+<a name="ln185">  dt_accel_connect_slider_iop(self, &quot;range extent&quot;, GTK_WIDGET(g-&gt;range));</a>
+<a name="ln186">  dt_accel_connect_slider_iop(self, &quot;hue&quot;, GTK_WIDGET(g-&gt;hue));</a>
+<a name="ln187">}</a>
+<a name="ln188"> </a>
+<a name="ln189">typedef struct dt_iop_colorreconstruct_bilateral_t</a>
+<a name="ln190">{</a>
+<a name="ln191">  size_t size_x, size_y, size_z;</a>
+<a name="ln192">  int width, height, x, y;</a>
+<a name="ln193">  float scale;</a>
+<a name="ln194">  float sigma_s, sigma_r;</a>
+<a name="ln195">  dt_iop_colorreconstruct_Lab_t *buf;</a>
+<a name="ln196">} dt_iop_colorreconstruct_bilateral_t;</a>
+<a name="ln197"> </a>
+<a name="ln198"> </a>
+<a name="ln199">static inline float hue_conversion(const float HSL_Hue)</a>
+<a name="ln200">{</a>
+<a name="ln201">  float rgb[3] = { 0 }, XYZ[3] = { 0 }, Lab[3] = { 0 };</a>
+<a name="ln202"> </a>
+<a name="ln203">  hsl2rgb(rgb, HSL_Hue, 1.0f, 0.5f);</a>
+<a name="ln204"> </a>
+<a name="ln205">  XYZ[0] = (rgb[0] * 0.4360747f) + (rgb[1] * 0.3850649f) + (rgb[2] * 0.1430804f);</a>
+<a name="ln206">  XYZ[1] = (rgb[0] * 0.2225045f) + (rgb[1] * 0.7168786f) + (rgb[2] * 0.0606169f);</a>
+<a name="ln207">  XYZ[2] = (rgb[0] * 0.0139322f) + (rgb[1] * 0.0971045f) + (rgb[2] * 0.7141733f);</a>
+<a name="ln208"> </a>
+<a name="ln209">  dt_XYZ_to_Lab(XYZ, Lab);</a>
+<a name="ln210"> </a>
+<a name="ln211">  // Hue from LCH color space in [-pi, +pi] interval</a>
+<a name="ln212">  float LCH_hue = atan2(Lab[2], Lab[1]);</a>
+<a name="ln213"> </a>
+<a name="ln214">  return LCH_hue;</a>
+<a name="ln215">}</a>
+<a name="ln216"> </a>
+<a name="ln217"> </a>
+<a name="ln218">static inline void image_to_grid(const dt_iop_colorreconstruct_bilateral_t *const b, const float i, const float j, const float L, float *x,</a>
+<a name="ln219">                          float *y, float *z)</a>
+<a name="ln220">{</a>
+<a name="ln221">  *x = CLAMPS(i / b-&gt;sigma_s, 0, b-&gt;size_x - 1);</a>
+<a name="ln222">  *y = CLAMPS(j / b-&gt;sigma_s, 0, b-&gt;size_y - 1);</a>
+<a name="ln223">  *z = CLAMPS(L / b-&gt;sigma_r, 0, b-&gt;size_z - 1);</a>
+<a name="ln224">}</a>
+<a name="ln225"> </a>
+<a name="ln226">static inline void grid_rescale(const dt_iop_colorreconstruct_bilateral_t *const b, const int i, const int j, const dt_iop_roi_t *roi,</a>
+<a name="ln227">                         const float scale, float *px, float *py)</a>
+<a name="ln228">{</a>
+<a name="ln229">  *px = (roi-&gt;x + i) * scale - b-&gt;x;</a>
+<a name="ln230">  *py = (roi-&gt;y + j) * scale - b-&gt;y;</a>
+<a name="ln231">}</a>
+<a name="ln232"> </a>
+<a name="ln233">static void dt_iop_colorreconstruct_bilateral_dump(dt_iop_colorreconstruct_bilateral_frozen_t *bf)</a>
+<a name="ln234">{</a>
+<a name="ln235">  if(!bf) return;</a>
+<a name="ln236">  dt_free_align(bf-&gt;buf);</a>
+<a name="ln237">  free(bf);</a>
+<a name="ln238">}</a>
+<a name="ln239"> </a>
+<a name="ln240">static void dt_iop_colorreconstruct_bilateral_free(dt_iop_colorreconstruct_bilateral_t *b)</a>
+<a name="ln241">{</a>
+<a name="ln242">  if(!b) return;</a>
+<a name="ln243">  dt_free_align(b-&gt;buf);</a>
+<a name="ln244">  free(b);</a>
+<a name="ln245">}</a>
+<a name="ln246"> </a>
+<a name="ln247">static dt_iop_colorreconstruct_bilateral_t *dt_iop_colorreconstruct_bilateral_init(const dt_iop_roi_t *roi, // dimensions of input image</a>
+<a name="ln248">                                                                                   const float iscale,      // overall scale of input image</a>
+<a name="ln249">                                                                                   const float sigma_s,     // spatial sigma (blur pixel coords)</a>
+<a name="ln250">                                                                                   const float sigma_r)     // range sigma (blur luma values)</a>
+<a name="ln251">{</a>
+<a name="ln252">  dt_iop_colorreconstruct_bilateral_t *b = (dt_iop_colorreconstruct_bilateral_t *)malloc(sizeof(dt_iop_colorreconstruct_bilateral_t));</a>
+<a name="ln253">  if(!b)</a>
+<a name="ln254">  {</a>
+<a name="ln255">    fprintf(stderr, &quot;[color reconstruction] not able to allocate buffer (a)\n&quot;);</a>
+<a name="ln256">    return NULL;</a>
+<a name="ln257">  }</a>
+<a name="ln258">  float _x = roundf(roi-&gt;width / sigma_s);</a>
+<a name="ln259">  float _y = roundf(roi-&gt;height / sigma_s);</a>
+<a name="ln260">  float _z = roundf(100.0f / sigma_r);</a>
+<a name="ln261">  b-&gt;size_x = CLAMPS((int)_x, 4, DT_COLORRECONSTRUCT_BILATERAL_MAX_RES_S) + 1;</a>
+<a name="ln262">  b-&gt;size_y = CLAMPS((int)_y, 4, DT_COLORRECONSTRUCT_BILATERAL_MAX_RES_S) + 1;</a>
+<a name="ln263">  b-&gt;size_z = CLAMPS((int)_z, 4, DT_COLORRECONSTRUCT_BILATERAL_MAX_RES_R) + 1;</a>
+<a name="ln264">  b-&gt;width = roi-&gt;width;</a>
+<a name="ln265">  b-&gt;height = roi-&gt;height;</a>
+<a name="ln266">  b-&gt;x = roi-&gt;x;</a>
+<a name="ln267">  b-&gt;y = roi-&gt;y;</a>
+<a name="ln268">  b-&gt;scale = iscale / roi-&gt;scale;</a>
+<a name="ln269">  b-&gt;sigma_s = MAX(roi-&gt;height / (b-&gt;size_y - 1.0f), roi-&gt;width / (b-&gt;size_x - 1.0f));</a>
+<a name="ln270">  b-&gt;sigma_r = 100.0f / (b-&gt;size_z - 1.0f);</a>
+<a name="ln271">  b-&gt;buf = dt_alloc_align(16, b-&gt;size_x * b-&gt;size_y * b-&gt;size_z * sizeof(dt_iop_colorreconstruct_Lab_t));</a>
+<a name="ln272">  if(!b-&gt;buf)</a>
+<a name="ln273">  {</a>
+<a name="ln274">    fprintf(stderr, &quot;[color reconstruction] not able to allocate buffer (b)\n&quot;);</a>
+<a name="ln275">    dt_iop_colorreconstruct_bilateral_free(b);</a>
+<a name="ln276">    return NULL;</a>
+<a name="ln277">  }</a>
+<a name="ln278"> </a>
+<a name="ln279">  memset(b-&gt;buf, 0, b-&gt;size_x * b-&gt;size_y * b-&gt;size_z * sizeof(dt_iop_colorreconstruct_Lab_t));</a>
+<a name="ln280">#if 0</a>
+<a name="ln281">  fprintf(stderr, &quot;[bilateral] created grid [%d %d %d]&quot;</a>
+<a name="ln282">          &quot; with sigma (%f %f) (%f %f)\n&quot;, b-&gt;size_x, b-&gt;size_y, b-&gt;size_z,</a>
+<a name="ln283">          b-&gt;sigma_s, sigma_s, b-&gt;sigma_r, sigma_r);</a>
+<a name="ln284">#endif</a>
+<a name="ln285">  return b;</a>
+<a name="ln286">}</a>
+<a name="ln287"> </a>
+<a name="ln288">static dt_iop_colorreconstruct_bilateral_frozen_t *dt_iop_colorreconstruct_bilateral_freeze(dt_iop_colorreconstruct_bilateral_t *b)</a>
+<a name="ln289">{</a>
+<a name="ln290">  if(!b) return NULL;</a>
+<a name="ln291"> </a>
+<a name="ln292">  dt_iop_colorreconstruct_bilateral_frozen_t *bf = (dt_iop_colorreconstruct_bilateral_frozen_t *)malloc(sizeof(dt_iop_colorreconstruct_bilateral_frozen_t));</a>
+<a name="ln293">  if(!bf)</a>
+<a name="ln294">  {</a>
+<a name="ln295">    fprintf(stderr, &quot;[color reconstruction] not able to allocate buffer (c)\n&quot;);</a>
+<a name="ln296">    return NULL;</a>
+<a name="ln297">  }</a>
+<a name="ln298"> </a>
+<a name="ln299">  bf-&gt;size_x = b-&gt;size_x;</a>
+<a name="ln300">  bf-&gt;size_y = b-&gt;size_y;</a>
+<a name="ln301">  bf-&gt;size_z = b-&gt;size_z;</a>
+<a name="ln302">  bf-&gt;width = b-&gt;width;</a>
+<a name="ln303">  bf-&gt;height = b-&gt;height;</a>
+<a name="ln304">  bf-&gt;x = b-&gt;x;</a>
+<a name="ln305">  bf-&gt;y = b-&gt;y;</a>
+<a name="ln306">  bf-&gt;scale = b-&gt;scale;</a>
+<a name="ln307">  bf-&gt;sigma_s = b-&gt;sigma_s;</a>
+<a name="ln308">  bf-&gt;sigma_r = b-&gt;sigma_r;</a>
+<a name="ln309">  bf-&gt;buf = dt_alloc_align(16, b-&gt;size_x * b-&gt;size_y * b-&gt;size_z * sizeof(dt_iop_colorreconstruct_Lab_t));</a>
+<a name="ln310">  if(bf-&gt;buf &amp;&amp; b-&gt;buf)</a>
+<a name="ln311">  {</a>
+<a name="ln312">    memcpy(bf-&gt;buf, b-&gt;buf, b-&gt;size_x * b-&gt;size_y * b-&gt;size_z * sizeof(dt_iop_colorreconstruct_Lab_t));</a>
+<a name="ln313">  }</a>
+<a name="ln314">  else</a>
+<a name="ln315">  {</a>
+<a name="ln316">    fprintf(stderr, &quot;[color reconstruction] not able to allocate buffer (d)\n&quot;);</a>
+<a name="ln317">    dt_iop_colorreconstruct_bilateral_dump(bf);</a>
+<a name="ln318">    return NULL;</a>
+<a name="ln319">  }</a>
+<a name="ln320"> </a>
+<a name="ln321">  return bf;</a>
+<a name="ln322">}</a>
+<a name="ln323"> </a>
+<a name="ln324">static dt_iop_colorreconstruct_bilateral_t *dt_iop_colorreconstruct_bilateral_thaw(dt_iop_colorreconstruct_bilateral_frozen_t *bf)</a>
+<a name="ln325">{</a>
+<a name="ln326">  if(!bf) return NULL;</a>
+<a name="ln327"> </a>
+<a name="ln328">  dt_iop_colorreconstruct_bilateral_t *b = (dt_iop_colorreconstruct_bilateral_t *)malloc(sizeof(dt_iop_colorreconstruct_bilateral_t));</a>
+<a name="ln329">  if(!b)</a>
+<a name="ln330">  {</a>
+<a name="ln331">    fprintf(stderr, &quot;[color reconstruction] not able to allocate buffer (e)\n&quot;);</a>
+<a name="ln332">    return NULL;</a>
+<a name="ln333">  }</a>
+<a name="ln334"> </a>
+<a name="ln335">  b-&gt;size_x = bf-&gt;size_x;</a>
+<a name="ln336">  b-&gt;size_y = bf-&gt;size_y;</a>
+<a name="ln337">  b-&gt;size_z = bf-&gt;size_z;</a>
+<a name="ln338">  b-&gt;width = bf-&gt;width;</a>
+<a name="ln339">  b-&gt;height = bf-&gt;height;</a>
+<a name="ln340">  b-&gt;x = bf-&gt;x;</a>
+<a name="ln341">  b-&gt;y = bf-&gt;y;</a>
+<a name="ln342">  b-&gt;scale = bf-&gt;scale;</a>
+<a name="ln343">  b-&gt;sigma_s = bf-&gt;sigma_s;</a>
+<a name="ln344">  b-&gt;sigma_r = bf-&gt;sigma_r;</a>
+<a name="ln345">  b-&gt;buf = dt_alloc_align(16, b-&gt;size_x * b-&gt;size_y * b-&gt;size_z * sizeof(dt_iop_colorreconstruct_Lab_t));</a>
+<a name="ln346">  if(b-&gt;buf &amp;&amp; bf-&gt;buf)</a>
+<a name="ln347">  {</a>
+<a name="ln348">    memcpy(b-&gt;buf, bf-&gt;buf, b-&gt;size_x * b-&gt;size_y * b-&gt;size_z * sizeof(dt_iop_colorreconstruct_Lab_t));</a>
+<a name="ln349">  }</a>
+<a name="ln350">  else</a>
+<a name="ln351">  {</a>
+<a name="ln352">    fprintf(stderr, &quot;[color reconstruction] not able to allocate buffer (f)\n&quot;);</a>
+<a name="ln353">    dt_iop_colorreconstruct_bilateral_free(b);</a>
+<a name="ln354">    return NULL;</a>
+<a name="ln355">  }</a>
+<a name="ln356"> </a>
+<a name="ln357">  return b;</a>
+<a name="ln358">}</a>
+<a name="ln359"> </a>
+<a name="ln360"> </a>
+<a name="ln361">static void dt_iop_colorreconstruct_bilateral_splat(dt_iop_colorreconstruct_bilateral_t *b, const float *const in, const float threshold,</a>
+<a name="ln362">                                                    dt_iop_colorreconstruct_precedence_t precedence, const float *params)</a>
+<a name="ln363">{</a>
+<a name="ln364">  if(!b) return;</a>
+<a name="ln365"> </a>
+<a name="ln366">  // splat into downsampled grid</a>
+<a name="ln367">#ifdef _OPENMP</a>
+<a name="ln368">#pragma omp parallel for default(none) shared(b, precedence, params)</a>
+<a name="ln369">#endif</a>
+<a name="ln370">  for(int j = 0; j &lt; b-&gt;height; j++)</a>
+<a name="ln371">  {</a>
+<a name="ln372">    size_t index = 4 * j * b-&gt;width;</a>
+<a name="ln373">    for(int i = 0; i &lt; b-&gt;width; i++, index += 4)</a>
+<a name="ln374">    {</a>
+<a name="ln375">      float x, y, z, weight, m;</a>
+<a name="ln376">      const float Lin = in[index];</a>
+<a name="ln377">      const float ain = in[index + 1];</a>
+<a name="ln378">      const float bin = in[index + 2];</a>
+<a name="ln379">      // we deliberately ignore pixels above threshold</a>
+<a name="ln380">      if (Lin &gt; threshold) continue;</a>
+<a name="ln381"> </a>
+<a name="ln382">      switch(precedence)</a>
+<a name="ln383">      {</a>
+<a name="ln384">        case COLORRECONSTRUCT_PRECEDENCE_CHROMA:</a>
+<a name="ln385">          weight = sqrt(ain * ain + bin * bin);</a>
+<a name="ln386">          break;</a>
+<a name="ln387"> </a>
+<a name="ln388">        case COLORRECONSTRUCT_PRECEDENCE_HUE:</a>
+<a name="ln389">          m = atan2(bin, ain) - params[0];</a>
+<a name="ln390">          // readjust m into [-pi, +pi] interval</a>
+<a name="ln391">          m = m &gt; M_PI ? m - 2*M_PI : (m &lt; -M_PI ? m + 2*M_PI : m);</a>
+<a name="ln392">          weight = exp(-m*m/params[1]);</a>
+<a name="ln393">          break;</a>
+<a name="ln394"> </a>
+<a name="ln395">        case COLORRECONSTRUCT_PRECEDENCE_NONE:</a>
+<a name="ln396">        default:</a>
+<a name="ln397">          weight = 1.0f;</a>
+<a name="ln398">          break;</a>
+<a name="ln399">      }</a>
+<a name="ln400"> </a>
+<a name="ln401">      image_to_grid(b, i, j, Lin, &amp;x, &amp;y, &amp;z);</a>
+<a name="ln402"> </a>
+<a name="ln403">      // closest integer splatting:</a>
+<a name="ln404">      const int xi = CLAMPS((int)round(x), 0, b-&gt;size_x - 1);</a>
+<a name="ln405">      const int yi = CLAMPS((int)round(y), 0, b-&gt;size_y - 1);</a>
+<a name="ln406">      const int zi = CLAMPS((int)round(z), 0, b-&gt;size_z - 1);</a>
+<a name="ln407">      const size_t grid_index = xi + b-&gt;size_x * (yi + b-&gt;size_y * zi);</a>
+<a name="ln408"> </a>
+<a name="ln409">#ifdef _OPENMP</a>
+<a name="ln410">#pragma omp atomic</a>
+<a name="ln411">#endif</a>
+<a name="ln412">      b-&gt;buf[grid_index].L += Lin * weight;</a>
+<a name="ln413"> </a>
+<a name="ln414">#ifdef _OPENMP</a>
+<a name="ln415">#pragma omp atomic</a>
+<a name="ln416">#endif</a>
+<a name="ln417">      b-&gt;buf[grid_index].a += ain * weight;</a>
+<a name="ln418"> </a>
+<a name="ln419">#ifdef _OPENMP</a>
+<a name="ln420">#pragma omp atomic</a>
+<a name="ln421">#endif</a>
+<a name="ln422">      b-&gt;buf[grid_index].b += bin * weight;</a>
+<a name="ln423"> </a>
+<a name="ln424">#ifdef _OPENMP</a>
+<a name="ln425">#pragma omp atomic</a>
+<a name="ln426">#endif</a>
+<a name="ln427">      b-&gt;buf[grid_index].weight += weight;</a>
+<a name="ln428">    }</a>
+<a name="ln429">  }</a>
+<a name="ln430">}</a>
+<a name="ln431"> </a>
+<a name="ln432"> </a>
+<a name="ln433">static void blur_line(dt_iop_colorreconstruct_Lab_t *buf, const int offset1, const int offset2, const int offset3, const int size1,</a>
+<a name="ln434">                      const int size2, const int size3)</a>
+<a name="ln435">{</a>
+<a name="ln436">  if(!buf) return;</a>
+<a name="ln437"> </a>
+<a name="ln438">  const float w0 = 6.f / 16.f;</a>
+<a name="ln439">  const float w1 = 4.f / 16.f;</a>
+<a name="ln440">  const float w2 = 1.f / 16.f;</a>
+<a name="ln441">#ifdef _OPENMP</a>
+<a name="ln442">#pragma omp parallel for default(none) shared(buf)</a>
+<a name="ln443">#endif</a>
+<a name="ln444">  for(int k = 0; k &lt; size1; k++)</a>
+<a name="ln445">  {</a>
+<a name="ln446">    size_t index = (size_t)k * offset1;</a>
+<a name="ln447">    for(int j = 0; j &lt; size2; j++)</a>
+<a name="ln448">    {</a>
+<a name="ln449">      dt_iop_colorreconstruct_Lab_t tmp1 = buf[index];</a>
+<a name="ln450">      buf[index].L      = buf[index].L      * w0 + w1 * buf[index + offset3].L      + w2 * buf[index + 2 * offset3].L;</a>
+<a name="ln451">      buf[index].a      = buf[index].a      * w0 + w1 * buf[index + offset3].a      + w2 * buf[index + 2 * offset3].a;</a>
+<a name="ln452">      buf[index].b      = buf[index].b      * w0 + w1 * buf[index + offset3].b      + w2 * buf[index + 2 * offset3].b;</a>
+<a name="ln453">      buf[index].weight = buf[index].weight * w0 + w1 * buf[index + offset3].weight + w2 * buf[index + 2 * offset3].weight;</a>
+<a name="ln454">      index += offset3;</a>
+<a name="ln455">      dt_iop_colorreconstruct_Lab_t tmp2 = buf[index];</a>
+<a name="ln456">      buf[index].L      = buf[index].L      * w0 + w1 * (buf[index + offset3].L      + tmp1.L)      + w2 * buf[index + 2 * offset3].L;</a>
+<a name="ln457">      buf[index].a      = buf[index].a      * w0 + w1 * (buf[index + offset3].a      + tmp1.a)      + w2 * buf[index + 2 * offset3].a;</a>
+<a name="ln458">      buf[index].b      = buf[index].b      * w0 + w1 * (buf[index + offset3].b      + tmp1.b)      + w2 * buf[index + 2 * offset3].b;</a>
+<a name="ln459">      buf[index].weight = buf[index].weight * w0 + w1 * (buf[index + offset3].weight + tmp1.weight) + w2 * buf[index + 2 * offset3].weight;</a>
+<a name="ln460">      index += offset3;</a>
+<a name="ln461">      for(int i = 2; i &lt; size3 - 2; i++)</a>
+<a name="ln462">      {</a>
+<a name="ln463">        const dt_iop_colorreconstruct_Lab_t tmp3 = buf[index];</a>
+<a name="ln464">        buf[index].L      = buf[index].L      * w0 + w1 * (buf[index + offset3].L      + tmp2.L)</a>
+<a name="ln465">                     + w2 * (buf[index + 2 * offset3].L      + tmp1.L);</a>
+<a name="ln466">        buf[index].a      = buf[index].a      * w0 + w1 * (buf[index + offset3].a      + tmp2.a)</a>
+<a name="ln467">                     + w2 * (buf[index + 2 * offset3].a      + tmp1.a);</a>
+<a name="ln468">        buf[index].b      = buf[index].b      * w0 + w1 * (buf[index + offset3].b      + tmp2.b)</a>
+<a name="ln469">                     + w2 * (buf[index + 2 * offset3].b      + tmp1.b);</a>
+<a name="ln470">        buf[index].weight = buf[index].weight * w0 + w1 * (buf[index + offset3].weight + tmp2.weight)</a>
+<a name="ln471">                     + w2 * (buf[index + 2 * offset3].weight + tmp1.weight);</a>
+<a name="ln472"> </a>
+<a name="ln473">        index += offset3;</a>
+<a name="ln474">        tmp1 = tmp2;</a>
+<a name="ln475">        tmp2 = tmp3;</a>
+<a name="ln476">      }</a>
+<a name="ln477">      const dt_iop_colorreconstruct_Lab_t tmp3 = buf[index];</a>
+<a name="ln478">      buf[index].L      = buf[index].L      * w0 + w1 * (buf[index + offset3].L      + tmp2.L)      + w2 * tmp1.L;</a>
+<a name="ln479">      buf[index].a      = buf[index].a      * w0 + w1 * (buf[index + offset3].a      + tmp2.a)      + w2 * tmp1.a;</a>
+<a name="ln480">      buf[index].b      = buf[index].b      * w0 + w1 * (buf[index + offset3].b      + tmp2.b)      + w2 * tmp1.b;</a>
+<a name="ln481">      buf[index].weight = buf[index].weight * w0 + w1 * (buf[index + offset3].weight + tmp2.weight) + w2 * tmp1.weight;</a>
+<a name="ln482">      index += offset3;</a>
+<a name="ln483">      buf[index].L      = buf[index].L      * w0 + w1 * tmp3.L      + w2 * tmp2.L;</a>
+<a name="ln484">      buf[index].a      = buf[index].a      * w0 + w1 * tmp3.a      + w2 * tmp2.a;</a>
+<a name="ln485">      buf[index].b      = buf[index].b      * w0 + w1 * tmp3.b      + w2 * tmp2.b;</a>
+<a name="ln486">      buf[index].weight = buf[index].weight * w0 + w1 * tmp3.weight + w2 * tmp2.weight;</a>
+<a name="ln487">      index += offset3;</a>
+<a name="ln488">      index += offset2 - offset3 * size3;</a>
+<a name="ln489">    }</a>
+<a name="ln490">  }</a>
+<a name="ln491">}</a>
+<a name="ln492"> </a>
+<a name="ln493"> </a>
+<a name="ln494">static void dt_iop_colorreconstruct_bilateral_blur(dt_iop_colorreconstruct_bilateral_t *b)</a>
+<a name="ln495">{</a>
+<a name="ln496">  if(!b) return;</a>
+<a name="ln497"> </a>
+<a name="ln498">  // gaussian up to 3 sigma</a>
+<a name="ln499">  blur_line(b-&gt;buf, b-&gt;size_x * b-&gt;size_y, b-&gt;size_x, 1, b-&gt;size_z, b-&gt;size_y, b-&gt;size_x);</a>
+<a name="ln500">  // gaussian up to 3 sigma</a>
+<a name="ln501">  blur_line(b-&gt;buf, b-&gt;size_x * b-&gt;size_y, 1, b-&gt;size_x, b-&gt;size_z, b-&gt;size_x, b-&gt;size_y);</a>
+<a name="ln502">  // gaussian up to 3 sigma</a>
+<a name="ln503">  blur_line(b-&gt;buf, 1, b-&gt;size_x, b-&gt;size_x * b-&gt;size_y, b-&gt;size_x, b-&gt;size_y, b-&gt;size_z);</a>
+<a name="ln504">}</a>
+<a name="ln505"> </a>
+<a name="ln506">static void dt_iop_colorreconstruct_bilateral_slice(const dt_iop_colorreconstruct_bilateral_t *const b,</a>
+<a name="ln507">                                                    const float *const in, float *const out,</a>
+<a name="ln508">                                                    const float threshold, const dt_iop_roi_t *const roi,</a>
+<a name="ln509">                                                    const float iscale)</a>
+<a name="ln510">{</a>
+<a name="ln511">  if(!b) return;</a>
+<a name="ln512"> </a>
+<a name="ln513">  const float rescale = iscale / (roi-&gt;scale * b-&gt;scale);</a>
+<a name="ln514">  const int ox = 1;</a>
+<a name="ln515">  const int oy = b-&gt;size_x;</a>
+<a name="ln516">  const int oz = b-&gt;size_y * b-&gt;size_x;</a>
+<a name="ln517">#ifdef _OPENMP</a>
+<a name="ln518">#pragma omp parallel for default(none)</a>
+<a name="ln519">#endif</a>
+<a name="ln520">  for(int j = 0; j &lt; roi-&gt;height; j++)</a>
+<a name="ln521">  {</a>
+<a name="ln522">    size_t index = 4 * j * roi-&gt;width;</a>
+<a name="ln523">    for(int i = 0; i &lt; roi-&gt;width; i++, index += 4)</a>
+<a name="ln524">    {</a>
+<a name="ln525">      float x, y, z;</a>
+<a name="ln526">      float px, py;</a>
+<a name="ln527">      const float Lin = out[index + 0] = in[index + 0];</a>
+<a name="ln528">      const float ain = out[index + 1] = in[index + 1];</a>
+<a name="ln529">      const float bin = out[index + 2] = in[index + 2];</a>
+<a name="ln530">      out[index + 3] = in[index + 3];</a>
+<a name="ln531">      const float blend = CLAMPS(20.0f / threshold * Lin - 19.0f, 0.0f, 1.0f);</a>
+<a name="ln532">      if (blend == 0.0f) continue;</a>
+<a name="ln533">      grid_rescale(b, i, j, roi, rescale, &amp;px, &amp;py);</a>
+<a name="ln534">      image_to_grid(b, px, py, Lin, &amp;x, &amp;y, &amp;z);</a>
+<a name="ln535">      // trilinear lookup:</a>
+<a name="ln536">      const int xi = MIN((int)x, b-&gt;size_x - 2);</a>
+<a name="ln537">      const int yi = MIN((int)y, b-&gt;size_y - 2);</a>
+<a name="ln538">      const int zi = MIN((int)z, b-&gt;size_z - 2);</a>
+<a name="ln539">      const float xf = x - xi;</a>
+<a name="ln540">      const float yf = y - yi;</a>
+<a name="ln541">      const float zf = z - zi;</a>
+<a name="ln542">      const size_t gi = xi + b-&gt;size_x * (yi + b-&gt;size_y * zi);</a>
+<a name="ln543"> </a>
+<a name="ln544">      const float Lout =   b-&gt;buf[gi].L * (1.0f - xf) * (1.0f - yf) * (1.0f - zf)</a>
+<a name="ln545">                         + b-&gt;buf[gi + ox].L * (xf) * (1.0f - yf) * (1.0f - zf)</a>
+<a name="ln546">                         + b-&gt;buf[gi + oy].L * (1.0f - xf) * (yf) * (1.0f - zf)</a>
+<a name="ln547">                         + b-&gt;buf[gi + ox + oy].L * (xf) * (yf) * (1.0f - zf)</a>
+<a name="ln548">                         + b-&gt;buf[gi + oz].L * (1.0f - xf) * (1.0f - yf) * (zf)</a>
+<a name="ln549">                         + b-&gt;buf[gi + ox + oz].L * (xf) * (1.0f - yf) * (zf)</a>
+<a name="ln550">                         + b-&gt;buf[gi + oy + oz].L * (1.0f - xf) * (yf) * (zf)</a>
+<a name="ln551">                         + b-&gt;buf[gi + ox + oy + oz].L * (xf) * (yf) * (zf);</a>
+<a name="ln552"> </a>
+<a name="ln553">      const float aout =   b-&gt;buf[gi].a * (1.0f - xf) * (1.0f - yf) * (1.0f - zf)</a>
+<a name="ln554">                         + b-&gt;buf[gi + ox].a * (xf) * (1.0f - yf) * (1.0f - zf)</a>
+<a name="ln555">                         + b-&gt;buf[gi + oy].a * (1.0f - xf) * (yf) * (1.0f - zf)</a>
+<a name="ln556">                         + b-&gt;buf[gi + ox + oy].a * (xf) * (yf) * (1.0f - zf)</a>
+<a name="ln557">                         + b-&gt;buf[gi + oz].a * (1.0f - xf) * (1.0f - yf) * (zf)</a>
+<a name="ln558">                         + b-&gt;buf[gi + ox + oz].a * (xf) * (1.0f - yf) * (zf)</a>
+<a name="ln559">                         + b-&gt;buf[gi + oy + oz].a * (1.0f - xf) * (yf) * (zf)</a>
+<a name="ln560">                         + b-&gt;buf[gi + ox + oy + oz].a * (xf) * (yf) * (zf);</a>
+<a name="ln561"> </a>
+<a name="ln562"> </a>
+<a name="ln563">      const float bout =   b-&gt;buf[gi].b * (1.0f - xf) * (1.0f - yf) * (1.0f - zf)</a>
+<a name="ln564">                         + b-&gt;buf[gi + ox].b * (xf) * (1.0f - yf) * (1.0f - zf)</a>
+<a name="ln565">                         + b-&gt;buf[gi + oy].b * (1.0f - xf) * (yf) * (1.0f - zf)</a>
+<a name="ln566">                         + b-&gt;buf[gi + ox + oy].b * (xf) * (yf) * (1.0f - zf)</a>
+<a name="ln567">                         + b-&gt;buf[gi + oz].b * (1.0f - xf) * (1.0f - yf) * (zf)</a>
+<a name="ln568">                         + b-&gt;buf[gi + ox + oz].b * (xf) * (1.0f - yf) * (zf)</a>
+<a name="ln569">                         + b-&gt;buf[gi + oy + oz].b * (1.0f - xf) * (yf) * (zf)</a>
+<a name="ln570">                         + b-&gt;buf[gi + ox + oy + oz].b * (xf) * (yf) * (zf);</a>
+<a name="ln571"> </a>
+<a name="ln572">      const float weight = b-&gt;buf[gi].weight * (1.0f - xf) * (1.0f - yf) * (1.0f - zf)</a>
+<a name="ln573">                         + b-&gt;buf[gi + ox].weight * (xf) * (1.0f - yf) * (1.0f - zf)</a>
+<a name="ln574">                         + b-&gt;buf[gi + oy].weight * (1.0f - xf) * (yf) * (1.0f - zf)</a>
+<a name="ln575">                         + b-&gt;buf[gi + ox + oy].weight * (xf) * (yf) * (1.0f - zf)</a>
+<a name="ln576">                         + b-&gt;buf[gi + oz].weight * (1.0f - xf) * (1.0f - yf) * (zf)</a>
+<a name="ln577">                         + b-&gt;buf[gi + ox + oz].weight * (xf) * (1.0f - yf) * (zf)</a>
+<a name="ln578">                         + b-&gt;buf[gi + oy + oz].weight * (1.0f - xf) * (yf) * (zf)</a>
+<a name="ln579">                         + b-&gt;buf[gi + ox + oy + oz].weight * (xf) * (yf) * (zf);</a>
+<a name="ln580"> </a>
+<a name="ln581">      const float lout = fmax(Lout, 0.01f);</a>
+<a name="ln582">      out[index + 1] = (weight &gt; 0.0f) ? ain * (1.0f - blend) + aout * Lin/lout * blend : ain;</a>
+<a name="ln583">      out[index + 2] = (weight &gt; 0.0f) ? bin * (1.0f - blend) + bout * Lin/lout * blend : bin;</a>
+<a name="ln584">    }</a>
+<a name="ln585">  }</a>
+<a name="ln586">}</a>
+<a name="ln587"> </a>
+<a name="ln588"> </a>
+<a name="ln589">void process(struct dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, const void *const ivoid,</a>
+<a name="ln590">             void *const ovoid, const dt_iop_roi_t *const roi_in, const dt_iop_roi_t *const roi_out)</a>
+<a name="ln591">{</a>
+<a name="ln592">  dt_iop_colorreconstruct_data_t *data = (dt_iop_colorreconstruct_data_t *)piece-&gt;data;</a>
+<a name="ln593">  dt_iop_colorreconstruct_gui_data_t *g = (dt_iop_colorreconstruct_gui_data_t *)self-&gt;gui_data;</a>
+<a name="ln594">  float *in = (float *)ivoid;</a>
+<a name="ln595">  float *out = (float *)ovoid;</a>
+<a name="ln596"> </a>
+<a name="ln597">  const float scale = piece-&gt;iscale / roi_in-&gt;scale;</a>
+<a name="ln598">  const float sigma_r = fmax(data-&gt;range, 0.1f);</a>
+<a name="ln599">  const float sigma_s = fmax(data-&gt;spatial, 1.0f) / scale;</a>
+<a name="ln600">  const float hue = hue_conversion(data-&gt;hue); // convert to LCH hue which better fits to Lab colorspace</a>
+<a name="ln601"> </a>
+<a name="ln602">  const float params[4] = { hue, M_PI*M_PI/8, 0.0f, 0.0f };</a>
+<a name="ln603"> </a>
+<a name="ln604">  dt_iop_colorreconstruct_bilateral_t *b;</a>
+<a name="ln605">  dt_iop_colorreconstruct_bilateral_frozen_t *can = NULL;</a>
+<a name="ln606"> </a>
+<a name="ln607">  // color reconstruction often involves a massive spatial blur of the bilateral grid. this typically requires</a>
+<a name="ln608">  // more or less the whole image to contribute to the grid. In pixelpipe FULL we can not rely on this</a>
+<a name="ln609">  // as the pixelpipe might only see part of the image (region of interest). Therefore we &quot;steal&quot; the bilateral grid</a>
+<a name="ln610">  // of the preview pipe if needed. However, the grid of the preview pipeline is coarser and may lead</a>
+<a name="ln611">  // to other artifacts so we only want to use it when necessary. The threshold for data-&gt;spatial has been selected</a>
+<a name="ln612">  // arbitrarily.</a>
+<a name="ln613">  if(sigma_s &gt; DT_COLORRECONSTRUCT_SPATIAL_APPROX &amp;&amp; self-&gt;dev-&gt;gui_attached &amp;&amp; g &amp;&amp; piece-&gt;pipe-&gt;type == DT_DEV_PIXELPIPE_FULL)</a>
+<a name="ln614">  {</a>
+<a name="ln615">    // check how far we are zoomed-in</a>
+<a name="ln616">    dt_dev_zoom_t zoom = dt_control_get_dev_zoom();</a>
+<a name="ln617">    int closeup = dt_control_get_dev_closeup();</a>
+<a name="ln618">    const float min_scale = dt_dev_get_zoom_scale(self-&gt;dev, DT_ZOOM_FIT, 1&lt;&lt;closeup, 0);</a>
+<a name="ln619">    const float cur_scale = dt_dev_get_zoom_scale(self-&gt;dev, zoom, 1&lt;&lt;closeup, 0);</a>
+<a name="ln620"> </a>
+<a name="ln621">    // if we are zoomed in more than just a little bit, we try to use the canned grid of the preview pipeline</a>
+<a name="ln622">    if(cur_scale &gt; 1.05f * min_scale)</a>
+<a name="ln623">    {</a>
+<a name="ln624">      if(!dt_dev_sync_pixelpipe_hash(self-&gt;dev, piece-&gt;pipe, 0, self-&gt;priority, &amp;g-&gt;lock, &amp;g-&gt;hash))</a>
+<a name="ln625">        dt_control_log(_(&quot;inconsistent output&quot;));</a>
+<a name="ln626"> </a>
+<a name="ln627">      dt_pthread_mutex_lock(&amp;g-&gt;lock);</a>
+<a name="ln628">      can = g-&gt;can;</a>
+<a name="ln629">      dt_pthread_mutex_unlock(&amp;g-&gt;lock);</a>
+<a name="ln630">    }</a>
+<a name="ln631">  }</a>
+<a name="ln632"> </a>
+<a name="ln633">  if(can)</a>
+<a name="ln634">  {</a>
+<a name="ln635">    b = dt_iop_colorreconstruct_bilateral_thaw(can);</a>
+<a name="ln636">  }</a>
+<a name="ln637">  else</a>
+<a name="ln638">  {</a>
+<a name="ln639">    b = dt_iop_colorreconstruct_bilateral_init(roi_in, piece-&gt;iscale, sigma_s, sigma_r);</a>
+<a name="ln640">    dt_iop_colorreconstruct_bilateral_splat(b, in, data-&gt;threshold, data-&gt;precedence, params);</a>
+<a name="ln641">    dt_iop_colorreconstruct_bilateral_blur(b);</a>
+<a name="ln642">  }</a>
+<a name="ln643"> </a>
+<a name="ln644">  if(!b) goto error;</a>
+<a name="ln645"> </a>
+<a name="ln646">  dt_iop_colorreconstruct_bilateral_slice(b, in, out, data-&gt;threshold, roi_in, piece-&gt;iscale);</a>
+<a name="ln647"> </a>
+<a name="ln648">  // here is where we generate the canned bilateral grid of the preview pipe for later use</a>
+<a name="ln649">  if(self-&gt;dev-&gt;gui_attached &amp;&amp; g &amp;&amp; piece-&gt;pipe-&gt;type == DT_DEV_PIXELPIPE_PREVIEW)</a>
+<a name="ln650">  {</a>
+<a name="ln651">    uint64_t hash = dt_dev_hash_plus(self-&gt;dev, piece-&gt;pipe, 0, self-&gt;priority);</a>
+<a name="ln652">    dt_pthread_mutex_lock(&amp;g-&gt;lock);</a>
+<a name="ln653">    dt_iop_colorreconstruct_bilateral_dump(g-&gt;can);</a>
+<a name="ln654">    g-&gt;can = dt_iop_colorreconstruct_bilateral_freeze(b);</a>
+<a name="ln655">    g-&gt;hash = hash;</a>
+<a name="ln656">    dt_pthread_mutex_unlock(&amp;g-&gt;lock);</a>
+<a name="ln657">  }</a>
+<a name="ln658"> </a>
+<a name="ln659">  dt_iop_colorreconstruct_bilateral_free(b);</a>
+<a name="ln660">  return;</a>
+<a name="ln661"> </a>
+<a name="ln662">error:</a>
+<a name="ln663">  dt_control_log(_(&quot;module `color reconstruction' failed&quot;));</a>
+<a name="ln664">  dt_iop_colorreconstruct_bilateral_free(b);</a>
+<a name="ln665">  memcpy(ovoid, ivoid, (size_t)sizeof(float) * piece-&gt;colors * roi_out-&gt;width * roi_out-&gt;height);</a>
+<a name="ln666">}</a>
+<a name="ln667"> </a>
+<a name="ln668">#ifdef HAVE_OPENCL</a>
+<a name="ln669">typedef struct dt_iop_colorreconstruct_bilateral_cl_t</a>
+<a name="ln670">{</a>
+<a name="ln671">  dt_iop_colorreconstruct_global_data_t *global;</a>
+<a name="ln672">  int devid;</a>
+<a name="ln673">  size_t size_x, size_y, size_z;</a>
+<a name="ln674">  int width, height, x, y;</a>
+<a name="ln675">  float scale;</a>
+<a name="ln676">  size_t blocksizex, blocksizey;</a>
+<a name="ln677">  float sigma_s, sigma_r;</a>
+<a name="ln678">  cl_mem dev_grid;</a>
+<a name="ln679">  cl_mem dev_grid_tmp;</a>
+<a name="ln680">} dt_iop_colorreconstruct_bilateral_cl_t;</a>
+<a name="ln681"> </a>
+<a name="ln682">static void dt_iop_colorreconstruct_bilateral_free_cl(dt_iop_colorreconstruct_bilateral_cl_t *b)</a>
+<a name="ln683">{</a>
+<a name="ln684">  if(!b) return;</a>
+<a name="ln685">  // be sure we're done with the memory:</a>
+<a name="ln686">  dt_opencl_finish(b-&gt;devid);</a>
+<a name="ln687">  // free device mem</a>
+<a name="ln688">  dt_opencl_release_mem_object(b-&gt;dev_grid);</a>
+<a name="ln689">  dt_opencl_release_mem_object(b-&gt;dev_grid_tmp);</a>
+<a name="ln690">  free(b);</a>
+<a name="ln691">}</a>
+<a name="ln692"> </a>
+<a name="ln693">static dt_iop_colorreconstruct_bilateral_cl_t *dt_iop_colorreconstruct_bilateral_init_cl(</a>
+<a name="ln694">                                        const int devid,</a>
+<a name="ln695">                                        dt_iop_colorreconstruct_global_data_t *global,</a>
+<a name="ln696">                                        const dt_iop_roi_t *roi, // dimensions of input image</a>
+<a name="ln697">                                        const float iscale,      // overall scale of input image</a>
+<a name="ln698">                                        const float sigma_s,     // spatial sigma (blur pixel coords)</a>
+<a name="ln699">                                        const float sigma_r)     // range sigma (blur luma values)</a>
+<a name="ln700">{</a>
+<a name="ln701">  int blocksizex, blocksizey;</a>
+<a name="ln702"> </a>
+<a name="ln703">  dt_opencl_local_buffer_t locopt</a>
+<a name="ln704">    = (dt_opencl_local_buffer_t){ .xoffset = 0, .xfactor = 1, .yoffset = 0, .yfactor = 1,</a>
+<a name="ln705">                                  .cellsize = 4 * sizeof(float) + sizeof(int), .overhead = 0,</a>
+<a name="ln706">                                  .sizex = 1 &lt;&lt; 6, .sizey = 1 &lt;&lt; 6 };</a>
+<a name="ln707"> </a>
+<a name="ln708">  if(dt_opencl_local_buffer_opt(devid, global-&gt;kernel_colorreconstruct_splat, &amp;locopt))</a>
+<a name="ln709">  {</a>
+<a name="ln710">    blocksizex = locopt.sizex;</a>
+<a name="ln711">    blocksizey = locopt.sizey;</a>
+<a name="ln712">  }</a>
+<a name="ln713">  else</a>
+<a name="ln714">    blocksizex = blocksizey = 1;</a>
+<a name="ln715"> </a>
+<a name="ln716">  if(blocksizex * blocksizey &lt; 16 * 16)</a>
+<a name="ln717">  {</a>
+<a name="ln718">    dt_print(DT_DEBUG_OPENCL,</a>
+<a name="ln719">             &quot;[opencl_colorreconstruction] device %d does not offer sufficient resources to run bilateral grid\n&quot;,</a>
+<a name="ln720">             devid);</a>
+<a name="ln721">    return NULL;</a>
+<a name="ln722">  }</a>
+<a name="ln723"> </a>
+<a name="ln724">  dt_iop_colorreconstruct_bilateral_cl_t *b = (dt_iop_colorreconstruct_bilateral_cl_t *)malloc(sizeof(dt_iop_colorreconstruct_bilateral_cl_t));</a>
+<a name="ln725">  if(!b)</a>
+<a name="ln726">  {</a>
+<a name="ln727">    dt_print(DT_DEBUG_OPENCL, &quot;[opencl_colorreconstruction] not able to allocate host buffer (a)\n&quot;);</a>
+<a name="ln728">    return NULL;</a>
+<a name="ln729">  }</a>
+<a name="ln730"> </a>
+<a name="ln731">  float _x = roundf(roi-&gt;width / sigma_s);</a>
+<a name="ln732">  float _y = roundf(roi-&gt;height / sigma_s);</a>
+<a name="ln733">  float _z = roundf(100.0f / sigma_r);</a>
+<a name="ln734">  b-&gt;size_x = CLAMPS((int)_x, 4, DT_COLORRECONSTRUCT_BILATERAL_MAX_RES_S) + 1;</a>
+<a name="ln735">  b-&gt;size_y = CLAMPS((int)_y, 4, DT_COLORRECONSTRUCT_BILATERAL_MAX_RES_S) + 1;</a>
+<a name="ln736">  b-&gt;size_z = CLAMPS((int)_z, 4, DT_COLORRECONSTRUCT_BILATERAL_MAX_RES_R) + 1;</a>
+<a name="ln737">  b-&gt;width = roi-&gt;width;</a>
+<a name="ln738">  b-&gt;height = roi-&gt;height;</a>
+<a name="ln739">  b-&gt;x = roi-&gt;x;</a>
+<a name="ln740">  b-&gt;y = roi-&gt;y;</a>
+<a name="ln741">  b-&gt;scale = iscale / roi-&gt;scale;</a>
+<a name="ln742">  b-&gt;blocksizex = blocksizex;</a>
+<a name="ln743">  b-&gt;blocksizey = blocksizey;</a>
+<a name="ln744">  b-&gt;sigma_s = MAX(roi-&gt;height / (b-&gt;size_y - 1.0f), roi-&gt;width / (b-&gt;size_x - 1.0f));</a>
+<a name="ln745">  b-&gt;sigma_r = 100.0f / (b-&gt;size_z - 1.0f);</a>
+<a name="ln746">  b-&gt;devid = devid;</a>
+<a name="ln747">  b-&gt;global = global;</a>
+<a name="ln748">  b-&gt;dev_grid = NULL;</a>
+<a name="ln749">  b-&gt;dev_grid_tmp = NULL;</a>
+<a name="ln750"> </a>
+<a name="ln751">  // alloc grid buffer:</a>
+<a name="ln752">  b-&gt;dev_grid</a>
+<a name="ln753">      = dt_opencl_alloc_device_buffer(b-&gt;devid, (size_t)b-&gt;size_x * b-&gt;size_y * b-&gt;size_z * 4 * sizeof(float));</a>
+<a name="ln754">  if(!b-&gt;dev_grid)</a>
+<a name="ln755">  {</a>
+<a name="ln756">    dt_print(DT_DEBUG_OPENCL, &quot;[opencl_colorreconstruction] not able to allocate device buffer (b)\n&quot;);</a>
+<a name="ln757">    dt_iop_colorreconstruct_bilateral_free_cl(b);</a>
+<a name="ln758">    return NULL;</a>
+<a name="ln759">  }</a>
+<a name="ln760"> </a>
+<a name="ln761">  // alloc temporary grid buffer</a>
+<a name="ln762">  b-&gt;dev_grid_tmp</a>
+<a name="ln763">      = dt_opencl_alloc_device_buffer(b-&gt;devid, (size_t)b-&gt;size_x * b-&gt;size_y * b-&gt;size_z * 4 * sizeof(float));</a>
+<a name="ln764">  if(!b-&gt;dev_grid_tmp)</a>
+<a name="ln765">  {</a>
+<a name="ln766">    dt_print(DT_DEBUG_OPENCL, &quot;[opencl_colorreconstruction] not able to allocate device buffer (c)\n&quot;);</a>
+<a name="ln767">    dt_iop_colorreconstruct_bilateral_free_cl(b);</a>
+<a name="ln768">    return NULL;</a>
+<a name="ln769">  }</a>
+<a name="ln770"> </a>
+<a name="ln771">  // zero out grid</a>
+<a name="ln772">  int wd = 4 * b-&gt;size_x, ht = b-&gt;size_y * b-&gt;size_z;</a>
+<a name="ln773">  size_t sizes[] = { ROUNDUPWD(wd), ROUNDUPHT(ht), 1 };</a>
+<a name="ln774">  dt_opencl_set_kernel_arg(b-&gt;devid, b-&gt;global-&gt;kernel_colorreconstruct_zero, 0, sizeof(cl_mem), (void *)&amp;b-&gt;dev_grid);</a>
+<a name="ln775">  dt_opencl_set_kernel_arg(b-&gt;devid, b-&gt;global-&gt;kernel_colorreconstruct_zero, 1, sizeof(int), (void *)&amp;wd);</a>
+<a name="ln776">  dt_opencl_set_kernel_arg(b-&gt;devid, b-&gt;global-&gt;kernel_colorreconstruct_zero, 2, sizeof(int), (void *)&amp;ht);</a>
+<a name="ln777">  cl_int err = -666;</a>
+<a name="ln778">  err = dt_opencl_enqueue_kernel_2d(b-&gt;devid, b-&gt;global-&gt;kernel_colorreconstruct_zero, sizes);</a>
+<a name="ln779">  if(err != CL_SUCCESS)</a>
+<a name="ln780">  {</a>
+<a name="ln781">    dt_print(DT_DEBUG_OPENCL, &quot;[opencl_colorreconstruction] error running kernel colorreconstruct_zero: %d\n&quot;, err);</a>
+<a name="ln782">    dt_iop_colorreconstruct_bilateral_free_cl(b);</a>
+<a name="ln783">    return NULL;</a>
+<a name="ln784">  }</a>
+<a name="ln785"> </a>
+<a name="ln786">#if 0</a>
+<a name="ln787">  fprintf(stderr, &quot;[bilateral] created grid [%d %d %d]&quot;</a>
+<a name="ln788">          &quot; with sigma (%f %f) (%f %f)\n&quot;, b-&gt;size_x, b-&gt;size_y, b-&gt;size_z,</a>
+<a name="ln789">          b-&gt;sigma_s, sigma_s, b-&gt;sigma_r, sigma_r);</a>
+<a name="ln790">#endif</a>
+<a name="ln791">  return b;</a>
+<a name="ln792">}</a>
+<a name="ln793"> </a>
+<a name="ln794">static dt_iop_colorreconstruct_bilateral_frozen_t *dt_iop_colorreconstruct_bilateral_freeze_cl(dt_iop_colorreconstruct_bilateral_cl_t *b)</a>
+<a name="ln795">{</a>
+<a name="ln796">  if(!b) return NULL;</a>
+<a name="ln797"> </a>
+<a name="ln798">  dt_iop_colorreconstruct_bilateral_frozen_t *bf = (dt_iop_colorreconstruct_bilateral_frozen_t *)malloc(sizeof(dt_iop_colorreconstruct_bilateral_frozen_t));</a>
+<a name="ln799">  if(!bf)</a>
+<a name="ln800">  {</a>
+<a name="ln801">    dt_print(DT_DEBUG_OPENCL, &quot;[opencl_colorreconstruction] not able to allocate host buffer (d)\n&quot;);</a>
+<a name="ln802">    return NULL;</a>
+<a name="ln803">  }</a>
+<a name="ln804"> </a>
+<a name="ln805">  bf-&gt;size_x = b-&gt;size_x;</a>
+<a name="ln806">  bf-&gt;size_y = b-&gt;size_y;</a>
+<a name="ln807">  bf-&gt;size_z = b-&gt;size_z;</a>
+<a name="ln808">  bf-&gt;width = b-&gt;width;</a>
+<a name="ln809">  bf-&gt;height = b-&gt;height;</a>
+<a name="ln810">  bf-&gt;x = b-&gt;x;</a>
+<a name="ln811">  bf-&gt;y = b-&gt;y;</a>
+<a name="ln812">  bf-&gt;scale = b-&gt;scale;</a>
+<a name="ln813">  bf-&gt;sigma_s = b-&gt;sigma_s;</a>
+<a name="ln814">  bf-&gt;sigma_r = b-&gt;sigma_r;</a>
+<a name="ln815">  bf-&gt;buf = dt_alloc_align(16, b-&gt;size_x * b-&gt;size_y * b-&gt;size_z * sizeof(dt_iop_colorreconstruct_Lab_t));</a>
+<a name="ln816">  if(bf-&gt;buf &amp;&amp; b-&gt;dev_grid)</a>
+<a name="ln817">  {</a>
+<a name="ln818">    // read bilateral grid from device memory to host buffer (blocking)</a>
+<a name="ln819">    cl_int err = dt_opencl_read_buffer_from_device(b-&gt;devid, bf-&gt;buf, b-&gt;dev_grid, 0,</a>
+<a name="ln820">                                    b-&gt;size_x * b-&gt;size_y * b-&gt;size_z * sizeof(dt_iop_colorreconstruct_Lab_t), TRUE);</a>
+<a name="ln821">    if(err != CL_SUCCESS)</a>
+<a name="ln822">    {</a>
+<a name="ln823">      dt_print(DT_DEBUG_OPENCL,</a>
+<a name="ln824">           &quot;[opencl_colorreconstruction] can not read bilateral grid from device %d\n&quot;, b-&gt;devid);</a>
+<a name="ln825">      dt_iop_colorreconstruct_bilateral_dump(bf);</a>
+<a name="ln826">      return NULL;</a>
+<a name="ln827">    }</a>
+<a name="ln828">  }</a>
+<a name="ln829">  else</a>
+<a name="ln830">  {</a>
+<a name="ln831">    dt_print(DT_DEBUG_OPENCL, &quot;[opencl_colorreconstruction] not able to allocate host buffer (e)\n&quot;);</a>
+<a name="ln832">    dt_iop_colorreconstruct_bilateral_dump(bf);</a>
+<a name="ln833">    return NULL;</a>
+<a name="ln834">  }</a>
+<a name="ln835"> </a>
+<a name="ln836">  return bf;</a>
+<a name="ln837">}</a>
+<a name="ln838"> </a>
+<a name="ln839">static dt_iop_colorreconstruct_bilateral_cl_t *dt_iop_colorreconstruct_bilateral_thaw_cl(dt_iop_colorreconstruct_bilateral_frozen_t *bf,</a>
+<a name="ln840">                                                                                         const int devid,</a>
+<a name="ln841">                                                                                         dt_iop_colorreconstruct_global_data_t *global)</a>
+<a name="ln842">{</a>
+<a name="ln843">  if(!bf || !bf-&gt;buf) return NULL;</a>
+<a name="ln844"> </a>
+<a name="ln845">  int blocksizex, blocksizey;</a>
+<a name="ln846"> </a>
+<a name="ln847">  dt_opencl_local_buffer_t locopt</a>
+<a name="ln848">    = (dt_opencl_local_buffer_t){ .xoffset = 0, .xfactor = 1, .yoffset = 0, .yfactor = 1,</a>
+<a name="ln849">                                  .cellsize = 4 * sizeof(float) + sizeof(int), .overhead = 0,</a>
+<a name="ln850">                                  .sizex = 1 &lt;&lt; 6, .sizey = 1 &lt;&lt; 6 };</a>
+<a name="ln851"> </a>
+<a name="ln852">  if(dt_opencl_local_buffer_opt(devid, global-&gt;kernel_colorreconstruct_splat, &amp;locopt))</a>
+<a name="ln853">  {</a>
+<a name="ln854">    blocksizex = locopt.sizex;</a>
+<a name="ln855">    blocksizey = locopt.sizey;</a>
+<a name="ln856">  }</a>
+<a name="ln857">  else</a>
+<a name="ln858">    blocksizex = blocksizey = 1;</a>
+<a name="ln859"> </a>
+<a name="ln860">  if(blocksizex * blocksizey &lt; 16 * 16)</a>
+<a name="ln861">  {</a>
+<a name="ln862">    dt_print(DT_DEBUG_OPENCL,</a>
+<a name="ln863">             &quot;[opencl_colorreconstruction] device %d does not offer sufficient resources to run bilateral grid\n&quot;,</a>
+<a name="ln864">             devid);</a>
+<a name="ln865">    return NULL;</a>
+<a name="ln866">  }</a>
+<a name="ln867"> </a>
+<a name="ln868">  dt_iop_colorreconstruct_bilateral_cl_t *b = (dt_iop_colorreconstruct_bilateral_cl_t *)malloc(sizeof(dt_iop_colorreconstruct_bilateral_cl_t));</a>
+<a name="ln869">  if(!b)</a>
+<a name="ln870">  {</a>
+<a name="ln871">    dt_print(DT_DEBUG_OPENCL, &quot;[opencl_colorreconstruction] not able to allocate host buffer (f)\n&quot;);</a>
+<a name="ln872">    return NULL;</a>
+<a name="ln873">  }</a>
+<a name="ln874"> </a>
+<a name="ln875">  b-&gt;devid = devid;</a>
+<a name="ln876">  b-&gt;blocksizex = blocksizex;</a>
+<a name="ln877">  b-&gt;blocksizey = blocksizey;</a>
+<a name="ln878">  b-&gt;global = global;</a>
+<a name="ln879">  b-&gt;size_x = bf-&gt;size_x;</a>
+<a name="ln880">  b-&gt;size_y = bf-&gt;size_y;</a>
+<a name="ln881">  b-&gt;size_z = bf-&gt;size_z;</a>
+<a name="ln882">  b-&gt;width = bf-&gt;width;</a>
+<a name="ln883">  b-&gt;height = bf-&gt;height;</a>
+<a name="ln884">  b-&gt;x = bf-&gt;x;</a>
+<a name="ln885">  b-&gt;y = bf-&gt;y;</a>
+<a name="ln886">  b-&gt;scale = bf-&gt;scale;</a>
+<a name="ln887">  b-&gt;sigma_s = bf-&gt;sigma_s;</a>
+<a name="ln888">  b-&gt;sigma_r = bf-&gt;sigma_r;</a>
+<a name="ln889">  b-&gt;dev_grid = NULL;</a>
+<a name="ln890">  b-&gt;dev_grid_tmp = NULL;</a>
+<a name="ln891"> </a>
+<a name="ln892">  // alloc grid buffer:</a>
+<a name="ln893">  b-&gt;dev_grid</a>
+<a name="ln894">      = dt_opencl_alloc_device_buffer(b-&gt;devid, (size_t)b-&gt;size_x * b-&gt;size_y * b-&gt;size_z * 4 * sizeof(float));</a>
+<a name="ln895">  if(!b-&gt;dev_grid)</a>
+<a name="ln896">  {</a>
+<a name="ln897">    dt_print(DT_DEBUG_OPENCL, &quot;[opencl_colorreconstruction] not able to allocate device buffer (g)\n&quot;);</a>
+<a name="ln898">    dt_iop_colorreconstruct_bilateral_free_cl(b);</a>
+<a name="ln899">    return NULL;</a>
+<a name="ln900">  }</a>
+<a name="ln901"> </a>
+<a name="ln902">  // alloc temporary grid buffer</a>
+<a name="ln903">  b-&gt;dev_grid_tmp</a>
+<a name="ln904">      = dt_opencl_alloc_device_buffer(b-&gt;devid, (size_t)b-&gt;size_x * b-&gt;size_y * b-&gt;size_z * 4 * sizeof(float));</a>
+<a name="ln905">  if(!b-&gt;dev_grid_tmp)</a>
+<a name="ln906">  {</a>
+<a name="ln907">    dt_print(DT_DEBUG_OPENCL, &quot;[opencl_colorreconstruction] not able to allocate device buffer (h)\n&quot;);</a>
+<a name="ln908">    dt_iop_colorreconstruct_bilateral_free_cl(b);</a>
+<a name="ln909">    return NULL;</a>
+<a name="ln910">  }</a>
+<a name="ln911"> </a>
+<a name="ln912">  if(bf-&gt;buf)</a>
+<a name="ln913">  {</a>
+<a name="ln914">    // write bilateral grid from host buffer to device memory (blocking)</a>
+<a name="ln915">    cl_int err = dt_opencl_write_buffer_to_device(b-&gt;devid, bf-&gt;buf, b-&gt;dev_grid, 0,</a>
+<a name="ln916">                                    bf-&gt;size_x * bf-&gt;size_y * bf-&gt;size_z * sizeof(dt_iop_colorreconstruct_Lab_t), TRUE);</a>
+<a name="ln917">    if(err != CL_SUCCESS)</a>
+<a name="ln918">    {</a>
+<a name="ln919">      dt_print(DT_DEBUG_OPENCL,</a>
+<a name="ln920">           &quot;[opencl_colorreconstruction] can not write bilateral grid to device %d\n&quot;, b-&gt;devid);</a>
+<a name="ln921">      dt_iop_colorreconstruct_bilateral_free_cl(b);</a>
+<a name="ln922">      return NULL;</a>
+<a name="ln923">    }</a>
+<a name="ln924">  }</a>
+<a name="ln925"> </a>
+<a name="ln926">  return b;</a>
+<a name="ln927">}</a>
+<a name="ln928"> </a>
+<a name="ln929">static cl_int dt_iop_colorreconstruct_bilateral_splat_cl(dt_iop_colorreconstruct_bilateral_cl_t *b, cl_mem in, const float threshold,</a>
+<a name="ln930">                                                         dt_iop_colorreconstruct_precedence_t precedence, const float *params)</a>
+<a name="ln931">{</a>
+<a name="ln932">  cl_int err = -666;</a>
+<a name="ln933">  if(!b) return err;</a>
+<a name="ln934">  int pref = precedence;</a>
+<a name="ln935">  size_t sizes[] = { ROUNDUP(b-&gt;width, b-&gt;blocksizex), ROUNDUP(b-&gt;height, b-&gt;blocksizey), 1 };</a>
+<a name="ln936">  size_t local[] = { b-&gt;blocksizex, b-&gt;blocksizey, 1 };</a>
+<a name="ln937">  dt_opencl_set_kernel_arg(b-&gt;devid, b-&gt;global-&gt;kernel_colorreconstruct_splat, 0, sizeof(cl_mem), (void *)&amp;in);</a>
+<a name="ln938">  dt_opencl_set_kernel_arg(b-&gt;devid, b-&gt;global-&gt;kernel_colorreconstruct_splat, 1, sizeof(cl_mem), (void *)&amp;b-&gt;dev_grid);</a>
+<a name="ln939">  dt_opencl_set_kernel_arg(b-&gt;devid, b-&gt;global-&gt;kernel_colorreconstruct_splat, 2, sizeof(int), (void *)&amp;b-&gt;width);</a>
+<a name="ln940">  dt_opencl_set_kernel_arg(b-&gt;devid, b-&gt;global-&gt;kernel_colorreconstruct_splat, 3, sizeof(int), (void *)&amp;b-&gt;height);</a>
+<a name="ln941">  dt_opencl_set_kernel_arg(b-&gt;devid, b-&gt;global-&gt;kernel_colorreconstruct_splat, 4, sizeof(int), (void *)&amp;b-&gt;size_x);</a>
+<a name="ln942">  dt_opencl_set_kernel_arg(b-&gt;devid, b-&gt;global-&gt;kernel_colorreconstruct_splat, 5, sizeof(int), (void *)&amp;b-&gt;size_y);</a>
+<a name="ln943">  dt_opencl_set_kernel_arg(b-&gt;devid, b-&gt;global-&gt;kernel_colorreconstruct_splat, 6, sizeof(int), (void *)&amp;b-&gt;size_z);</a>
+<a name="ln944">  dt_opencl_set_kernel_arg(b-&gt;devid, b-&gt;global-&gt;kernel_colorreconstruct_splat, 7, sizeof(float), (void *)&amp;b-&gt;sigma_s);</a>
+<a name="ln945">  dt_opencl_set_kernel_arg(b-&gt;devid, b-&gt;global-&gt;kernel_colorreconstruct_splat, 8, sizeof(float), (void *)&amp;b-&gt;sigma_r);</a>
+<a name="ln946">  dt_opencl_set_kernel_arg(b-&gt;devid, b-&gt;global-&gt;kernel_colorreconstruct_splat, 9, sizeof(float), (void *)&amp;threshold);</a>
+<a name="ln947">  dt_opencl_set_kernel_arg(b-&gt;devid, b-&gt;global-&gt;kernel_colorreconstruct_splat, 10, sizeof(int), (void *)&amp;pref);</a>
+<a name="ln948">  dt_opencl_set_kernel_arg(b-&gt;devid, b-&gt;global-&gt;kernel_colorreconstruct_splat, 11, 4*sizeof(float), (void *)params);</a>
+<a name="ln949">  dt_opencl_set_kernel_arg(b-&gt;devid, b-&gt;global-&gt;kernel_colorreconstruct_splat, 12, b-&gt;blocksizex * b-&gt;blocksizey * sizeof(int),</a>
+<a name="ln950">                           NULL);</a>
+<a name="ln951">  dt_opencl_set_kernel_arg(b-&gt;devid, b-&gt;global-&gt;kernel_colorreconstruct_splat, 13,</a>
+<a name="ln952">                           b-&gt;blocksizex * b-&gt;blocksizey * 4 * sizeof(float), NULL);</a>
+<a name="ln953">  err = dt_opencl_enqueue_kernel_2d_with_local(b-&gt;devid, b-&gt;global-&gt;kernel_colorreconstruct_splat, sizes, local);</a>
+<a name="ln954">  return err;</a>
+<a name="ln955">}</a>
+<a name="ln956"> </a>
+<a name="ln957">static cl_int dt_iop_colorreconstruct_bilateral_blur_cl(dt_iop_colorreconstruct_bilateral_cl_t *b)</a>
+<a name="ln958">{</a>
+<a name="ln959">  cl_int err = -666;</a>
+<a name="ln960">  if(!b) return err;</a>
+<a name="ln961">  size_t sizes[3] = { 0, 0, 1 };</a>
+<a name="ln962"> </a>
+<a name="ln963">  err = dt_opencl_enqueue_copy_buffer_to_buffer(b-&gt;devid, b-&gt;dev_grid, b-&gt;dev_grid_tmp, 0, 0,</a>
+<a name="ln964">                                                b-&gt;size_x * b-&gt;size_y * b-&gt;size_z * 4 * sizeof(float));</a>
+<a name="ln965">  if(err != CL_SUCCESS) return err;</a>
+<a name="ln966"> </a>
+<a name="ln967">  sizes[0] = ROUNDUPWD(b-&gt;size_z);</a>
+<a name="ln968">  sizes[1] = ROUNDUPHT(b-&gt;size_y);</a>
+<a name="ln969">  int stride1, stride2, stride3;</a>
+<a name="ln970">  stride1 = b-&gt;size_x * b-&gt;size_y;</a>
+<a name="ln971">  stride2 = b-&gt;size_x;</a>
+<a name="ln972">  stride3 = 1;</a>
+<a name="ln973">  dt_opencl_set_kernel_arg(b-&gt;devid, b-&gt;global-&gt;kernel_colorreconstruct_blur_line, 0, sizeof(cl_mem), (void *)&amp;b-&gt;dev_grid_tmp);</a>
+<a name="ln974">  dt_opencl_set_kernel_arg(b-&gt;devid, b-&gt;global-&gt;kernel_colorreconstruct_blur_line, 1, sizeof(cl_mem), (void *)&amp;b-&gt;dev_grid);</a>
+<a name="ln975">  dt_opencl_set_kernel_arg(b-&gt;devid, b-&gt;global-&gt;kernel_colorreconstruct_blur_line, 2, sizeof(int), (void *)&amp;stride1);</a>
+<a name="ln976">  dt_opencl_set_kernel_arg(b-&gt;devid, b-&gt;global-&gt;kernel_colorreconstruct_blur_line, 3, sizeof(int), (void *)&amp;stride2);</a>
+<a name="ln977">  dt_opencl_set_kernel_arg(b-&gt;devid, b-&gt;global-&gt;kernel_colorreconstruct_blur_line, 4, sizeof(int), (void *)&amp;stride3);</a>
+<a name="ln978">  dt_opencl_set_kernel_arg(b-&gt;devid, b-&gt;global-&gt;kernel_colorreconstruct_blur_line, 5, sizeof(int), (void *)&amp;b-&gt;size_z);</a>
+<a name="ln979">  dt_opencl_set_kernel_arg(b-&gt;devid, b-&gt;global-&gt;kernel_colorreconstruct_blur_line, 6, sizeof(int), (void *)&amp;b-&gt;size_y);</a>
+<a name="ln980">  dt_opencl_set_kernel_arg(b-&gt;devid, b-&gt;global-&gt;kernel_colorreconstruct_blur_line, 7, sizeof(int), (void *)&amp;b-&gt;size_x);</a>
+<a name="ln981">  err = dt_opencl_enqueue_kernel_2d(b-&gt;devid, b-&gt;global-&gt;kernel_colorreconstruct_blur_line, sizes);</a>
+<a name="ln982">  if(err != CL_SUCCESS) return err;</a>
+<a name="ln983"> </a>
+<a name="ln984">  stride1 = b-&gt;size_x * b-&gt;size_y;</a>
+<a name="ln985">  stride2 = 1;</a>
+<a name="ln986">  stride3 = b-&gt;size_x;</a>
+<a name="ln987">  sizes[0] = ROUNDUPWD(b-&gt;size_z);</a>
+<a name="ln988">  sizes[1] = ROUNDUPHT(b-&gt;size_x);</a>
+<a name="ln989">  dt_opencl_set_kernel_arg(b-&gt;devid, b-&gt;global-&gt;kernel_colorreconstruct_blur_line, 0, sizeof(cl_mem), (void *)&amp;b-&gt;dev_grid);</a>
+<a name="ln990">  dt_opencl_set_kernel_arg(b-&gt;devid, b-&gt;global-&gt;kernel_colorreconstruct_blur_line, 1, sizeof(cl_mem), (void *)&amp;b-&gt;dev_grid_tmp);</a>
+<a name="ln991">  dt_opencl_set_kernel_arg(b-&gt;devid, b-&gt;global-&gt;kernel_colorreconstruct_blur_line, 2, sizeof(int), (void *)&amp;stride1);</a>
+<a name="ln992">  dt_opencl_set_kernel_arg(b-&gt;devid, b-&gt;global-&gt;kernel_colorreconstruct_blur_line, 3, sizeof(int), (void *)&amp;stride2);</a>
+<a name="ln993">  dt_opencl_set_kernel_arg(b-&gt;devid, b-&gt;global-&gt;kernel_colorreconstruct_blur_line, 4, sizeof(int), (void *)&amp;stride3);</a>
+<a name="ln994">  dt_opencl_set_kernel_arg(b-&gt;devid, b-&gt;global-&gt;kernel_colorreconstruct_blur_line, 5, sizeof(int), (void *)&amp;b-&gt;size_z);</a>
+<a name="ln995">  dt_opencl_set_kernel_arg(b-&gt;devid, b-&gt;global-&gt;kernel_colorreconstruct_blur_line, 6, sizeof(int), (void *)&amp;b-&gt;size_x);</a>
+<a name="ln996">  dt_opencl_set_kernel_arg(b-&gt;devid, b-&gt;global-&gt;kernel_colorreconstruct_blur_line, 7, sizeof(int), (void *)&amp;b-&gt;size_y);</a>
+<a name="ln997">  err = dt_opencl_enqueue_kernel_2d(b-&gt;devid, b-&gt;global-&gt;kernel_colorreconstruct_blur_line, sizes);</a>
+<a name="ln998">  if(err != CL_SUCCESS) return err;</a>
+<a name="ln999"> </a>
+<a name="ln1000">  stride1 = 1;</a>
+<a name="ln1001">  stride2 = b-&gt;size_x;</a>
+<a name="ln1002">  stride3 = b-&gt;size_x * b-&gt;size_y;</a>
+<a name="ln1003">  sizes[0] = ROUNDUPWD(b-&gt;size_x);</a>
+<a name="ln1004">  sizes[1] = ROUNDUPHT(b-&gt;size_y);</a>
+<a name="ln1005">  dt_opencl_set_kernel_arg(b-&gt;devid, b-&gt;global-&gt;kernel_colorreconstruct_blur_line, 0, sizeof(cl_mem),</a>
+<a name="ln1006">                           (void *)&amp;b-&gt;dev_grid_tmp);</a>
+<a name="ln1007">  dt_opencl_set_kernel_arg(b-&gt;devid, b-&gt;global-&gt;kernel_colorreconstruct_blur_line, 1, sizeof(cl_mem), (void *)&amp;b-&gt;dev_grid);</a>
+<a name="ln1008">  dt_opencl_set_kernel_arg(b-&gt;devid, b-&gt;global-&gt;kernel_colorreconstruct_blur_line, 2, sizeof(int), (void *)&amp;stride1);</a>
+<a name="ln1009">  dt_opencl_set_kernel_arg(b-&gt;devid, b-&gt;global-&gt;kernel_colorreconstruct_blur_line, 3, sizeof(int), (void *)&amp;stride2);</a>
+<a name="ln1010">  dt_opencl_set_kernel_arg(b-&gt;devid, b-&gt;global-&gt;kernel_colorreconstruct_blur_line, 4, sizeof(int), (void *)&amp;stride3);</a>
+<a name="ln1011">  dt_opencl_set_kernel_arg(b-&gt;devid, b-&gt;global-&gt;kernel_colorreconstruct_blur_line, 5, sizeof(int), (void *)&amp;b-&gt;size_x);</a>
+<a name="ln1012">  dt_opencl_set_kernel_arg(b-&gt;devid, b-&gt;global-&gt;kernel_colorreconstruct_blur_line, 6, sizeof(int), (void *)&amp;b-&gt;size_y);</a>
+<a name="ln1013">  dt_opencl_set_kernel_arg(b-&gt;devid, b-&gt;global-&gt;kernel_colorreconstruct_blur_line, 7, sizeof(int), (void *)&amp;b-&gt;size_z);</a>
+<a name="ln1014">  err = dt_opencl_enqueue_kernel_2d(b-&gt;devid, b-&gt;global-&gt;kernel_colorreconstruct_blur_line, sizes);</a>
+<a name="ln1015">  return err;</a>
+<a name="ln1016">}</a>
+<a name="ln1017"> </a>
+<a name="ln1018">static cl_int dt_iop_colorreconstruct_bilateral_slice_cl(dt_iop_colorreconstruct_bilateral_cl_t *b, cl_mem in, cl_mem out,</a>
+<a name="ln1019">                                                         const float threshold, const dt_iop_roi_t *roi, const float iscale)</a>
+<a name="ln1020">{</a>
+<a name="ln1021">  cl_int err = -666;</a>
+<a name="ln1022">  if(!b) return err;</a>
+<a name="ln1023">  const int bxy[2] = { b-&gt;x, b-&gt;y };</a>
+<a name="ln1024">  const int roixy[2] = { roi-&gt;x, roi-&gt;y };</a>
+<a name="ln1025">  const float rescale = iscale / (roi-&gt;scale * b-&gt;scale);</a>
+<a name="ln1026"> </a>
+<a name="ln1027">  size_t sizes[] = { ROUNDUPWD(roi-&gt;width), ROUNDUPHT(roi-&gt;height), 1 };</a>
+<a name="ln1028">  dt_opencl_set_kernel_arg(b-&gt;devid, b-&gt;global-&gt;kernel_colorreconstruct_slice, 0, sizeof(cl_mem), (void *)&amp;in);</a>
+<a name="ln1029">  dt_opencl_set_kernel_arg(b-&gt;devid, b-&gt;global-&gt;kernel_colorreconstruct_slice, 1, sizeof(cl_mem), (void *)&amp;out);</a>
+<a name="ln1030">  dt_opencl_set_kernel_arg(b-&gt;devid, b-&gt;global-&gt;kernel_colorreconstruct_slice, 2, sizeof(cl_mem), (void *)&amp;b-&gt;dev_grid);</a>
+<a name="ln1031">  dt_opencl_set_kernel_arg(b-&gt;devid, b-&gt;global-&gt;kernel_colorreconstruct_slice, 3, sizeof(int), (void *)&amp;roi-&gt;width);</a>
+<a name="ln1032">  dt_opencl_set_kernel_arg(b-&gt;devid, b-&gt;global-&gt;kernel_colorreconstruct_slice, 4, sizeof(int), (void *)&amp;roi-&gt;height);</a>
+<a name="ln1033">  dt_opencl_set_kernel_arg(b-&gt;devid, b-&gt;global-&gt;kernel_colorreconstruct_slice, 5, sizeof(int), (void *)&amp;b-&gt;size_x);</a>
+<a name="ln1034">  dt_opencl_set_kernel_arg(b-&gt;devid, b-&gt;global-&gt;kernel_colorreconstruct_slice, 6, sizeof(int), (void *)&amp;b-&gt;size_y);</a>
+<a name="ln1035">  dt_opencl_set_kernel_arg(b-&gt;devid, b-&gt;global-&gt;kernel_colorreconstruct_slice, 7, sizeof(int), (void *)&amp;b-&gt;size_z);</a>
+<a name="ln1036">  dt_opencl_set_kernel_arg(b-&gt;devid, b-&gt;global-&gt;kernel_colorreconstruct_slice, 8, sizeof(float), (void *)&amp;b-&gt;sigma_s);</a>
+<a name="ln1037">  dt_opencl_set_kernel_arg(b-&gt;devid, b-&gt;global-&gt;kernel_colorreconstruct_slice, 9, sizeof(float), (void *)&amp;b-&gt;sigma_r);</a>
+<a name="ln1038">  dt_opencl_set_kernel_arg(b-&gt;devid, b-&gt;global-&gt;kernel_colorreconstruct_slice, 10, sizeof(float), (void *)&amp;threshold);</a>
+<a name="ln1039">  dt_opencl_set_kernel_arg(b-&gt;devid, b-&gt;global-&gt;kernel_colorreconstruct_slice, 11, 2*sizeof(int), (void *)&amp;bxy);</a>
+<a name="ln1040">  dt_opencl_set_kernel_arg(b-&gt;devid, b-&gt;global-&gt;kernel_colorreconstruct_slice, 12, 2*sizeof(int), (void *)&amp;roixy);</a>
+<a name="ln1041">  dt_opencl_set_kernel_arg(b-&gt;devid, b-&gt;global-&gt;kernel_colorreconstruct_slice, 13, sizeof(float), (void *)&amp;rescale);</a>
+<a name="ln1042">  err = dt_opencl_enqueue_kernel_2d(b-&gt;devid, b-&gt;global-&gt;kernel_colorreconstruct_slice, sizes);</a>
+<a name="ln1043">  return err;</a>
+<a name="ln1044">}</a>
+<a name="ln1045"> </a>
+<a name="ln1046">int process_cl(struct dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, cl_mem dev_in, cl_mem dev_out,</a>
+<a name="ln1047">               const dt_iop_roi_t *const roi_in, const dt_iop_roi_t *const roi_out)</a>
+<a name="ln1048">{</a>
+<a name="ln1049">  dt_iop_colorreconstruct_data_t *d = (dt_iop_colorreconstruct_data_t *)piece-&gt;data;</a>
+<a name="ln1050">  dt_iop_colorreconstruct_global_data_t *gd = (dt_iop_colorreconstruct_global_data_t *)self-&gt;data;</a>
+<a name="ln1051">  dt_iop_colorreconstruct_gui_data_t *g = (dt_iop_colorreconstruct_gui_data_t *)self-&gt;gui_data;</a>
+<a name="ln1052"> </a>
+<a name="ln1053">  const float scale = piece-&gt;iscale / roi_in-&gt;scale;</a>
+<a name="ln1054">  const float sigma_r = fmax(d-&gt;range, 0.1f); // does not depend on scale</a>
+<a name="ln1055">  const float sigma_s = fmax(d-&gt;spatial, 1.0f) / scale;</a>
+<a name="ln1056">  const float hue = hue_conversion(d-&gt;hue); // convert to LCH hue which better fits to Lab colorspace</a>
+<a name="ln1057"> </a>
+<a name="ln1058">  const float params[4] = { hue, M_PI*M_PI/8, 0.0f, 0.0f };</a>
+<a name="ln1059"> </a>
+<a name="ln1060">  cl_int err = -666;</a>
+<a name="ln1061"> </a>
+<a name="ln1062">  dt_iop_colorreconstruct_bilateral_cl_t *b;</a>
+<a name="ln1063">  dt_iop_colorreconstruct_bilateral_frozen_t *can = NULL;</a>
+<a name="ln1064"> </a>
+<a name="ln1065">  // see process() for more details on how we transfer a bilateral grid from the preview to the full pipeline</a>
+<a name="ln1066">  if(sigma_s &gt; DT_COLORRECONSTRUCT_SPATIAL_APPROX &amp;&amp; self-&gt;dev-&gt;gui_attached &amp;&amp; g &amp;&amp; piece-&gt;pipe-&gt;type == DT_DEV_PIXELPIPE_FULL)</a>
+<a name="ln1067">  {</a>
+<a name="ln1068">    // check how far we are zoomed-in</a>
+<a name="ln1069">    dt_dev_zoom_t zoom = dt_control_get_dev_zoom();</a>
+<a name="ln1070">    int closeup = dt_control_get_dev_closeup();</a>
+<a name="ln1071">    const float min_scale = dt_dev_get_zoom_scale(self-&gt;dev, DT_ZOOM_FIT, 1&lt;&lt;closeup, 0);</a>
+<a name="ln1072">    const float cur_scale = dt_dev_get_zoom_scale(self-&gt;dev, zoom, 1&lt;&lt;closeup, 0);</a>
+<a name="ln1073"> </a>
+<a name="ln1074">    // if we are zoomed in more than just a little bit, we try to use the canned grid of the preview pipeline</a>
+<a name="ln1075">    if(cur_scale &gt; 1.05f * min_scale)</a>
+<a name="ln1076">    {</a>
+<a name="ln1077">      if(!dt_dev_sync_pixelpipe_hash(self-&gt;dev, piece-&gt;pipe, 0, self-&gt;priority, &amp;g-&gt;lock, &amp;g-&gt;hash))</a>
+<a name="ln1078">        dt_control_log(_(&quot;inconsistent output&quot;));</a>
+<a name="ln1079"> </a>
+<a name="ln1080">      dt_pthread_mutex_lock(&amp;g-&gt;lock);</a>
+<a name="ln1081">      can = g-&gt;can;</a>
+<a name="ln1082">      dt_pthread_mutex_unlock(&amp;g-&gt;lock);</a>
+<a name="ln1083">    }</a>
+<a name="ln1084">  }</a>
+<a name="ln1085"> </a>
+<a name="ln1086">  if(can)</a>
+<a name="ln1087">  {</a>
+<a name="ln1088">    b = dt_iop_colorreconstruct_bilateral_thaw_cl(can, piece-&gt;pipe-&gt;devid, gd);</a>
+<a name="ln1089">    if(!b) goto error;</a>
+<a name="ln1090">  }</a>
+<a name="ln1091">  else</a>
+<a name="ln1092">  {</a>
+<a name="ln1093">    b = dt_iop_colorreconstruct_bilateral_init_cl(piece-&gt;pipe-&gt;devid, gd, roi_in, piece-&gt;iscale, sigma_s, sigma_r);</a>
+<a name="ln1094">    if(!b) goto error;</a>
+<a name="ln1095">    err = dt_iop_colorreconstruct_bilateral_splat_cl(b, dev_in, d-&gt;threshold, d-&gt;precedence, params);</a>
+<a name="ln1096">    if(err != CL_SUCCESS) goto error;</a>
+<a name="ln1097">    err = dt_iop_colorreconstruct_bilateral_blur_cl(b);</a>
+<a name="ln1098">    if(err != CL_SUCCESS) goto error;</a>
+<a name="ln1099">  }</a>
+<a name="ln1100"> </a>
+<a name="ln1101">  err = dt_iop_colorreconstruct_bilateral_slice_cl(b, dev_in, dev_out, d-&gt;threshold, roi_in, piece-&gt;iscale);</a>
+<a name="ln1102">  if(err != CL_SUCCESS) goto error;</a>
+<a name="ln1103"> </a>
+<a name="ln1104">  if(self-&gt;dev-&gt;gui_attached &amp;&amp; g &amp;&amp; piece-&gt;pipe-&gt;type == DT_DEV_PIXELPIPE_PREVIEW)</a>
+<a name="ln1105">  {</a>
+<a name="ln1106">    uint64_t hash = dt_dev_hash_plus(self-&gt;dev, piece-&gt;pipe, 0, self-&gt;priority);</a>
+<a name="ln1107">    dt_pthread_mutex_lock(&amp;g-&gt;lock);</a>
+<a name="ln1108">    dt_iop_colorreconstruct_bilateral_dump(g-&gt;can);</a>
+<a name="ln1109">    g-&gt;can = dt_iop_colorreconstruct_bilateral_freeze_cl(b);</a>
+<a name="ln1110">    g-&gt;hash = hash;</a>
+<a name="ln1111">    dt_pthread_mutex_unlock(&amp;g-&gt;lock);</a>
+<a name="ln1112">  }</a>
+<a name="ln1113"> </a>
+<a name="ln1114">  dt_iop_colorreconstruct_bilateral_free_cl(b);</a>
+<a name="ln1115">  return TRUE;</a>
+<a name="ln1116"> </a>
+<a name="ln1117">error:</a>
+<a name="ln1118">  dt_iop_colorreconstruct_bilateral_free_cl(b);</a>
+<a name="ln1119">  dt_print(DT_DEBUG_OPENCL, &quot;[opencl_colorreconstruction] couldn't enqueue kernel! %d\n&quot;, err);</a>
+<a name="ln1120">  return FALSE;</a>
+<a name="ln1121">}</a>
+<a name="ln1122">#endif</a>
+<a name="ln1123"> </a>
+<a name="ln1124"> </a>
+<a name="ln1125">static size_t dt_iop_colorreconstruct_bilateral_memory_use(const int width,     // width of input image</a>
+<a name="ln1126">                                                           const int height,    // height of input image</a>
+<a name="ln1127">                                                           const float sigma_s, // spatial sigma (blur pixel coords)</a>
+<a name="ln1128">                                                           const float sigma_r) // range sigma (blur luma values)</a>
+<a name="ln1129">{</a>
+<a name="ln1130">  float _x = roundf(width / sigma_s);</a>
+<a name="ln1131">  float _y = roundf(height / sigma_s);</a>
+<a name="ln1132">  float _z = roundf(100.0f / sigma_r);</a>
+<a name="ln1133">  size_t size_x = CLAMPS((int)_x, 4, DT_COLORRECONSTRUCT_BILATERAL_MAX_RES_S) + 1;</a>
+<a name="ln1134">  size_t size_y = CLAMPS((int)_y, 4, DT_COLORRECONSTRUCT_BILATERAL_MAX_RES_S) + 1;</a>
+<a name="ln1135">  size_t size_z = CLAMPS((int)_z, 4, DT_COLORRECONSTRUCT_BILATERAL_MAX_RES_R) + 1;</a>
+<a name="ln1136"> </a>
+<a name="ln1137">  return size_x * size_y * size_z * 4 * sizeof(float) * 2;   // in fact only the OpenCL path needs a second tmp buffer</a>
+<a name="ln1138">}</a>
+<a name="ln1139"> </a>
+<a name="ln1140"> </a>
+<a name="ln1141">static size_t dt_iop_colorreconstruct_bilateral_singlebuffer_size(const int width,     // width of input image</a>
+<a name="ln1142">                                                                  const int height,    // height of input image</a>
+<a name="ln1143">                                                                  const float sigma_s, // spatial sigma (blur pixel coords)</a>
+<a name="ln1144">                                                                  const float sigma_r) // range sigma (blur luma values)</a>
+<a name="ln1145">{</a>
+<a name="ln1146">  float _x = roundf(width / sigma_s);</a>
+<a name="ln1147">  float _y = roundf(height / sigma_s);</a>
+<a name="ln1148">  float _z = roundf(100.0f / sigma_r);</a>
+<a name="ln1149">  size_t size_x = CLAMPS((int)_x, 4, DT_COLORRECONSTRUCT_BILATERAL_MAX_RES_S) + 1;</a>
+<a name="ln1150">  size_t size_y = CLAMPS((int)_y, 4, DT_COLORRECONSTRUCT_BILATERAL_MAX_RES_S) + 1;</a>
+<a name="ln1151">  size_t size_z = CLAMPS((int)_z, 4, DT_COLORRECONSTRUCT_BILATERAL_MAX_RES_R) + 1;</a>
+<a name="ln1152"> </a>
+<a name="ln1153">  return size_x * size_y * size_z * 4 * sizeof(float);</a>
+<a name="ln1154">}</a>
+<a name="ln1155"> </a>
+<a name="ln1156">void tiling_callback(struct dt_iop_module_t *self, struct dt_dev_pixelpipe_iop_t *piece,</a>
+<a name="ln1157">                     const dt_iop_roi_t *roi_in, const dt_iop_roi_t *roi_out,</a>
+<a name="ln1158">                     struct dt_develop_tiling_t *tiling)</a>
+<a name="ln1159">{</a>
+<a name="ln1160">  dt_iop_colorreconstruct_data_t *d = (dt_iop_colorreconstruct_data_t *)piece-&gt;data;</a>
+<a name="ln1161">  // the total scale is composed of scale before input to the pipeline (iscale),</a>
+<a name="ln1162">  // and the scale of the roi.</a>
+<a name="ln1163">  const float scale = piece-&gt;iscale / roi_in-&gt;scale;</a>
+<a name="ln1164">  const float sigma_r = fmax(d-&gt;range, 0.1f);</a>
+<a name="ln1165">  const float sigma_s = fmax(d-&gt;spatial, 1.0f) / scale;</a>
+<a name="ln1166"> </a>
+<a name="ln1167">  const int width = roi_in-&gt;width;</a>
+<a name="ln1168">  const int height = roi_in-&gt;height;</a>
+<a name="ln1169">  const int channels = piece-&gt;colors;</a>
+<a name="ln1170"> </a>
+<a name="ln1171">  const size_t basebuffer = width * height * channels * sizeof(float);</a>
+<a name="ln1172"> </a>
+<a name="ln1173">  tiling-&gt;factor = 2.0f + (float)dt_iop_colorreconstruct_bilateral_memory_use(width, height, sigma_s, sigma_r) / basebuffer;</a>
+<a name="ln1174">  tiling-&gt;maxbuf</a>
+<a name="ln1175">      = fmax(1.0f, (float)dt_iop_colorreconstruct_bilateral_singlebuffer_size(width, height, sigma_s, sigma_r) / basebuffer);</a>
+<a name="ln1176">  tiling-&gt;overhead = 0;</a>
+<a name="ln1177">  tiling-&gt;overlap = ceilf(4 * sigma_s);</a>
+<a name="ln1178">  tiling-&gt;xalign = 1;</a>
+<a name="ln1179">  tiling-&gt;yalign = 1;</a>
+<a name="ln1180">  return;</a>
+<a name="ln1181">}</a>
+<a name="ln1182"> </a>
+<a name="ln1183"> </a>
+<a name="ln1184">static void threshold_callback(GtkWidget *slider, gpointer user_data)</a>
+<a name="ln1185">{</a>
+<a name="ln1186">  dt_iop_module_t *self = (dt_iop_module_t *)user_data;</a>
+<a name="ln1187">  if(self-&gt;dt-&gt;gui-&gt;reset) return;</a>
+<a name="ln1188">  dt_iop_colorreconstruct_params_t *p = (dt_iop_colorreconstruct_params_t *)self-&gt;params;</a>
+<a name="ln1189">  p-&gt;threshold = dt_bauhaus_slider_get(slider);</a>
+<a name="ln1190">  dt_dev_add_history_item(darktable.develop, self, TRUE);</a>
+<a name="ln1191">}</a>
+<a name="ln1192"> </a>
+<a name="ln1193"> </a>
+<a name="ln1194">static void spatial_callback(GtkWidget *slider, gpointer user_data)</a>
+<a name="ln1195">{</a>
+<a name="ln1196">  dt_iop_module_t *self = (dt_iop_module_t *)user_data;</a>
+<a name="ln1197">  if(self-&gt;dt-&gt;gui-&gt;reset) return;</a>
+<a name="ln1198">  dt_iop_colorreconstruct_params_t *p = (dt_iop_colorreconstruct_params_t *)self-&gt;params;</a>
+<a name="ln1199">  p-&gt;spatial = dt_bauhaus_slider_get(slider);</a>
+<a name="ln1200">  dt_dev_add_history_item(darktable.develop, self, TRUE);</a>
+<a name="ln1201">}</a>
+<a name="ln1202"> </a>
+<a name="ln1203">static void range_callback(GtkWidget *slider, gpointer user_data)</a>
+<a name="ln1204">{</a>
+<a name="ln1205">  dt_iop_module_t *self = (dt_iop_module_t *)user_data;</a>
+<a name="ln1206">  if(self-&gt;dt-&gt;gui-&gt;reset) return;</a>
+<a name="ln1207">  dt_iop_colorreconstruct_params_t *p = (dt_iop_colorreconstruct_params_t *)self-&gt;params;</a>
+<a name="ln1208">  p-&gt;range = dt_bauhaus_slider_get(slider);</a>
+<a name="ln1209">  dt_dev_add_history_item(darktable.develop, self, TRUE);</a>
+<a name="ln1210">}</a>
+<a name="ln1211"> </a>
+<a name="ln1212">static void precedence_callback(GtkWidget *widget, gpointer user_data)</a>
+<a name="ln1213">{</a>
+<a name="ln1214">  dt_iop_module_t *self = (dt_iop_module_t *)user_data;</a>
+<a name="ln1215">  if(self-&gt;dt-&gt;gui-&gt;reset) return;</a>
+<a name="ln1216">  dt_iop_colorreconstruct_params_t *p = (dt_iop_colorreconstruct_params_t *)self-&gt;params;</a>
+<a name="ln1217">  dt_iop_colorreconstruct_gui_data_t *g = (dt_iop_colorreconstruct_gui_data_t *)self-&gt;gui_data;</a>
+<a name="ln1218">  p-&gt;precedence = dt_bauhaus_combobox_get(widget);</a>
+<a name="ln1219"> </a>
+<a name="ln1220">  switch(p-&gt;precedence)</a>
+<a name="ln1221">  {</a>
+<a name="ln1222">    case COLORRECONSTRUCT_PRECEDENCE_HUE:</a>
+<a name="ln1223">      gtk_widget_show(g-&gt;hue);</a>
+<a name="ln1224">      break;</a>
+<a name="ln1225">    default:</a>
+<a name="ln1226">      gtk_widget_hide(g-&gt;hue);</a>
+<a name="ln1227">      break;</a>
+<a name="ln1228">  }</a>
+<a name="ln1229"> </a>
+<a name="ln1230">  dt_dev_add_history_item(darktable.develop, self, TRUE);</a>
+<a name="ln1231">}</a>
+<a name="ln1232"> </a>
+<a name="ln1233">static void hue_callback(GtkWidget *slider, gpointer user_data)</a>
+<a name="ln1234">{</a>
+<a name="ln1235">  dt_iop_module_t *self = (dt_iop_module_t *)user_data;</a>
+<a name="ln1236">  if(self-&gt;dt-&gt;gui-&gt;reset) return;</a>
+<a name="ln1237">  dt_iop_colorreconstruct_params_t *p = (dt_iop_colorreconstruct_params_t *)self-&gt;params;</a>
+<a name="ln1238">  p-&gt;hue = dt_bauhaus_slider_get(slider);</a>
+<a name="ln1239">  dt_dev_add_history_item(darktable.develop, self, TRUE);</a>
+<a name="ln1240">}</a>
+<a name="ln1241"> </a>
+<a name="ln1242">void commit_params(struct dt_iop_module_t *self, dt_iop_params_t *p1, dt_dev_pixelpipe_t *pipe,</a>
+<a name="ln1243">                   dt_dev_pixelpipe_iop_t *piece)</a>
+<a name="ln1244">{</a>
+<a name="ln1245">  dt_iop_colorreconstruct_params_t *p = (dt_iop_colorreconstruct_params_t *)p1;</a>
+<a name="ln1246">  dt_iop_colorreconstruct_data_t *d = (dt_iop_colorreconstruct_data_t *)piece-&gt;data;</a>
+<a name="ln1247"> </a>
+<a name="ln1248">  d-&gt;threshold = p-&gt;threshold;</a>
+<a name="ln1249">  d-&gt;spatial = p-&gt;spatial;</a>
+<a name="ln1250">  d-&gt;range = p-&gt;range;</a>
+<a name="ln1251">  d-&gt;precedence = p-&gt;precedence;</a>
+<a name="ln1252">  d-&gt;hue = p-&gt;hue;</a>
+<a name="ln1253"> </a>
+<a name="ln1254">#ifdef HAVE_OPENCL</a>
+<a name="ln1255">  piece-&gt;process_cl_ready = (piece-&gt;process_cl_ready &amp;&amp; !(darktable.opencl-&gt;avoid_atomics));</a>
+<a name="ln1256">#endif</a>
+<a name="ln1257">}</a>
+<a name="ln1258"> </a>
+<a name="ln1259">void init_pipe(struct dt_iop_module_t *self, dt_dev_pixelpipe_t *pipe, dt_dev_pixelpipe_iop_t *piece)</a>
+<a name="ln1260">{</a>
+<a name="ln1261">  dt_iop_colorreconstruct_data_t *d = (dt_iop_colorreconstruct_data_t *)calloc(1, sizeof(dt_iop_colorreconstruct_data_t));</a>
+<a name="ln1262">  piece-&gt;data = (void *)d;</a>
+<a name="ln1263">  self-&gt;commit_params(self, self-&gt;default_params, pipe, piece);</a>
+<a name="ln1264">}</a>
+<a name="ln1265"> </a>
+<a name="ln1266">void cleanup_pipe(struct dt_iop_module_t *self, dt_dev_pixelpipe_t *pipe, dt_dev_pixelpipe_iop_t *piece)</a>
+<a name="ln1267">{</a>
+<a name="ln1268">  free(piece-&gt;data);</a>
+<a name="ln1269">  piece-&gt;data = NULL;</a>
+<a name="ln1270">}</a>
+<a name="ln1271"> </a>
+<a name="ln1272">void gui_update(struct dt_iop_module_t *self)</a>
+<a name="ln1273">{</a>
+<a name="ln1274">  dt_iop_module_t *module = (dt_iop_module_t *)self;</a>
+<a name="ln1275">  dt_iop_colorreconstruct_gui_data_t *g = (dt_iop_colorreconstruct_gui_data_t *)self-&gt;gui_data;</a>
+<a name="ln1276">  dt_iop_colorreconstruct_params_t *p = (dt_iop_colorreconstruct_params_t *)module-&gt;params;</a>
+<a name="ln1277">  dt_bauhaus_slider_set(g-&gt;threshold, p-&gt;threshold);</a>
+<a name="ln1278">  dt_bauhaus_slider_set(g-&gt;spatial, p-&gt;spatial);</a>
+<a name="ln1279">  dt_bauhaus_slider_set(g-&gt;range, p-&gt;range);</a>
+<a name="ln1280">  dt_bauhaus_combobox_set(g-&gt;precedence, p-&gt;precedence);</a>
+<a name="ln1281">  dt_bauhaus_slider_set(g-&gt;hue, p-&gt;hue);</a>
+<a name="ln1282"> </a>
+<a name="ln1283">  switch(p-&gt;precedence)</a>
+<a name="ln1284">  {</a>
+<a name="ln1285">    case COLORRECONSTRUCT_PRECEDENCE_HUE:</a>
+<a name="ln1286">      gtk_widget_show(g-&gt;hue);</a>
+<a name="ln1287">      break;</a>
+<a name="ln1288">    default:</a>
+<a name="ln1289">      gtk_widget_hide(g-&gt;hue);</a>
+<a name="ln1290">      break;</a>
+<a name="ln1291">  }</a>
+<a name="ln1292"> </a>
+<a name="ln1293">  dt_pthread_mutex_lock(&amp;g-&gt;lock);</a>
+<a name="ln1294">  dt_iop_colorreconstruct_bilateral_dump(g-&gt;can);</a>
+<a name="ln1295">  g-&gt;can = NULL;</a>
+<a name="ln1296">  g-&gt;hash = 0;</a>
+<a name="ln1297">  dt_pthread_mutex_unlock(&amp;g-&gt;lock);</a>
+<a name="ln1298">}</a>
+<a name="ln1299"> </a>
+<a name="ln1300">void init(dt_iop_module_t *module)</a>
+<a name="ln1301">{</a>
+<a name="ln1302">  module-&gt;params = calloc(1, sizeof(dt_iop_colorreconstruct_params_t));</a>
+<a name="ln1303">  module-&gt;default_params = calloc(1, sizeof(dt_iop_colorreconstruct_params_t));</a>
+<a name="ln1304">  module-&gt;default_enabled = 0;</a>
+<a name="ln1305">  module-&gt;priority = 385; // module order created by iop_dependencies.py, do not edit!</a>
+<a name="ln1306">  module-&gt;params_size = sizeof(dt_iop_colorreconstruct_params_t);</a>
+<a name="ln1307">  module-&gt;gui_data = NULL;</a>
+<a name="ln1308">  dt_iop_colorreconstruct_params_t tmp = (dt_iop_colorreconstruct_params_t){ 100.0f, 400.0f, 10.0f, 0.66f, COLORRECONSTRUCT_PRECEDENCE_NONE };</a>
+<a name="ln1309">  memcpy(module-&gt;params, &amp;tmp, sizeof(dt_iop_colorreconstruct_params_t));</a>
+<a name="ln1310">  memcpy(module-&gt;default_params, &amp;tmp, sizeof(dt_iop_colorreconstruct_params_t));</a>
+<a name="ln1311">}</a>
+<a name="ln1312"> </a>
+<a name="ln1313">void init_global(dt_iop_module_so_t *module)</a>
+<a name="ln1314">{</a>
+<a name="ln1315">  dt_iop_colorreconstruct_global_data_t *gd</a>
+<a name="ln1316">      = (dt_iop_colorreconstruct_global_data_t *)malloc(sizeof(dt_iop_colorreconstruct_global_data_t));</a>
+<a name="ln1317">  module-&gt;data = gd;</a>
+<a name="ln1318">  const int program = 13; // colorcorrection.cl, from programs.conf</a>
+<a name="ln1319">  gd-&gt;kernel_colorreconstruct_zero = dt_opencl_create_kernel(program, &quot;colorreconstruction_zero&quot;);</a>
+<a name="ln1320">  gd-&gt;kernel_colorreconstruct_splat = dt_opencl_create_kernel(program, &quot;colorreconstruction_splat&quot;);</a>
+<a name="ln1321">  gd-&gt;kernel_colorreconstruct_blur_line = dt_opencl_create_kernel(program, &quot;colorreconstruction_blur_line&quot;);</a>
+<a name="ln1322">  gd-&gt;kernel_colorreconstruct_slice = dt_opencl_create_kernel(program, &quot;colorreconstruction_slice&quot;);</a>
+<a name="ln1323">}</a>
+<a name="ln1324"> </a>
+<a name="ln1325">void cleanup(dt_iop_module_t *module)</a>
+<a name="ln1326">{</a>
+<a name="ln1327">  free(module-&gt;params);</a>
+<a name="ln1328">  module-&gt;params = NULL;</a>
+<a name="ln1329">}</a>
+<a name="ln1330"> </a>
+<a name="ln1331">void cleanup_global(dt_iop_module_so_t *module)</a>
+<a name="ln1332">{</a>
+<a name="ln1333">  dt_iop_colorreconstruct_global_data_t *gd = (dt_iop_colorreconstruct_global_data_t *)module-&gt;data;</a>
+<a name="ln1334">  dt_opencl_free_kernel(gd-&gt;kernel_colorreconstruct_zero);</a>
+<a name="ln1335">  dt_opencl_free_kernel(gd-&gt;kernel_colorreconstruct_splat);</a>
+<a name="ln1336">  dt_opencl_free_kernel(gd-&gt;kernel_colorreconstruct_blur_line);</a>
+<a name="ln1337">  dt_opencl_free_kernel(gd-&gt;kernel_colorreconstruct_slice);</a>
+<a name="ln1338">  free(module-&gt;data);</a>
+<a name="ln1339">  module-&gt;data = NULL;</a>
+<a name="ln1340">}</a>
+<a name="ln1341"> </a>
+<a name="ln1342"> </a>
+<a name="ln1343">void gui_init(struct dt_iop_module_t *self)</a>
+<a name="ln1344">{</a>
+<a name="ln1345">  self-&gt;gui_data = malloc(sizeof(dt_iop_colorreconstruct_gui_data_t));</a>
+<a name="ln1346">  dt_iop_colorreconstruct_gui_data_t *g = (dt_iop_colorreconstruct_gui_data_t *)self-&gt;gui_data;</a>
+<a name="ln1347">  dt_iop_colorreconstruct_params_t *p = (dt_iop_colorreconstruct_params_t *)self-&gt;params;</a>
+<a name="ln1348"> </a>
+<a name="ln1349">  dt_pthread_mutex_init(&amp;g-&gt;lock, NULL);</a>
+<a name="ln1350">  g-&gt;can = NULL;</a>
+<a name="ln1351">  g-&gt;hash = 0;</a>
+<a name="ln1352"> </a>
+<a name="ln1353">  self-&gt;widget = gtk_box_new(GTK_ORIENTATION_VERTICAL, DT_BAUHAUS_SPACE);</a>
+<a name="ln1354">  dt_gui_add_help_link(self-&gt;widget, dt_get_help_url(self-&gt;op));</a>
+<a name="ln1355"> </a>
+<a name="ln1356">  g-&gt;threshold = dt_bauhaus_slider_new_with_range(self, 50.0f, 150.0f, 0.1f, p-&gt;threshold, 2);</a>
+<a name="ln1357">  g-&gt;spatial = dt_bauhaus_slider_new_with_range(self, 0.0f, 1000.0f, 1.0f, p-&gt;spatial, 2);</a>
+<a name="ln1358">  g-&gt;range = dt_bauhaus_slider_new_with_range(self, 0.0f, 50.0f, 0.1f, p-&gt;range, 2);</a>
+<a name="ln1359">  g-&gt;precedence = dt_bauhaus_combobox_new(self);</a>
+<a name="ln1360">  g-&gt;hue = dt_bauhaus_slider_new_with_range_and_feedback(self, 0.0f, 1.0f, 0.01f, 0.0f, 2, 0);</a>
+<a name="ln1361"> </a>
+<a name="ln1362">  dt_bauhaus_widget_set_label(g-&gt;threshold, NULL, _(&quot;threshold&quot;));</a>
+<a name="ln1363">  dt_bauhaus_widget_set_label(g-&gt;spatial, NULL, _(&quot;spatial extent&quot;));</a>
+<a name="ln1364">  dt_bauhaus_widget_set_label(g-&gt;range, NULL, _(&quot;range extent&quot;));</a>
+<a name="ln1365">  dt_bauhaus_widget_set_label(g-&gt;hue, NULL, _(&quot;hue&quot;));</a>
+<a name="ln1366"> </a>
+<a name="ln1367">  dt_bauhaus_widget_set_label(g-&gt;precedence, NULL, _(&quot;precedence&quot;));</a>
+<a name="ln1368">  dt_bauhaus_combobox_add(g-&gt;precedence, _(&quot;none&quot;));</a>
+<a name="ln1369">  dt_bauhaus_combobox_add(g-&gt;precedence, _(&quot;saturated colors&quot;));</a>
+<a name="ln1370">  dt_bauhaus_combobox_add(g-&gt;precedence, _(&quot;hue&quot;));</a>
+<a name="ln1371"> </a>
+<a name="ln1372">  dt_bauhaus_slider_set_stop(g-&gt;hue, 0.0f, 1.0f, 0.0f, 0.0f);</a>
+<a name="ln1373">  dt_bauhaus_slider_set_stop(g-&gt;hue, 0.166f, 1.0f, 1.0f, 0.0f);</a>
+<a name="ln1374">  dt_bauhaus_slider_set_stop(g-&gt;hue, 0.322f, 0.0f, 1.0f, 0.0f);</a>
+<a name="ln1375">  dt_bauhaus_slider_set_stop(g-&gt;hue, 0.498f, 0.0f, 1.0f, 1.0f);</a>
+<a name="ln1376">  dt_bauhaus_slider_set_stop(g-&gt;hue, 0.664f, 0.0f, 0.0f, 1.0f);</a>
+<a name="ln1377">  dt_bauhaus_slider_set_stop(g-&gt;hue, 0.830f, 1.0f, 0.0f, 1.0f);</a>
+<a name="ln1378">  dt_bauhaus_slider_set_stop(g-&gt;hue, 1.0f, 1.0f, 0.0f, 0.0f);</a>
+<a name="ln1379"> </a>
+<a name="ln1380">  gtk_box_pack_start(GTK_BOX(self-&gt;widget), g-&gt;threshold, TRUE, TRUE, 0);</a>
+<a name="ln1381">  gtk_box_pack_start(GTK_BOX(self-&gt;widget), g-&gt;spatial, TRUE, TRUE, 0);</a>
+<a name="ln1382">  gtk_box_pack_start(GTK_BOX(self-&gt;widget), g-&gt;range, TRUE, TRUE, 0);</a>
+<a name="ln1383">  gtk_box_pack_start(GTK_BOX(self-&gt;widget), g-&gt;precedence, TRUE, TRUE, 0);</a>
+<a name="ln1384">  gtk_box_pack_start(GTK_BOX(self-&gt;widget), g-&gt;hue, TRUE, TRUE, 0);</a>
+<a name="ln1385"> </a>
+<a name="ln1386">  gtk_widget_show_all(g-&gt;hue);</a>
+<a name="ln1387">  gtk_widget_set_no_show_all(g-&gt;hue, TRUE);</a>
+<a name="ln1388"> </a>
+<a name="ln1389">  switch(p-&gt;precedence)</a>
+<a name="ln1390">  {</a>
+<a name="ln1391">    case COLORRECONSTRUCT_PRECEDENCE_HUE:</a>
+<a name="ln1392">      gtk_widget_show(g-&gt;hue);</a>
+<a name="ln1393">      break;</a>
+<a name="ln1394">    default:</a>
+<a name="ln1395">      gtk_widget_hide(g-&gt;hue);</a>
+<a name="ln1396">      break;</a>
+<a name="ln1397">  }</a>
+<a name="ln1398"> </a>
+<a name="ln1399">  gtk_widget_set_tooltip_text(g-&gt;threshold, _(&quot;pixels with lightness values above this threshold are corrected&quot;));</a>
+<a name="ln1400">  gtk_widget_set_tooltip_text(g-&gt;spatial, _(&quot;how far to look for replacement colors in spatial dimensions&quot;));</a>
+<a name="ln1401">  gtk_widget_set_tooltip_text(g-&gt;range, _(&quot;how far to look for replacement colors in the luminance dimension&quot;));</a>
+<a name="ln1402">  gtk_widget_set_tooltip_text(g-&gt;precedence, _(&quot;if and how to give precedence to specific replacement colors&quot;));</a>
+<a name="ln1403">  gtk_widget_set_tooltip_text(g-&gt;hue, _(&quot;the hue tone which should be given precedence over other hue tones&quot;));</a>
+<a name="ln1404"> </a>
+<a name="ln1405">  g_signal_connect(G_OBJECT(g-&gt;threshold), &quot;value-changed&quot;, G_CALLBACK(threshold_callback), self);</a>
+<a name="ln1406">  g_signal_connect(G_OBJECT(g-&gt;spatial), &quot;value-changed&quot;, G_CALLBACK(spatial_callback), self);</a>
+<a name="ln1407">  g_signal_connect(G_OBJECT(g-&gt;range), &quot;value-changed&quot;, G_CALLBACK(range_callback), self);</a>
+<a name="ln1408">  g_signal_connect(G_OBJECT(g-&gt;precedence), &quot;value-changed&quot;, G_CALLBACK(precedence_callback), self);</a>
+<a name="ln1409">  g_signal_connect(G_OBJECT(g-&gt;hue), &quot;value-changed&quot;, G_CALLBACK(hue_callback), self);</a>
+<a name="ln1410">}</a>
+<a name="ln1411"> </a>
+<a name="ln1412">void gui_cleanup(struct dt_iop_module_t *self)</a>
+<a name="ln1413">{</a>
+<a name="ln1414">  dt_iop_colorreconstruct_gui_data_t *g = (dt_iop_colorreconstruct_gui_data_t *)self-&gt;gui_data;</a>
+<a name="ln1415">  dt_pthread_mutex_destroy(&amp;g-&gt;lock);</a>
+<a name="ln1416">  dt_iop_colorreconstruct_bilateral_dump(g-&gt;can);</a>
+<a name="ln1417">  free(self-&gt;gui_data);</a>
+<a name="ln1418">  self-&gt;gui_data = NULL;</a>
+<a name="ln1419">}</a>
+<a name="ln1420"> </a>
+<a name="ln1421">// modelines: These editor modelines have been set for all relevant files by tools/update_modelines.sh</a>
+<a name="ln1422">// vim: shiftwidth=2 expandtab tabstop=2 cindent</a>
+<a name="ln1423">// kate: tab-indents: off; indent-width 2; replace-tabs on; indent-mode cstyle; remove-trailing-spaces modified;</a>
+
+</code></pre>
+<div class="balloon" rel="912"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v547/" target="_blank">V547</a> Expression 'bf->buf' is always true.</p></div>
+<div class="balloon" rel="1309"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v575/" target="_blank">V575</a> The potential null pointer is passed into 'memcpy' function. Inspect the first argument. Check lines: 1309, 1302.</p></div>
+<div class="balloon" rel="1310"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v575/" target="_blank">V575</a> The potential null pointer is passed into 'memcpy' function. Inspect the first argument. Check lines: 1310, 1303.</p></div>
+<div class="balloon" rel="1319"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v522/" target="_blank">V522</a> There might be dereferencing of a potential null pointer 'gd'. Check lines: 1319, 1316.</p></div>
+<div class="balloon" rel="1349"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v522/" target="_blank">V522</a> There might be dereferencing of a potential null pointer 'g'. Check lines: 1349, 1345.</p></div>
+
+<link rel="stylesheet" href="highlight.css">
+<script src="highlight.pack.js"></script>
+<script src="highlightjs-line-numbers.js"></script>
+<script>hljs.initHighlightingOnLoad();</script>
+<script>hljs.initLineNumbersOnLoad();</script>
+<script>
+  $(document).ready(function() {
+      $('.balloon').each(function () {
+          var bl = $(this);
+          var line = bl.attr('rel');
+          var text = $('a[name="ln'+line+'"]').text();
+
+          var space_count = 0;
+          for(var i = 0; i<text.length; i++){
+              var char = text[i];
+              if((char !== ' ')&&(char !== '\t'))break;
+              if(char === '\t')space_count++;
+              space_count++;
+          }
+
+          bl.css('margin-left', space_count*8);
+          $('a[name="ln'+line+'"]').after(bl);
+      });
+
+      window.location = window.location;
+  });
+</script>
+</body>
+</html>
