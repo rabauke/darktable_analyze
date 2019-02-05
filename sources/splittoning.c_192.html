@@ -1,0 +1,726 @@
+
+<html>
+<head>
+  <link rel="stylesheet" href="../style.css"/>
+  <script src="../jquery-3.2.1.min.js"></script>
+</head>
+<body>
+<pre><code class = "cpp">
+<a name="ln1">/*</a>
+<a name="ln2">    This file is part of darktable,</a>
+<a name="ln3">    copyright (c) 2010-2011 Henrik Andersson.</a>
+<a name="ln4"> </a>
+<a name="ln5">    darktable is free software: you can redistribute it and/or modify</a>
+<a name="ln6">    it under the terms of the GNU General Public License as published by</a>
+<a name="ln7">    the Free Software Foundation, either version 3 of the License, or</a>
+<a name="ln8">    (at your option) any later version.</a>
+<a name="ln9"> </a>
+<a name="ln10">    darktable is distributed in the hope that it will be useful,</a>
+<a name="ln11">    but WITHOUT ANY WARRANTY; without even the implied warranty of</a>
+<a name="ln12">    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the</a>
+<a name="ln13">    GNU General Public License for more details.</a>
+<a name="ln14"> </a>
+<a name="ln15">    You should have received a copy of the GNU General Public License</a>
+<a name="ln16">    along with darktable.  If not, see &lt;http://www.gnu.org/licenses/&gt;.</a>
+<a name="ln17">*/</a>
+<a name="ln18">#ifdef HAVE_CONFIG_H</a>
+<a name="ln19">#include &quot;config.h&quot;</a>
+<a name="ln20">#endif</a>
+<a name="ln21">#include &quot;bauhaus/bauhaus.h&quot;</a>
+<a name="ln22">#include &quot;common/colorspaces.h&quot;</a>
+<a name="ln23">#include &quot;common/debug.h&quot;</a>
+<a name="ln24">#include &quot;common/opencl.h&quot;</a>
+<a name="ln25">#include &quot;control/control.h&quot;</a>
+<a name="ln26">#include &quot;develop/develop.h&quot;</a>
+<a name="ln27">#include &quot;develop/imageop.h&quot;</a>
+<a name="ln28">#include &quot;dtgtk/button.h&quot;</a>
+<a name="ln29">#include &quot;dtgtk/gradientslider.h&quot;</a>
+<a name="ln30">#include &quot;dtgtk/resetlabel.h&quot;</a>
+<a name="ln31">#include &quot;gui/accelerators.h&quot;</a>
+<a name="ln32">#include &quot;gui/gtk.h&quot;</a>
+<a name="ln33">#include &quot;gui/presets.h&quot;</a>
+<a name="ln34">#include &quot;gui/color_picker_proxy.h&quot;</a>
+<a name="ln35">#include &quot;iop/iop_api.h&quot;</a>
+<a name="ln36">#include &lt;assert.h&gt;</a>
+<a name="ln37">#include &lt;gtk/gtk.h&gt;</a>
+<a name="ln38">#include &lt;inttypes.h&gt;</a>
+<a name="ln39">#include &lt;math.h&gt;</a>
+<a name="ln40">#include &lt;stdlib.h&gt;</a>
+<a name="ln41">#include &lt;string.h&gt;</a>
+<a name="ln42"> </a>
+<a name="ln43">#define CLIP(x) ((x &lt; 0) ? 0.0 : (x &gt; 1.0) ? 1.0 : x)</a>
+<a name="ln44">DT_MODULE_INTROSPECTION(1, dt_iop_splittoning_params_t)</a>
+<a name="ln45"> </a>
+<a name="ln46">typedef struct dt_iop_splittoning_params_t</a>
+<a name="ln47">{</a>
+<a name="ln48">  float shadow_hue;</a>
+<a name="ln49">  float shadow_saturation;</a>
+<a name="ln50">  float highlight_hue;</a>
+<a name="ln51">  float highlight_saturation;</a>
+<a name="ln52">  float balance;  // center luminance of gradient</a>
+<a name="ln53">  float compress; // Compress range</a>
+<a name="ln54">} dt_iop_splittoning_params_t;</a>
+<a name="ln55"> </a>
+<a name="ln56">typedef struct dt_iop_splittoning_gui_data_t</a>
+<a name="ln57">{</a>
+<a name="ln58">  GtkWidget *scale1, *scale2;         // balance, compress</a>
+<a name="ln59">  GtkWidget *colorpick1, *colorpick2; // shadow,  highlight</a>
+<a name="ln60">  GtkWidget *gslider1, *gslider2, *gslider3,</a>
+<a name="ln61">      *gslider4; // highlight hue, highlight saturation, shadow hue, shadow saturation</a>
+<a name="ln62">  dt_iop_color_picker_t color_picker;</a>
+<a name="ln63">} dt_iop_splittoning_gui_data_t;</a>
+<a name="ln64"> </a>
+<a name="ln65">typedef struct dt_iop_splittoning_data_t</a>
+<a name="ln66">{</a>
+<a name="ln67">  float shadow_hue;</a>
+<a name="ln68">  float shadow_saturation;</a>
+<a name="ln69">  float highlight_hue;</a>
+<a name="ln70">  float highlight_saturation;</a>
+<a name="ln71">  float balance;  // center luminance of gradient}</a>
+<a name="ln72">  float compress; // Compress range</a>
+<a name="ln73">} dt_iop_splittoning_data_t;</a>
+<a name="ln74"> </a>
+<a name="ln75">typedef struct dt_iop_splittoning_global_data_t</a>
+<a name="ln76">{</a>
+<a name="ln77">  int kernel_splittoning;</a>
+<a name="ln78">} dt_iop_splittoning_global_data_t;</a>
+<a name="ln79"> </a>
+<a name="ln80">typedef enum dt_iop_splittoning_picker_t</a>
+<a name="ln81">{</a>
+<a name="ln82">  DT_SPLITTONING_NONE = 0,</a>
+<a name="ln83">  DT_SPLITTONING_HIGHLIGHTS,</a>
+<a name="ln84">  DT_SPLITTONING_SHADOWS</a>
+<a name="ln85">} dt_iop_splittoning_picker_data_t;</a>
+<a name="ln86"> </a>
+<a name="ln87"> </a>
+<a name="ln88">const char *name()</a>
+<a name="ln89">{</a>
+<a name="ln90">  return _(&quot;split toning&quot;);</a>
+<a name="ln91">}</a>
+<a name="ln92"> </a>
+<a name="ln93">int flags()</a>
+<a name="ln94">{</a>
+<a name="ln95">  return IOP_FLAGS_INCLUDE_IN_STYLES | IOP_FLAGS_SUPPORTS_BLENDING | IOP_FLAGS_ALLOW_TILING;</a>
+<a name="ln96">}</a>
+<a name="ln97"> </a>
+<a name="ln98">int default_group()</a>
+<a name="ln99">{</a>
+<a name="ln100">  return IOP_GROUP_EFFECT;</a>
+<a name="ln101">}</a>
+<a name="ln102"> </a>
+<a name="ln103">void init_key_accels(dt_iop_module_so_t *self)</a>
+<a name="ln104">{</a>
+<a name="ln105">  dt_accel_register_iop(self, FALSE, NC_(&quot;accel&quot;, &quot;pick primary color&quot;), 0, 0);</a>
+<a name="ln106">  dt_accel_register_iop(self, FALSE, NC_(&quot;accel&quot;, &quot;pick secondary color&quot;), 0, 0);</a>
+<a name="ln107"> </a>
+<a name="ln108">  dt_accel_register_slider_iop(self, FALSE, NC_(&quot;accel&quot;, &quot;balance&quot;));</a>
+<a name="ln109">  dt_accel_register_slider_iop(self, FALSE, NC_(&quot;accel&quot;, &quot;compress&quot;));</a>
+<a name="ln110">}</a>
+<a name="ln111"> </a>
+<a name="ln112">void connect_key_accels(dt_iop_module_t *self)</a>
+<a name="ln113">{</a>
+<a name="ln114">  dt_iop_splittoning_gui_data_t *g = (dt_iop_splittoning_gui_data_t *)self-&gt;gui_data;</a>
+<a name="ln115"> </a>
+<a name="ln116">  dt_accel_connect_button_iop(self, &quot;pick primary color&quot;, GTK_WIDGET(g-&gt;colorpick1));</a>
+<a name="ln117">  dt_accel_connect_button_iop(self, &quot;pick secondary color&quot;, GTK_WIDGET(g-&gt;colorpick2));</a>
+<a name="ln118"> </a>
+<a name="ln119">  dt_accel_connect_slider_iop(self, &quot;balance&quot;, GTK_WIDGET(g-&gt;scale1));</a>
+<a name="ln120">  dt_accel_connect_slider_iop(self, &quot;compress&quot;, GTK_WIDGET(g-&gt;scale2));</a>
+<a name="ln121">}</a>
+<a name="ln122"> </a>
+<a name="ln123">void init_presets(dt_iop_module_so_t *self)</a>
+<a name="ln124">{</a>
+<a name="ln125">  DT_DEBUG_SQLITE3_EXEC(dt_database_get(darktable.db), &quot;BEGIN&quot;, NULL, NULL, NULL);</a>
+<a name="ln126"> </a>
+<a name="ln127">  // shadows: #ED7212</a>
+<a name="ln128">  // highlights: #ECA413</a>
+<a name="ln129">  // balance : 63</a>
+<a name="ln130">  // compress : 0</a>
+<a name="ln131">  dt_gui_presets_add_generic(</a>
+<a name="ln132">      _(&quot;authentic sepia&quot;), self-&gt;op, self-&gt;version(),</a>
+<a name="ln133">      &amp;(dt_iop_splittoning_params_t){ 26.0 / 360.0, 92.0 / 100.0, 40.0 / 360.0, 92.0 / 100.0, 0.63, 0.0 },</a>
+<a name="ln134">      sizeof(dt_iop_splittoning_params_t), 1);</a>
+<a name="ln135"> </a>
+<a name="ln136">  // shadows: #446CBB</a>
+<a name="ln137">  // highlights: #446CBB</a>
+<a name="ln138">  // balance : 0</a>
+<a name="ln139">  // compress : 5.22</a>
+<a name="ln140">  dt_gui_presets_add_generic(</a>
+<a name="ln141">      _(&quot;authentic cyanotype&quot;), self-&gt;op, self-&gt;version(),</a>
+<a name="ln142">      &amp;(dt_iop_splittoning_params_t){ 220.0 / 360.0, 64.0 / 100.0, 220.0 / 360.0, 64.0 / 100.0, 0.0, 5.22 },</a>
+<a name="ln143">      sizeof(dt_iop_splittoning_params_t), 1);</a>
+<a name="ln144"> </a>
+<a name="ln145">  // shadows : #A16C5E</a>
+<a name="ln146">  // highlights : #A16C5E</a>
+<a name="ln147">  // balance : 100</a>
+<a name="ln148">  // compress : 0</a>
+<a name="ln149">  dt_gui_presets_add_generic(</a>
+<a name="ln150">      _(&quot;authentic platinotype&quot;), self-&gt;op, self-&gt;version(),</a>
+<a name="ln151">      &amp;(dt_iop_splittoning_params_t){ 13.0 / 360.0, 42.0 / 100.0, 13.0 / 360.0, 42.0 / 100.0, 100.0, 0.0 },</a>
+<a name="ln152">      sizeof(dt_iop_splittoning_params_t), 1);</a>
+<a name="ln153"> </a>
+<a name="ln154">  // shadows: #211A14</a>
+<a name="ln155">  // highlights: #D9D0C7</a>
+<a name="ln156">  // balance : 60</a>
+<a name="ln157">  // compress : 0</a>
+<a name="ln158">  dt_gui_presets_add_generic(</a>
+<a name="ln159">      _(&quot;chocolate brown&quot;), self-&gt;op, self-&gt;version(),</a>
+<a name="ln160">      &amp;(dt_iop_splittoning_params_t){ 28.0 / 360.0, 39.0 / 100.0, 28.0 / 360.0, 8.0 / 100.0, 0.60, 0.0 },</a>
+<a name="ln161">      sizeof(dt_iop_splittoning_params_t), 1);</a>
+<a name="ln162"> </a>
+<a name="ln163">  DT_DEBUG_SQLITE3_EXEC(dt_database_get(darktable.db), &quot;COMMIT&quot;, NULL, NULL, NULL);</a>
+<a name="ln164">}</a>
+<a name="ln165"> </a>
+<a name="ln166">void process(struct dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, const void *const ivoid,</a>
+<a name="ln167">             void *const ovoid, const dt_iop_roi_t *const roi_in, const dt_iop_roi_t *const roi_out)</a>
+<a name="ln168">{</a>
+<a name="ln169">  dt_iop_splittoning_data_t *data = (dt_iop_splittoning_data_t *)piece-&gt;data;</a>
+<a name="ln170">  float *in;</a>
+<a name="ln171">  float *out;</a>
+<a name="ln172">  const int ch = piece-&gt;colors;</a>
+<a name="ln173"> </a>
+<a name="ln174">  const float compress = (data-&gt;compress / 110.0) / 2.0; // Don't allow 100% compression..</a>
+<a name="ln175">#ifdef _OPENMP</a>
+<a name="ln176">#pragma omp parallel for default(none) shared(data) private(in, out) schedule(static)</a>
+<a name="ln177">#endif</a>
+<a name="ln178">  for(int k = 0; k &lt; roi_out-&gt;height; k++)</a>
+<a name="ln179">  {</a>
+<a name="ln180">    in = ((float *)ivoid) + (size_t)ch * k * roi_out-&gt;width;</a>
+<a name="ln181">    out = ((float *)ovoid) + (size_t)ch * k * roi_out-&gt;width;</a>
+<a name="ln182">    for(int j = 0; j &lt; roi_out-&gt;width; j++, in += ch, out += ch)</a>
+<a name="ln183">    {</a>
+<a name="ln184">      double ra, la;</a>
+<a name="ln185">      float mixrgb[3];</a>
+<a name="ln186">      float h, s, l;</a>
+<a name="ln187">      rgb2hsl(in, &amp;h, &amp;s, &amp;l);</a>
+<a name="ln188">      if(l &lt; data-&gt;balance - compress || l &gt; data-&gt;balance + compress)</a>
+<a name="ln189">      {</a>
+<a name="ln190">        h = l &lt; data-&gt;balance ? data-&gt;shadow_hue : data-&gt;highlight_hue;</a>
+<a name="ln191">        s = l &lt; data-&gt;balance ? data-&gt;shadow_saturation : data-&gt;highlight_saturation;</a>
+<a name="ln192">        ra = l &lt; data-&gt;balance ? CLIP((fabs(-data-&gt;balance + compress + l) * 2.0))</a>
+<a name="ln193">                               : CLIP((fabs(-data-&gt;balance - compress + l) * 2.0));</a>
+<a name="ln194">        la = (1.0 - ra);</a>
+<a name="ln195"> </a>
+<a name="ln196">        hsl2rgb(mixrgb, h, s, l);</a>
+<a name="ln197"> </a>
+<a name="ln198">        out[0] = CLIP(in[0] * la + mixrgb[0] * ra);</a>
+<a name="ln199">        out[1] = CLIP(in[1] * la + mixrgb[1] * ra);</a>
+<a name="ln200">        out[2] = CLIP(in[2] * la + mixrgb[2] * ra);</a>
+<a name="ln201">      }</a>
+<a name="ln202">      else</a>
+<a name="ln203">      {</a>
+<a name="ln204">        out[0] = in[0];</a>
+<a name="ln205">        out[1] = in[1];</a>
+<a name="ln206">        out[2] = in[2];</a>
+<a name="ln207">      }</a>
+<a name="ln208"> </a>
+<a name="ln209">      out[3] = in[3];</a>
+<a name="ln210">    }</a>
+<a name="ln211">  }</a>
+<a name="ln212">}</a>
+<a name="ln213"> </a>
+<a name="ln214">#ifdef HAVE_OPENCL</a>
+<a name="ln215">int process_cl(struct dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, cl_mem dev_in, cl_mem dev_out,</a>
+<a name="ln216">               const dt_iop_roi_t *const roi_in, const dt_iop_roi_t *const roi_out)</a>
+<a name="ln217">{</a>
+<a name="ln218">  dt_iop_splittoning_data_t *d = (dt_iop_splittoning_data_t *)piece-&gt;data;</a>
+<a name="ln219">  dt_iop_splittoning_global_data_t *gd = (dt_iop_splittoning_global_data_t *)self-&gt;data;</a>
+<a name="ln220"> </a>
+<a name="ln221">  cl_int err = -999;</a>
+<a name="ln222">  const int devid = piece-&gt;pipe-&gt;devid;</a>
+<a name="ln223"> </a>
+<a name="ln224">  const int width = roi_out-&gt;width;</a>
+<a name="ln225">  const int height = roi_out-&gt;height;</a>
+<a name="ln226"> </a>
+<a name="ln227">  const float compress = (d-&gt;compress / 110.0) / 2.0; // Don't allow 100% compression..</a>
+<a name="ln228">  const float balance = d-&gt;balance;</a>
+<a name="ln229">  const float shadow_hue = d-&gt;shadow_hue;</a>
+<a name="ln230">  const float shadow_saturation = d-&gt;shadow_saturation;</a>
+<a name="ln231">  const float highlight_hue = d-&gt;highlight_hue;</a>
+<a name="ln232">  const float highlight_saturation = d-&gt;highlight_saturation;</a>
+<a name="ln233"> </a>
+<a name="ln234">  size_t sizes[2] = { ROUNDUPWD(width), ROUNDUPHT(height) };</a>
+<a name="ln235">  dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_splittoning, 0, sizeof(cl_mem), &amp;dev_in);</a>
+<a name="ln236">  dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_splittoning, 1, sizeof(cl_mem), &amp;dev_out);</a>
+<a name="ln237">  dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_splittoning, 2, sizeof(int), &amp;width);</a>
+<a name="ln238">  dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_splittoning, 3, sizeof(int), &amp;height);</a>
+<a name="ln239">  dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_splittoning, 4, sizeof(float), &amp;compress);</a>
+<a name="ln240">  dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_splittoning, 5, sizeof(float), &amp;balance);</a>
+<a name="ln241">  dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_splittoning, 6, sizeof(float), &amp;shadow_hue);</a>
+<a name="ln242">  dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_splittoning, 7, sizeof(float), &amp;shadow_saturation);</a>
+<a name="ln243">  dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_splittoning, 8, sizeof(float), &amp;highlight_hue);</a>
+<a name="ln244">  dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_splittoning, 9, sizeof(float), &amp;highlight_saturation);</a>
+<a name="ln245">  err = dt_opencl_enqueue_kernel_2d(devid, gd-&gt;kernel_splittoning, sizes);</a>
+<a name="ln246">  if(err != CL_SUCCESS) goto error;</a>
+<a name="ln247">  return TRUE;</a>
+<a name="ln248"> </a>
+<a name="ln249">error:</a>
+<a name="ln250">  dt_print(DT_DEBUG_OPENCL, &quot;[opencl_splittoning] couldn't enqueue kernel! %d\n&quot;, err);</a>
+<a name="ln251">  return FALSE;</a>
+<a name="ln252">}</a>
+<a name="ln253">#endif</a>
+<a name="ln254"> </a>
+<a name="ln255"> </a>
+<a name="ln256">void init_global(dt_iop_module_so_t *module)</a>
+<a name="ln257">{</a>
+<a name="ln258">  const int program = 8; // extended.cl from programs.conf</a>
+<a name="ln259">  dt_iop_splittoning_global_data_t *gd</a>
+<a name="ln260">      = (dt_iop_splittoning_global_data_t *)malloc(sizeof(dt_iop_splittoning_global_data_t));</a>
+<a name="ln261">  module-&gt;data = gd;</a>
+<a name="ln262">  gd-&gt;kernel_splittoning = dt_opencl_create_kernel(program, &quot;splittoning&quot;);</a>
+<a name="ln263">}</a>
+<a name="ln264"> </a>
+<a name="ln265"> </a>
+<a name="ln266">void cleanup_global(dt_iop_module_so_t *module)</a>
+<a name="ln267">{</a>
+<a name="ln268">  dt_iop_splittoning_global_data_t *gd = (dt_iop_splittoning_global_data_t *)module-&gt;data;</a>
+<a name="ln269">  dt_opencl_free_kernel(gd-&gt;kernel_splittoning);</a>
+<a name="ln270">  free(module-&gt;data);</a>
+<a name="ln271">  module-&gt;data = NULL;</a>
+<a name="ln272">}</a>
+<a name="ln273"> </a>
+<a name="ln274"> </a>
+<a name="ln275">static void balance_callback(GtkWidget *slider, gpointer user_data)</a>
+<a name="ln276">{</a>
+<a name="ln277">  dt_iop_module_t *self = (dt_iop_module_t *)user_data;</a>
+<a name="ln278">  if(self-&gt;dt-&gt;gui-&gt;reset) return;</a>
+<a name="ln279">  dt_iop_splittoning_gui_data_t *g = (dt_iop_splittoning_gui_data_t *)self-&gt;gui_data;</a>
+<a name="ln280">  dt_iop_splittoning_params_t *p = (dt_iop_splittoning_params_t *)self-&gt;params;</a>
+<a name="ln281">  p-&gt;balance = dt_bauhaus_slider_get(slider) / 100.0f;</a>
+<a name="ln282">  dt_iop_color_picker_reset(&amp;g-&gt;color_picker, TRUE);</a>
+<a name="ln283">  dt_dev_add_history_item(darktable.develop, self, TRUE);</a>
+<a name="ln284">}</a>
+<a name="ln285"> </a>
+<a name="ln286">static void compress_callback(GtkWidget *slider, gpointer user_data)</a>
+<a name="ln287">{</a>
+<a name="ln288">  dt_iop_module_t *self = (dt_iop_module_t *)user_data;</a>
+<a name="ln289">  if(self-&gt;dt-&gt;gui-&gt;reset) return;</a>
+<a name="ln290">  dt_iop_splittoning_gui_data_t *g = (dt_iop_splittoning_gui_data_t *)self-&gt;gui_data;</a>
+<a name="ln291">  dt_iop_splittoning_params_t *p = (dt_iop_splittoning_params_t *)self-&gt;params;</a>
+<a name="ln292">  p-&gt;compress = dt_bauhaus_slider_get(slider);</a>
+<a name="ln293">  dt_iop_color_picker_reset(&amp;g-&gt;color_picker, TRUE);</a>
+<a name="ln294">  dt_dev_add_history_item(darktable.develop, self, TRUE);</a>
+<a name="ln295">}</a>
+<a name="ln296"> </a>
+<a name="ln297">static inline void update_colorpicker_color(GtkWidget *colorpicker, float hue, float sat)</a>
+<a name="ln298">{</a>
+<a name="ln299">  float rgb[3];</a>
+<a name="ln300">  hsl2rgb(rgb, hue, sat, 0.5);</a>
+<a name="ln301"> </a>
+<a name="ln302">  GdkRGBA color = (GdkRGBA){.red = rgb[0], .green = rgb[1], .blue = rgb[2], .alpha = 1.0 };</a>
+<a name="ln303">  gtk_color_chooser_set_rgba(GTK_COLOR_CHOOSER(colorpicker), &amp;color);</a>
+<a name="ln304">}</a>
+<a name="ln305"> </a>
+<a name="ln306">static inline void update_saturation_slider_end_color(GtkWidget *slider, float hue)</a>
+<a name="ln307">{</a>
+<a name="ln308">  float rgb[3];</a>
+<a name="ln309">  hsl2rgb(rgb, hue, 1.0, 0.5);</a>
+<a name="ln310">  dt_bauhaus_slider_set_stop(slider, 1.0, rgb[0], rgb[1], rgb[2]);</a>
+<a name="ln311">}</a>
+<a name="ln312"> </a>
+<a name="ln313">static inline void update_balance_slider_colors(GtkWidget *slider, float hue1, float hue2)</a>
+<a name="ln314">{</a>
+<a name="ln315">  float rgb[3];</a>
+<a name="ln316">  if(hue1 != -1)</a>
+<a name="ln317">  {</a>
+<a name="ln318">    hsl2rgb(rgb, hue1, 1.0, 0.5);</a>
+<a name="ln319">    dt_bauhaus_slider_set_stop(slider, 0.0, rgb[0], rgb[1], rgb[2]);</a>
+<a name="ln320">  }</a>
+<a name="ln321">  if(hue2 != -1)</a>
+<a name="ln322">  {</a>
+<a name="ln323">    hsl2rgb(rgb, hue2, 1.0, 0.5);</a>
+<a name="ln324">    dt_bauhaus_slider_set_stop(slider, 1.0, rgb[0], rgb[1], rgb[2]);</a>
+<a name="ln325">  }</a>
+<a name="ln326">}</a>
+<a name="ln327"> </a>
+<a name="ln328">static void hue_callback(GtkWidget *slider, gpointer user_data)</a>
+<a name="ln329">{</a>
+<a name="ln330">  dt_iop_module_t *self = (dt_iop_module_t *)user_data;</a>
+<a name="ln331">  dt_iop_splittoning_params_t *p = (dt_iop_splittoning_params_t *)self-&gt;params;</a>
+<a name="ln332">  dt_iop_splittoning_gui_data_t *g = (dt_iop_splittoning_gui_data_t *)self-&gt;gui_data;</a>
+<a name="ln333"> </a>
+<a name="ln334">  dt_iop_color_picker_reset(&amp;g-&gt;color_picker, TRUE);</a>
+<a name="ln335"> </a>
+<a name="ln336">  double hue = 0;</a>
+<a name="ln337">  double saturation = 0;</a>
+<a name="ln338">  GtkWidget *colorpicker;</a>
+<a name="ln339">  GtkWidget *sat_slider = NULL;</a>
+<a name="ln340">  if(slider == g-&gt;gslider1)</a>
+<a name="ln341">  {</a>
+<a name="ln342">    // Shadows</a>
+<a name="ln343">    hue = p-&gt;shadow_hue = dt_bauhaus_slider_get(slider);</a>
+<a name="ln344">    saturation = p-&gt;shadow_saturation;</a>
+<a name="ln345">    colorpicker = GTK_WIDGET(g-&gt;colorpick1);</a>
+<a name="ln346">    sat_slider = g-&gt;gslider2;</a>
+<a name="ln347">    update_balance_slider_colors(g-&gt;scale1, -1, hue);</a>
+<a name="ln348">  }</a>
+<a name="ln349">  else</a>
+<a name="ln350">  {</a>
+<a name="ln351">    hue = p-&gt;highlight_hue = dt_bauhaus_slider_get(slider);</a>
+<a name="ln352">    saturation = p-&gt;highlight_saturation;</a>
+<a name="ln353">    colorpicker = GTK_WIDGET(g-&gt;colorpick2);</a>
+<a name="ln354">    sat_slider = g-&gt;gslider4;</a>
+<a name="ln355">    update_balance_slider_colors(g-&gt;scale1, hue, -1);</a>
+<a name="ln356">  }</a>
+<a name="ln357"> </a>
+<a name="ln358">  update_colorpicker_color(colorpicker, hue, saturation);</a>
+<a name="ln359">  update_saturation_slider_end_color(sat_slider, hue);</a>
+<a name="ln360"> </a>
+<a name="ln361">  if(self-&gt;dt-&gt;gui-&gt;reset) return;</a>
+<a name="ln362"> </a>
+<a name="ln363">  gtk_widget_queue_draw(GTK_WIDGET(sat_slider));</a>
+<a name="ln364"> </a>
+<a name="ln365">  dt_dev_add_history_item(darktable.develop, self, TRUE);</a>
+<a name="ln366">}</a>
+<a name="ln367"> </a>
+<a name="ln368">static void saturation_callback(GtkWidget *slider, gpointer user_data)</a>
+<a name="ln369">{</a>
+<a name="ln370">  dt_iop_module_t *self = (dt_iop_module_t *)user_data;</a>
+<a name="ln371">  dt_iop_splittoning_params_t *p = (dt_iop_splittoning_params_t *)self-&gt;params;</a>
+<a name="ln372">  dt_iop_splittoning_gui_data_t *g = (dt_iop_splittoning_gui_data_t *)self-&gt;gui_data;</a>
+<a name="ln373"> </a>
+<a name="ln374">  dt_iop_color_picker_reset(&amp;g-&gt;color_picker, TRUE);</a>
+<a name="ln375"> </a>
+<a name="ln376">  double hue = 0;</a>
+<a name="ln377">  double saturation = 0;</a>
+<a name="ln378">  GtkWidget *colorpicker;</a>
+<a name="ln379">  if(slider == g-&gt;gslider2)</a>
+<a name="ln380">  {</a>
+<a name="ln381">    // Shadows</a>
+<a name="ln382">    hue = dt_bauhaus_slider_get(g-&gt;gslider1);</a>
+<a name="ln383">    p-&gt;shadow_saturation = saturation = dt_bauhaus_slider_get(slider);</a>
+<a name="ln384">    colorpicker = GTK_WIDGET(g-&gt;colorpick1);</a>
+<a name="ln385">  }</a>
+<a name="ln386">  else</a>
+<a name="ln387">  {</a>
+<a name="ln388">    hue = dt_bauhaus_slider_get(g-&gt;gslider3);</a>
+<a name="ln389">    p-&gt;highlight_saturation = saturation = dt_bauhaus_slider_get(slider);</a>
+<a name="ln390">    colorpicker = GTK_WIDGET(g-&gt;colorpick2);</a>
+<a name="ln391">  }</a>
+<a name="ln392"> </a>
+<a name="ln393">  update_colorpicker_color(colorpicker, hue, saturation);</a>
+<a name="ln394"> </a>
+<a name="ln395">  if(self-&gt;dt-&gt;gui-&gt;reset) return;</a>
+<a name="ln396">  dt_dev_add_history_item(darktable.develop, self, TRUE);</a>
+<a name="ln397">}</a>
+<a name="ln398"> </a>
+<a name="ln399">static void colorpick_callback(GtkColorButton *widget, dt_iop_module_t *self)</a>
+<a name="ln400">{</a>
+<a name="ln401">  if(self-&gt;dt-&gt;gui-&gt;reset) return;</a>
+<a name="ln402"> </a>
+<a name="ln403">  dt_iop_splittoning_gui_data_t *g = (dt_iop_splittoning_gui_data_t *)self-&gt;gui_data;</a>
+<a name="ln404"> </a>
+<a name="ln405">  float color[3], h, s, l;</a>
+<a name="ln406"> </a>
+<a name="ln407">  GdkRGBA c;</a>
+<a name="ln408">  gtk_color_chooser_get_rgba(GTK_COLOR_CHOOSER(widget), &amp;c);</a>
+<a name="ln409">  color[0] = c.red;</a>
+<a name="ln410">  color[1] = c.green;</a>
+<a name="ln411">  color[2] = c.blue;</a>
+<a name="ln412">  rgb2hsl(color, &amp;h, &amp;s, &amp;l);</a>
+<a name="ln413"> </a>
+<a name="ln414">  dt_bauhaus_slider_set((GTK_WIDGET(widget) == g-&gt;colorpick1) ? g-&gt;gslider1 : g-&gt;gslider3, h);</a>
+<a name="ln415">  dt_bauhaus_slider_set((GTK_WIDGET(widget) == g-&gt;colorpick1) ? g-&gt;gslider2 : g-&gt;gslider4, s);</a>
+<a name="ln416"> </a>
+<a name="ln417">  dt_dev_add_history_item(darktable.develop, self, TRUE);</a>
+<a name="ln418">}</a>
+<a name="ln419"> </a>
+<a name="ln420">static int _iop_color_picker_get_set(dt_iop_module_t *self, GtkWidget *button)</a>
+<a name="ln421">{</a>
+<a name="ln422">  dt_iop_splittoning_gui_data_t *g =  (dt_iop_splittoning_gui_data_t *)self-&gt;gui_data;</a>
+<a name="ln423"> </a>
+<a name="ln424">  const int current_picker = g-&gt;color_picker.current_picker;</a>
+<a name="ln425"> </a>
+<a name="ln426">  g-&gt;color_picker.current_picker = DT_SPLITTONING_NONE;</a>
+<a name="ln427"> </a>
+<a name="ln428">  if(button == g-&gt;gslider1)</a>
+<a name="ln429">    g-&gt;color_picker.current_picker = DT_SPLITTONING_HIGHLIGHTS;</a>
+<a name="ln430">  else if(button == g-&gt;gslider3)</a>
+<a name="ln431">    g-&gt;color_picker.current_picker = DT_SPLITTONING_SHADOWS;</a>
+<a name="ln432"> </a>
+<a name="ln433">  if (current_picker == g-&gt;color_picker.current_picker)</a>
+<a name="ln434">    return ALREADY_SELECTED;</a>
+<a name="ln435">  else</a>
+<a name="ln436">    return g-&gt;color_picker.current_picker;</a>
+<a name="ln437">}</a>
+<a name="ln438"> </a>
+<a name="ln439">static void _iop_color_picker_apply(struct dt_iop_module_t *self)</a>
+<a name="ln440">{</a>
+<a name="ln441">  dt_iop_splittoning_gui_data_t *g = (dt_iop_splittoning_gui_data_t *)self-&gt;gui_data;</a>
+<a name="ln442">  dt_iop_splittoning_params_t *p = (dt_iop_splittoning_params_t *)self-&gt;params;</a>
+<a name="ln443"> </a>
+<a name="ln444">  float *p_hue, *p_saturation;</a>
+<a name="ln445">  GtkWidget *sat, *hue, *colorpicker;</a>
+<a name="ln446"> </a>
+<a name="ln447">  // convert picker RGB 2 HSL</a>
+<a name="ln448">  float H = .0f, S = .0f, L = .0f;</a>
+<a name="ln449">  rgb2hsl(self-&gt;picked_color, &amp;H, &amp;S, &amp;L);</a>
+<a name="ln450"> </a>
+<a name="ln451">  if(g-&gt;color_picker.current_picker == DT_SPLITTONING_HIGHLIGHTS)</a>
+<a name="ln452">  {</a>
+<a name="ln453">    p_hue = &amp;p-&gt;highlight_hue;</a>
+<a name="ln454">    p_saturation = &amp;p-&gt;highlight_saturation;</a>
+<a name="ln455">    hue = g-&gt;gslider1;</a>
+<a name="ln456">    sat = g-&gt;gslider2;</a>
+<a name="ln457">    colorpicker = g-&gt;colorpick1;</a>
+<a name="ln458">  }</a>
+<a name="ln459">  else</a>
+<a name="ln460">  {</a>
+<a name="ln461">    p_hue = &amp;p-&gt;shadow_hue;</a>
+<a name="ln462">    p_saturation = &amp;p-&gt;shadow_saturation;</a>
+<a name="ln463">    hue = g-&gt;gslider3;</a>
+<a name="ln464">    sat = g-&gt;gslider4;</a>
+<a name="ln465">    colorpicker = g-&gt;colorpick2;</a>
+<a name="ln466">  }</a>
+<a name="ln467"> </a>
+<a name="ln468">  if(fabsf(*p_hue - H) &lt; 0.0001f &amp;&amp; fabsf(*p_saturation - S) &lt; 0.0001f)</a>
+<a name="ln469">  {</a>
+<a name="ln470">    // interrupt infinite loops</a>
+<a name="ln471">    return;</a>
+<a name="ln472">  }</a>
+<a name="ln473"> </a>
+<a name="ln474">  *p_hue        = H;</a>
+<a name="ln475">  *p_saturation = S;</a>
+<a name="ln476"> </a>
+<a name="ln477">  darktable.gui-&gt;reset = 1;</a>
+<a name="ln478">  dt_bauhaus_slider_set(hue, H);</a>
+<a name="ln479">  dt_bauhaus_slider_set(sat, S);</a>
+<a name="ln480">  update_colorpicker_color(colorpicker, H, S);</a>
+<a name="ln481">  update_saturation_slider_end_color(sat, H);</a>
+<a name="ln482">  darktable.gui-&gt;reset = 0;</a>
+<a name="ln483"> </a>
+<a name="ln484">  dt_dev_add_history_item(darktable.develop, self, TRUE);</a>
+<a name="ln485">}</a>
+<a name="ln486"> </a>
+<a name="ln487">static void _iop_color_picker_update(dt_iop_module_t *self)</a>
+<a name="ln488">{</a>
+<a name="ln489">  dt_iop_splittoning_gui_data_t *g =  (dt_iop_splittoning_gui_data_t *)self-&gt;gui_data;</a>
+<a name="ln490">  dt_bauhaus_widget_set_quad_active(g-&gt;gslider1, g-&gt;color_picker.current_picker == DT_SPLITTONING_HIGHLIGHTS);</a>
+<a name="ln491">  dt_bauhaus_widget_set_quad_active(g-&gt;gslider3, g-&gt;color_picker.current_picker == DT_SPLITTONING_SHADOWS);</a>
+<a name="ln492">}</a>
+<a name="ln493"> </a>
+<a name="ln494">void commit_params(struct dt_iop_module_t *self, dt_iop_params_t *p1, dt_dev_pixelpipe_t *pipe,</a>
+<a name="ln495">                   dt_dev_pixelpipe_iop_t *piece)</a>
+<a name="ln496">{</a>
+<a name="ln497">  dt_iop_splittoning_params_t *p = (dt_iop_splittoning_params_t *)p1;</a>
+<a name="ln498">  dt_iop_splittoning_data_t *d = (dt_iop_splittoning_data_t *)piece-&gt;data;</a>
+<a name="ln499"> </a>
+<a name="ln500">  d-&gt;shadow_hue = p-&gt;shadow_hue;</a>
+<a name="ln501">  d-&gt;highlight_hue = p-&gt;highlight_hue;</a>
+<a name="ln502">  d-&gt;shadow_saturation = p-&gt;shadow_saturation;</a>
+<a name="ln503">  d-&gt;highlight_saturation = p-&gt;highlight_saturation;</a>
+<a name="ln504">  d-&gt;balance = p-&gt;balance;</a>
+<a name="ln505">  d-&gt;compress = p-&gt;compress;</a>
+<a name="ln506">}</a>
+<a name="ln507"> </a>
+<a name="ln508">void init_pipe(struct dt_iop_module_t *self, dt_dev_pixelpipe_t *pipe, dt_dev_pixelpipe_iop_t *piece)</a>
+<a name="ln509">{</a>
+<a name="ln510">  piece-&gt;data = calloc(1, sizeof(dt_iop_splittoning_data_t));</a>
+<a name="ln511">  self-&gt;commit_params(self, self-&gt;default_params, pipe, piece);</a>
+<a name="ln512">}</a>
+<a name="ln513"> </a>
+<a name="ln514">void cleanup_pipe(struct dt_iop_module_t *self, dt_dev_pixelpipe_t *pipe, dt_dev_pixelpipe_iop_t *piece)</a>
+<a name="ln515">{</a>
+<a name="ln516">  free(piece-&gt;data);</a>
+<a name="ln517">  piece-&gt;data = NULL;</a>
+<a name="ln518">}</a>
+<a name="ln519"> </a>
+<a name="ln520">void gui_update(struct dt_iop_module_t *self)</a>
+<a name="ln521">{</a>
+<a name="ln522">  dt_iop_module_t *module = (dt_iop_module_t *)self;</a>
+<a name="ln523">  dt_iop_splittoning_gui_data_t *g = (dt_iop_splittoning_gui_data_t *)self-&gt;gui_data;</a>
+<a name="ln524">  dt_iop_splittoning_params_t *p = (dt_iop_splittoning_params_t *)module-&gt;params;</a>
+<a name="ln525"> </a>
+<a name="ln526">  dt_bauhaus_slider_set(g-&gt;gslider1, p-&gt;shadow_hue);</a>
+<a name="ln527">  dt_bauhaus_slider_set(g-&gt;gslider3, p-&gt;highlight_hue);</a>
+<a name="ln528">  dt_bauhaus_slider_set(g-&gt;gslider4, p-&gt;highlight_saturation);</a>
+<a name="ln529">  dt_bauhaus_slider_set(g-&gt;gslider2, p-&gt;shadow_saturation);</a>
+<a name="ln530">  dt_bauhaus_slider_set(g-&gt;scale1, p-&gt;balance * 100.0);</a>
+<a name="ln531">  dt_bauhaus_slider_set(g-&gt;scale2, p-&gt;compress);</a>
+<a name="ln532"> </a>
+<a name="ln533">  update_colorpicker_color(GTK_WIDGET(g-&gt;colorpick1), p-&gt;shadow_hue, p-&gt;shadow_saturation);</a>
+<a name="ln534">  update_colorpicker_color(GTK_WIDGET(g-&gt;colorpick2), p-&gt;highlight_hue, p-&gt;highlight_saturation);</a>
+<a name="ln535">  update_saturation_slider_end_color(g-&gt;gslider2, p-&gt;shadow_hue);</a>
+<a name="ln536">  update_saturation_slider_end_color(g-&gt;gslider4, p-&gt;highlight_hue);</a>
+<a name="ln537"> </a>
+<a name="ln538">  update_balance_slider_colors(g-&gt;scale1, p-&gt;highlight_hue, p-&gt;shadow_hue);</a>
+<a name="ln539">}</a>
+<a name="ln540"> </a>
+<a name="ln541">void init(dt_iop_module_t *module)</a>
+<a name="ln542">{</a>
+<a name="ln543">  module-&gt;params = calloc(1, sizeof(dt_iop_splittoning_params_t));</a>
+<a name="ln544">  module-&gt;default_params = calloc(1, sizeof(dt_iop_splittoning_params_t));</a>
+<a name="ln545">  module-&gt;default_enabled = 0;</a>
+<a name="ln546">  module-&gt;priority = 871; // module order created by iop_dependencies.py, do not edit!</a>
+<a name="ln547">  module-&gt;params_size = sizeof(dt_iop_splittoning_params_t);</a>
+<a name="ln548">  module-&gt;gui_data = NULL;</a>
+<a name="ln549">  dt_iop_splittoning_params_t tmp = (dt_iop_splittoning_params_t){ 0, 0.5, 0.2, 0.5, 0.5, 33.0 };</a>
+<a name="ln550">  memcpy(module-&gt;params, &amp;tmp, sizeof(dt_iop_splittoning_params_t));</a>
+<a name="ln551">  memcpy(module-&gt;default_params, &amp;tmp, sizeof(dt_iop_splittoning_params_t));</a>
+<a name="ln552">}</a>
+<a name="ln553"> </a>
+<a name="ln554">void cleanup(dt_iop_module_t *module)</a>
+<a name="ln555">{</a>
+<a name="ln556">  free(module-&gt;params);</a>
+<a name="ln557">  module-&gt;params = NULL;</a>
+<a name="ln558">}</a>
+<a name="ln559"> </a>
+<a name="ln560">static inline int gui_init_tab(struct dt_iop_module_t *self, int line, const char *name, GtkWidget **ppcolor,</a>
+<a name="ln561">                                const GdkRGBA *c, GtkWidget **pphue, GtkWidget **ppsaturation)</a>
+<a name="ln562">{</a>
+<a name="ln563">  dt_iop_splittoning_gui_data_t *g = (dt_iop_splittoning_gui_data_t *)self-&gt;gui_data;</a>
+<a name="ln564"> </a>
+<a name="ln565">  GtkGrid *grid = GTK_GRID(self-&gt;widget);</a>
+<a name="ln566">  gtk_grid_attach(grid, dt_ui_section_label_new(name), 0, line++, 2, 1);</a>
+<a name="ln567"> </a>
+<a name="ln568">  // color button</a>
+<a name="ln569">  GtkWidget *color;</a>
+<a name="ln570">  *ppcolor = color = gtk_color_button_new_with_rgba(c);</a>
+<a name="ln571">  gtk_widget_set_size_request(GTK_WIDGET(color), DT_PIXEL_APPLY_DPI(32), DT_PIXEL_APPLY_DPI(32));</a>
+<a name="ln572">  gtk_color_chooser_set_use_alpha(GTK_COLOR_CHOOSER(color), FALSE);</a>
+<a name="ln573">  gtk_color_button_set_title(GTK_COLOR_BUTTON(color), _(&quot;select tone color&quot;));</a>
+<a name="ln574"> </a>
+<a name="ln575">  // hue slider</a>
+<a name="ln576">  GtkWidget *hue;</a>
+<a name="ln577">  *pphue = hue = (dt_bauhaus_slider_new_with_range_and_feedback(self, 0.0f, 1.0f, 0.01f, 0.0f, 2, 0));</a>
+<a name="ln578">  dt_bauhaus_slider_set_stop(hue, 0.0f, 1.0f, 0.0f, 0.0f);</a>
+<a name="ln579">  dt_bauhaus_widget_set_label(hue, NULL, _(&quot;hue&quot;));</a>
+<a name="ln580">  dt_bauhaus_slider_set_stop(hue, 0.166f, 1.0f, 1.0f, 0.0f);</a>
+<a name="ln581">  dt_bauhaus_slider_set_stop(hue, 0.322f, 0.0f, 1.0f, 0.0f);</a>
+<a name="ln582">  dt_bauhaus_slider_set_stop(hue, 0.498f, 0.0f, 1.0f, 1.0f);</a>
+<a name="ln583">  dt_bauhaus_slider_set_stop(hue, 0.664f, 0.0f, 0.0f, 1.0f);</a>
+<a name="ln584">  dt_bauhaus_slider_set_stop(hue, 0.830f, 1.0f, 0.0f, 1.0f);</a>
+<a name="ln585">  dt_bauhaus_slider_set_stop(hue, 1.0f, 1.0f, 0.0f, 0.0f);</a>
+<a name="ln586">  gtk_widget_set_tooltip_text(hue, _(&quot;select the hue tone&quot;));</a>
+<a name="ln587">  dt_bauhaus_widget_set_quad_paint(hue, dtgtk_cairo_paint_colorpicker, CPF_STYLE_FLAT | CPF_DO_NOT_USE_BORDER, NULL);</a>
+<a name="ln588">  dt_bauhaus_widget_set_quad_toggle(hue, TRUE);</a>
+<a name="ln589">  g_signal_connect(G_OBJECT(hue), &quot;quad-pressed&quot;, G_CALLBACK(dt_iop_color_picker_callback), &amp;g-&gt;color_picker);</a>
+<a name="ln590"> </a>
+<a name="ln591">  // saturation slider</a>
+<a name="ln592">  GtkWidget *saturation;</a>
+<a name="ln593">  *ppsaturation = saturation = dt_bauhaus_slider_new_with_range(self, 0.0f, 1.0f, 0.01f, 0.0f, 2);</a>
+<a name="ln594">  dt_bauhaus_widget_set_label(saturation, NULL, _(&quot;saturation&quot;));</a>
+<a name="ln595">  dt_bauhaus_slider_set_stop(saturation, 0.0f, 0.2f, 0.2f, 0.2f);</a>
+<a name="ln596">  dt_bauhaus_slider_set_stop(saturation, 1.0f, 1.0f, 1.0f, 1.0f);</a>
+<a name="ln597">  gtk_widget_set_tooltip_text(saturation, _(&quot;select the saturation tone&quot;));</a>
+<a name="ln598"> </a>
+<a name="ln599">  // pack the widgets</a>
+<a name="ln600">  gtk_widget_set_hexpand(hue, TRUE); // make sure that the color picker doesn't become HUGE</a>
+<a name="ln601">  gtk_grid_attach(grid, hue, 0, line, 1, 1);</a>
+<a name="ln602">  gtk_grid_attach(grid, color, 1, line++, 1, 2);</a>
+<a name="ln603">  gtk_grid_attach(grid, saturation, 0, line++, 1, 1);</a>
+<a name="ln604"> </a>
+<a name="ln605">  return line;</a>
+<a name="ln606">}</a>
+<a name="ln607"> </a>
+<a name="ln608">void gui_init(struct dt_iop_module_t *self)</a>
+<a name="ln609">{</a>
+<a name="ln610">  self-&gt;gui_data = malloc(sizeof(dt_iop_splittoning_gui_data_t));</a>
+<a name="ln611">  dt_iop_splittoning_gui_data_t *g = (dt_iop_splittoning_gui_data_t *)self-&gt;gui_data;</a>
+<a name="ln612">  dt_iop_splittoning_params_t *p = (dt_iop_splittoning_params_t *)self-&gt;params;</a>
+<a name="ln613"> </a>
+<a name="ln614">  int line = 0;</a>
+<a name="ln615">  self-&gt;widget = gtk_grid_new();</a>
+<a name="ln616">  GtkGrid *grid = GTK_GRID(self-&gt;widget);</a>
+<a name="ln617">  gtk_grid_set_row_spacing(grid, DT_BAUHAUS_SPACE);</a>
+<a name="ln618">  gtk_grid_set_column_spacing(grid, DT_BAUHAUS_SPACE);</a>
+<a name="ln619">  gtk_grid_set_column_homogeneous(grid, FALSE);</a>
+<a name="ln620">  dt_gui_add_help_link(self-&gt;widget, dt_get_help_url(self-&gt;op));</a>
+<a name="ln621"> </a>
+<a name="ln622">  float rgb[3];</a>
+<a name="ln623"> </a>
+<a name="ln624">  // Shadows</a>
+<a name="ln625">  hsl2rgb(rgb, p-&gt;shadow_hue, p-&gt;shadow_saturation, 0.5f);</a>
+<a name="ln626">  GdkRGBA sh_color = (GdkRGBA){.red = rgb[0], .green = rgb[1], .blue = rgb[2], .alpha = 1.0 };</a>
+<a name="ln627">  line = gui_init_tab(self, line, _(&quot;shadows&quot;), &amp;g-&gt;colorpick1, &amp;sh_color, &amp;g-&gt;gslider1, &amp;g-&gt;gslider2);</a>
+<a name="ln628"> </a>
+<a name="ln629">  // Highlights</a>
+<a name="ln630">  hsl2rgb(rgb, p-&gt;highlight_hue, p-&gt;highlight_saturation, 0.5f);</a>
+<a name="ln631">  GdkRGBA hi_color = (GdkRGBA){.red = rgb[0], .green = rgb[1], .blue = rgb[2], .alpha = 1.0 };</a>
+<a name="ln632">  line = gui_init_tab(self, line, _(&quot;highlights&quot;), &amp;g-&gt;colorpick2, &amp;hi_color, &amp;g-&gt;gslider3, &amp;g-&gt;gslider4);</a>
+<a name="ln633"> </a>
+<a name="ln634">  // Additional parameters</a>
+<a name="ln635">  g-&gt;scale1 = dt_bauhaus_slider_new_with_range_and_feedback(self, 0.0, 100.0, 0.1, p-&gt;balance * 100.0, 2, 0);</a>
+<a name="ln636">  dt_bauhaus_slider_set_format(g-&gt;scale1, &quot;%.2f&quot;);</a>
+<a name="ln637">  dt_bauhaus_slider_set_stop(g-&gt;scale1, 0.0f, 0.5f, 0.5f, 0.5f);</a>
+<a name="ln638">  dt_bauhaus_slider_set_stop(g-&gt;scale1, 1.0f, 0.5f, 0.5f, 0.5f);</a>
+<a name="ln639">  dt_bauhaus_widget_set_label(g-&gt;scale1, NULL, _(&quot;balance&quot;));</a>
+<a name="ln640">  gtk_widget_set_margin_top(g-&gt;scale1, 6 * DT_BAUHAUS_SPACE);</a>
+<a name="ln641">  gtk_grid_attach(grid, g-&gt;scale1, 0, line++, 2, 1);</a>
+<a name="ln642"> </a>
+<a name="ln643"> </a>
+<a name="ln644">  g-&gt;scale2 = dt_bauhaus_slider_new_with_range(self, 0.0, 100.0, 1.0, p-&gt;compress, 2);</a>
+<a name="ln645">  dt_bauhaus_slider_set_format(g-&gt;scale2, &quot;%.2f%%&quot;);</a>
+<a name="ln646">  dt_bauhaus_widget_set_label(g-&gt;scale2, NULL, _(&quot;compress&quot;));</a>
+<a name="ln647">  gtk_grid_attach(grid, g-&gt;scale2, 0, line++, 2, 1);</a>
+<a name="ln648"> </a>
+<a name="ln649"> </a>
+<a name="ln650">  gtk_widget_set_tooltip_text(g-&gt;scale1, _(&quot;the balance of center of splittoning&quot;));</a>
+<a name="ln651">  gtk_widget_set_tooltip_text(g-&gt;scale2, _(&quot;compress the effect on highlights/shadows and\npreserve midtones&quot;));</a>
+<a name="ln652"> </a>
+<a name="ln653">  g_signal_connect(G_OBJECT(g-&gt;gslider1), &quot;value-changed&quot;, G_CALLBACK(hue_callback), self);</a>
+<a name="ln654">  g_signal_connect(G_OBJECT(g-&gt;gslider3), &quot;value-changed&quot;, G_CALLBACK(hue_callback), self);</a>
+<a name="ln655"> </a>
+<a name="ln656">  g_signal_connect(G_OBJECT(g-&gt;gslider2), &quot;value-changed&quot;, G_CALLBACK(saturation_callback), self);</a>
+<a name="ln657">  g_signal_connect(G_OBJECT(g-&gt;gslider4), &quot;value-changed&quot;, G_CALLBACK(saturation_callback), self);</a>
+<a name="ln658"> </a>
+<a name="ln659">  g_signal_connect(G_OBJECT(g-&gt;scale1), &quot;value-changed&quot;, G_CALLBACK(balance_callback), self);</a>
+<a name="ln660">  g_signal_connect(G_OBJECT(g-&gt;scale2), &quot;value-changed&quot;, G_CALLBACK(compress_callback), self);</a>
+<a name="ln661"> </a>
+<a name="ln662"> </a>
+<a name="ln663">  g_signal_connect(G_OBJECT(g-&gt;colorpick1), &quot;color-set&quot;, G_CALLBACK(colorpick_callback), self);</a>
+<a name="ln664">  g_signal_connect(G_OBJECT(g-&gt;colorpick2), &quot;color-set&quot;, G_CALLBACK(colorpick_callback), self);</a>
+<a name="ln665"> </a>
+<a name="ln666">  init_picker(&amp;g-&gt;color_picker,</a>
+<a name="ln667">              self,</a>
+<a name="ln668">              DT_COLOR_PICKER_POINT,</a>
+<a name="ln669">              _iop_color_picker_get_set,</a>
+<a name="ln670">              _iop_color_picker_apply,</a>
+<a name="ln671">              _iop_color_picker_update);</a>
+<a name="ln672">}</a>
+<a name="ln673"> </a>
+<a name="ln674">void gui_cleanup(struct dt_iop_module_t *self)</a>
+<a name="ln675">{</a>
+<a name="ln676">  free(self-&gt;gui_data);</a>
+<a name="ln677">  self-&gt;gui_data = NULL;</a>
+<a name="ln678">}</a>
+<a name="ln679"> </a>
+<a name="ln680">// modelines: These editor modelines have been set for all relevant files by tools/update_modelines.sh</a>
+<a name="ln681">// vim: shiftwidth=2 expandtab tabstop=2 cindent</a>
+<a name="ln682">// kate: tab-indents: off; indent-width 2; replace-tabs on; indent-mode cstyle; remove-trailing-spaces modified;</a>
+
+</code></pre>
+<div class="balloon" rel="262"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v522/" target="_blank">V522</a> There might be dereferencing of a potential null pointer 'gd'. Check lines: 262, 260.</p></div>
+<div class="balloon" rel="550"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v575/" target="_blank">V575</a> The potential null pointer is passed into 'memcpy' function. Inspect the first argument. Check lines: 550, 543.</p></div>
+<div class="balloon" rel="551"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v575/" target="_blank">V575</a> The potential null pointer is passed into 'memcpy' function. Inspect the first argument. Check lines: 551, 544.</p></div>
+<div class="balloon" rel="627"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v522/" target="_blank">V522</a> There might be dereferencing of a potential null pointer 'g'. Check lines: 627, 610.</p></div>
+
+<link rel="stylesheet" href="highlight.css">
+<script src="highlight.pack.js"></script>
+<script src="highlightjs-line-numbers.js"></script>
+<script>hljs.initHighlightingOnLoad();</script>
+<script>hljs.initLineNumbersOnLoad();</script>
+<script>
+  $(document).ready(function() {
+      $('.balloon').each(function () {
+          var bl = $(this);
+          var line = bl.attr('rel');
+          var text = $('a[name="ln'+line+'"]').text();
+
+          var space_count = 0;
+          for(var i = 0; i<text.length; i++){
+              var char = text[i];
+              if((char !== ' ')&&(char !== '\t'))break;
+              if(char === '\t')space_count++;
+              space_count++;
+          }
+
+          bl.css('margin-left', space_count*8);
+          $('a[name="ln'+line+'"]').after(bl);
+      });
+
+      window.location = window.location;
+  });
+</script>
+</body>
+</html>
