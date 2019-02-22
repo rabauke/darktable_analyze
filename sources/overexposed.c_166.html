@@ -115,202 +115,307 @@
 <a name="ln107">//   dt_accel_connect_slider_iop(self, &quot;color scheme&quot;, GTK_WIDGET(g-&gt;colorscheme));</a>
 <a name="ln108">// }</a>
 <a name="ln109"> </a>
-<a name="ln110">void process(struct dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, const void *const ivoid,</a>
-<a name="ln111">             void *const ovoid, const dt_iop_roi_t *const roi_in, const dt_iop_roi_t *const roi_out)</a>
-<a name="ln112">{</a>
-<a name="ln113">  dt_develop_t *dev = self-&gt;dev;</a>
-<a name="ln114"> </a>
-<a name="ln115">  const int ch = piece-&gt;colors;</a>
-<a name="ln116"> </a>
-<a name="ln117">  const float lower = MAX(dev-&gt;overexposed.lower / 100.0f, 1e-6f);</a>
-<a name="ln118">  const float upper = dev-&gt;overexposed.upper / 100.0f;</a>
-<a name="ln119"> </a>
-<a name="ln120">  const int colorscheme = dev-&gt;overexposed.colorscheme;</a>
-<a name="ln121">  const float *const upper_color = dt_iop_overexposed_colors[colorscheme][0];</a>
-<a name="ln122">  const float *const lower_color = dt_iop_overexposed_colors[colorscheme][1];</a>
-<a name="ln123"> </a>
-<a name="ln124">  const float *const in = (const float *const)ivoid;</a>
-<a name="ln125">  float *const out = (float *const)ovoid;</a>
-<a name="ln126"> </a>
-<a name="ln127">#ifdef _OPENMP</a>
-<a name="ln128">#pragma omp parallel for default(none) schedule(static)</a>
-<a name="ln129">#endif</a>
-<a name="ln130">  for(size_t k = 0; k &lt; (size_t)ch * roi_out-&gt;width * roi_out-&gt;height; k += ch)</a>
-<a name="ln131">  {</a>
-<a name="ln132">    if(in[k + 0] &gt;= upper || in[k + 1] &gt;= upper || in[k + 2] &gt;= upper)</a>
-<a name="ln133">    {</a>
-<a name="ln134">      for(int c = 0; c &lt; 3; c++)</a>
-<a name="ln135">      {</a>
-<a name="ln136">        out[k + c] = upper_color[c];</a>
-<a name="ln137">      }</a>
-<a name="ln138">    }</a>
-<a name="ln139">    else if(in[k + 0] &lt;= lower &amp;&amp; in[k + 1] &lt;= lower &amp;&amp; in[k + 2] &lt;= lower)</a>
-<a name="ln140">    {</a>
-<a name="ln141">      for(int c = 0; c &lt; 3; c++)</a>
-<a name="ln142">      {</a>
-<a name="ln143">        out[k + c] = lower_color[c];</a>
-<a name="ln144">      }</a>
-<a name="ln145">    }</a>
-<a name="ln146">    else</a>
-<a name="ln147">    {</a>
-<a name="ln148">      for(int c = 0; c &lt; 3; c++)</a>
-<a name="ln149">      {</a>
-<a name="ln150">        const size_t p = (size_t)k + c;</a>
-<a name="ln151">        out[p] = in[p];</a>
-<a name="ln152">      }</a>
-<a name="ln153">    }</a>
-<a name="ln154">  }</a>
-<a name="ln155"> </a>
-<a name="ln156">  if(piece-&gt;pipe-&gt;mask_display &amp; DT_DEV_PIXELPIPE_DISPLAY_MASK) dt_iop_alpha_copy(ivoid, ovoid, roi_out-&gt;width, roi_out-&gt;height);</a>
-<a name="ln157">}</a>
-<a name="ln158"> </a>
-<a name="ln159">#if defined(__SSE__)</a>
-<a name="ln160">void process_sse2(struct dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, const void *const ivoid,</a>
-<a name="ln161">                  void *const ovoid, const dt_iop_roi_t *const roi_in, const dt_iop_roi_t *const roi_out)</a>
-<a name="ln162">{</a>
-<a name="ln163">  dt_develop_t *dev = self-&gt;dev;</a>
-<a name="ln164"> </a>
-<a name="ln165">  const int ch = piece-&gt;colors;</a>
-<a name="ln166">  const float lower = MAX(dev-&gt;overexposed.lower / 100.0f, 1e-6f);</a>
-<a name="ln167">  const float upper = dev-&gt;overexposed.upper / 100.0f;</a>
+<a name="ln110">static void _get_histogram_profile_type(dt_colorspaces_color_profile_type_t *out_type, gchar **out_filename)</a>
+<a name="ln111">{</a>
+<a name="ln112">  // if in gamut check use soft proof</a>
+<a name="ln113">  if(darktable.color_profiles-&gt;histogram_type == DT_COLORSPACE_SOFTPROOF)</a>
+<a name="ln114">  {</a>
+<a name="ln115">    *out_type = darktable.color_profiles-&gt;softproof_type;</a>
+<a name="ln116">    *out_filename = darktable.color_profiles-&gt;softproof_filename;</a>
+<a name="ln117">  }</a>
+<a name="ln118">  else if(darktable.color_profiles-&gt;histogram_type == DT_COLORSPACE_EXPORT)</a>
+<a name="ln119">  {</a>
+<a name="ln120">    // use introspection to get the params values</a>
+<a name="ln121">    dt_iop_module_so_t *colorout_so = NULL;</a>
+<a name="ln122">    dt_iop_module_t *colorout = NULL;</a>
+<a name="ln123">    GList *modules = g_list_last(darktable.iop);</a>
+<a name="ln124">    while(modules)</a>
+<a name="ln125">    {</a>
+<a name="ln126">      dt_iop_module_so_t *module_so = (dt_iop_module_so_t *)(modules-&gt;data);</a>
+<a name="ln127">      if(!strcmp(module_so-&gt;op, &quot;colorout&quot;))</a>
+<a name="ln128">      {</a>
+<a name="ln129">        colorout_so = module_so;</a>
+<a name="ln130">        break;</a>
+<a name="ln131">      }</a>
+<a name="ln132">      modules = g_list_previous(modules);</a>
+<a name="ln133">    }</a>
+<a name="ln134">    if(colorout_so &amp;&amp; colorout_so-&gt;get_p)</a>
+<a name="ln135">    {</a>
+<a name="ln136">      modules = g_list_last(darktable.develop-&gt;iop);</a>
+<a name="ln137">      while(modules)</a>
+<a name="ln138">      {</a>
+<a name="ln139">        dt_iop_module_t *module = (dt_iop_module_t *)(modules-&gt;data);</a>
+<a name="ln140">        if(!strcmp(module-&gt;op, &quot;colorout&quot;))</a>
+<a name="ln141">        {</a>
+<a name="ln142">          colorout = module;</a>
+<a name="ln143">          break;</a>
+<a name="ln144">        }</a>
+<a name="ln145">        modules = g_list_previous(modules);</a>
+<a name="ln146">      }</a>
+<a name="ln147">    }</a>
+<a name="ln148">    if(colorout)</a>
+<a name="ln149">    {</a>
+<a name="ln150">      dt_colorspaces_color_profile_type_t *_type = colorout_so-&gt;get_p(colorout-&gt;params, &quot;type&quot;);</a>
+<a name="ln151">      char *_filename = colorout_so-&gt;get_p(colorout-&gt;params, &quot;filename&quot;);</a>
+<a name="ln152">      if(_type) *out_type = *_type;</a>
+<a name="ln153">      if(_filename) *out_filename = _filename;</a>
+<a name="ln154">    }</a>
+<a name="ln155">  }</a>
+<a name="ln156">  else</a>
+<a name="ln157">  {</a>
+<a name="ln158">    *out_type = darktable.color_profiles-&gt;histogram_type;</a>
+<a name="ln159">    *out_filename = darktable.color_profiles-&gt;histogram_filename;</a>
+<a name="ln160">  }</a>
+<a name="ln161">}</a>
+<a name="ln162"> </a>
+<a name="ln163">static void _transform_image_colorspace(const float *const img_in, float *const img_out, const dt_iop_roi_t *const roi_in)</a>
+<a name="ln164">{</a>
+<a name="ln165">  cmsHPROFILE display_profile = NULL;</a>
+<a name="ln166">  cmsHPROFILE histogram_profile = NULL;</a>
+<a name="ln167">  cmsHTRANSFORM xform_rgb2rgb = NULL;</a>
 <a name="ln168"> </a>
-<a name="ln169">  const __m128 mupper = _mm_set_ps(FLT_MAX, upper, upper, upper);</a>
-<a name="ln170">  const __m128 mlower = _mm_set_ps(FLT_MAX, lower, lower, lower);</a>
-<a name="ln171"> </a>
-<a name="ln172">  const int colorscheme = dev-&gt;overexposed.colorscheme;</a>
-<a name="ln173">  const __m128 upper_color = _mm_load_ps(dt_iop_overexposed_colors[colorscheme][0]);</a>
-<a name="ln174">  const __m128 lower_color = _mm_load_ps(dt_iop_overexposed_colors[colorscheme][1]);</a>
-<a name="ln175"> </a>
-<a name="ln176">#ifdef _OPENMP</a>
-<a name="ln177">#pragma omp parallel for default(none) schedule(static)</a>
-<a name="ln178">#endif</a>
-<a name="ln179">  for(int k = 0; k &lt; roi_out-&gt;height; k++)</a>
-<a name="ln180">  {</a>
-<a name="ln181">    const float *in = ((float *)ivoid) + (size_t)ch * k * roi_out-&gt;width;</a>
-<a name="ln182">    float *out = ((float *)ovoid) + (size_t)ch * k * roi_out-&gt;width;</a>
-<a name="ln183"> </a>
-<a name="ln184">    for(int j = 0; j &lt; roi_out-&gt;width; j++, in += 4, out += 4)</a>
-<a name="ln185">    {</a>
-<a name="ln186">      const __m128 pixel = _mm_load_ps(in);</a>
-<a name="ln187"> </a>
-<a name="ln188">      __m128 isoe = _mm_cmpge_ps(pixel, mupper);</a>
-<a name="ln189">      isoe = _mm_or_ps(_mm_unpacklo_ps(isoe, isoe), _mm_unpackhi_ps(isoe, isoe));</a>
-<a name="ln190">      isoe = _mm_or_ps(_mm_unpacklo_ps(isoe, isoe), _mm_unpackhi_ps(isoe, isoe));</a>
+<a name="ln169">  dt_colorspaces_color_profile_type_t histogram_type = DT_COLORSPACE_SRGB;</a>
+<a name="ln170">  gchar *histogram_filename = NULL;</a>
+<a name="ln171">  </a>
+<a name="ln172">  if(darktable.color_profiles-&gt;display_type == DT_COLORSPACE_DISPLAY || histogram_type == DT_COLORSPACE_DISPLAY)</a>
+<a name="ln173">    pthread_rwlock_rdlock(&amp;darktable.color_profiles-&gt;xprofile_lock);</a>
+<a name="ln174"> </a>
+<a name="ln175">  _get_histogram_profile_type(&amp;histogram_type, &amp;histogram_filename);</a>
+<a name="ln176">  </a>
+<a name="ln177">  const dt_colorspaces_color_profile_t *d_profile = dt_colorspaces_get_profile(darktable.color_profiles-&gt;display_type,</a>
+<a name="ln178">                                                       darktable.color_profiles-&gt;display_filename,</a>
+<a name="ln179">                                                       DT_PROFILE_DIRECTION_OUT | DT_PROFILE_DIRECTION_DISPLAY);</a>
+<a name="ln180">  if(d_profile) display_profile = d_profile-&gt;profile;</a>
+<a name="ln181"> </a>
+<a name="ln182">  if((histogram_type != darktable.color_profiles-&gt;display_type) || </a>
+<a name="ln183">      (histogram_type == DT_COLORSPACE_FILE &amp;&amp;</a>
+<a name="ln184">      strcmp(histogram_filename, darktable.color_profiles-&gt;display_filename)))</a>
+<a name="ln185">  {</a>
+<a name="ln186">    const dt_colorspaces_color_profile_t *d_histogram = dt_colorspaces_get_profile(histogram_type,</a>
+<a name="ln187">                                                         histogram_filename,</a>
+<a name="ln188">                                                         DT_PROFILE_DIRECTION_OUT | DT_PROFILE_DIRECTION_DISPLAY);</a>
+<a name="ln189">    if(d_histogram) histogram_profile = d_histogram-&gt;profile;</a>
+<a name="ln190">  }</a>
 <a name="ln191"> </a>
-<a name="ln192">      __m128 isue = _mm_cmple_ps(pixel, mlower);</a>
-<a name="ln193">      isue = _mm_and_ps(_mm_unpacklo_ps(isue, isue), _mm_unpackhi_ps(isue, isue));</a>
-<a name="ln194">      isue = _mm_and_ps(_mm_unpacklo_ps(isue, isue), _mm_unpackhi_ps(isue, isue));</a>
-<a name="ln195"> </a>
-<a name="ln196">      __m128 result = _mm_or_ps(_mm_andnot_ps(isoe, pixel), _mm_and_ps(isoe, upper_color));</a>
-<a name="ln197"> </a>
-<a name="ln198">      result = _mm_or_ps(_mm_andnot_ps(isue, result), _mm_and_ps(isue, lower_color));</a>
+<a name="ln192">  // display rgb --&gt; histogram rgb</a>
+<a name="ln193">  if(display_profile &amp;&amp; histogram_profile)</a>
+<a name="ln194">  {</a>
+<a name="ln195">    xform_rgb2rgb = cmsCreateTransform(display_profile, TYPE_RGBA_FLT, histogram_profile, TYPE_RGBA_FLT, INTENT_PERCEPTUAL, 0);</a>
+<a name="ln196">    if(xform_rgb2rgb == NULL)</a>
+<a name="ln197">      fprintf(stderr, &quot;[overexposed _transform_image_colorspace] can't create colorspace transform\n&quot;);</a>
+<a name="ln198">  }</a>
 <a name="ln199"> </a>
-<a name="ln200">      _mm_stream_ps(out, result);</a>
-<a name="ln201">    }</a>
-<a name="ln202">  }</a>
-<a name="ln203">  _mm_sfence();</a>
-<a name="ln204"> </a>
-<a name="ln205">  if(piece-&gt;pipe-&gt;mask_display &amp; DT_DEV_PIXELPIPE_DISPLAY_MASK) dt_iop_alpha_copy(ivoid, ovoid, roi_out-&gt;width, roi_out-&gt;height);</a>
-<a name="ln206">}</a>
-<a name="ln207">#endif</a>
+<a name="ln200">  if(darktable.color_profiles-&gt;display_type == DT_COLORSPACE_DISPLAY || histogram_type == DT_COLORSPACE_DISPLAY)</a>
+<a name="ln201">    pthread_rwlock_unlock(&amp;darktable.color_profiles-&gt;xprofile_lock);</a>
+<a name="ln202"> </a>
+<a name="ln203">  if(xform_rgb2rgb)</a>
+<a name="ln204">    cmsDoTransform(xform_rgb2rgb, img_in, img_out, roi_in-&gt;width * roi_in-&gt;height);</a>
+<a name="ln205">  </a>
+<a name="ln206">  if(xform_rgb2rgb) cmsDeleteTransform(xform_rgb2rgb);</a>
+<a name="ln207">}</a>
 <a name="ln208"> </a>
-<a name="ln209">#ifdef HAVE_OPENCL</a>
-<a name="ln210">int process_cl(struct dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, cl_mem dev_in, cl_mem dev_out,</a>
-<a name="ln211">               const dt_iop_roi_t *const roi_in, const dt_iop_roi_t *const roi_out)</a>
-<a name="ln212">{</a>
-<a name="ln213">  dt_develop_t *dev = self-&gt;dev;</a>
-<a name="ln214">  dt_iop_overexposed_global_data_t *gd = (dt_iop_overexposed_global_data_t *)self-&gt;data;</a>
+<a name="ln209">void process(struct dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, const void *const ivoid,</a>
+<a name="ln210">             void *const ovoid, const dt_iop_roi_t *const roi_in, const dt_iop_roi_t *const roi_out)</a>
+<a name="ln211">{</a>
+<a name="ln212">  dt_develop_t *dev = self-&gt;dev;</a>
+<a name="ln213"> </a>
+<a name="ln214">  const int ch = piece-&gt;colors;</a>
 <a name="ln215"> </a>
-<a name="ln216">  cl_int err = -999;</a>
-<a name="ln217">  const int devid = piece-&gt;pipe-&gt;devid;</a>
-<a name="ln218"> </a>
-<a name="ln219">  const int width = roi_out-&gt;width;</a>
-<a name="ln220">  const int height = roi_out-&gt;height;</a>
-<a name="ln221"> </a>
-<a name="ln222">  const float lower = MAX(dev-&gt;overexposed.lower / 100.0f, 1e-6f);</a>
-<a name="ln223">  const float upper = dev-&gt;overexposed.upper / 100.0f;</a>
-<a name="ln224">  const int colorscheme = dev-&gt;overexposed.colorscheme;</a>
+<a name="ln216">  float *const img_tmp = dt_alloc_align(64, ch * roi_out-&gt;width * roi_out-&gt;height * sizeof(float));</a>
+<a name="ln217">  if(img_tmp == NULL)</a>
+<a name="ln218">  {</a>
+<a name="ln219">    fprintf(stderr, &quot;[overexposed process] can't alloc temp image\n&quot;);</a>
+<a name="ln220">    goto cleanup;</a>
+<a name="ln221">  }</a>
+<a name="ln222">  </a>
+<a name="ln223">  const float lower = MAX(dev-&gt;overexposed.lower / 100.0f, 1e-6f);</a>
+<a name="ln224">  const float upper = dev-&gt;overexposed.upper / 100.0f;</a>
 <a name="ln225"> </a>
-<a name="ln226">  const float *upper_color = dt_iop_overexposed_colors[colorscheme][0];</a>
-<a name="ln227">  const float *lower_color = dt_iop_overexposed_colors[colorscheme][1];</a>
-<a name="ln228"> </a>
-<a name="ln229">  size_t sizes[2] = { ROUNDUPWD(width), ROUNDUPHT(height) };</a>
-<a name="ln230">  dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_overexposed, 0, sizeof(cl_mem), &amp;dev_in);</a>
-<a name="ln231">  dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_overexposed, 1, sizeof(cl_mem), &amp;dev_out);</a>
-<a name="ln232">  dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_overexposed, 2, sizeof(int), &amp;width);</a>
-<a name="ln233">  dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_overexposed, 3, sizeof(int), &amp;height);</a>
-<a name="ln234">  dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_overexposed, 4, sizeof(float), &amp;lower);</a>
-<a name="ln235">  dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_overexposed, 5, sizeof(float), &amp;upper);</a>
-<a name="ln236">  dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_overexposed, 6, 4 * sizeof(float), lower_color);</a>
-<a name="ln237">  dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_overexposed, 7, 4 * sizeof(float), upper_color);</a>
-<a name="ln238">  err = dt_opencl_enqueue_kernel_2d(devid, gd-&gt;kernel_overexposed, sizes);</a>
-<a name="ln239">  if(err != CL_SUCCESS) goto error;</a>
-<a name="ln240">  return TRUE;</a>
-<a name="ln241"> </a>
-<a name="ln242">error:</a>
-<a name="ln243">  dt_print(DT_DEBUG_OPENCL, &quot;[opencl_overexposed] couldn't enqueue kernel! %d\n&quot;, err);</a>
-<a name="ln244">  return FALSE;</a>
-<a name="ln245">}</a>
-<a name="ln246">#endif</a>
-<a name="ln247"> </a>
-<a name="ln248"> </a>
-<a name="ln249">void init_global(dt_iop_module_so_t *module)</a>
-<a name="ln250">{</a>
-<a name="ln251">  const int program = 2; // basic.cl from programs.conf</a>
-<a name="ln252">  dt_iop_overexposed_global_data_t *gd</a>
-<a name="ln253">      = (dt_iop_overexposed_global_data_t *)malloc(sizeof(dt_iop_overexposed_global_data_t));</a>
-<a name="ln254">  module-&gt;data = gd;</a>
-<a name="ln255">  gd-&gt;kernel_overexposed = dt_opencl_create_kernel(program, &quot;overexposed&quot;);</a>
-<a name="ln256">}</a>
-<a name="ln257"> </a>
-<a name="ln258"> </a>
-<a name="ln259">void cleanup_global(dt_iop_module_so_t *module)</a>
-<a name="ln260">{</a>
-<a name="ln261">  dt_iop_overexposed_global_data_t *gd = (dt_iop_overexposed_global_data_t *)module-&gt;data;</a>
-<a name="ln262">  dt_opencl_free_kernel(gd-&gt;kernel_overexposed);</a>
-<a name="ln263">  free(module-&gt;data);</a>
-<a name="ln264">  module-&gt;data = NULL;</a>
-<a name="ln265">}</a>
+<a name="ln226">  const int colorscheme = dev-&gt;overexposed.colorscheme;</a>
+<a name="ln227">  const float *const upper_color = dt_iop_overexposed_colors[colorscheme][0];</a>
+<a name="ln228">  const float *const lower_color = dt_iop_overexposed_colors[colorscheme][1];</a>
+<a name="ln229"> </a>
+<a name="ln230">  const float *const in = (const float *const)ivoid;</a>
+<a name="ln231">  float *const out = (float *const)ovoid;</a>
+<a name="ln232"> </a>
+<a name="ln233">  // display mask using histogram profile as output</a>
+<a name="ln234">  _transform_image_colorspace(in, img_tmp, roi_out);</a>
+<a name="ln235"> </a>
+<a name="ln236">#ifdef _OPENMP</a>
+<a name="ln237">#pragma omp parallel for default(none) schedule(static)</a>
+<a name="ln238">#endif</a>
+<a name="ln239">  for(size_t k = 0; k &lt; (size_t)ch * roi_out-&gt;width * roi_out-&gt;height; k += ch)</a>
+<a name="ln240">  {</a>
+<a name="ln241">    if(img_tmp[k + 0] &gt;= upper || img_tmp[k + 1] &gt;= upper || img_tmp[k + 2] &gt;= upper)</a>
+<a name="ln242">    {</a>
+<a name="ln243">      for(int c = 0; c &lt; 3; c++)</a>
+<a name="ln244">      {</a>
+<a name="ln245">        out[k + c] = upper_color[c];</a>
+<a name="ln246">      }</a>
+<a name="ln247">    }</a>
+<a name="ln248">    else if(img_tmp[k + 0] &lt;= lower &amp;&amp; img_tmp[k + 1] &lt;= lower &amp;&amp; img_tmp[k + 2] &lt;= lower)</a>
+<a name="ln249">    {</a>
+<a name="ln250">      for(int c = 0; c &lt; 3; c++)</a>
+<a name="ln251">      {</a>
+<a name="ln252">        out[k + c] = lower_color[c];</a>
+<a name="ln253">      }</a>
+<a name="ln254">    }</a>
+<a name="ln255">    else</a>
+<a name="ln256">    {</a>
+<a name="ln257">      for(int c = 0; c &lt; 3; c++)</a>
+<a name="ln258">      {</a>
+<a name="ln259">        const size_t p = (size_t)k + c;</a>
+<a name="ln260">        out[p] = in[p];</a>
+<a name="ln261">      }</a>
+<a name="ln262">    }</a>
+<a name="ln263">  }</a>
+<a name="ln264"> </a>
+<a name="ln265">  if(piece-&gt;pipe-&gt;mask_display &amp; DT_DEV_PIXELPIPE_DISPLAY_MASK) dt_iop_alpha_copy(ivoid, ovoid, roi_out-&gt;width, roi_out-&gt;height);</a>
 <a name="ln266"> </a>
-<a name="ln267">void commit_params(struct dt_iop_module_t *self, dt_iop_params_t *p1, dt_dev_pixelpipe_t *pipe,</a>
-<a name="ln268">                   dt_dev_pixelpipe_iop_t *piece)</a>
-<a name="ln269">{</a>
-<a name="ln270">  if(pipe-&gt;type != DT_DEV_PIXELPIPE_FULL || !self-&gt;dev-&gt;overexposed.enabled || !self-&gt;dev-&gt;gui_attached)</a>
-<a name="ln271">    piece-&gt;enabled = 0;</a>
-<a name="ln272">}</a>
-<a name="ln273"> </a>
-<a name="ln274">void init_pipe(struct dt_iop_module_t *self, dt_dev_pixelpipe_t *pipe, dt_dev_pixelpipe_iop_t *piece)</a>
-<a name="ln275">{</a>
-<a name="ln276">  piece-&gt;data = NULL;</a>
-<a name="ln277">}</a>
-<a name="ln278"> </a>
-<a name="ln279">void cleanup_pipe(struct dt_iop_module_t *self, dt_dev_pixelpipe_t *pipe, dt_dev_pixelpipe_iop_t *piece)</a>
-<a name="ln280">{</a>
-<a name="ln281">}</a>
-<a name="ln282"> </a>
-<a name="ln283">void init(dt_iop_module_t *module)</a>
-<a name="ln284">{</a>
-<a name="ln285">  module-&gt;params = calloc(1, sizeof(dt_iop_overexposed_t));</a>
-<a name="ln286">  module-&gt;default_params = calloc(1, sizeof(dt_iop_overexposed_t));</a>
-<a name="ln287">  module-&gt;hide_enable_button = 1;</a>
-<a name="ln288">  module-&gt;default_enabled = 1;</a>
-<a name="ln289">  module-&gt;priority = 928; // module order created by iop_dependencies.py, do not edit!</a>
-<a name="ln290">  module-&gt;params_size = sizeof(dt_iop_overexposed_t);</a>
-<a name="ln291">  module-&gt;gui_data = NULL;</a>
-<a name="ln292">}</a>
-<a name="ln293"> </a>
-<a name="ln294">void cleanup(dt_iop_module_t *module)</a>
-<a name="ln295">{</a>
-<a name="ln296">  free(module-&gt;params);</a>
-<a name="ln297">  module-&gt;params = NULL;</a>
-<a name="ln298">}</a>
-<a name="ln299"> </a>
-<a name="ln300">// modelines: These editor modelines have been set for all relevant files by tools/update_modelines.sh</a>
-<a name="ln301">// vim: shiftwidth=2 expandtab tabstop=2 cindent</a>
-<a name="ln302">// kate: tab-indents: off; indent-width 2; replace-tabs on; indent-mode cstyle; remove-trailing-spaces modified;</a>
+<a name="ln267">cleanup:</a>
+<a name="ln268">  if(img_tmp) dt_free_align(img_tmp);</a>
+<a name="ln269">}</a>
+<a name="ln270"> </a>
+<a name="ln271">#ifdef HAVE_OPENCL</a>
+<a name="ln272">int process_cl(struct dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, cl_mem dev_in, cl_mem dev_out,</a>
+<a name="ln273">               const dt_iop_roi_t *const roi_in, const dt_iop_roi_t *const roi_out)</a>
+<a name="ln274">{</a>
+<a name="ln275">  dt_develop_t *dev = self-&gt;dev;</a>
+<a name="ln276">  dt_iop_overexposed_global_data_t *gd = (dt_iop_overexposed_global_data_t *)self-&gt;data;</a>
+<a name="ln277"> </a>
+<a name="ln278">  cl_int err = -999;</a>
+<a name="ln279">  const int devid = piece-&gt;pipe-&gt;devid;</a>
+<a name="ln280"> </a>
+<a name="ln281">  const int ch = piece-&gt;colors;</a>
+<a name="ln282">  cl_mem dev_tmp = NULL;</a>
+<a name="ln283"> </a>
+<a name="ln284">  const int width = roi_out-&gt;width;</a>
+<a name="ln285">  const int height = roi_out-&gt;height;</a>
+<a name="ln286"> </a>
+<a name="ln287">  float *const img_tmp = dt_alloc_align(64, ch * width * height * sizeof(float));</a>
+<a name="ln288">  if(img_tmp == NULL)</a>
+<a name="ln289">  {</a>
+<a name="ln290">    fprintf(stderr, &quot;[overexposed process_cl] can't alloc temp image\n&quot;);</a>
+<a name="ln291">    goto error;</a>
+<a name="ln292">  }</a>
+<a name="ln293">  </a>
+<a name="ln294">  // display mask using histogram profile as output</a>
+<a name="ln295">  dev_tmp = dt_opencl_alloc_device(devid, width, height, ch * sizeof(float));</a>
+<a name="ln296">  if(dev_tmp == NULL)</a>
+<a name="ln297">  {</a>
+<a name="ln298">    err = CL_MEM_OBJECT_ALLOCATION_FAILURE;</a>
+<a name="ln299">    fprintf(stderr, &quot;[overexposed process_cl] error allocating memory for color transformation\n&quot;);</a>
+<a name="ln300">    goto error;</a>
+<a name="ln301">  }</a>
+<a name="ln302">  </a>
+<a name="ln303">  err = dt_opencl_copy_device_to_host(devid, img_tmp, dev_in, width, height, ch * sizeof(float));</a>
+<a name="ln304">  if(err != CL_SUCCESS)</a>
+<a name="ln305">  {</a>
+<a name="ln306">    fprintf(stderr, &quot;[overexposed process_cl] error allocating memory for color transformation\n&quot;);</a>
+<a name="ln307">    goto error;</a>
+<a name="ln308">  }</a>
+<a name="ln309"> </a>
+<a name="ln310">  _transform_image_colorspace(img_tmp, img_tmp, roi_out);</a>
+<a name="ln311"> </a>
+<a name="ln312">  err = dt_opencl_write_host_to_device(devid, img_tmp, dev_tmp, width, height, ch * sizeof(float));</a>
+<a name="ln313">  if(err != CL_SUCCESS)</a>
+<a name="ln314">  {</a>
+<a name="ln315">    fprintf(stderr, &quot;[dt_ioppr_transform_image_colorspace_cl] error allocating memory for color transformation 3\n&quot;);</a>
+<a name="ln316">    goto error;</a>
+<a name="ln317">  }</a>
+<a name="ln318"> </a>
+<a name="ln319">  const float lower = MAX(dev-&gt;overexposed.lower / 100.0f, 1e-6f);</a>
+<a name="ln320">  const float upper = dev-&gt;overexposed.upper / 100.0f;</a>
+<a name="ln321">  const int colorscheme = dev-&gt;overexposed.colorscheme;</a>
+<a name="ln322"> </a>
+<a name="ln323">  const float *upper_color = dt_iop_overexposed_colors[colorscheme][0];</a>
+<a name="ln324">  const float *lower_color = dt_iop_overexposed_colors[colorscheme][1];</a>
+<a name="ln325"> </a>
+<a name="ln326">  size_t sizes[2] = { ROUNDUPWD(width), ROUNDUPHT(height) };</a>
+<a name="ln327">  dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_overexposed, 0, sizeof(cl_mem), &amp;dev_in);</a>
+<a name="ln328">  dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_overexposed, 1, sizeof(cl_mem), &amp;dev_out);</a>
+<a name="ln329">  dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_overexposed, 2, sizeof(cl_mem), &amp;dev_tmp);</a>
+<a name="ln330">  dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_overexposed, 3, sizeof(int), &amp;width);</a>
+<a name="ln331">  dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_overexposed, 4, sizeof(int), &amp;height);</a>
+<a name="ln332">  dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_overexposed, 5, sizeof(float), &amp;lower);</a>
+<a name="ln333">  dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_overexposed, 6, sizeof(float), &amp;upper);</a>
+<a name="ln334">  dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_overexposed, 7, 4 * sizeof(float), lower_color);</a>
+<a name="ln335">  dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_overexposed, 8, 4 * sizeof(float), upper_color);</a>
+<a name="ln336">  err = dt_opencl_enqueue_kernel_2d(devid, gd-&gt;kernel_overexposed, sizes);</a>
+<a name="ln337">  if(err != CL_SUCCESS) goto error;</a>
+<a name="ln338">  if(img_tmp) dt_free_align(img_tmp);</a>
+<a name="ln339">  if(dev_tmp) dt_opencl_release_mem_object(dev_tmp);</a>
+<a name="ln340">  return TRUE;</a>
+<a name="ln341"> </a>
+<a name="ln342">error:</a>
+<a name="ln343">  if(img_tmp) dt_free_align(img_tmp);</a>
+<a name="ln344">  if(dev_tmp) dt_opencl_release_mem_object(dev_tmp);</a>
+<a name="ln345">  dt_print(DT_DEBUG_OPENCL, &quot;[opencl_overexposed] couldn't enqueue kernel! %d\n&quot;, err);</a>
+<a name="ln346">  return FALSE;</a>
+<a name="ln347">}</a>
+<a name="ln348">#endif</a>
+<a name="ln349"> </a>
+<a name="ln350"> </a>
+<a name="ln351">void init_global(dt_iop_module_so_t *module)</a>
+<a name="ln352">{</a>
+<a name="ln353">  const int program = 2; // basic.cl from programs.conf</a>
+<a name="ln354">  dt_iop_overexposed_global_data_t *gd</a>
+<a name="ln355">      = (dt_iop_overexposed_global_data_t *)malloc(sizeof(dt_iop_overexposed_global_data_t));</a>
+<a name="ln356">  module-&gt;data = gd;</a>
+<a name="ln357">  gd-&gt;kernel_overexposed = dt_opencl_create_kernel(program, &quot;overexposed&quot;);</a>
+<a name="ln358">}</a>
+<a name="ln359"> </a>
+<a name="ln360"> </a>
+<a name="ln361">void cleanup_global(dt_iop_module_so_t *module)</a>
+<a name="ln362">{</a>
+<a name="ln363">  dt_iop_overexposed_global_data_t *gd = (dt_iop_overexposed_global_data_t *)module-&gt;data;</a>
+<a name="ln364">  dt_opencl_free_kernel(gd-&gt;kernel_overexposed);</a>
+<a name="ln365">  free(module-&gt;data);</a>
+<a name="ln366">  module-&gt;data = NULL;</a>
+<a name="ln367">}</a>
+<a name="ln368"> </a>
+<a name="ln369">void commit_params(struct dt_iop_module_t *self, dt_iop_params_t *p1, dt_dev_pixelpipe_t *pipe,</a>
+<a name="ln370">                   dt_dev_pixelpipe_iop_t *piece)</a>
+<a name="ln371">{</a>
+<a name="ln372">  if(pipe-&gt;type != DT_DEV_PIXELPIPE_FULL || !self-&gt;dev-&gt;overexposed.enabled || !self-&gt;dev-&gt;gui_attached)</a>
+<a name="ln373">    piece-&gt;enabled = 0;</a>
+<a name="ln374">}</a>
+<a name="ln375"> </a>
+<a name="ln376">void init_pipe(struct dt_iop_module_t *self, dt_dev_pixelpipe_t *pipe, dt_dev_pixelpipe_iop_t *piece)</a>
+<a name="ln377">{</a>
+<a name="ln378">  piece-&gt;data = NULL;</a>
+<a name="ln379">}</a>
+<a name="ln380"> </a>
+<a name="ln381">void cleanup_pipe(struct dt_iop_module_t *self, dt_dev_pixelpipe_t *pipe, dt_dev_pixelpipe_iop_t *piece)</a>
+<a name="ln382">{</a>
+<a name="ln383">}</a>
+<a name="ln384"> </a>
+<a name="ln385">void init(dt_iop_module_t *module)</a>
+<a name="ln386">{</a>
+<a name="ln387">  module-&gt;params = calloc(1, sizeof(dt_iop_overexposed_t));</a>
+<a name="ln388">  module-&gt;default_params = calloc(1, sizeof(dt_iop_overexposed_t));</a>
+<a name="ln389">  module-&gt;hide_enable_button = 1;</a>
+<a name="ln390">  module-&gt;default_enabled = 1;</a>
+<a name="ln391">  module-&gt;priority = 928; // module order created by iop_dependencies.py, do not edit!</a>
+<a name="ln392">  module-&gt;params_size = sizeof(dt_iop_overexposed_t);</a>
+<a name="ln393">  module-&gt;gui_data = NULL;</a>
+<a name="ln394">}</a>
+<a name="ln395"> </a>
+<a name="ln396">void cleanup(dt_iop_module_t *module)</a>
+<a name="ln397">{</a>
+<a name="ln398">  free(module-&gt;params);</a>
+<a name="ln399">  module-&gt;params = NULL;</a>
+<a name="ln400">}</a>
+<a name="ln401"> </a>
+<a name="ln402">// modelines: These editor modelines have been set for all relevant files by tools/update_modelines.sh</a>
+<a name="ln403">// vim: shiftwidth=2 expandtab tabstop=2 cindent</a>
+<a name="ln404">// kate: tab-indents: off; indent-width 2; replace-tabs on; indent-mode cstyle; remove-trailing-spaces modified;</a>
 
 </code></pre>
-<div class="balloon" rel="255"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v522/" target="_blank">V522</a> There might be dereferencing of a potential null pointer 'gd'. Check lines: 255, 253.</p></div>
+<div class="balloon" rel="172"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v560/" target="_blank">V560</a> A part of conditional expression is always false: histogram_type == DT_COLORSPACE_DISPLAY.</p></div>
+<div class="balloon" rel="338"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v547/" target="_blank">V547</a> Expression 'img_tmp' is always true.</p></div>
+<div class="balloon" rel="339"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v547/" target="_blank">V547</a> Expression 'dev_tmp' is always true.</p></div>
+<div class="balloon" rel="357"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v522/" target="_blank">V522</a> There might be dereferencing of a potential null pointer 'gd'. Check lines: 357, 355.</p></div>
 
 <link rel="stylesheet" href="highlight.css">
 <script src="highlight.pack.js"></script>
