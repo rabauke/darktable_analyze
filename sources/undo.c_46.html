@@ -1,0 +1,404 @@
+
+<html>
+<head>
+  <link rel="stylesheet" href="../style.css"/>
+  <script src="../jquery-3.2.1.min.js"></script>
+</head>
+<body>
+<pre><code class = "cpp">
+<a name="ln1">/*</a>
+<a name="ln2">    This file is part of darktable,</a>
+<a name="ln3">    copyright (c) 2016 pascal obry</a>
+<a name="ln4"> </a>
+<a name="ln5">    darktable is free software: you can redistribute it and/or modify</a>
+<a name="ln6">    it under the terms of the GNU General Public License as published by</a>
+<a name="ln7">    the Free Software Foundation, either version 3 of the License, or</a>
+<a name="ln8">    (at your option) any later version.</a>
+<a name="ln9"> </a>
+<a name="ln10">    darktable is distributed in the hope that it will be useful,</a>
+<a name="ln11">    but WITHOUT ANY WARRANTY; without even the implied warranty of</a>
+<a name="ln12">    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the</a>
+<a name="ln13">    GNU General Public License for more details.</a>
+<a name="ln14"> </a>
+<a name="ln15">    You should have received a copy of the GNU General Public License</a>
+<a name="ln16">    along with darktable.  If not, see &lt;http://www.gnu.org/licenses/&gt;.</a>
+<a name="ln17">*/</a>
+<a name="ln18"> </a>
+<a name="ln19">#include &quot;common/darktable.h&quot;</a>
+<a name="ln20">#include &quot;common/undo.h&quot;</a>
+<a name="ln21">#include &lt;glib.h&gt;    // for GList, gpointer, g_list_first, g_list_prepend</a>
+<a name="ln22">#include &lt;stdlib.h&gt;  // for NULL, malloc, free</a>
+<a name="ln23">#include &lt;sys/time.h&gt;</a>
+<a name="ln24"> </a>
+<a name="ln25">const double MAX_TIME_PERIOD = 0.5; // in second</a>
+<a name="ln26"> </a>
+<a name="ln27">typedef struct dt_undo_item_t</a>
+<a name="ln28">{</a>
+<a name="ln29">  gpointer user_data;</a>
+<a name="ln30">  dt_undo_type_t type;</a>
+<a name="ln31">  dt_undo_data_t *data;</a>
+<a name="ln32">  double ts;</a>
+<a name="ln33">  gboolean is_group;</a>
+<a name="ln34">  void (*undo)(gpointer user_data, dt_undo_type_t type, dt_undo_data_t *data, dt_undo_action_t action);</a>
+<a name="ln35">  void (*free_data)(gpointer data);</a>
+<a name="ln36">} dt_undo_item_t;</a>
+<a name="ln37"> </a>
+<a name="ln38">dt_undo_t *dt_undo_init(void)</a>
+<a name="ln39">{</a>
+<a name="ln40">  dt_undo_t *udata = malloc(sizeof(dt_undo_t));</a>
+<a name="ln41">  udata-&gt;undo_list = NULL;</a>
+<a name="ln42">  udata-&gt;redo_list = NULL;</a>
+<a name="ln43">  udata-&gt;disable_next = FALSE;</a>
+<a name="ln44">  dt_pthread_mutex_init(&amp;udata-&gt;mutex, NULL);</a>
+<a name="ln45">  udata-&gt;group = 0;</a>
+<a name="ln46">  udata-&gt;group_indent = 0;</a>
+<a name="ln47">  return udata;</a>
+<a name="ln48">}</a>
+<a name="ln49"> </a>
+<a name="ln50">void dt_undo_disable_next(dt_undo_t *self)</a>
+<a name="ln51">{</a>
+<a name="ln52">  self-&gt;disable_next = TRUE;</a>
+<a name="ln53">}</a>
+<a name="ln54"> </a>
+<a name="ln55">void dt_undo_cleanup(dt_undo_t *self)</a>
+<a name="ln56">{</a>
+<a name="ln57">  dt_undo_clear(self, DT_UNDO_ALL);</a>
+<a name="ln58">  dt_pthread_mutex_destroy(&amp;self-&gt;mutex);</a>
+<a name="ln59">}</a>
+<a name="ln60"> </a>
+<a name="ln61">static void _free_undo_data(void *p)</a>
+<a name="ln62">{</a>
+<a name="ln63">  dt_undo_item_t *item = (dt_undo_item_t *)p;</a>
+<a name="ln64">  if (item-&gt;free_data) item-&gt;free_data(item-&gt;data);</a>
+<a name="ln65">  free(item);</a>
+<a name="ln66">}</a>
+<a name="ln67"> </a>
+<a name="ln68">static void _undo_record(dt_undo_t *self, gpointer user_data, dt_undo_type_t type, dt_undo_data_t *data,</a>
+<a name="ln69">                         gboolean is_group,</a>
+<a name="ln70">                         void (*undo)(gpointer user_data, dt_undo_type_t type, dt_undo_data_t *item, dt_undo_action_t action),</a>
+<a name="ln71">                         void (*free_data)(gpointer data))</a>
+<a name="ln72">{</a>
+<a name="ln73">  if(!self) return;</a>
+<a name="ln74"> </a>
+<a name="ln75">  if(self-&gt;disable_next)</a>
+<a name="ln76">  {</a>
+<a name="ln77">    if(free_data) free_data(data);</a>
+<a name="ln78">    self-&gt;disable_next = FALSE;</a>
+<a name="ln79">  }</a>
+<a name="ln80">  else</a>
+<a name="ln81">  {</a>
+<a name="ln82">    dt_pthread_mutex_lock(&amp;self-&gt;mutex);</a>
+<a name="ln83"> </a>
+<a name="ln84">    dt_undo_item_t *item = malloc(sizeof(dt_undo_item_t));</a>
+<a name="ln85"> </a>
+<a name="ln86">    item-&gt;user_data = user_data;</a>
+<a name="ln87">    item-&gt;type      = type;</a>
+<a name="ln88">    item-&gt;data      = data;</a>
+<a name="ln89">    item-&gt;undo      = undo;</a>
+<a name="ln90">    item-&gt;free_data = free_data;</a>
+<a name="ln91">    item-&gt;ts        = dt_get_wtime();</a>
+<a name="ln92">    item-&gt;is_group  = is_group;</a>
+<a name="ln93"> </a>
+<a name="ln94">    self-&gt;undo_list = g_list_prepend(self-&gt;undo_list, (gpointer)item);</a>
+<a name="ln95"> </a>
+<a name="ln96">    // recording an undo data invalidate all the redo</a>
+<a name="ln97">    g_list_free_full(self-&gt;redo_list, _free_undo_data);</a>
+<a name="ln98">    self-&gt;redo_list = NULL;</a>
+<a name="ln99"> </a>
+<a name="ln100">    dt_pthread_mutex_unlock(&amp;self-&gt;mutex);</a>
+<a name="ln101">  }</a>
+<a name="ln102">}</a>
+<a name="ln103"> </a>
+<a name="ln104">void dt_undo_start_group(dt_undo_t *self, dt_undo_type_t type)</a>
+<a name="ln105">{</a>
+<a name="ln106">  if(self-&gt;group == 0)</a>
+<a name="ln107">  {</a>
+<a name="ln108">    self-&gt;group = type;</a>
+<a name="ln109">    self-&gt;group_indent = 1;</a>
+<a name="ln110">    _undo_record(self, NULL, type, NULL, TRUE, NULL, NULL);</a>
+<a name="ln111">  }</a>
+<a name="ln112">  else</a>
+<a name="ln113">    self-&gt;group_indent++;</a>
+<a name="ln114">}</a>
+<a name="ln115"> </a>
+<a name="ln116">void dt_undo_end_group(dt_undo_t *self)</a>
+<a name="ln117">{</a>
+<a name="ln118">  assert(self-&gt;group_indent&gt;0);</a>
+<a name="ln119">  self-&gt;group_indent--;</a>
+<a name="ln120">  if(self-&gt;group_indent == 0)</a>
+<a name="ln121">  {</a>
+<a name="ln122">    _undo_record(self, NULL, self-&gt;group, NULL, TRUE, NULL, NULL);</a>
+<a name="ln123">    self-&gt;group = 0;</a>
+<a name="ln124">  }</a>
+<a name="ln125">}</a>
+<a name="ln126"> </a>
+<a name="ln127">void dt_undo_record(dt_undo_t *self, gpointer user_data, dt_undo_type_t type, dt_undo_data_t *data,</a>
+<a name="ln128">                    void (*undo)(gpointer user_data, dt_undo_type_t type, dt_undo_data_t *item, dt_undo_action_t action),</a>
+<a name="ln129">                    void (*free_data)(gpointer data))</a>
+<a name="ln130">{</a>
+<a name="ln131">  _undo_record(self, user_data, type, data, FALSE, undo, free_data);</a>
+<a name="ln132">}</a>
+<a name="ln133"> </a>
+<a name="ln134">void dt_undo_do_redo(dt_undo_t *self, uint32_t filter)</a>
+<a name="ln135">{</a>
+<a name="ln136">  if(!self) return;</a>
+<a name="ln137"> </a>
+<a name="ln138">  dt_pthread_mutex_lock(&amp;self-&gt;mutex);</a>
+<a name="ln139"> </a>
+<a name="ln140">  GList *l = g_list_first(self-&gt;redo_list);</a>
+<a name="ln141"> </a>
+<a name="ln142">  // check for first item that is matching the given pattern</a>
+<a name="ln143"> </a>
+<a name="ln144">  while(l)</a>
+<a name="ln145">  {</a>
+<a name="ln146">    dt_undo_item_t *item = (dt_undo_item_t *)l-&gt;data;</a>
+<a name="ln147"> </a>
+<a name="ln148">    if(item-&gt;type &amp; filter)</a>
+<a name="ln149">    {</a>
+<a name="ln150">      if(item-&gt;is_group)</a>
+<a name="ln151">      {</a>
+<a name="ln152">        gboolean is_group = FALSE;</a>
+<a name="ln153"> </a>
+<a name="ln154">        GList *next = g_list_next(l);</a>
+<a name="ln155"> </a>
+<a name="ln156">        //  first move the group item into the undo list</a>
+<a name="ln157">        self-&gt;redo_list = g_list_remove(self-&gt;redo_list, item);</a>
+<a name="ln158">        self-&gt;undo_list = g_list_prepend(self-&gt;undo_list, item);</a>
+<a name="ln159"> </a>
+<a name="ln160">        while((l = next) &amp;&amp; !is_group)</a>
+<a name="ln161">        {</a>
+<a name="ln162">          item = (dt_undo_item_t *)l-&gt;data;</a>
+<a name="ln163">          next = g_list_next(l);</a>
+<a name="ln164"> </a>
+<a name="ln165">          //  first remove element from _redo_list</a>
+<a name="ln166">          self-&gt;redo_list = g_list_remove(self-&gt;redo_list, item);</a>
+<a name="ln167"> </a>
+<a name="ln168">          //  callback with redo data</a>
+<a name="ln169">          if(item-&gt;is_group)</a>
+<a name="ln170">            is_group = TRUE;</a>
+<a name="ln171">          else</a>
+<a name="ln172">            item-&gt;undo(item-&gt;user_data, item-&gt;type, item-&gt;data, DT_ACTION_REDO);</a>
+<a name="ln173"> </a>
+<a name="ln174">          //  add old position back into the undo list</a>
+<a name="ln175">          self-&gt;undo_list = g_list_prepend(self-&gt;undo_list, item);</a>
+<a name="ln176">        }</a>
+<a name="ln177">      }</a>
+<a name="ln178">      else</a>
+<a name="ln179">      {</a>
+<a name="ln180">        const double first_item_ts = item-&gt;ts;</a>
+<a name="ln181"> </a>
+<a name="ln182">        //  when found, redo all items of the same type and in the same time period</a>
+<a name="ln183"> </a>
+<a name="ln184">        do</a>
+<a name="ln185">        {</a>
+<a name="ln186">          GList *next = g_list_next(l);</a>
+<a name="ln187"> </a>
+<a name="ln188">          //  first remove element from _redo_list</a>
+<a name="ln189">          self-&gt;redo_list = g_list_remove(self-&gt;redo_list, item);</a>
+<a name="ln190"> </a>
+<a name="ln191">          //  callback with redo data</a>
+<a name="ln192">          item-&gt;undo(item-&gt;user_data, item-&gt;type, item-&gt;data, DT_ACTION_REDO);</a>
+<a name="ln193"> </a>
+<a name="ln194">          //  add old position back into the undo list</a>
+<a name="ln195">          self-&gt;undo_list = g_list_prepend(self-&gt;undo_list, item);</a>
+<a name="ln196"> </a>
+<a name="ln197">          l = next;</a>
+<a name="ln198">          if (l) item = (dt_undo_item_t *)l-&gt;data;</a>
+<a name="ln199">        } while (l &amp;&amp; (item-&gt;type &amp; filter) &amp;&amp; (item-&gt;ts - first_item_ts &lt; MAX_TIME_PERIOD));</a>
+<a name="ln200">      }</a>
+<a name="ln201"> </a>
+<a name="ln202">      break;</a>
+<a name="ln203">    }</a>
+<a name="ln204">    l = g_list_next(l);</a>
+<a name="ln205">  }</a>
+<a name="ln206">  dt_pthread_mutex_unlock(&amp;self-&gt;mutex);</a>
+<a name="ln207">}</a>
+<a name="ln208"> </a>
+<a name="ln209">void dt_undo_do_undo(dt_undo_t *self, uint32_t filter)</a>
+<a name="ln210">{</a>
+<a name="ln211">  if(!self) return;</a>
+<a name="ln212"> </a>
+<a name="ln213">  dt_pthread_mutex_lock(&amp;self-&gt;mutex);</a>
+<a name="ln214"> </a>
+<a name="ln215">  GList *l = g_list_first(self-&gt;undo_list);</a>
+<a name="ln216"> </a>
+<a name="ln217">  // the first matching item (current state) is moved into the redo list</a>
+<a name="ln218"> </a>
+<a name="ln219">  while(l)</a>
+<a name="ln220">  {</a>
+<a name="ln221">    dt_undo_item_t *item = (dt_undo_item_t *)l-&gt;data;</a>
+<a name="ln222">    GList *next = g_list_next(l);</a>
+<a name="ln223"> </a>
+<a name="ln224">    if(item-&gt;type &amp; filter)</a>
+<a name="ln225">    {</a>
+<a name="ln226">      self-&gt;undo_list = g_list_remove(self-&gt;undo_list, item);</a>
+<a name="ln227">      self-&gt;redo_list = g_list_prepend(self-&gt;redo_list, item);</a>
+<a name="ln228"> </a>
+<a name="ln229">      if(item-&gt;is_group)</a>
+<a name="ln230">      {</a>
+<a name="ln231">        l = next;</a>
+<a name="ln232">        while (l)</a>
+<a name="ln233">        {</a>
+<a name="ln234">          next = g_list_next(l);</a>
+<a name="ln235">          item = (dt_undo_item_t *)l-&gt;data;</a>
+<a name="ln236"> </a>
+<a name="ln237">          self-&gt;undo_list = g_list_remove(self-&gt;undo_list, item);</a>
+<a name="ln238">          self-&gt;redo_list = g_list_prepend(self-&gt;redo_list, item);</a>
+<a name="ln239"> </a>
+<a name="ln240">          //  undo item</a>
+<a name="ln241">          if(item-&gt;is_group)</a>
+<a name="ln242">            break;</a>
+<a name="ln243">          else</a>
+<a name="ln244">            item-&gt;undo(item-&gt;user_data, item-&gt;type, item-&gt;data, DT_ACTION_UNDO);</a>
+<a name="ln245"> </a>
+<a name="ln246">          l = next;</a>
+<a name="ln247">        }</a>
+<a name="ln248">        break;</a>
+<a name="ln249">      }</a>
+<a name="ln250">      else</a>
+<a name="ln251">      {</a>
+<a name="ln252">        const double first_item_ts = item-&gt;ts;</a>
+<a name="ln253"> </a>
+<a name="ln254">        //  now record in the redo list also all items that are on the same time period</a>
+<a name="ln255"> </a>
+<a name="ln256">        l = next;</a>
+<a name="ln257">        while (l)</a>
+<a name="ln258">        {</a>
+<a name="ln259">          next = g_list_next(l);</a>
+<a name="ln260">          item = (dt_undo_item_t *)l-&gt;data;</a>
+<a name="ln261"> </a>
+<a name="ln262">          //  if we have reached a group, stop</a>
+<a name="ln263">          if(item-&gt;is_group) break;</a>
+<a name="ln264"> </a>
+<a name="ln265">          //  undo item</a>
+<a name="ln266">          item-&gt;undo(item-&gt;user_data, item-&gt;type, item-&gt;data, DT_ACTION_UNDO);</a>
+<a name="ln267"> </a>
+<a name="ln268">          //  if we are on the same time frame, just continue</a>
+<a name="ln269">          if ((item-&gt;type &amp; filter) &amp;&amp; (first_item_ts - item-&gt;ts &lt; MAX_TIME_PERIOD))</a>
+<a name="ln270">          {</a>
+<a name="ln271">            self-&gt;undo_list = g_list_remove(self-&gt;undo_list, item);</a>
+<a name="ln272">            self-&gt;redo_list = g_list_prepend(self-&gt;redo_list, item);</a>
+<a name="ln273">            l = next;</a>
+<a name="ln274">          }</a>
+<a name="ln275">          else</a>
+<a name="ln276">            break;</a>
+<a name="ln277">        };</a>
+<a name="ln278">      }</a>
+<a name="ln279">      break;</a>
+<a name="ln280">    }</a>
+<a name="ln281"> </a>
+<a name="ln282">    l = next;</a>
+<a name="ln283">  }</a>
+<a name="ln284"> </a>
+<a name="ln285">  dt_pthread_mutex_unlock(&amp;self-&gt;mutex);</a>
+<a name="ln286">}</a>
+<a name="ln287"> </a>
+<a name="ln288">static void _undo_clear_list(GList **list, uint32_t filter)</a>
+<a name="ln289">{</a>
+<a name="ln290">  GList *l = g_list_first(*list);</a>
+<a name="ln291"> </a>
+<a name="ln292">  // check for first item that is matching the given pattern</a>
+<a name="ln293"> </a>
+<a name="ln294">  while(l)</a>
+<a name="ln295">  {</a>
+<a name="ln296">    dt_undo_item_t *item = (dt_undo_item_t *)l-&gt;data;</a>
+<a name="ln297">    GList *next = l-&gt;next;</a>
+<a name="ln298">    if(item-&gt;type &amp; filter)</a>
+<a name="ln299">    {</a>
+<a name="ln300">      //  remove this element</a>
+<a name="ln301">      *list = g_list_remove(*list, item);</a>
+<a name="ln302">      _free_undo_data((void *)item);</a>
+<a name="ln303">    }</a>
+<a name="ln304">    l = next;</a>
+<a name="ln305">  };</a>
+<a name="ln306">}</a>
+<a name="ln307"> </a>
+<a name="ln308">void dt_undo_clear(dt_undo_t *self, uint32_t filter)</a>
+<a name="ln309">{</a>
+<a name="ln310">  if(!self) return;</a>
+<a name="ln311"> </a>
+<a name="ln312">  dt_pthread_mutex_lock(&amp;self-&gt;mutex);</a>
+<a name="ln313">  _undo_clear_list(&amp;self-&gt;undo_list, filter);</a>
+<a name="ln314">  _undo_clear_list(&amp;self-&gt;redo_list, filter);</a>
+<a name="ln315">  self-&gt;undo_list = NULL;</a>
+<a name="ln316">  self-&gt;redo_list = NULL;</a>
+<a name="ln317">  self-&gt;disable_next = FALSE;</a>
+<a name="ln318">  dt_pthread_mutex_unlock(&amp;self-&gt;mutex);</a>
+<a name="ln319">}</a>
+<a name="ln320"> </a>
+<a name="ln321">static void _undo_iterate(GList *list, uint32_t filter, gpointer user_data,</a>
+<a name="ln322">                          void (*apply)(gpointer user_data, dt_undo_type_t type, dt_undo_data_t *item))</a>
+<a name="ln323">{</a>
+<a name="ln324">  GList *l = g_list_first(list);</a>
+<a name="ln325"> </a>
+<a name="ln326">  // check for first item that is matching the given pattern</a>
+<a name="ln327"> </a>
+<a name="ln328">  while(l)</a>
+<a name="ln329">  {</a>
+<a name="ln330">    dt_undo_item_t *item = (dt_undo_item_t *)l-&gt;data;</a>
+<a name="ln331">    if(!item-&gt;is_group &amp;&amp; (item-&gt;type &amp; filter))</a>
+<a name="ln332">    {</a>
+<a name="ln333">      apply(user_data, item-&gt;type, item-&gt;data);</a>
+<a name="ln334">    }</a>
+<a name="ln335">    l = l-&gt;next;</a>
+<a name="ln336">  };</a>
+<a name="ln337">}</a>
+<a name="ln338"> </a>
+<a name="ln339">void dt_undo_iterate_internal(dt_undo_t *self, uint32_t filter, gpointer user_data,</a>
+<a name="ln340">                              void (*apply)(gpointer user_data, dt_undo_type_t type, dt_undo_data_t *item))</a>
+<a name="ln341">{</a>
+<a name="ln342">  if(!self) return;</a>
+<a name="ln343"> </a>
+<a name="ln344">  _undo_iterate(self-&gt;undo_list, filter, user_data, apply);</a>
+<a name="ln345">  _undo_iterate(self-&gt;redo_list, filter, user_data, apply);</a>
+<a name="ln346">}</a>
+<a name="ln347"> </a>
+<a name="ln348"> </a>
+<a name="ln349">void dt_undo_iterate(dt_undo_t *self, uint32_t filter, gpointer user_data,</a>
+<a name="ln350">                     void (*apply)(gpointer user_data, dt_undo_type_t type, dt_undo_data_t *item))</a>
+<a name="ln351">{</a>
+<a name="ln352">  if(!self) return;</a>
+<a name="ln353"> </a>
+<a name="ln354">  dt_pthread_mutex_lock(&amp;self-&gt;mutex);</a>
+<a name="ln355">  dt_undo_iterate_internal(self, filter, user_data, apply);</a>
+<a name="ln356">  dt_pthread_mutex_unlock(&amp;self-&gt;mutex);</a>
+<a name="ln357">}</a>
+<a name="ln358"> </a>
+<a name="ln359">// modelines: These editor modelines have been set for all relevant files by tools/update_modelines.sh</a>
+<a name="ln360">// vim: shiftwidth=2 expandtab tabstop=2 cindent</a>
+<a name="ln361">// kate: tab-indents: off; indent-width 2; replace-tabs on; indent-mode cstyle; remove-trailing-spaces modified;</a>
+
+</code></pre>
+<div class="balloon" rel="41"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v522/" target="_blank">V522</a> There might be dereferencing of a potential null pointer 'udata'. Check lines: 41, 40.</p></div>
+<div class="balloon" rel="86"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v522/" target="_blank">V522</a> There might be dereferencing of a potential null pointer 'item'. Check lines: 86, 84.</p></div>
+<div class="balloon" rel="106"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v547/" target="_blank">V547</a> Expression 'self->group == 0' is always false.</p></div>
+
+<link rel="stylesheet" href="highlight.css">
+<script src="highlight.pack.js"></script>
+<script src="highlightjs-line-numbers.js"></script>
+<script>hljs.initHighlightingOnLoad();</script>
+<script>hljs.initLineNumbersOnLoad();</script>
+<script>
+  $(document).ready(function() {
+      $('.balloon').each(function () {
+          var bl = $(this);
+          var line = bl.attr('rel');
+          var text = $('a[name="ln'+line+'"]').text();
+
+          var space_count = 0;
+          for(var i = 0; i<text.length; i++){
+              var char = text[i];
+              if((char !== ' ')&&(char !== '\t'))break;
+              if(char === '\t')space_count++;
+              space_count++;
+          }
+
+          bl.css('margin-left', space_count*8);
+          $('a[name="ln'+line+'"]').after(bl);
+      });
+
+      window.location = window.location;
+  });
+</script>
+</body>
+</html>

@@ -1,0 +1,635 @@
+
+<html>
+<head>
+  <link rel="stylesheet" href="../style.css"/>
+  <script src="../jquery-3.2.1.min.js"></script>
+</head>
+<body>
+<pre><code class = "cpp">
+<a name="ln1">/*</a>
+<a name="ln2">    This file is part of darktable,</a>
+<a name="ln3">    copyright (c) 2010 tobias ellinghaus.</a>
+<a name="ln4"> </a>
+<a name="ln5">    darktable is free software: you can redistribute it and/or modify</a>
+<a name="ln6">    it under the terms of the GNU General Public License as published by</a>
+<a name="ln7">    the Free Software Foundation, either version 3 of the License, or</a>
+<a name="ln8">    (at your option) any later version.</a>
+<a name="ln9"> </a>
+<a name="ln10">    darktable is distributed in the hope that it will be useful,</a>
+<a name="ln11">    but WITHOUT ANY WARRANTY; without even the implied warranty of</a>
+<a name="ln12">    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the</a>
+<a name="ln13">    GNU General Public License for more details.</a>
+<a name="ln14"> </a>
+<a name="ln15">    You should have received a copy of the GNU General Public License</a>
+<a name="ln16">    along with darktable.  If not, see &lt;http://www.gnu.org/licenses/&gt;.</a>
+<a name="ln17">*/</a>
+<a name="ln18"> </a>
+<a name="ln19">#include &quot;common/metadata.h&quot;</a>
+<a name="ln20">#include &quot;common/debug.h&quot;</a>
+<a name="ln21">#include &quot;common/undo.h&quot;</a>
+<a name="ln22">#include &quot;control/signal.h&quot;</a>
+<a name="ln23"> </a>
+<a name="ln24">#include &lt;stdlib.h&gt;</a>
+<a name="ln25"> </a>
+<a name="ln26">typedef struct dt_undo_metadata_t</a>
+<a name="ln27">{</a>
+<a name="ln28">  int imgid;</a>
+<a name="ln29">  GList *before;      // list of key/value before</a>
+<a name="ln30">  gint keyid;         // new value (key, value)</a>
+<a name="ln31">  gchar *value;</a>
+<a name="ln32">} dt_undo_metadata_t;</a>
+<a name="ln33"> </a>
+<a name="ln34">static void _metadata_set_xmp(int id, const gint keyid, const char *value, gboolean undo_actif);</a>
+<a name="ln35"> </a>
+<a name="ln36">static void _pop_undo(gpointer user_data, const dt_undo_type_t type, dt_undo_data_t *data, const dt_undo_action_t action)</a>
+<a name="ln37">{</a>
+<a name="ln38">  if(type == DT_UNDO_METADATA)</a>
+<a name="ln39">  {</a>
+<a name="ln40">    GList *list = (GList *)data;</a>
+<a name="ln41"> </a>
+<a name="ln42">    while(list)</a>
+<a name="ln43">    {</a>
+<a name="ln44">      dt_undo_metadata_t *metadata = (dt_undo_metadata_t *)list-&gt;data;</a>
+<a name="ln45"> </a>
+<a name="ln46">      GList *tag_list = metadata-&gt;before;</a>
+<a name="ln47"> </a>
+<a name="ln48">      // remove from meta_data</a>
+<a name="ln49">      dt_metadata_clear(metadata-&gt;imgid);</a>
+<a name="ln50"> </a>
+<a name="ln51">      // iterate over tag_list and attach tagid to imgid</a>
+<a name="ln52"> </a>
+<a name="ln53">      while(tag_list)</a>
+<a name="ln54">      {</a>
+<a name="ln55">        const gchar *key = (gchar *)tag_list-&gt;data;</a>
+<a name="ln56">        const gint keyid = atoi(key);</a>
+<a name="ln57">        tag_list = g_list_next(tag_list);</a>
+<a name="ln58">        const gchar *value = (gchar *)tag_list-&gt;data;</a>
+<a name="ln59">        tag_list = g_list_next(tag_list);</a>
+<a name="ln60">        _metadata_set_xmp(metadata-&gt;imgid, keyid, value, FALSE);</a>
+<a name="ln61">      }</a>
+<a name="ln62"> </a>
+<a name="ln63">      if(action == DT_ACTION_REDO)</a>
+<a name="ln64">      {</a>
+<a name="ln65">        _metadata_set_xmp(metadata-&gt;imgid, metadata-&gt;keyid, metadata-&gt;value, FALSE);</a>
+<a name="ln66">      }</a>
+<a name="ln67"> </a>
+<a name="ln68">      list = g_list_next(list);</a>
+<a name="ln69">    }</a>
+<a name="ln70"> </a>
+<a name="ln71">    dt_control_signal_raise(darktable.signals, DT_SIGNAL_MOUSE_OVER_IMAGE_CHANGE);</a>
+<a name="ln72">  }</a>
+<a name="ln73">}</a>
+<a name="ln74"> </a>
+<a name="ln75">static dt_undo_metadata_t *_get_metadata(const int imgid, const gint keyid, const gchar *value)</a>
+<a name="ln76">{</a>
+<a name="ln77">  dt_undo_metadata_t *result = (dt_undo_metadata_t *)malloc(sizeof(dt_undo_metadata_t));</a>
+<a name="ln78">  result-&gt;imgid  = imgid;</a>
+<a name="ln79">  result-&gt;before = NULL;</a>
+<a name="ln80">  result-&gt;keyid  = keyid;</a>
+<a name="ln81">  result-&gt;value  = g_strdup(value);</a>
+<a name="ln82"> </a>
+<a name="ln83">  sqlite3_stmt *stmt;</a>
+<a name="ln84"> </a>
+<a name="ln85">  DT_DEBUG_SQLITE3_PREPARE_V2(dt_database_get(darktable.db),</a>
+<a name="ln86">                              &quot;SELECT key, value FROM main.meta_data WHERE id=?1&quot;, -1, &amp;stmt, NULL);</a>
+<a name="ln87">  DT_DEBUG_SQLITE3_BIND_INT(stmt, 1, imgid);</a>
+<a name="ln88"> </a>
+<a name="ln89">  while(sqlite3_step(stmt) == SQLITE_ROW)</a>
+<a name="ln90">  {</a>
+<a name="ln91">    const gchar *ckey = dt_util_dstrcat(NULL, &quot;%d&quot;, sqlite3_column_int(stmt, 0));</a>
+<a name="ln92">    const gchar *cvalue = g_strdup((const char *)sqlite3_column_text(stmt, 1));</a>
+<a name="ln93">    result-&gt;before = g_list_append(result-&gt;before, (gpointer)ckey);</a>
+<a name="ln94">    result-&gt;before = g_list_append(result-&gt;before, (gpointer)cvalue);</a>
+<a name="ln95">  }</a>
+<a name="ln96">  sqlite3_finalize(stmt);</a>
+<a name="ln97"> </a>
+<a name="ln98">  return result;</a>
+<a name="ln99">}</a>
+<a name="ln100"> </a>
+<a name="ln101">GList *_get_metadata_selection(const gint keyid, const gchar *value)</a>
+<a name="ln102">{</a>
+<a name="ln103">  GList *result = NULL;</a>
+<a name="ln104"> </a>
+<a name="ln105">  sqlite3_stmt *stmt;</a>
+<a name="ln106">  DT_DEBUG_SQLITE3_PREPARE_V2(dt_database_get(darktable.db), &quot;SELECT imgid FROM main.selected_images&quot;, -1, &amp;stmt, NULL);</a>
+<a name="ln107"> </a>
+<a name="ln108">  while(sqlite3_step(stmt) == SQLITE_ROW)</a>
+<a name="ln109">  {</a>
+<a name="ln110">    const int imgid = sqlite3_column_int(stmt, 0);</a>
+<a name="ln111">    result = g_list_append(result, _get_metadata(imgid, keyid, value));</a>
+<a name="ln112">  }</a>
+<a name="ln113"> </a>
+<a name="ln114">  sqlite3_finalize(stmt);</a>
+<a name="ln115"> </a>
+<a name="ln116">  return result;</a>
+<a name="ln117">}</a>
+<a name="ln118"> </a>
+<a name="ln119">static void _undo_metadata_free(gpointer data)</a>
+<a name="ln120">{</a>
+<a name="ln121">  dt_undo_metadata_t *metadata = (dt_undo_metadata_t *)data;</a>
+<a name="ln122">  g_list_free_full(metadata-&gt;before, g_free);</a>
+<a name="ln123">  g_free(metadata-&gt;value);</a>
+<a name="ln124">}</a>
+<a name="ln125"> </a>
+<a name="ln126">static void _metadata_undo_data_free(gpointer data)</a>
+<a name="ln127">{</a>
+<a name="ln128">  GList *l = (GList *)data;</a>
+<a name="ln129">  g_list_free_full(l, _undo_metadata_free);</a>
+<a name="ln130">}</a>
+<a name="ln131"> </a>
+<a name="ln132">static void _metadata_set_xmp(const int id, const gint keyid, const char *value, gboolean undo_actif)</a>
+<a name="ln133">{</a>
+<a name="ln134">  sqlite3_stmt *stmt;</a>
+<a name="ln135">  GList *undo = NULL;</a>
+<a name="ln136"> </a>
+<a name="ln137">  if(undo_actif) dt_undo_start_group(darktable.undo, DT_UNDO_METADATA);</a>
+<a name="ln138"> </a>
+<a name="ln139">  if(id == -1)</a>
+<a name="ln140">  {</a>
+<a name="ln141">    if(undo_actif) undo = _get_metadata_selection(keyid, value);</a>
+<a name="ln142"> </a>
+<a name="ln143">    DT_DEBUG_SQLITE3_PREPARE_V2(dt_database_get(darktable.db),</a>
+<a name="ln144">                                &quot;DELETE FROM main.meta_data WHERE id IN (SELECT imgid FROM main.selected_images) &quot;</a>
+<a name="ln145">                                &quot;AND key = ?1&quot;,</a>
+<a name="ln146">                                -1, &amp;stmt, NULL);</a>
+<a name="ln147">    DT_DEBUG_SQLITE3_BIND_INT(stmt, 1, keyid);</a>
+<a name="ln148">    sqlite3_step(stmt);</a>
+<a name="ln149">    sqlite3_finalize(stmt);</a>
+<a name="ln150"> </a>
+<a name="ln151">    if(value != NULL &amp;&amp; value[0] != '\0')</a>
+<a name="ln152">    {</a>
+<a name="ln153">      DT_DEBUG_SQLITE3_PREPARE_V2(dt_database_get(darktable.db),</a>
+<a name="ln154">                                  &quot;INSERT INTO main.meta_data (id, key, value) SELECT imgid, ?1, ?2 FROM &quot;</a>
+<a name="ln155">                                  &quot;main.selected_images&quot;,</a>
+<a name="ln156">                                  -1, &amp;stmt, NULL);</a>
+<a name="ln157">      DT_DEBUG_SQLITE3_BIND_INT(stmt, 1, keyid);</a>
+<a name="ln158">      DT_DEBUG_SQLITE3_BIND_TEXT(stmt, 2, value, -1, SQLITE_TRANSIENT);</a>
+<a name="ln159">      sqlite3_step(stmt);</a>
+<a name="ln160">      sqlite3_finalize(stmt);</a>
+<a name="ln161">    }</a>
+<a name="ln162">  }</a>
+<a name="ln163">  else</a>
+<a name="ln164">  {</a>
+<a name="ln165">    if(undo_actif) undo = g_list_append(undo, _get_metadata(id, keyid, value));</a>
+<a name="ln166"> </a>
+<a name="ln167">    DT_DEBUG_SQLITE3_PREPARE_V2(dt_database_get(darktable.db),</a>
+<a name="ln168">                                &quot;DELETE FROM main.meta_data WHERE id = ?1 AND key = ?2&quot;, -1, &amp;stmt, NULL);</a>
+<a name="ln169">    DT_DEBUG_SQLITE3_BIND_INT(stmt, 1, id);</a>
+<a name="ln170">    DT_DEBUG_SQLITE3_BIND_INT(stmt, 2, keyid);</a>
+<a name="ln171">    sqlite3_step(stmt);</a>
+<a name="ln172">    sqlite3_finalize(stmt);</a>
+<a name="ln173"> </a>
+<a name="ln174">    if(value != NULL &amp;&amp; value[0] != '\0')</a>
+<a name="ln175">    {</a>
+<a name="ln176">      DT_DEBUG_SQLITE3_PREPARE_V2(dt_database_get(darktable.db),</a>
+<a name="ln177">                                  &quot;INSERT INTO main.meta_data (id, key, value) VALUES (?1, ?2, ?3)&quot;, -1, &amp;stmt,</a>
+<a name="ln178">                                  NULL);</a>
+<a name="ln179">      DT_DEBUG_SQLITE3_BIND_INT(stmt, 1, id);</a>
+<a name="ln180">      DT_DEBUG_SQLITE3_BIND_INT(stmt, 2, keyid);</a>
+<a name="ln181">      DT_DEBUG_SQLITE3_BIND_TEXT(stmt, 3, value, -1, SQLITE_TRANSIENT);</a>
+<a name="ln182">      sqlite3_step(stmt);</a>
+<a name="ln183">      sqlite3_finalize(stmt);</a>
+<a name="ln184">    }</a>
+<a name="ln185">  }</a>
+<a name="ln186"> </a>
+<a name="ln187">  if(undo_actif)</a>
+<a name="ln188">  {</a>
+<a name="ln189">    dt_undo_record(darktable.undo, NULL, DT_UNDO_METADATA, (dt_undo_data_t *)undo, &amp;_pop_undo, _metadata_undo_data_free);</a>
+<a name="ln190">    dt_undo_end_group(darktable.undo);</a>
+<a name="ln191">  }</a>
+<a name="ln192">}</a>
+<a name="ln193"> </a>
+<a name="ln194">static void dt_metadata_set_xmp(int id, const char *key, const char *value)</a>
+<a name="ln195">{</a>
+<a name="ln196">  int keyid = dt_metadata_get_keyid(key);</a>
+<a name="ln197">  if(keyid == -1) // unknown key</a>
+<a name="ln198">    return;</a>
+<a name="ln199"> </a>
+<a name="ln200">  _metadata_set_xmp(id, keyid, value, TRUE);</a>
+<a name="ln201">}</a>
+<a name="ln202"> </a>
+<a name="ln203">static void dt_metadata_set_exif(int id, const char *key, const char *value)</a>
+<a name="ln204">{</a>
+<a name="ln205">} // TODO Is this useful at all?</a>
+<a name="ln206"> </a>
+<a name="ln207">static GList *dt_metadata_get_xmp(int id, const char *key, uint32_t *count)</a>
+<a name="ln208">{</a>
+<a name="ln209">  GList *result = NULL;</a>
+<a name="ln210">  sqlite3_stmt *stmt;</a>
+<a name="ln211">  uint32_t local_count = 0;</a>
+<a name="ln212"> </a>
+<a name="ln213">  int keyid = dt_metadata_get_keyid(key);</a>
+<a name="ln214">  // key not found in db. Maybe it's one of our &quot;special&quot; keys (rating, tags and colorlabels)?</a>
+<a name="ln215">  if(keyid == -1)</a>
+<a name="ln216">  {</a>
+<a name="ln217">    if(strncmp(key, &quot;Xmp.xmp.Rating&quot;, 14) == 0)</a>
+<a name="ln218">    {</a>
+<a name="ln219">      if(id == -1)</a>
+<a name="ln220">      {</a>
+<a name="ln221">        DT_DEBUG_SQLITE3_PREPARE_V2(dt_database_get(darktable.db), &quot;SELECT flags FROM main.images WHERE id IN &quot;</a>
+<a name="ln222">                                                                   &quot;(SELECT imgid FROM main.selected_images)&quot;,</a>
+<a name="ln223">                                    -1, &amp;stmt, NULL);</a>
+<a name="ln224">      }</a>
+<a name="ln225">      else // single image under mouse cursor</a>
+<a name="ln226">      {</a>
+<a name="ln227">        DT_DEBUG_SQLITE3_PREPARE_V2(dt_database_get(darktable.db), &quot;SELECT flags FROM main.images WHERE id = ?1&quot;,</a>
+<a name="ln228">                                    -1, &amp;stmt, NULL);</a>
+<a name="ln229">        DT_DEBUG_SQLITE3_BIND_INT(stmt, 1, id);</a>
+<a name="ln230">      }</a>
+<a name="ln231">      while(sqlite3_step(stmt) == SQLITE_ROW)</a>
+<a name="ln232">      {</a>
+<a name="ln233">        local_count++;</a>
+<a name="ln234">        int stars = sqlite3_column_int(stmt, 0);</a>
+<a name="ln235">        stars = (stars &amp; 0x7) - 1;</a>
+<a name="ln236">        result = g_list_append(result, GINT_TO_POINTER(stars));</a>
+<a name="ln237">      }</a>
+<a name="ln238">      sqlite3_finalize(stmt);</a>
+<a name="ln239">    }</a>
+<a name="ln240">    else if(strncmp(key, &quot;Xmp.dc.subject&quot;, 14) == 0)</a>
+<a name="ln241">    {</a>
+<a name="ln242">      if(id == -1)</a>
+<a name="ln243">      {</a>
+<a name="ln244">        DT_DEBUG_SQLITE3_PREPARE_V2(dt_database_get(darktable.db),</a>
+<a name="ln245">                                    &quot;SELECT name FROM data.tags t JOIN main.tagged_images i ON &quot;</a>
+<a name="ln246">                                    &quot;i.tagid = t.id WHERE imgid IN &quot;</a>
+<a name="ln247">                                    &quot;(SELECT imgid FROM main.selected_images)&quot;,</a>
+<a name="ln248">                                    -1, &amp;stmt, NULL);</a>
+<a name="ln249">      }</a>
+<a name="ln250">      else // single image under mouse cursor</a>
+<a name="ln251">      {</a>
+<a name="ln252">        DT_DEBUG_SQLITE3_PREPARE_V2(dt_database_get(darktable.db),</a>
+<a name="ln253">                                    &quot;SELECT name FROM data.tags t JOIN main.tagged_images i ON &quot;</a>
+<a name="ln254">                                    &quot;i.tagid = t.id WHERE imgid = ?1&quot;,</a>
+<a name="ln255">                                    -1, &amp;stmt, NULL);</a>
+<a name="ln256">        DT_DEBUG_SQLITE3_BIND_INT(stmt, 1, id);</a>
+<a name="ln257">      }</a>
+<a name="ln258">      while(sqlite3_step(stmt) == SQLITE_ROW)</a>
+<a name="ln259">      {</a>
+<a name="ln260">        local_count++;</a>
+<a name="ln261">        result = g_list_append(result, g_strdup((char *)sqlite3_column_text(stmt, 0)));</a>
+<a name="ln262">      }</a>
+<a name="ln263">      sqlite3_finalize(stmt);</a>
+<a name="ln264">    }</a>
+<a name="ln265">    else if(strncmp(key, &quot;Xmp.darktable.colorlabels&quot;, 25) == 0)</a>
+<a name="ln266">    {</a>
+<a name="ln267">      if(id == -1)</a>
+<a name="ln268">      {</a>
+<a name="ln269">        DT_DEBUG_SQLITE3_PREPARE_V2(dt_database_get(darktable.db),</a>
+<a name="ln270">                                    &quot;SELECT color FROM main.color_labels WHERE imgid IN &quot;</a>
+<a name="ln271">                                    &quot;(SELECT imgid FROM main.selected_images)&quot;,</a>
+<a name="ln272">                                    -1, &amp;stmt, NULL);</a>
+<a name="ln273">      }</a>
+<a name="ln274">      else // single image under mouse cursor</a>
+<a name="ln275">      {</a>
+<a name="ln276">        DT_DEBUG_SQLITE3_PREPARE_V2(dt_database_get(darktable.db),</a>
+<a name="ln277">                                    &quot;SELECT color FROM main.color_labels WHERE imgid=?1 ORDER BY color&quot;,</a>
+<a name="ln278">                                    -1, &amp;stmt, NULL);</a>
+<a name="ln279">        DT_DEBUG_SQLITE3_BIND_INT(stmt, 1, id);</a>
+<a name="ln280">      }</a>
+<a name="ln281">      while(sqlite3_step(stmt) == SQLITE_ROW)</a>
+<a name="ln282">      {</a>
+<a name="ln283">        local_count++;</a>
+<a name="ln284">        result = g_list_append(result, GINT_TO_POINTER(sqlite3_column_int(stmt, 0)));</a>
+<a name="ln285">      }</a>
+<a name="ln286">      sqlite3_finalize(stmt);</a>
+<a name="ln287">    }</a>
+<a name="ln288">    if(count != NULL) *count = local_count;</a>
+<a name="ln289">    return result;</a>
+<a name="ln290">  }</a>
+<a name="ln291"> </a>
+<a name="ln292">  // So we got this far -- it has to be a generic key-value entry from meta_data</a>
+<a name="ln293">  if(id == -1)</a>
+<a name="ln294">  {</a>
+<a name="ln295">    DT_DEBUG_SQLITE3_PREPARE_V2(dt_database_get(darktable.db),</a>
+<a name="ln296">                                &quot;SELECT value FROM main.meta_data WHERE id IN &quot;</a>
+<a name="ln297">                                &quot;(SELECT imgid FROM main.selected_images) AND key = ?1 ORDER BY value&quot;,</a>
+<a name="ln298">                                -1, &amp;stmt, NULL);</a>
+<a name="ln299">    DT_DEBUG_SQLITE3_BIND_INT(stmt, 1, keyid);</a>
+<a name="ln300">  }</a>
+<a name="ln301">  else // single image under mouse cursor</a>
+<a name="ln302">  {</a>
+<a name="ln303">    DT_DEBUG_SQLITE3_PREPARE_V2(dt_database_get(darktable.db),</a>
+<a name="ln304">                                &quot;SELECT value FROM main.meta_data WHERE id = ?1 AND key = ?2 ORDER BY value&quot;, -1,</a>
+<a name="ln305">                                &amp;stmt, NULL);</a>
+<a name="ln306">    DT_DEBUG_SQLITE3_BIND_INT(stmt, 1, id);</a>
+<a name="ln307">    DT_DEBUG_SQLITE3_BIND_INT(stmt, 2, keyid);</a>
+<a name="ln308">  }</a>
+<a name="ln309">  while(sqlite3_step(stmt) == SQLITE_ROW)</a>
+<a name="ln310">  {</a>
+<a name="ln311">    local_count++;</a>
+<a name="ln312">    result = g_list_append(result, g_strdup((char *)sqlite3_column_text(stmt, 0)));</a>
+<a name="ln313">  }</a>
+<a name="ln314">  sqlite3_finalize(stmt);</a>
+<a name="ln315">  if(count != NULL) *count = local_count;</a>
+<a name="ln316">  return result;</a>
+<a name="ln317">}</a>
+<a name="ln318"> </a>
+<a name="ln319">/*</a>
+<a name="ln320">  Dear Mister Dijkstra,</a>
+<a name="ln321">  I hereby make a formal apology for using goto statements in the following</a>
+<a name="ln322">  function. While I am fully aware that I will rot in the deepest hells for</a>
+<a name="ln323">  this ultimate sin and that I'm not worth to be called a &quot;programmer&quot; from</a>
+<a name="ln324">  now on, I have one excuse to bring up: I never did so before, and this way</a>
+<a name="ln325">  the code gets a lot smaller and less repetitive. And since you are dead</a>
+<a name="ln326">  while I am not (yet) I will stick with my gotos.</a>
+<a name="ln327">  See you in hell</a>
+<a name="ln328">  houz</a>
+<a name="ln329">*/</a>
+<a name="ln330">static GList *dt_metadata_get_exif(int id, const char *key, uint32_t *count)</a>
+<a name="ln331">{</a>
+<a name="ln332">  GList *result = NULL;</a>
+<a name="ln333">  sqlite3_stmt *stmt;</a>
+<a name="ln334">  uint32_t local_count = 0;</a>
+<a name="ln335"> </a>
+<a name="ln336">  // the doubles</a>
+<a name="ln337">  if(strncmp(key, &quot;Exif.Photo.ExposureTime&quot;, 23) == 0)</a>
+<a name="ln338">  {</a>
+<a name="ln339">    if(id == -1)</a>
+<a name="ln340">    {</a>
+<a name="ln341">      DT_DEBUG_SQLITE3_PREPARE_V2(dt_database_get(darktable.db), &quot;SELECT exposure FROM main.images WHERE id IN &quot;</a>
+<a name="ln342">                                                                 &quot;(SELECT imgid FROM main.selected_images)&quot;,</a>
+<a name="ln343">                                  -1, &amp;stmt, NULL);</a>
+<a name="ln344">    }</a>
+<a name="ln345">    else // single image under mouse cursor</a>
+<a name="ln346">    {</a>
+<a name="ln347">      DT_DEBUG_SQLITE3_PREPARE_V2(dt_database_get(darktable.db), &quot;SELECT exposure FROM main.images WHERE id = ?1&quot;,</a>
+<a name="ln348">                                  -1, &amp;stmt, NULL);</a>
+<a name="ln349">      DT_DEBUG_SQLITE3_BIND_INT(stmt, 1, id);</a>
+<a name="ln350">    }</a>
+<a name="ln351">  }</a>
+<a name="ln352">  else if(strncmp(key, &quot;Exif.Photo.ApertureValue&quot;, 24) == 0)</a>
+<a name="ln353">  {</a>
+<a name="ln354">    if(id == -1)</a>
+<a name="ln355">    {</a>
+<a name="ln356">      DT_DEBUG_SQLITE3_PREPARE_V2(dt_database_get(darktable.db), &quot;SELECT aperture FROM main.images WHERE id IN &quot;</a>
+<a name="ln357">                                                                 &quot;(SELECT imgid FROM main.selected_images)&quot;,</a>
+<a name="ln358">                                  -1, &amp;stmt, NULL);</a>
+<a name="ln359">    }</a>
+<a name="ln360">    else // single image under mouse cursor</a>
+<a name="ln361">    {</a>
+<a name="ln362">      DT_DEBUG_SQLITE3_PREPARE_V2(dt_database_get(darktable.db), &quot;SELECT aperture FROM main.images WHERE id = ?1&quot;,</a>
+<a name="ln363">                                  -1, &amp;stmt, NULL);</a>
+<a name="ln364">      DT_DEBUG_SQLITE3_BIND_INT(stmt, 1, id);</a>
+<a name="ln365">    }</a>
+<a name="ln366">  }</a>
+<a name="ln367">  else if(strncmp(key, &quot;Exif.Photo.ISOSpeedRatings&quot;, 26) == 0)</a>
+<a name="ln368">  {</a>
+<a name="ln369">    if(id == -1)</a>
+<a name="ln370">    {</a>
+<a name="ln371">      DT_DEBUG_SQLITE3_PREPARE_V2(dt_database_get(darktable.db),</a>
+<a name="ln372">                                  &quot;SELECT iso FROM main.images WHERE id IN &quot;</a>
+<a name="ln373">                                  &quot;(SELECT imgid FROM main.selected_images)&quot;, -1, &amp;stmt, NULL);</a>
+<a name="ln374">    }</a>
+<a name="ln375">    else // single image under mouse cursor</a>
+<a name="ln376">    {</a>
+<a name="ln377">      DT_DEBUG_SQLITE3_PREPARE_V2(dt_database_get(darktable.db), &quot;SELECT iso FROM main.images WHERE id = ?1&quot;, -1,</a>
+<a name="ln378">                                  &amp;stmt, NULL);</a>
+<a name="ln379">      DT_DEBUG_SQLITE3_BIND_INT(stmt, 1, id);</a>
+<a name="ln380">    }</a>
+<a name="ln381">  }</a>
+<a name="ln382">  else if(strncmp(key, &quot;Exif.Photo.FocalLength&quot;, 22) == 0)</a>
+<a name="ln383">  {</a>
+<a name="ln384">    if(id == -1)</a>
+<a name="ln385">    {</a>
+<a name="ln386">      DT_DEBUG_SQLITE3_PREPARE_V2(dt_database_get(darktable.db),</a>
+<a name="ln387">                                  &quot;SELECT focal_length FROM main.images WHERE id IN &quot;</a>
+<a name="ln388">                                  &quot;(SELECT imgid FROM main.selected_images)&quot;,</a>
+<a name="ln389">                                  -1, &amp;stmt, NULL);</a>
+<a name="ln390">    }</a>
+<a name="ln391">    else // single image under mouse cursor</a>
+<a name="ln392">    {</a>
+<a name="ln393">      DT_DEBUG_SQLITE3_PREPARE_V2(dt_database_get(darktable.db),</a>
+<a name="ln394">                                  &quot;SELECT focal_length FROM main.images WHERE id = ?1&quot;, -1, &amp;stmt, NULL);</a>
+<a name="ln395">      DT_DEBUG_SQLITE3_BIND_INT(stmt, 1, id);</a>
+<a name="ln396">    }</a>
+<a name="ln397">  }</a>
+<a name="ln398">  else</a>
+<a name="ln399">  {</a>
+<a name="ln400"> </a>
+<a name="ln401">    // the strings</a>
+<a name="ln402">    if(strncmp(key, &quot;Exif.Photo.DateTimeOriginal&quot;, 27) == 0)</a>
+<a name="ln403">    {</a>
+<a name="ln404">      if(id == -1)</a>
+<a name="ln405">      {</a>
+<a name="ln406">        DT_DEBUG_SQLITE3_PREPARE_V2(dt_database_get(darktable.db),</a>
+<a name="ln407">                                    &quot;SELECT datetime_taken FROM main.images WHERE id IN &quot;</a>
+<a name="ln408">                                    &quot;(SELECT imgid FROM main.selected_images)&quot;,</a>
+<a name="ln409">                                    -1, &amp;stmt, NULL);</a>
+<a name="ln410">      }</a>
+<a name="ln411">      else // single image under mouse cursor</a>
+<a name="ln412">      {</a>
+<a name="ln413">        DT_DEBUG_SQLITE3_PREPARE_V2(dt_database_get(darktable.db),</a>
+<a name="ln414">                                    &quot;SELECT datetime_taken FROM main.images WHERE id = ?1&quot;, -1, &amp;stmt, NULL);</a>
+<a name="ln415">        DT_DEBUG_SQLITE3_BIND_INT(stmt, 1, id);</a>
+<a name="ln416">      }</a>
+<a name="ln417">    }</a>
+<a name="ln418">    else if(strncmp(key, &quot;Exif.Image.Make&quot;, 15) == 0)</a>
+<a name="ln419">    {</a>
+<a name="ln420">      if(id == -1)</a>
+<a name="ln421">      {</a>
+<a name="ln422">        DT_DEBUG_SQLITE3_PREPARE_V2(dt_database_get(darktable.db), &quot;SELECT maker FROM main.images WHERE id IN &quot;</a>
+<a name="ln423">                                                                   &quot;(SELECT imgid FROM main.selected_images)&quot;,</a>
+<a name="ln424">                                    -1, &amp;stmt, NULL);</a>
+<a name="ln425">      }</a>
+<a name="ln426">      else // single image under mouse cursor</a>
+<a name="ln427">      {</a>
+<a name="ln428">        DT_DEBUG_SQLITE3_PREPARE_V2(dt_database_get(darktable.db), &quot;SELECT maker FROM main.images WHERE id = ?1&quot;,</a>
+<a name="ln429">                                    -1, &amp;stmt, NULL);</a>
+<a name="ln430">        DT_DEBUG_SQLITE3_BIND_INT(stmt, 1, id);</a>
+<a name="ln431">      }</a>
+<a name="ln432">    }</a>
+<a name="ln433">    else if(strncmp(key, &quot;Exif.Image.Model&quot;, 16) == 0)</a>
+<a name="ln434">    {</a>
+<a name="ln435">      if(id == -1)</a>
+<a name="ln436">      {</a>
+<a name="ln437">        DT_DEBUG_SQLITE3_PREPARE_V2(dt_database_get(darktable.db), &quot;SELECT model FROM main.images WHERE id IN &quot;</a>
+<a name="ln438">                                                                   &quot;(SELECT imgid FROM main.selected_images)&quot;,</a>
+<a name="ln439">                                    -1, &amp;stmt, NULL);</a>
+<a name="ln440">      }</a>
+<a name="ln441">      else // single image under mouse cursor</a>
+<a name="ln442">      {</a>
+<a name="ln443">        DT_DEBUG_SQLITE3_PREPARE_V2(dt_database_get(darktable.db), &quot;SELECT model FROM main.images WHERE id = ?1&quot;,</a>
+<a name="ln444">                                    -1, &amp;stmt, NULL);</a>
+<a name="ln445">        DT_DEBUG_SQLITE3_BIND_INT(stmt, 1, id);</a>
+<a name="ln446">      }</a>
+<a name="ln447">    }</a>
+<a name="ln448">    else</a>
+<a name="ln449">    {</a>
+<a name="ln450">      goto END;</a>
+<a name="ln451">    }</a>
+<a name="ln452">    while(sqlite3_step(stmt) == SQLITE_ROW)</a>
+<a name="ln453">    {</a>
+<a name="ln454">      local_count++;</a>
+<a name="ln455">      result = g_list_append(result, g_strdup((char *)sqlite3_column_text(stmt, 0)));</a>
+<a name="ln456">    }</a>
+<a name="ln457">    sqlite3_finalize(stmt);</a>
+<a name="ln458">    goto END;</a>
+<a name="ln459">  }</a>
+<a name="ln460"> </a>
+<a name="ln461">  // the double queries</a>
+<a name="ln462">  while(sqlite3_step(stmt) == SQLITE_ROW)</a>
+<a name="ln463">  {</a>
+<a name="ln464">    local_count++;</a>
+<a name="ln465">    double *tmp = (double *)malloc(sizeof(double));</a>
+<a name="ln466">    *tmp = sqlite3_column_double(stmt, 0);</a>
+<a name="ln467">    result = g_list_append(result, tmp);</a>
+<a name="ln468">  }</a>
+<a name="ln469">  sqlite3_finalize(stmt);</a>
+<a name="ln470"> </a>
+<a name="ln471">END:</a>
+<a name="ln472">  if(count != NULL) *count = local_count;</a>
+<a name="ln473">  return result;</a>
+<a name="ln474">}</a>
+<a name="ln475"> </a>
+<a name="ln476">// for everything which doesn't fit anywhere else (our made up stuff)</a>
+<a name="ln477">static GList *dt_metadata_get_dt(int id, const char *key, uint32_t *count)</a>
+<a name="ln478">{</a>
+<a name="ln479">  GList *result = NULL;</a>
+<a name="ln480">  sqlite3_stmt *stmt;</a>
+<a name="ln481">  uint32_t local_count = 0;</a>
+<a name="ln482"> </a>
+<a name="ln483">  if(strncmp(key, &quot;darktable.Lens&quot;, 14) == 0)</a>
+<a name="ln484">  {</a>
+<a name="ln485">    if(id == -1)</a>
+<a name="ln486">    {</a>
+<a name="ln487">      DT_DEBUG_SQLITE3_PREPARE_V2(dt_database_get(darktable.db), &quot;SELECT lens FROM main.images WHERE id IN &quot;</a>
+<a name="ln488">                                                                 &quot;(SELECT imgid FROM main.selected_images)&quot;,</a>
+<a name="ln489">                                  -1, &amp;stmt, NULL);</a>
+<a name="ln490">    }</a>
+<a name="ln491">    else // single image under mouse cursor</a>
+<a name="ln492">    {</a>
+<a name="ln493">      DT_DEBUG_SQLITE3_PREPARE_V2(dt_database_get(darktable.db), &quot;SELECT lens FROM main.images WHERE id = ?1&quot;, -1,</a>
+<a name="ln494">                                  &amp;stmt, NULL);</a>
+<a name="ln495">      DT_DEBUG_SQLITE3_BIND_INT(stmt, 1, id);</a>
+<a name="ln496">    }</a>
+<a name="ln497">    while(sqlite3_step(stmt) == SQLITE_ROW)</a>
+<a name="ln498">    {</a>
+<a name="ln499">      local_count++;</a>
+<a name="ln500">      result = g_list_append(result, g_strdup((char *)sqlite3_column_text(stmt, 0)));</a>
+<a name="ln501">    }</a>
+<a name="ln502">    sqlite3_finalize(stmt);</a>
+<a name="ln503">  }</a>
+<a name="ln504">  else if(strncmp(key, &quot;darktable.Name&quot;, 14) == 0)</a>
+<a name="ln505">  {</a>
+<a name="ln506">    result = g_list_append(result, g_strdup(PACKAGE_NAME));</a>
+<a name="ln507">    local_count = 1;</a>
+<a name="ln508">  }</a>
+<a name="ln509">  else if(strncmp(key, &quot;darktable.Version&quot;, 17) == 0)</a>
+<a name="ln510">  {</a>
+<a name="ln511">    result = g_list_append(result, g_strdup(darktable_package_version));</a>
+<a name="ln512">    local_count = 1;</a>
+<a name="ln513">  }</a>
+<a name="ln514">  if(count != NULL) *count = local_count;</a>
+<a name="ln515">  return result;</a>
+<a name="ln516">}</a>
+<a name="ln517"> </a>
+<a name="ln518">void dt_metadata_set(int id, const char *key, const char *value)</a>
+<a name="ln519">{</a>
+<a name="ln520">  if(!key) return;</a>
+<a name="ln521"> </a>
+<a name="ln522">  char *v = NULL;</a>
+<a name="ln523">  char *c = NULL;</a>
+<a name="ln524"> </a>
+<a name="ln525">  // strip whitespace from start &amp; end</a>
+<a name="ln526">  if(value)</a>
+<a name="ln527">  {</a>
+<a name="ln528">    v = g_strdup(value);</a>
+<a name="ln529">    c = v + strlen(v) - 1;</a>
+<a name="ln530">    while(c &gt;= v &amp;&amp; *c == ' ') *c-- = '\0';</a>
+<a name="ln531">    c = v;</a>
+<a name="ln532">    while(*c == ' ') c++;</a>
+<a name="ln533">  }</a>
+<a name="ln534"> </a>
+<a name="ln535">  if(strncmp(key, &quot;Xmp.&quot;, 4) == 0)</a>
+<a name="ln536">    dt_metadata_set_xmp(id, key, c);</a>
+<a name="ln537">  else if(strncmp(key, &quot;Exif.&quot;, 5) == 0)</a>
+<a name="ln538">    dt_metadata_set_exif(id, key, c);</a>
+<a name="ln539"> </a>
+<a name="ln540">  g_free(v);</a>
+<a name="ln541">}</a>
+<a name="ln542"> </a>
+<a name="ln543">void dt_metadata_set_list(int id, GList *key_value)</a>
+<a name="ln544">{</a>
+<a name="ln545">  dt_undo_start_group(darktable.undo, DT_UNDO_METADATA);</a>
+<a name="ln546"> </a>
+<a name="ln547">  GList *kv = key_value;</a>
+<a name="ln548"> </a>
+<a name="ln549">  while(kv)</a>
+<a name="ln550">  {</a>
+<a name="ln551">    const gchar *key = (const gchar *)kv-&gt;data;</a>
+<a name="ln552">    kv = g_list_next(kv);</a>
+<a name="ln553">    const gchar *value = (const gchar *)kv-&gt;data;</a>
+<a name="ln554">    kv = g_list_next(kv);</a>
+<a name="ln555">    dt_metadata_set(id, key, value);</a>
+<a name="ln556">  }</a>
+<a name="ln557"> </a>
+<a name="ln558">  dt_undo_end_group(darktable.undo);</a>
+<a name="ln559">}</a>
+<a name="ln560"> </a>
+<a name="ln561">GList *dt_metadata_get(int id, const char *key, uint32_t *count)</a>
+<a name="ln562">{</a>
+<a name="ln563">  if(strncmp(key, &quot;Xmp.&quot;, 4) == 0) return dt_metadata_get_xmp(id, key, count);</a>
+<a name="ln564">  if(strncmp(key, &quot;Exif.&quot;, 5) == 0) return dt_metadata_get_exif(id, key, count);</a>
+<a name="ln565">  if(strncmp(key, &quot;darktable.&quot;, 10) == 0) return dt_metadata_get_dt(id, key, count);</a>
+<a name="ln566">  return NULL;</a>
+<a name="ln567">}</a>
+<a name="ln568"> </a>
+<a name="ln569">// TODO: Also clear exif data? I don't think it makes sense.</a>
+<a name="ln570">void dt_metadata_clear(int id)</a>
+<a name="ln571">{</a>
+<a name="ln572">  if(id == -1)</a>
+<a name="ln573">  {</a>
+<a name="ln574">    DT_DEBUG_SQLITE3_EXEC(dt_database_get(darktable.db), &quot;DELETE FROM main.meta_data WHERE id IN &quot;</a>
+<a name="ln575">                                                         &quot;(SELECT imgid FROM main.selected_images)&quot;,</a>
+<a name="ln576">                          NULL, NULL, NULL);</a>
+<a name="ln577">  }</a>
+<a name="ln578">  else</a>
+<a name="ln579">  {</a>
+<a name="ln580">    sqlite3_stmt *stmt;</a>
+<a name="ln581">    DT_DEBUG_SQLITE3_PREPARE_V2(dt_database_get(darktable.db), &quot;DELETE FROM main.meta_data WHERE id = ?1&quot;, -1,</a>
+<a name="ln582">                                &amp;stmt, NULL);</a>
+<a name="ln583">    DT_DEBUG_SQLITE3_BIND_INT(stmt, 1, id);</a>
+<a name="ln584">    sqlite3_step(stmt);</a>
+<a name="ln585">    sqlite3_finalize(stmt);</a>
+<a name="ln586">  }</a>
+<a name="ln587">}</a>
+<a name="ln588"> </a>
+<a name="ln589">// modelines: These editor modelines have been set for all relevant files by tools/update_modelines.sh</a>
+<a name="ln590">// vim: shiftwidth=2 expandtab tabstop=2 cindent</a>
+<a name="ln591">// kate: tab-indents: off; indent-width 2; replace-tabs on; indent-mode cstyle; remove-trailing-spaces modified;</a>
+
+</code></pre>
+<div class="balloon" rel="78"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v522/" target="_blank">V522</a> There might be dereferencing of a potential null pointer 'result'. Check lines: 78, 77.</p></div>
+<div class="balloon" rel="197"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v547/" target="_blank">V547</a> Expression 'keyid == - 1' is always false.</p></div>
+<div class="balloon" rel="215"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v547/" target="_blank">V547</a> Expression 'keyid == - 1' is always false.</p></div>
+<div class="balloon" rel="466"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v522/" target="_blank">V522</a> There might be dereferencing of a potential null pointer 'tmp'. Check lines: 466, 465.</p></div>
+
+<link rel="stylesheet" href="highlight.css">
+<script src="highlight.pack.js"></script>
+<script src="highlightjs-line-numbers.js"></script>
+<script>hljs.initHighlightingOnLoad();</script>
+<script>hljs.initLineNumbersOnLoad();</script>
+<script>
+  $(document).ready(function() {
+      $('.balloon').each(function () {
+          var bl = $(this);
+          var line = bl.attr('rel');
+          var text = $('a[name="ln'+line+'"]').text();
+
+          var space_count = 0;
+          for(var i = 0; i<text.length; i++){
+              var char = text[i];
+              if((char !== ' ')&&(char !== '\t'))break;
+              if(char === '\t')space_count++;
+              space_count++;
+          }
+
+          bl.css('margin-left', space_count*8);
+          $('a[name="ln'+line+'"]').after(bl);
+      });
+
+      window.location = window.location;
+  });
+</script>
+</body>
+</html>

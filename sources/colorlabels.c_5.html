@@ -1,0 +1,365 @@
+
+<html>
+<head>
+  <link rel="stylesheet" href="../style.css"/>
+  <script src="../jquery-3.2.1.min.js"></script>
+</head>
+<body>
+<pre><code class = "cpp">
+<a name="ln1">/*</a>
+<a name="ln2">    This file is part of darktable,</a>
+<a name="ln3">    copyright (c) 2009--2011 johannes hanika.</a>
+<a name="ln4"> </a>
+<a name="ln5">    darktable is free software: you can redistribute it and/or modify</a>
+<a name="ln6">    it under the terms of the GNU General Public License as published by</a>
+<a name="ln7">    the Free Software Foundation, either version 3 of the License, or</a>
+<a name="ln8">    (at your option) any later version.</a>
+<a name="ln9"> </a>
+<a name="ln10">    darktable is distributed in the hope that it will be useful,</a>
+<a name="ln11">    but WITHOUT ANY WARRANTY; without even the implied warranty of</a>
+<a name="ln12">    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the</a>
+<a name="ln13">    GNU General Public License for more details.</a>
+<a name="ln14"> </a>
+<a name="ln15">    You should have received a copy of the GNU General Public License</a>
+<a name="ln16">    along with darktable.  If not, see &lt;http://www.gnu.org/licenses/&gt;.</a>
+<a name="ln17">*/</a>
+<a name="ln18">#include &quot;common/colorlabels.h&quot;</a>
+<a name="ln19">#include &quot;common/collection.h&quot;</a>
+<a name="ln20">#include &quot;common/darktable.h&quot;</a>
+<a name="ln21">#include &quot;common/debug.h&quot;</a>
+<a name="ln22">#include &quot;common/image_cache.h&quot;</a>
+<a name="ln23">#include &quot;common/undo.h&quot;</a>
+<a name="ln24">#include &quot;control/conf.h&quot;</a>
+<a name="ln25">#include &quot;control/control.h&quot;</a>
+<a name="ln26">#include &quot;gui/gtk.h&quot;</a>
+<a name="ln27">#include &lt;gdk/gdkkeysyms.h&gt;</a>
+<a name="ln28"> </a>
+<a name="ln29">const char *dt_colorlabels_name[] = {</a>
+<a name="ln30">  &quot;red&quot;, &quot;yellow&quot;, &quot;green&quot;, &quot;blue&quot;, &quot;purple&quot;,</a>
+<a name="ln31">  NULL // termination</a>
+<a name="ln32">};</a>
+<a name="ln33"> </a>
+<a name="ln34">typedef struct dt_undo_colorlabels_t</a>
+<a name="ln35">{</a>
+<a name="ln36">  int imgid;</a>
+<a name="ln37">  uint8_t before;</a>
+<a name="ln38">  uint8_t after;</a>
+<a name="ln39">} dt_undo_colorlabels_t;</a>
+<a name="ln40"> </a>
+<a name="ln41">static void _pop_undo(gpointer user_data, dt_undo_type_t type, dt_undo_data_t *data, dt_undo_action_t action)</a>
+<a name="ln42">{</a>
+<a name="ln43">  if(type == DT_UNDO_COLORLABELS)</a>
+<a name="ln44">  {</a>
+<a name="ln45">    GList *list = (GList *)data;</a>
+<a name="ln46"> </a>
+<a name="ln47">    while(list)</a>
+<a name="ln48">    {</a>
+<a name="ln49">      dt_undo_colorlabels_t *clabels = (dt_undo_colorlabels_t *)list-&gt;data;</a>
+<a name="ln50">      uint8_t labels;</a>
+<a name="ln51">      dt_colorlabels_remove_labels(clabels-&gt;imgid);</a>
+<a name="ln52"> </a>
+<a name="ln53">      if(action == DT_ACTION_UNDO)</a>
+<a name="ln54">        labels = clabels-&gt;before;</a>
+<a name="ln55">      else</a>
+<a name="ln56">        labels = clabels-&gt;after;</a>
+<a name="ln57"> </a>
+<a name="ln58">      for(int color=0; color&lt;5; color++)</a>
+<a name="ln59">        if(labels &amp; (1&lt;&lt;color))</a>
+<a name="ln60">          dt_colorlabels_set_label(clabels-&gt;imgid, color);</a>
+<a name="ln61"> </a>
+<a name="ln62">      list = g_list_next(list);</a>
+<a name="ln63">    }</a>
+<a name="ln64">  }</a>
+<a name="ln65">}</a>
+<a name="ln66"> </a>
+<a name="ln67">static dt_undo_colorlabels_t *_get_labels(int imgid, uint8_t label, gboolean add)</a>
+<a name="ln68">{</a>
+<a name="ln69">  dt_undo_colorlabels_t *result = (dt_undo_colorlabels_t *)malloc(sizeof(dt_undo_colorlabels_t));</a>
+<a name="ln70">  result-&gt;before = 0;</a>
+<a name="ln71">  result-&gt;imgid = imgid;</a>
+<a name="ln72">  sqlite3_stmt *stmt;</a>
+<a name="ln73"> </a>
+<a name="ln74">  DT_DEBUG_SQLITE3_PREPARE_V2(dt_database_get(darktable.db),</a>
+<a name="ln75">                              &quot;SELECT color FROM main.color_labels WHERE imgid=?1&quot;, -1, &amp;stmt, NULL);</a>
+<a name="ln76">  DT_DEBUG_SQLITE3_BIND_INT(stmt, 1, imgid);</a>
+<a name="ln77"> </a>
+<a name="ln78">  while(sqlite3_step(stmt) == SQLITE_ROW)</a>
+<a name="ln79">  {</a>
+<a name="ln80">    const int color = sqlite3_column_int(stmt, 0);</a>
+<a name="ln81">    result-&gt;before |= (1 &lt;&lt; color);</a>
+<a name="ln82">  }</a>
+<a name="ln83">  sqlite3_finalize(stmt);</a>
+<a name="ln84"> </a>
+<a name="ln85">  if(add)</a>
+<a name="ln86">    result-&gt;after = result-&gt;before | label;</a>
+<a name="ln87">  else</a>
+<a name="ln88">    result-&gt;after = result-&gt;before &amp; (~label);</a>
+<a name="ln89"> </a>
+<a name="ln90">  return result;</a>
+<a name="ln91">}</a>
+<a name="ln92"> </a>
+<a name="ln93">GList *_get_labels_selection(uint8_t label, gboolean add)</a>
+<a name="ln94">{</a>
+<a name="ln95">  GList *result = NULL;</a>
+<a name="ln96"> </a>
+<a name="ln97">  sqlite3_stmt *stmt;</a>
+<a name="ln98">  DT_DEBUG_SQLITE3_PREPARE_V2(dt_database_get(darktable.db), &quot;SELECT imgid FROM main.selected_images&quot;, -1, &amp;stmt, NULL);</a>
+<a name="ln99"> </a>
+<a name="ln100">  while(sqlite3_step(stmt) == SQLITE_ROW)</a>
+<a name="ln101">  {</a>
+<a name="ln102">    const int imgid = sqlite3_column_int(stmt, 0);</a>
+<a name="ln103">    result = g_list_append(result, _get_labels(imgid, label, add));</a>
+<a name="ln104">  }</a>
+<a name="ln105"> </a>
+<a name="ln106">  sqlite3_finalize(stmt);</a>
+<a name="ln107"> </a>
+<a name="ln108">  return result;</a>
+<a name="ln109">}</a>
+<a name="ln110"> </a>
+<a name="ln111">static void _colorlabels_undo_data_free(gpointer data)</a>
+<a name="ln112">{</a>
+<a name="ln113">  GList *l = (GList *)data;</a>
+<a name="ln114">  g_list_free(l);</a>
+<a name="ln115">}</a>
+<a name="ln116"> </a>
+<a name="ln117">void dt_colorlabels_remove_labels_selection()</a>
+<a name="ln118">{</a>
+<a name="ln119">  DT_DEBUG_SQLITE3_EXEC(dt_database_get(darktable.db),</a>
+<a name="ln120">                        &quot;DELETE FROM main.color_labels WHERE imgid IN (SELECT imgid FROM main.selected_images)&quot;,</a>
+<a name="ln121">                        NULL, NULL, NULL);</a>
+<a name="ln122">}</a>
+<a name="ln123"> </a>
+<a name="ln124">void dt_colorlabels_remove_labels(const int imgid)</a>
+<a name="ln125">{</a>
+<a name="ln126">  sqlite3_stmt *stmt;</a>
+<a name="ln127">  DT_DEBUG_SQLITE3_PREPARE_V2(dt_database_get(darktable.db), &quot;DELETE FROM main.color_labels WHERE imgid=?1&quot;, -1,</a>
+<a name="ln128">                              &amp;stmt, NULL);</a>
+<a name="ln129">  DT_DEBUG_SQLITE3_BIND_INT(stmt, 1, imgid);</a>
+<a name="ln130">  sqlite3_step(stmt);</a>
+<a name="ln131">  sqlite3_finalize(stmt);</a>
+<a name="ln132">}</a>
+<a name="ln133"> </a>
+<a name="ln134">void dt_colorlabels_set_label(const int imgid, const int color)</a>
+<a name="ln135">{</a>
+<a name="ln136">  sqlite3_stmt *stmt;</a>
+<a name="ln137">  DT_DEBUG_SQLITE3_PREPARE_V2(dt_database_get(darktable.db),</a>
+<a name="ln138">                              &quot;INSERT INTO main.color_labels (imgid, color) VALUES (?1, ?2)&quot;, -1, &amp;stmt, NULL);</a>
+<a name="ln139">  DT_DEBUG_SQLITE3_BIND_INT(stmt, 1, imgid);</a>
+<a name="ln140">  DT_DEBUG_SQLITE3_BIND_INT(stmt, 2, color);</a>
+<a name="ln141">  sqlite3_step(stmt);</a>
+<a name="ln142">  sqlite3_finalize(stmt);</a>
+<a name="ln143">}</a>
+<a name="ln144"> </a>
+<a name="ln145">void dt_colorlabels_remove_label(const int imgid, const int color)</a>
+<a name="ln146">{</a>
+<a name="ln147">  sqlite3_stmt *stmt;</a>
+<a name="ln148">  DT_DEBUG_SQLITE3_PREPARE_V2(dt_database_get(darktable.db),</a>
+<a name="ln149">                              &quot;DELETE FROM main.color_labels WHERE imgid=?1 AND color=?2&quot;, -1, &amp;stmt, NULL);</a>
+<a name="ln150">  DT_DEBUG_SQLITE3_BIND_INT(stmt, 1, imgid);</a>
+<a name="ln151">  DT_DEBUG_SQLITE3_BIND_INT(stmt, 2, color);</a>
+<a name="ln152">  sqlite3_step(stmt);</a>
+<a name="ln153">  sqlite3_finalize(stmt);</a>
+<a name="ln154">}</a>
+<a name="ln155"> </a>
+<a name="ln156">void dt_colorlabels_toggle_label_selection(const int color)</a>
+<a name="ln157">{</a>
+<a name="ln158">  sqlite3_stmt *stmt, *stmt2;</a>
+<a name="ln159"> </a>
+<a name="ln160">  GList *undo = NULL;</a>
+<a name="ln161"> </a>
+<a name="ln162">  dt_undo_start_group(darktable.undo, DT_UNDO_COLORLABELS);</a>
+<a name="ln163"> </a>
+<a name="ln164">  // check if all images in selection have that color label, i.e. try to get those which do not have the label</a>
+<a name="ln165">  DT_DEBUG_SQLITE3_PREPARE_V2(dt_database_get(darktable.db), &quot;SELECT imgid FROM main.selected_images WHERE imgid &quot;</a>
+<a name="ln166">                                                             &quot;NOT IN (SELECT a.imgid FROM main.selected_images AS &quot;</a>
+<a name="ln167">                                                             &quot;a JOIN main.color_labels AS b ON a.imgid = b.imgid &quot;</a>
+<a name="ln168">                                                             &quot;WHERE b.color = ?1)&quot;,</a>
+<a name="ln169">                              -1, &amp;stmt, NULL);</a>
+<a name="ln170">  DT_DEBUG_SQLITE3_BIND_INT(stmt, 1, color);</a>
+<a name="ln171">  if(sqlite3_step(stmt) == SQLITE_ROW)</a>
+<a name="ln172">  {</a>
+<a name="ln173">    undo = _get_labels_selection(1 &lt;&lt; color, TRUE);</a>
+<a name="ln174">    // none or only part of images have that color label, so label them all</a>
+<a name="ln175">    DT_DEBUG_SQLITE3_PREPARE_V2(</a>
+<a name="ln176">        dt_database_get(darktable.db),</a>
+<a name="ln177">        &quot;INSERT OR IGNORE INTO main.color_labels (imgid, color) SELECT imgid, ?1 FROM main.selected_images&quot;,</a>
+<a name="ln178">        -1, &amp;stmt2, NULL);</a>
+<a name="ln179">    DT_DEBUG_SQLITE3_BIND_INT(stmt2, 1, color);</a>
+<a name="ln180">    sqlite3_step(stmt2);</a>
+<a name="ln181">    sqlite3_finalize(stmt2);</a>
+<a name="ln182">  }</a>
+<a name="ln183">  else</a>
+<a name="ln184">  {</a>
+<a name="ln185">    undo = _get_labels_selection(1 &lt;&lt; color, FALSE);</a>
+<a name="ln186">    // none of the selected images without that color label, so delete them all</a>
+<a name="ln187">    DT_DEBUG_SQLITE3_PREPARE_V2(</a>
+<a name="ln188">        dt_database_get(darktable.db),</a>
+<a name="ln189">        &quot;DELETE FROM main.color_labels WHERE imgid IN (SELECT imgid FROM main.selected_images) AND color=?1&quot;, -1,</a>
+<a name="ln190">        &amp;stmt2, NULL);</a>
+<a name="ln191">    DT_DEBUG_SQLITE3_BIND_INT(stmt2, 1, color);</a>
+<a name="ln192">    sqlite3_step(stmt2);</a>
+<a name="ln193">    sqlite3_finalize(stmt2);</a>
+<a name="ln194">  }</a>
+<a name="ln195">  sqlite3_finalize(stmt);</a>
+<a name="ln196"> </a>
+<a name="ln197">  dt_undo_record(darktable.undo, NULL, DT_UNDO_COLORLABELS, (dt_undo_data_t *)undo, &amp;_pop_undo, _colorlabels_undo_data_free);</a>
+<a name="ln198">  dt_undo_end_group(darktable.undo);</a>
+<a name="ln199"> </a>
+<a name="ln200">  dt_collection_hint_message(darktable.collection);</a>
+<a name="ln201">}</a>
+<a name="ln202"> </a>
+<a name="ln203">void dt_colorlabels_toggle_label(const int imgid, const int color)</a>
+<a name="ln204">{</a>
+<a name="ln205">  if(imgid &lt;= 0) return;</a>
+<a name="ln206">  sqlite3_stmt *stmt, *stmt2;</a>
+<a name="ln207">  GList *undo = NULL;</a>
+<a name="ln208"> </a>
+<a name="ln209">  dt_undo_start_group(darktable.undo, DT_UNDO_COLORLABELS);</a>
+<a name="ln210"> </a>
+<a name="ln211">  DT_DEBUG_SQLITE3_PREPARE_V2(dt_database_get(darktable.db),</a>
+<a name="ln212">                              &quot;SELECT * FROM main.color_labels WHERE imgid=?1 AND color=?2 LIMIT 1&quot;,</a>
+<a name="ln213">                              -1, &amp;stmt, NULL);</a>
+<a name="ln214">  DT_DEBUG_SQLITE3_BIND_INT(stmt, 1, imgid);</a>
+<a name="ln215">  DT_DEBUG_SQLITE3_BIND_INT(stmt, 2, color);</a>
+<a name="ln216">  if(sqlite3_step(stmt) == SQLITE_ROW)</a>
+<a name="ln217">  {</a>
+<a name="ln218">    undo = g_list_append(undo, _get_labels(imgid, 1 &lt;&lt; color, FALSE));</a>
+<a name="ln219">    DT_DEBUG_SQLITE3_PREPARE_V2(dt_database_get(darktable.db),</a>
+<a name="ln220">                                &quot;DELETE FROM main.color_labels WHERE imgid=?1 AND color=?2&quot;, -1, &amp;stmt2, NULL);</a>
+<a name="ln221">    DT_DEBUG_SQLITE3_BIND_INT(stmt2, 1, imgid);</a>
+<a name="ln222">    DT_DEBUG_SQLITE3_BIND_INT(stmt2, 2, color);</a>
+<a name="ln223">    sqlite3_step(stmt2);</a>
+<a name="ln224">    sqlite3_finalize(stmt2);</a>
+<a name="ln225">  }</a>
+<a name="ln226">  else</a>
+<a name="ln227">  {</a>
+<a name="ln228">    undo = g_list_append(undo, _get_labels(imgid, 1 &lt;&lt; color, TRUE));</a>
+<a name="ln229">    DT_DEBUG_SQLITE3_PREPARE_V2(dt_database_get(darktable.db),</a>
+<a name="ln230">                                &quot;INSERT INTO main.color_labels (imgid, color) VALUES (?1, ?2)&quot;, -1, &amp;stmt2, NULL);</a>
+<a name="ln231">    DT_DEBUG_SQLITE3_BIND_INT(stmt2, 1, imgid);</a>
+<a name="ln232">    DT_DEBUG_SQLITE3_BIND_INT(stmt2, 2, color);</a>
+<a name="ln233">    sqlite3_step(stmt2);</a>
+<a name="ln234">    sqlite3_finalize(stmt2);</a>
+<a name="ln235">  }</a>
+<a name="ln236">  sqlite3_finalize(stmt);</a>
+<a name="ln237"> </a>
+<a name="ln238">  dt_undo_record(darktable.undo, NULL, DT_UNDO_COLORLABELS, (dt_undo_data_t *)undo, &amp;_pop_undo, _colorlabels_undo_data_free);</a>
+<a name="ln239">  dt_undo_end_group(darktable.undo);</a>
+<a name="ln240"> </a>
+<a name="ln241">  dt_collection_hint_message(darktable.collection);</a>
+<a name="ln242">}</a>
+<a name="ln243"> </a>
+<a name="ln244">int dt_colorlabels_check_label(const int imgid, const int color)</a>
+<a name="ln245">{</a>
+<a name="ln246">  if(imgid &lt;= 0) return 0;</a>
+<a name="ln247">  sqlite3_stmt *stmt;</a>
+<a name="ln248">  DT_DEBUG_SQLITE3_PREPARE_V2(dt_database_get(darktable.db),</a>
+<a name="ln249">                              &quot;SELECT * FROM main.color_labels WHERE imgid=?1 AND color=?2 LIMIT 1&quot;,</a>
+<a name="ln250">                              -1, &amp;stmt, NULL);</a>
+<a name="ln251">  DT_DEBUG_SQLITE3_BIND_INT(stmt, 1, imgid);</a>
+<a name="ln252">  DT_DEBUG_SQLITE3_BIND_INT(stmt, 2, color);</a>
+<a name="ln253">  if(sqlite3_step(stmt) == SQLITE_ROW)</a>
+<a name="ln254">  {</a>
+<a name="ln255">    sqlite3_finalize(stmt);</a>
+<a name="ln256">    return 1;</a>
+<a name="ln257">  }</a>
+<a name="ln258">  else</a>
+<a name="ln259">  {</a>
+<a name="ln260">    sqlite3_finalize(stmt);</a>
+<a name="ln261">    return 0;</a>
+<a name="ln262">  }</a>
+<a name="ln263">}</a>
+<a name="ln264"> </a>
+<a name="ln265">gboolean dt_colorlabels_key_accel_callback(GtkAccelGroup *accel_group, GObject *acceleratable, guint keyval,</a>
+<a name="ln266">                                           GdkModifierType modifier, gpointer data)</a>
+<a name="ln267">{</a>
+<a name="ln268">  const int mode = GPOINTER_TO_INT(data);</a>
+<a name="ln269">  int32_t selected;</a>
+<a name="ln270"> </a>
+<a name="ln271">  selected = dt_view_get_image_to_act_on();</a>
+<a name="ln272"> </a>
+<a name="ln273">  if(selected &lt;= 0)</a>
+<a name="ln274">  {</a>
+<a name="ln275">    switch(mode)</a>
+<a name="ln276">    {</a>
+<a name="ln277">      case 0:</a>
+<a name="ln278">      case 1:</a>
+<a name="ln279">      case 2:</a>
+<a name="ln280">      case 3:</a>
+<a name="ln281">      case 4: // colors red, yellow, green, blue, purple</a>
+<a name="ln282">        dt_colorlabels_toggle_label_selection(mode);</a>
+<a name="ln283">        break;</a>
+<a name="ln284">      case 5:</a>
+<a name="ln285">      default: // remove all selected</a>
+<a name="ln286">        dt_colorlabels_remove_labels_selection();</a>
+<a name="ln287">        break;</a>
+<a name="ln288">    }</a>
+<a name="ln289">  }</a>
+<a name="ln290">  else</a>
+<a name="ln291">  {</a>
+<a name="ln292">    switch(mode)</a>
+<a name="ln293">    {</a>
+<a name="ln294">      case 0:</a>
+<a name="ln295">      case 1:</a>
+<a name="ln296">      case 2:</a>
+<a name="ln297">      case 3:</a>
+<a name="ln298">      case 4: // colors red, yellow, green, blue, purple</a>
+<a name="ln299">        dt_colorlabels_toggle_label(selected, mode);</a>
+<a name="ln300">        break;</a>
+<a name="ln301">      case 5:</a>
+<a name="ln302">      default: // remove all selected</a>
+<a name="ln303">        dt_colorlabels_remove_labels(selected);</a>
+<a name="ln304">        break;</a>
+<a name="ln305">    }</a>
+<a name="ln306">  }</a>
+<a name="ln307">  // synch to file:</a>
+<a name="ln308">  // TODO: move color labels to image_t cache and sync via write_get!</a>
+<a name="ln309">  dt_image_synch_xmp(selected);</a>
+<a name="ln310">  dt_control_signal_raise(darktable.signals, DT_SIGNAL_FILMROLLS_CHANGED);</a>
+<a name="ln311">  dt_control_queue_redraw_center();</a>
+<a name="ln312">  return TRUE;</a>
+<a name="ln313">}</a>
+<a name="ln314"> </a>
+<a name="ln315">// FIXME: XMP uses Red, Green, ... while we use red, green, ... What should this function return?</a>
+<a name="ln316">const char *dt_colorlabels_to_string(int label)</a>
+<a name="ln317">{</a>
+<a name="ln318">  if(label &lt; 0 || label &gt;= DT_COLORLABELS_LAST) return &quot;&quot;; // shouldn't happen</a>
+<a name="ln319">  return dt_colorlabels_name[label];</a>
+<a name="ln320">}</a>
+<a name="ln321"> </a>
+<a name="ln322">// modelines: These editor modelines have been set for all relevant files by tools/update_modelines.sh</a>
+<a name="ln323">// vim: shiftwidth=2 expandtab tabstop=2 cindent</a>
+<a name="ln324">// kate: tab-indents: off; indent-width 2; replace-tabs on; indent-mode cstyle; remove-trailing-spaces modified;</a>
+
+</code></pre>
+<div class="balloon" rel="70"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v522/" target="_blank">V522</a> There might be dereferencing of a potential null pointer 'result'. Check lines: 70, 69.</p></div>
+
+<link rel="stylesheet" href="highlight.css">
+<script src="highlight.pack.js"></script>
+<script src="highlightjs-line-numbers.js"></script>
+<script>hljs.initHighlightingOnLoad();</script>
+<script>hljs.initLineNumbersOnLoad();</script>
+<script>
+  $(document).ready(function() {
+      $('.balloon').each(function () {
+          var bl = $(this);
+          var line = bl.attr('rel');
+          var text = $('a[name="ln'+line+'"]').text();
+
+          var space_count = 0;
+          for(var i = 0; i<text.length; i++){
+              var char = text[i];
+              if((char !== ' ')&&(char !== '\t'))break;
+              if(char === '\t')space_count++;
+              space_count++;
+          }
+
+          bl.css('margin-left', space_count*8);
+          $('a[name="ln'+line+'"]').after(bl);
+      });
+
+      window.location = window.location;
+  });
+</script>
+</body>
+</html>
