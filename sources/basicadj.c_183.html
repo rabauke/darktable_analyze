@@ -1,0 +1,1754 @@
+
+<html>
+<head>
+  <link rel="stylesheet" href="../style.css"/>
+  <script src="../jquery-3.2.1.min.js"></script>
+</head>
+<body>
+<pre><code class = "cpp">
+<a name="ln1">/*</a>
+<a name="ln2">    This file is part of darktable,</a>
+<a name="ln3">    copyright (c) 2019 edgardo hoszowski.</a>
+<a name="ln4"> </a>
+<a name="ln5">    darktable is free software: you can redistribute it and/or modify</a>
+<a name="ln6">    it under the terms of the GNU General Public License as published by</a>
+<a name="ln7">    the Free Software Foundation, either version 3 of the License, or</a>
+<a name="ln8">    (at your option) any later version.</a>
+<a name="ln9"> </a>
+<a name="ln10">    darktable is distributed in the hope that it will be useful,</a>
+<a name="ln11">    but WITHOUT ANY WARRANTY; without even the implied warranty of</a>
+<a name="ln12">    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the</a>
+<a name="ln13">    GNU General Public License for more details.</a>
+<a name="ln14"> </a>
+<a name="ln15">    You should have received a copy of the GNU General Public License</a>
+<a name="ln16">    along with darktable.  If not, see &lt;http://www.gnu.org/licenses/&gt;.</a>
+<a name="ln17">*/</a>
+<a name="ln18"> </a>
+<a name="ln19">/*</a>
+<a name="ln20">    auto exposure is based on RawTherapee's Auto Levels</a>
+<a name="ln21">*/</a>
+<a name="ln22"> </a>
+<a name="ln23">#ifdef HAVE_CONFIG_H</a>
+<a name="ln24">#include &quot;config.h&quot;</a>
+<a name="ln25">#endif</a>
+<a name="ln26"> </a>
+<a name="ln27">#include &quot;bauhaus/bauhaus.h&quot;</a>
+<a name="ln28">#include &quot;common/colorspaces_inline_conversions.h&quot;</a>
+<a name="ln29">#include &quot;develop/imageop.h&quot;</a>
+<a name="ln30">#include &quot;gui/color_picker_proxy.h&quot;</a>
+<a name="ln31"> </a>
+<a name="ln32">DT_MODULE_INTROSPECTION(1, dt_iop_basicadj_params_t)</a>
+<a name="ln33"> </a>
+<a name="ln34">#define exposure2white(x) exp2f(-(x))</a>
+<a name="ln35"> </a>
+<a name="ln36">typedef enum dt_iop_basicadj_preservecolors_t</a>
+<a name="ln37">{</a>
+<a name="ln38">  DT_BASICADJ_PRESERVE_NONE = 0,</a>
+<a name="ln39">  DT_BASICADJ_PRESERVE_LUMINANCE = 1</a>
+<a name="ln40">} dt_iop_basicadj_preservecolors_t;</a>
+<a name="ln41"> </a>
+<a name="ln42">typedef struct dt_iop_basicadj_params_t</a>
+<a name="ln43">{</a>
+<a name="ln44">  float black_point;</a>
+<a name="ln45">  float exposure;</a>
+<a name="ln46">  float hlcompr;</a>
+<a name="ln47">  float hlcomprthresh;</a>
+<a name="ln48">  float contrast;</a>
+<a name="ln49">  int preserve_colors;</a>
+<a name="ln50">  float middle_grey;</a>
+<a name="ln51">  float brightness;</a>
+<a name="ln52">  float saturation;</a>
+<a name="ln53">  float clip;</a>
+<a name="ln54">} dt_iop_basicadj_params_t;</a>
+<a name="ln55"> </a>
+<a name="ln56">typedef struct dt_iop_basicadj_gui_data_t</a>
+<a name="ln57">{</a>
+<a name="ln58">  dt_pthread_mutex_t lock;</a>
+<a name="ln59">  dt_iop_basicadj_params_t params;</a>
+<a name="ln60"> </a>
+<a name="ln61">  int call_auto_exposure;                       // should we calculate exposure automatically?</a>
+<a name="ln62">  int draw_selected_region;                     // are we drawing the selected region?</a>
+<a name="ln63">  float posx_from, posx_to, posy_from, posy_to; // coordinates of the area</a>
+<a name="ln64">  float box_cood[4];                            // normalized coordinates</a>
+<a name="ln65">  int button_down;                              // user pressed the mouse button?</a>
+<a name="ln66"> </a>
+<a name="ln67">  GtkWidget *bt_auto_levels;</a>
+<a name="ln68">  GtkWidget *bt_select_region;</a>
+<a name="ln69"> </a>
+<a name="ln70">  GtkWidget *sl_black_point;</a>
+<a name="ln71">  GtkWidget *sl_exposure;</a>
+<a name="ln72">  GtkWidget *sl_hlcompr;</a>
+<a name="ln73">  GtkWidget *sl_contrast;</a>
+<a name="ln74">  GtkWidget *cmb_preserve_colors;</a>
+<a name="ln75">  GtkWidget *sl_middle_grey;</a>
+<a name="ln76">  GtkWidget *sl_brightness;</a>
+<a name="ln77">  GtkWidget *sl_saturation;</a>
+<a name="ln78">  GtkWidget *sl_clip;</a>
+<a name="ln79"> </a>
+<a name="ln80">  dt_iop_color_picker_t color_picker;</a>
+<a name="ln81">} dt_iop_basicadj_gui_data_t;</a>
+<a name="ln82"> </a>
+<a name="ln83">typedef struct dt_iop_basicadj_data_t</a>
+<a name="ln84">{</a>
+<a name="ln85">  dt_iop_basicadj_params_t params;</a>
+<a name="ln86">  float lut_gamma[0x10000];</a>
+<a name="ln87">  float lut_contrast[0x10000];</a>
+<a name="ln88">} dt_iop_basicadj_data_t;</a>
+<a name="ln89"> </a>
+<a name="ln90">typedef struct dt_iop_basicadj_global_data_t</a>
+<a name="ln91">{</a>
+<a name="ln92">  int kernel_basicadj;</a>
+<a name="ln93">} dt_iop_basicadj_global_data_t;</a>
+<a name="ln94"> </a>
+<a name="ln95">const char *name()</a>
+<a name="ln96">{</a>
+<a name="ln97">  return _(&quot;basic adjustments&quot;);</a>
+<a name="ln98">}</a>
+<a name="ln99"> </a>
+<a name="ln100">int default_group()</a>
+<a name="ln101">{</a>
+<a name="ln102">  return IOP_GROUP_BASIC;</a>
+<a name="ln103">}</a>
+<a name="ln104"> </a>
+<a name="ln105">int flags()</a>
+<a name="ln106">{</a>
+<a name="ln107">  return IOP_FLAGS_ALLOW_TILING | IOP_FLAGS_SUPPORTS_BLENDING;</a>
+<a name="ln108">}</a>
+<a name="ln109"> </a>
+<a name="ln110">int default_colorspace(dt_iop_module_t *self, dt_dev_pixelpipe_t *pipe, dt_dev_pixelpipe_iop_t *piece)</a>
+<a name="ln111">{</a>
+<a name="ln112">  return iop_cs_rgb;</a>
+<a name="ln113">}</a>
+<a name="ln114"> </a>
+<a name="ln115">static void _turn_select_region_off(struct dt_iop_module_t *self)</a>
+<a name="ln116">{</a>
+<a name="ln117">  dt_iop_basicadj_gui_data_t *g = (dt_iop_basicadj_gui_data_t *)self-&gt;gui_data;</a>
+<a name="ln118">  if(g)</a>
+<a name="ln119">  {</a>
+<a name="ln120">    g-&gt;button_down = g-&gt;draw_selected_region = 0;</a>
+<a name="ln121">    gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(g-&gt;bt_select_region), g-&gt;draw_selected_region);</a>
+<a name="ln122">  }</a>
+<a name="ln123">}</a>
+<a name="ln124"> </a>
+<a name="ln125">static void _turn_selregion_picker_off(struct dt_iop_module_t *self)</a>
+<a name="ln126">{</a>
+<a name="ln127">  _turn_select_region_off(self);</a>
+<a name="ln128">  dt_iop_color_picker_reset(self, TRUE);</a>
+<a name="ln129">}</a>
+<a name="ln130"> </a>
+<a name="ln131">static void _black_point_callback(GtkWidget *slider, dt_iop_module_t *self)</a>
+<a name="ln132">{</a>
+<a name="ln133">  if(darktable.gui-&gt;reset) return;</a>
+<a name="ln134">  dt_iop_basicadj_params_t *p = (dt_iop_basicadj_params_t *)self-&gt;params;</a>
+<a name="ln135"> </a>
+<a name="ln136">  p-&gt;black_point = dt_bauhaus_slider_get(slider);</a>
+<a name="ln137"> </a>
+<a name="ln138">  _turn_selregion_picker_off(self);</a>
+<a name="ln139"> </a>
+<a name="ln140">  dt_dev_add_history_item(darktable.develop, self, TRUE);</a>
+<a name="ln141">}</a>
+<a name="ln142"> </a>
+<a name="ln143">static void _exposure_callback(GtkWidget *slider, dt_iop_module_t *self)</a>
+<a name="ln144">{</a>
+<a name="ln145">  if(darktable.gui-&gt;reset) return;</a>
+<a name="ln146">  dt_iop_basicadj_params_t *p = (dt_iop_basicadj_params_t *)self-&gt;params;</a>
+<a name="ln147"> </a>
+<a name="ln148">  p-&gt;exposure = dt_bauhaus_slider_get(slider);</a>
+<a name="ln149"> </a>
+<a name="ln150">  _turn_selregion_picker_off(self);</a>
+<a name="ln151"> </a>
+<a name="ln152">  dt_dev_add_history_item(darktable.develop, self, TRUE);</a>
+<a name="ln153">}</a>
+<a name="ln154"> </a>
+<a name="ln155">static void _hlcompr_callback(GtkWidget *slider, dt_iop_module_t *self)</a>
+<a name="ln156">{</a>
+<a name="ln157">  if(darktable.gui-&gt;reset) return;</a>
+<a name="ln158">  dt_iop_basicadj_params_t *p = (dt_iop_basicadj_params_t *)self-&gt;params;</a>
+<a name="ln159"> </a>
+<a name="ln160">  p-&gt;hlcompr = dt_bauhaus_slider_get(slider);</a>
+<a name="ln161"> </a>
+<a name="ln162">  _turn_selregion_picker_off(self);</a>
+<a name="ln163"> </a>
+<a name="ln164">  dt_dev_add_history_item(darktable.develop, self, TRUE);</a>
+<a name="ln165">}</a>
+<a name="ln166"> </a>
+<a name="ln167">static void _contrast_callback(GtkWidget *slider, dt_iop_module_t *self)</a>
+<a name="ln168">{</a>
+<a name="ln169">  if(darktable.gui-&gt;reset) return;</a>
+<a name="ln170">  dt_iop_basicadj_params_t *p = (dt_iop_basicadj_params_t *)self-&gt;params;</a>
+<a name="ln171"> </a>
+<a name="ln172">  p-&gt;contrast = dt_bauhaus_slider_get(slider);</a>
+<a name="ln173"> </a>
+<a name="ln174">  _turn_selregion_picker_off(self);</a>
+<a name="ln175"> </a>
+<a name="ln176">  dt_dev_add_history_item(darktable.develop, self, TRUE);</a>
+<a name="ln177">}</a>
+<a name="ln178"> </a>
+<a name="ln179">static void preserve_colors_callback(GtkWidget *widget, dt_iop_module_t *self)</a>
+<a name="ln180">{</a>
+<a name="ln181">  if(darktable.gui-&gt;reset) return;</a>
+<a name="ln182">  dt_iop_basicadj_params_t *p = (dt_iop_basicadj_params_t *)self-&gt;params;</a>
+<a name="ln183"> </a>
+<a name="ln184">  p-&gt;preserve_colors = dt_bauhaus_combobox_get(widget);</a>
+<a name="ln185"> </a>
+<a name="ln186">  _turn_selregion_picker_off(self);</a>
+<a name="ln187"> </a>
+<a name="ln188">  dt_dev_add_history_item(darktable.develop, self, TRUE);</a>
+<a name="ln189">}</a>
+<a name="ln190"> </a>
+<a name="ln191">static void _middle_grey_callback(GtkWidget *slider, dt_iop_module_t *self)</a>
+<a name="ln192">{</a>
+<a name="ln193">  if(darktable.gui-&gt;reset) return;</a>
+<a name="ln194">  dt_iop_basicadj_params_t *p = (dt_iop_basicadj_params_t *)self-&gt;params;</a>
+<a name="ln195"> </a>
+<a name="ln196">  p-&gt;middle_grey = dt_bauhaus_slider_get(slider);</a>
+<a name="ln197"> </a>
+<a name="ln198">  _turn_selregion_picker_off(self);</a>
+<a name="ln199"> </a>
+<a name="ln200">  dt_dev_add_history_item(darktable.develop, self, TRUE);</a>
+<a name="ln201">}</a>
+<a name="ln202"> </a>
+<a name="ln203">static void _color_picker_callback(GtkWidget *button, dt_iop_color_picker_t *self)</a>
+<a name="ln204">{</a>
+<a name="ln205">  _turn_select_region_off(self-&gt;module);</a>
+<a name="ln206">  dt_iop_color_picker_callback(button, self);</a>
+<a name="ln207">}</a>
+<a name="ln208"> </a>
+<a name="ln209">static void _brightness_callback(GtkWidget *slider, dt_iop_module_t *self)</a>
+<a name="ln210">{</a>
+<a name="ln211">  if(darktable.gui-&gt;reset) return;</a>
+<a name="ln212">  dt_iop_basicadj_params_t *p = (dt_iop_basicadj_params_t *)self-&gt;params;</a>
+<a name="ln213"> </a>
+<a name="ln214">  p-&gt;brightness = dt_bauhaus_slider_get(slider);</a>
+<a name="ln215"> </a>
+<a name="ln216">  _turn_selregion_picker_off(self);</a>
+<a name="ln217"> </a>
+<a name="ln218">  dt_dev_add_history_item(darktable.develop, self, TRUE);</a>
+<a name="ln219">}</a>
+<a name="ln220"> </a>
+<a name="ln221">static void _saturation_callback(GtkWidget *slider, dt_iop_module_t *self)</a>
+<a name="ln222">{</a>
+<a name="ln223">  if(darktable.gui-&gt;reset) return;</a>
+<a name="ln224">  dt_iop_basicadj_params_t *p = (dt_iop_basicadj_params_t *)self-&gt;params;</a>
+<a name="ln225"> </a>
+<a name="ln226">  p-&gt;saturation = dt_bauhaus_slider_get(slider);</a>
+<a name="ln227"> </a>
+<a name="ln228">  _turn_selregion_picker_off(self);</a>
+<a name="ln229"> </a>
+<a name="ln230">  dt_dev_add_history_item(darktable.develop, self, TRUE);</a>
+<a name="ln231">}</a>
+<a name="ln232"> </a>
+<a name="ln233">static void _clip_callback(GtkWidget *slider, dt_iop_module_t *self)</a>
+<a name="ln234">{</a>
+<a name="ln235">  if(darktable.gui-&gt;reset) return;</a>
+<a name="ln236">  dt_iop_basicadj_params_t *p = (dt_iop_basicadj_params_t *)self-&gt;params;</a>
+<a name="ln237"> </a>
+<a name="ln238">  p-&gt;clip = dt_bauhaus_slider_get(slider);</a>
+<a name="ln239"> </a>
+<a name="ln240">  _turn_selregion_picker_off(self);</a>
+<a name="ln241"> </a>
+<a name="ln242">  dt_dev_add_history_item(darktable.develop, self, TRUE);</a>
+<a name="ln243">}</a>
+<a name="ln244"> </a>
+<a name="ln245">static void _auto_levels_callback(GtkButton *button, dt_iop_module_t *self)</a>
+<a name="ln246">{</a>
+<a name="ln247">  if(darktable.gui-&gt;reset) return;</a>
+<a name="ln248"> </a>
+<a name="ln249">  dt_iop_basicadj_gui_data_t *g = (dt_iop_basicadj_gui_data_t *)self-&gt;gui_data;</a>
+<a name="ln250"> </a>
+<a name="ln251">  dt_iop_request_focus(self);</a>
+<a name="ln252">  if(self-&gt;off)</a>
+<a name="ln253">  {</a>
+<a name="ln254">    gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(self-&gt;off), 1);</a>
+<a name="ln255">    dt_dev_add_history_item(darktable.develop, self, TRUE);</a>
+<a name="ln256">  }</a>
+<a name="ln257"> </a>
+<a name="ln258">  _turn_selregion_picker_off(self);</a>
+<a name="ln259"> </a>
+<a name="ln260">  dt_pthread_mutex_lock(&amp;g-&gt;lock);</a>
+<a name="ln261">  if(g-&gt;call_auto_exposure == 0)</a>
+<a name="ln262">  {</a>
+<a name="ln263">    g-&gt;box_cood[0] = g-&gt;box_cood[1] = g-&gt;box_cood[2] = g-&gt;box_cood[3] = 0.f;</a>
+<a name="ln264">    g-&gt;call_auto_exposure = 1;</a>
+<a name="ln265">  }</a>
+<a name="ln266">  dt_pthread_mutex_unlock(&amp;g-&gt;lock);</a>
+<a name="ln267"> </a>
+<a name="ln268">  dt_dev_reprocess_all(self-&gt;dev);</a>
+<a name="ln269">}</a>
+<a name="ln270"> </a>
+<a name="ln271">static void _select_region_toggled_callback(GtkToggleButton *togglebutton, dt_iop_module_t *self)</a>
+<a name="ln272">{</a>
+<a name="ln273">  if(darktable.gui-&gt;reset) return;</a>
+<a name="ln274"> </a>
+<a name="ln275">  dt_iop_basicadj_gui_data_t *g = (dt_iop_basicadj_gui_data_t *)self-&gt;gui_data;</a>
+<a name="ln276"> </a>
+<a name="ln277">  dt_iop_request_focus(self);</a>
+<a name="ln278">  if(self-&gt;off)</a>
+<a name="ln279">  {</a>
+<a name="ln280">    gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(self-&gt;off), 1);</a>
+<a name="ln281">    dt_dev_add_history_item(darktable.develop, self, TRUE);</a>
+<a name="ln282">  }</a>
+<a name="ln283"> </a>
+<a name="ln284">  dt_iop_color_picker_reset(self, TRUE);</a>
+<a name="ln285"> </a>
+<a name="ln286">  dt_pthread_mutex_lock(&amp;g-&gt;lock);</a>
+<a name="ln287"> </a>
+<a name="ln288">  if(gtk_toggle_button_get_active(togglebutton))</a>
+<a name="ln289">  {</a>
+<a name="ln290">    g-&gt;draw_selected_region = 1;</a>
+<a name="ln291">  }</a>
+<a name="ln292">  else</a>
+<a name="ln293">    g-&gt;draw_selected_region = 0;</a>
+<a name="ln294"> </a>
+<a name="ln295">  g-&gt;posx_from = g-&gt;posx_to = g-&gt;posy_from = g-&gt;posy_to = 0;</a>
+<a name="ln296"> </a>
+<a name="ln297">  dt_pthread_mutex_unlock(&amp;g-&gt;lock);</a>
+<a name="ln298">}</a>
+<a name="ln299"> </a>
+<a name="ln300">static void _develop_ui_pipe_finished_callback(gpointer instance, gpointer user_data)</a>
+<a name="ln301">{</a>
+<a name="ln302">  dt_iop_module_t *self = (dt_iop_module_t *)user_data;</a>
+<a name="ln303">  dt_iop_basicadj_params_t *p = (dt_iop_basicadj_params_t *)self-&gt;params;</a>
+<a name="ln304">  dt_iop_basicadj_gui_data_t *g = (dt_iop_basicadj_gui_data_t *)self-&gt;gui_data;</a>
+<a name="ln305"> </a>
+<a name="ln306">  if(g == NULL) return;</a>
+<a name="ln307"> </a>
+<a name="ln308">  // FIXME: this doesn't seems the right place to update params and GUI ...</a>
+<a name="ln309">  // update auto levels</a>
+<a name="ln310">  dt_pthread_mutex_lock(&amp;g-&gt;lock);</a>
+<a name="ln311">  if(g-&gt;call_auto_exposure == 2)</a>
+<a name="ln312">  {</a>
+<a name="ln313">    g-&gt;call_auto_exposure = -1;</a>
+<a name="ln314"> </a>
+<a name="ln315">    dt_pthread_mutex_unlock(&amp;g-&gt;lock);</a>
+<a name="ln316"> </a>
+<a name="ln317">    memcpy(p, &amp;g-&gt;params, sizeof(dt_iop_basicadj_params_t));</a>
+<a name="ln318"> </a>
+<a name="ln319">    dt_dev_add_history_item(darktable.develop, self, TRUE);</a>
+<a name="ln320"> </a>
+<a name="ln321">    dt_pthread_mutex_lock(&amp;g-&gt;lock);</a>
+<a name="ln322"> </a>
+<a name="ln323">    g-&gt;call_auto_exposure = 0;</a>
+<a name="ln324"> </a>
+<a name="ln325">    dt_pthread_mutex_unlock(&amp;g-&gt;lock);</a>
+<a name="ln326"> </a>
+<a name="ln327">    const int reset = darktable.gui-&gt;reset;</a>
+<a name="ln328">    darktable.gui-&gt;reset = 1;</a>
+<a name="ln329"> </a>
+<a name="ln330">    gui_update(self);</a>
+<a name="ln331"> </a>
+<a name="ln332">    darktable.gui-&gt;reset = reset;</a>
+<a name="ln333">  }</a>
+<a name="ln334">  else</a>
+<a name="ln335">  {</a>
+<a name="ln336">    dt_pthread_mutex_unlock(&amp;g-&gt;lock);</a>
+<a name="ln337">  }</a>
+<a name="ln338">}</a>
+<a name="ln339"> </a>
+<a name="ln340">static void _signal_profile_user_changed(gpointer instance, uint8_t profile_type, gpointer user_data)</a>
+<a name="ln341">{</a>
+<a name="ln342">  if(profile_type == DT_COLORSPACES_PROFILE_TYPE_WORK)</a>
+<a name="ln343">  {</a>
+<a name="ln344">    dt_iop_module_t *self = (dt_iop_module_t *)user_data;</a>
+<a name="ln345">    if(!self-&gt;enabled) return;</a>
+<a name="ln346"> </a>
+<a name="ln347">    dt_iop_basicadj_params_t *def = (dt_iop_basicadj_params_t *)self-&gt;default_params;</a>
+<a name="ln348">    dt_iop_basicadj_gui_data_t *g = (dt_iop_basicadj_gui_data_t *)self-&gt;gui_data;</a>
+<a name="ln349"> </a>
+<a name="ln350">    const dt_iop_order_iccprofile_info_t *const work_profile</a>
+<a name="ln351">        = dt_ioppr_get_iop_work_profile_info(self, self-&gt;dev-&gt;iop);</a>
+<a name="ln352">    const float def_middle_grey</a>
+<a name="ln353">        = (work_profile) ? (dt_ioppr_get_profile_info_middle_grey(work_profile) * 100.f) : 18.42f;</a>
+<a name="ln354"> </a>
+<a name="ln355">    if(def-&gt;middle_grey != def_middle_grey)</a>
+<a name="ln356">    {</a>
+<a name="ln357">      def-&gt;middle_grey = def_middle_grey;</a>
+<a name="ln358"> </a>
+<a name="ln359">      if(g)</a>
+<a name="ln360">      {</a>
+<a name="ln361">        const int reset = darktable.gui-&gt;reset;</a>
+<a name="ln362">        darktable.gui-&gt;reset = 1;</a>
+<a name="ln363"> </a>
+<a name="ln364">        dt_bauhaus_slider_set_default(g-&gt;sl_middle_grey, def_middle_grey);</a>
+<a name="ln365"> </a>
+<a name="ln366">        darktable.gui-&gt;reset = reset;</a>
+<a name="ln367">      }</a>
+<a name="ln368">    }</a>
+<a name="ln369">  }</a>
+<a name="ln370">}</a>
+<a name="ln371"> </a>
+<a name="ln372">int mouse_moved(struct dt_iop_module_t *self, double x, double y, double pressure, int which)</a>
+<a name="ln373">{</a>
+<a name="ln374">  int handled = 0;</a>
+<a name="ln375">  dt_iop_basicadj_gui_data_t *g = (dt_iop_basicadj_gui_data_t *)self-&gt;gui_data;</a>
+<a name="ln376">  if(g &amp;&amp; g-&gt;draw_selected_region &amp;&amp; g-&gt;button_down &amp;&amp; self-&gt;enabled)</a>
+<a name="ln377">  {</a>
+<a name="ln378">    float pzx, pzy;</a>
+<a name="ln379">    dt_dev_get_pointer_zoom_pos(darktable.develop, x, y, &amp;pzx, &amp;pzy);</a>
+<a name="ln380">    pzx += 0.5f;</a>
+<a name="ln381">    pzy += 0.5f;</a>
+<a name="ln382"> </a>
+<a name="ln383">    g-&gt;posx_to = pzx * darktable.develop-&gt;preview_pipe-&gt;backbuf_width;</a>
+<a name="ln384">    g-&gt;posy_to = pzy * darktable.develop-&gt;preview_pipe-&gt;backbuf_height;</a>
+<a name="ln385"> </a>
+<a name="ln386">    dt_control_queue_redraw_center();</a>
+<a name="ln387"> </a>
+<a name="ln388">    handled = 1;</a>
+<a name="ln389">  }</a>
+<a name="ln390"> </a>
+<a name="ln391">  return handled;</a>
+<a name="ln392">}</a>
+<a name="ln393"> </a>
+<a name="ln394">int button_released(struct dt_iop_module_t *self, double x, double y, int which, uint32_t state)</a>
+<a name="ln395">{</a>
+<a name="ln396">  int handled = 0;</a>
+<a name="ln397">  dt_iop_basicadj_gui_data_t *g = (dt_iop_basicadj_gui_data_t *)self-&gt;gui_data;</a>
+<a name="ln398">  if(g &amp;&amp; g-&gt;draw_selected_region &amp;&amp; self-&gt;enabled)</a>
+<a name="ln399">  {</a>
+<a name="ln400">    if(fabsf(g-&gt;posx_from - g-&gt;posx_to) &gt; 1 &amp;&amp; fabsf(g-&gt;posy_from - g-&gt;posy_to) &gt; 1)</a>
+<a name="ln401">    {</a>
+<a name="ln402">      g-&gt;box_cood[0] = g-&gt;posx_from;</a>
+<a name="ln403">      g-&gt;box_cood[1] = g-&gt;posy_from;</a>
+<a name="ln404">      g-&gt;box_cood[2] = g-&gt;posx_to;</a>
+<a name="ln405">      g-&gt;box_cood[3] = g-&gt;posy_to;</a>
+<a name="ln406">      dt_dev_distort_backtransform(darktable.develop, g-&gt;box_cood, 2);</a>
+<a name="ln407">      g-&gt;box_cood[0] /= darktable.develop-&gt;preview_pipe-&gt;iwidth;</a>
+<a name="ln408">      g-&gt;box_cood[1] /= darktable.develop-&gt;preview_pipe-&gt;iheight;</a>
+<a name="ln409">      g-&gt;box_cood[2] /= darktable.develop-&gt;preview_pipe-&gt;iwidth;</a>
+<a name="ln410">      g-&gt;box_cood[3] /= darktable.develop-&gt;preview_pipe-&gt;iheight;</a>
+<a name="ln411"> </a>
+<a name="ln412">      g-&gt;button_down = 0;</a>
+<a name="ln413">      g-&gt;call_auto_exposure = 1;</a>
+<a name="ln414"> </a>
+<a name="ln415">      dt_dev_reprocess_all(self-&gt;dev);</a>
+<a name="ln416">    }</a>
+<a name="ln417">    else</a>
+<a name="ln418">      g-&gt;button_down = 0;</a>
+<a name="ln419"> </a>
+<a name="ln420">    handled = 1;</a>
+<a name="ln421">  }</a>
+<a name="ln422"> </a>
+<a name="ln423">  return handled;</a>
+<a name="ln424">}</a>
+<a name="ln425"> </a>
+<a name="ln426">int button_pressed(struct dt_iop_module_t *self, double x, double y, double pressure, int which, int type,</a>
+<a name="ln427">                   uint32_t state)</a>
+<a name="ln428">{</a>
+<a name="ln429">  int handled = 0;</a>
+<a name="ln430">  dt_iop_basicadj_gui_data_t *g = (dt_iop_basicadj_gui_data_t *)self-&gt;gui_data;</a>
+<a name="ln431">  if(g &amp;&amp; g-&gt;draw_selected_region &amp;&amp; self-&gt;enabled)</a>
+<a name="ln432">  {</a>
+<a name="ln433">    if((which == 3) || (which == 1 &amp;&amp; type == GDK_2BUTTON_PRESS))</a>
+<a name="ln434">    {</a>
+<a name="ln435">      _turn_selregion_picker_off(self);</a>
+<a name="ln436"> </a>
+<a name="ln437">      handled = 1;</a>
+<a name="ln438">    }</a>
+<a name="ln439">    else if(which == 1)</a>
+<a name="ln440">    {</a>
+<a name="ln441">      float pzx, pzy;</a>
+<a name="ln442">      dt_dev_get_pointer_zoom_pos(darktable.develop, x, y, &amp;pzx, &amp;pzy);</a>
+<a name="ln443">      pzx += 0.5f;</a>
+<a name="ln444">      pzy += 0.5f;</a>
+<a name="ln445"> </a>
+<a name="ln446">      g-&gt;posx_from = g-&gt;posx_to = pzx * darktable.develop-&gt;preview_pipe-&gt;backbuf_width;</a>
+<a name="ln447">      g-&gt;posy_from = g-&gt;posy_to = pzy * darktable.develop-&gt;preview_pipe-&gt;backbuf_height;</a>
+<a name="ln448"> </a>
+<a name="ln449">      g-&gt;button_down = 1;</a>
+<a name="ln450"> </a>
+<a name="ln451">      handled = 1;</a>
+<a name="ln452">    }</a>
+<a name="ln453">  }</a>
+<a name="ln454"> </a>
+<a name="ln455">  return handled;</a>
+<a name="ln456">}</a>
+<a name="ln457"> </a>
+<a name="ln458">void gui_post_expose(struct dt_iop_module_t *self, cairo_t *cr, int32_t width, int32_t height, int32_t pointerx,</a>
+<a name="ln459">                     int32_t pointery)</a>
+<a name="ln460">{</a>
+<a name="ln461">  dt_iop_basicadj_gui_data_t *g = (dt_iop_basicadj_gui_data_t *)self-&gt;gui_data;</a>
+<a name="ln462">  if(g == NULL || !self-&gt;enabled) return;</a>
+<a name="ln463">  if(!g-&gt;draw_selected_region || !g-&gt;button_down) return;</a>
+<a name="ln464">  if(g-&gt;posx_from == g-&gt;posx_to &amp;&amp; g-&gt;posy_from == g-&gt;posy_to) return;</a>
+<a name="ln465"> </a>
+<a name="ln466">  dt_develop_t *dev = darktable.develop;</a>
+<a name="ln467">  const float wd = dev-&gt;preview_pipe-&gt;backbuf_width;</a>
+<a name="ln468">  const float ht = dev-&gt;preview_pipe-&gt;backbuf_height;</a>
+<a name="ln469">  const float zoom_y = dt_control_get_dev_zoom_y();</a>
+<a name="ln470">  const float zoom_x = dt_control_get_dev_zoom_x();</a>
+<a name="ln471">  const dt_dev_zoom_t zoom = dt_control_get_dev_zoom();</a>
+<a name="ln472">  const int closeup = dt_control_get_dev_closeup();</a>
+<a name="ln473">  const float zoom_scale = dt_dev_get_zoom_scale(dev, zoom, 1 &lt;&lt; closeup, 1);</a>
+<a name="ln474"> </a>
+<a name="ln475">  const float posx_from = fmin(g-&gt;posx_from, g-&gt;posx_to);</a>
+<a name="ln476">  const float posx_to = fmax(g-&gt;posx_from, g-&gt;posx_to);</a>
+<a name="ln477">  const float posy_from = fmin(g-&gt;posy_from, g-&gt;posy_to);</a>
+<a name="ln478">  const float posy_to = fmax(g-&gt;posy_from, g-&gt;posy_to);</a>
+<a name="ln479"> </a>
+<a name="ln480">  cairo_save(cr);</a>
+<a name="ln481">  cairo_set_line_width(cr, 1.0 / zoom_scale);</a>
+<a name="ln482">  cairo_set_source_rgb(cr, .2, .2, .2);</a>
+<a name="ln483"> </a>
+<a name="ln484">  cairo_translate(cr, width / 2.0, height / 2.0f);</a>
+<a name="ln485">  cairo_scale(cr, zoom_scale, zoom_scale);</a>
+<a name="ln486">  cairo_translate(cr, -.5f * wd - zoom_x * wd, -.5f * ht - zoom_y * ht);</a>
+<a name="ln487"> </a>
+<a name="ln488">  cairo_set_line_cap(cr, CAIRO_LINE_CAP_ROUND);</a>
+<a name="ln489"> </a>
+<a name="ln490">  cairo_rectangle(cr, posx_from, posy_from, (posx_to - posx_from), (posy_to - posy_from));</a>
+<a name="ln491">  cairo_stroke(cr);</a>
+<a name="ln492">  cairo_translate(cr, 1.0 / zoom_scale, 1.0 / zoom_scale);</a>
+<a name="ln493">  cairo_set_source_rgb(cr, .8, .8, .8);</a>
+<a name="ln494">  cairo_rectangle(cr, posx_from + 1.0 / zoom_scale, posy_from, (posx_to - posx_from) - 3. / zoom_scale,</a>
+<a name="ln495">                  (posy_to - posy_from) - 2. / zoom_scale);</a>
+<a name="ln496">  cairo_stroke(cr);</a>
+<a name="ln497"> </a>
+<a name="ln498">  cairo_restore(cr);</a>
+<a name="ln499">}</a>
+<a name="ln500"> </a>
+<a name="ln501">void init_global(dt_iop_module_so_t *module)</a>
+<a name="ln502">{</a>
+<a name="ln503">  const int program = 24; // basicadj.cl, from programs.conf</a>
+<a name="ln504">  dt_iop_basicadj_global_data_t *gd</a>
+<a name="ln505">      = (dt_iop_basicadj_global_data_t *)malloc(sizeof(dt_iop_basicadj_global_data_t));</a>
+<a name="ln506">  module-&gt;data = gd;</a>
+<a name="ln507"> </a>
+<a name="ln508">  gd-&gt;kernel_basicadj = dt_opencl_create_kernel(program, &quot;basicadj&quot;);</a>
+<a name="ln509">}</a>
+<a name="ln510"> </a>
+<a name="ln511">void cleanup_global(dt_iop_module_so_t *module)</a>
+<a name="ln512">{</a>
+<a name="ln513">  dt_iop_basicadj_global_data_t *gd = (dt_iop_basicadj_global_data_t *)module-&gt;data;</a>
+<a name="ln514">  dt_opencl_free_kernel(gd-&gt;kernel_basicadj);</a>
+<a name="ln515">  free(module-&gt;data);</a>
+<a name="ln516">  module-&gt;data = NULL;</a>
+<a name="ln517">}</a>
+<a name="ln518"> </a>
+<a name="ln519">static void _iop_color_picker_apply(struct dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece)</a>
+<a name="ln520">{</a>
+<a name="ln521">  if(self-&gt;dt-&gt;gui-&gt;reset) return;</a>
+<a name="ln522">  dt_iop_basicadj_params_t *p = (dt_iop_basicadj_params_t *)self-&gt;params;</a>
+<a name="ln523">  dt_iop_basicadj_gui_data_t *g = (dt_iop_basicadj_gui_data_t *)self-&gt;gui_data;</a>
+<a name="ln524"> </a>
+<a name="ln525">  const dt_iop_order_iccprofile_info_t *const work_profile = dt_ioppr_get_pipe_work_profile_info(piece-&gt;pipe);</a>
+<a name="ln526">  p-&gt;middle_grey = (work_profile) ? (dt_ioppr_get_rgb_matrix_luminance(self-&gt;picked_color, work_profile) * 100.f)</a>
+<a name="ln527">                                  : dt_camera_rgb_luminance(self-&gt;picked_color);</a>
+<a name="ln528"> </a>
+<a name="ln529">  darktable.gui-&gt;reset = 1;</a>
+<a name="ln530">  dt_bauhaus_slider_set(g-&gt;sl_middle_grey, p-&gt;middle_grey);</a>
+<a name="ln531">  darktable.gui-&gt;reset = 0;</a>
+<a name="ln532"> </a>
+<a name="ln533">  dt_dev_add_history_item(darktable.develop, self, TRUE);</a>
+<a name="ln534">}</a>
+<a name="ln535"> </a>
+<a name="ln536">static inline float get_gamma(const float x, const float gamma)</a>
+<a name="ln537">{</a>
+<a name="ln538">  return powf(x, gamma);</a>
+<a name="ln539">}</a>
+<a name="ln540"> </a>
+<a name="ln541">static inline float get_lut_gamma(const float x, const float gamma, const float *const lut)</a>
+<a name="ln542">{</a>
+<a name="ln543">  return (x &gt; 1.f) ? get_gamma(x, gamma) : lut[CLAMP((int)(x * 0x10000ul), 0, 0xffff)];</a>
+<a name="ln544">}</a>
+<a name="ln545"> </a>
+<a name="ln546">static inline float get_contrast(const float x, const float contrast, const float middle_grey,</a>
+<a name="ln547">                                 const float inv_middle_grey)</a>
+<a name="ln548">{</a>
+<a name="ln549">  return powf(x * inv_middle_grey, contrast) * middle_grey;</a>
+<a name="ln550">}</a>
+<a name="ln551"> </a>
+<a name="ln552">static inline float get_lut_contrast(const float x, const float contrast, const float middle_grey,</a>
+<a name="ln553">                                     const float inv_middle_grey, const float *const lut)</a>
+<a name="ln554">{</a>
+<a name="ln555">  return (x &gt; 1.f) ? get_contrast(x, contrast, middle_grey, inv_middle_grey)</a>
+<a name="ln556">                   : lut[CLAMP((int)(x * 0x10000ul), 0, 0xffff)];</a>
+<a name="ln557">}</a>
+<a name="ln558"> </a>
+<a name="ln559">void commit_params(struct dt_iop_module_t *self, dt_iop_params_t *params, dt_dev_pixelpipe_t *pipe,</a>
+<a name="ln560">                   dt_dev_pixelpipe_iop_t *piece)</a>
+<a name="ln561">{</a>
+<a name="ln562">  dt_iop_basicadj_data_t *d = (dt_iop_basicadj_data_t *)piece-&gt;data;</a>
+<a name="ln563">  dt_iop_basicadj_params_t *p = (dt_iop_basicadj_params_t *)params;</a>
+<a name="ln564"> </a>
+<a name="ln565">  memcpy(&amp;d-&gt;params, params, sizeof(dt_iop_basicadj_params_t));</a>
+<a name="ln566"> </a>
+<a name="ln567">  const float brightness = p-&gt;brightness * 2.f;</a>
+<a name="ln568">  const float gamma = (brightness &gt;= 0.0f) ? 1.0f / (1.0f + brightness) : (1.0f - brightness);</a>
+<a name="ln569">  const float contrast = p-&gt;contrast + 1.0f;</a>
+<a name="ln570">  const float middle_grey = (p-&gt;middle_grey &gt; 0.f) ? (p-&gt;middle_grey / 100.f) : 0.1842f;</a>
+<a name="ln571">  const float inv_middle_grey = 1.f / middle_grey;</a>
+<a name="ln572"> </a>
+<a name="ln573">  const int process_gamma = (p-&gt;brightness != 0.f);</a>
+<a name="ln574">  const int plain_contrast = (!p-&gt;preserve_colors &amp;&amp; p-&gt;contrast != 0.f);</a>
+<a name="ln575"> </a>
+<a name="ln576">  // Building the lut for values in the [0,1] range</a>
+<a name="ln577">  if(process_gamma || plain_contrast)</a>
+<a name="ln578">  {</a>
+<a name="ln579">    for(unsigned int i = 0; i &lt; 0x10000; i++)</a>
+<a name="ln580">    {</a>
+<a name="ln581">      const float percentage = (float)i / (float)0x10000ul;</a>
+<a name="ln582">      if(process_gamma) d-&gt;lut_gamma[i] = get_gamma(percentage, gamma);</a>
+<a name="ln583">      if(plain_contrast) d-&gt;lut_contrast[i] = get_contrast(percentage, contrast, middle_grey, inv_middle_grey);</a>
+<a name="ln584">    }</a>
+<a name="ln585">  }</a>
+<a name="ln586">}</a>
+<a name="ln587"> </a>
+<a name="ln588">void init_pipe(struct dt_iop_module_t *self, dt_dev_pixelpipe_t *pipe, dt_dev_pixelpipe_iop_t *piece)</a>
+<a name="ln589">{</a>
+<a name="ln590">  piece-&gt;data = malloc(sizeof(dt_iop_basicadj_data_t));</a>
+<a name="ln591">  self-&gt;commit_params(self, self-&gt;default_params, pipe, piece);</a>
+<a name="ln592">}</a>
+<a name="ln593"> </a>
+<a name="ln594">void cleanup_pipe(struct dt_iop_module_t *self, dt_dev_pixelpipe_t *pipe, dt_dev_pixelpipe_iop_t *piece)</a>
+<a name="ln595">{</a>
+<a name="ln596">  free(piece-&gt;data);</a>
+<a name="ln597">  piece-&gt;data = NULL;</a>
+<a name="ln598">}</a>
+<a name="ln599"> </a>
+<a name="ln600">void gui_update(struct dt_iop_module_t *self)</a>
+<a name="ln601">{</a>
+<a name="ln602">  dt_iop_basicadj_gui_data_t *g = (dt_iop_basicadj_gui_data_t *)self-&gt;gui_data;</a>
+<a name="ln603">  dt_iop_basicadj_params_t *p = (dt_iop_basicadj_params_t *)self-&gt;params;</a>
+<a name="ln604"> </a>
+<a name="ln605">  dt_bauhaus_slider_set(g-&gt;sl_black_point, p-&gt;black_point);</a>
+<a name="ln606">  dt_bauhaus_slider_set(g-&gt;sl_exposure, p-&gt;exposure);</a>
+<a name="ln607">  dt_bauhaus_slider_set(g-&gt;sl_hlcompr, p-&gt;hlcompr);</a>
+<a name="ln608">  dt_bauhaus_slider_set(g-&gt;sl_contrast, p-&gt;contrast);</a>
+<a name="ln609">  dt_bauhaus_combobox_set(g-&gt;cmb_preserve_colors, p-&gt;preserve_colors);</a>
+<a name="ln610">  dt_bauhaus_slider_set(g-&gt;sl_middle_grey, p-&gt;middle_grey);</a>
+<a name="ln611">  dt_bauhaus_slider_set(g-&gt;sl_brightness, p-&gt;brightness);</a>
+<a name="ln612">  dt_bauhaus_slider_set(g-&gt;sl_saturation, p-&gt;saturation);</a>
+<a name="ln613">  dt_bauhaus_slider_set(g-&gt;sl_clip, p-&gt;clip);</a>
+<a name="ln614"> </a>
+<a name="ln615">  gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(g-&gt;bt_select_region), g-&gt;draw_selected_region);</a>
+<a name="ln616">}</a>
+<a name="ln617"> </a>
+<a name="ln618">void init(dt_iop_module_t *module)</a>
+<a name="ln619">{</a>
+<a name="ln620">  module-&gt;params = calloc(1, sizeof(dt_iop_basicadj_params_t));</a>
+<a name="ln621">  module-&gt;default_params = calloc(1, sizeof(dt_iop_basicadj_params_t));</a>
+<a name="ln622">  module-&gt;default_enabled = 0;</a>
+<a name="ln623">  module-&gt;params_size = sizeof(dt_iop_basicadj_params_t);</a>
+<a name="ln624">  module-&gt;gui_data = NULL;</a>
+<a name="ln625"> </a>
+<a name="ln626">  dt_iop_basicadj_params_t tmp = { 0 };</a>
+<a name="ln627">  tmp.preserve_colors = DT_BASICADJ_PRESERVE_LUMINANCE;</a>
+<a name="ln628">  tmp.middle_grey = 18.42f;</a>
+<a name="ln629"> </a>
+<a name="ln630">  memcpy(module-&gt;params, &amp;tmp, sizeof(dt_iop_basicadj_params_t));</a>
+<a name="ln631">  memcpy(module-&gt;default_params, &amp;tmp, sizeof(dt_iop_basicadj_params_t));</a>
+<a name="ln632">}</a>
+<a name="ln633"> </a>
+<a name="ln634">void cleanup(dt_iop_module_t *module)</a>
+<a name="ln635">{</a>
+<a name="ln636">  free(module-&gt;params);</a>
+<a name="ln637">  module-&gt;params = NULL;</a>
+<a name="ln638">}</a>
+<a name="ln639"> </a>
+<a name="ln640">void gui_focus(struct dt_iop_module_t *self, gboolean in)</a>
+<a name="ln641">{</a>
+<a name="ln642">  if(!in) _turn_selregion_picker_off(self);</a>
+<a name="ln643">}</a>
+<a name="ln644"> </a>
+<a name="ln645">void change_image(struct dt_iop_module_t *self)</a>
+<a name="ln646">{</a>
+<a name="ln647">  dt_iop_basicadj_gui_data_t *g = (dt_iop_basicadj_gui_data_t *)self-&gt;gui_data;</a>
+<a name="ln648"> </a>
+<a name="ln649">  g-&gt;call_auto_exposure = 0;</a>
+<a name="ln650">  g-&gt;draw_selected_region = 0;</a>
+<a name="ln651">  g-&gt;posx_from = g-&gt;posx_to = g-&gt;posy_from = g-&gt;posy_to = 0.f;</a>
+<a name="ln652">  g-&gt;box_cood[0] = g-&gt;box_cood[1] = g-&gt;box_cood[2] = g-&gt;box_cood[3] = 0.f;</a>
+<a name="ln653">  g-&gt;button_down = 0;</a>
+<a name="ln654">}</a>
+<a name="ln655"> </a>
+<a name="ln656">void gui_init(struct dt_iop_module_t *self)</a>
+<a name="ln657">{</a>
+<a name="ln658">  self-&gt;gui_data = malloc(sizeof(dt_iop_basicadj_gui_data_t));</a>
+<a name="ln659">  dt_iop_basicadj_gui_data_t *g = (dt_iop_basicadj_gui_data_t *)self-&gt;gui_data;</a>
+<a name="ln660">  dt_iop_basicadj_params_t *p = (dt_iop_basicadj_params_t *)self-&gt;params;</a>
+<a name="ln661"> </a>
+<a name="ln662">  dt_pthread_mutex_init(&amp;g-&gt;lock, NULL);</a>
+<a name="ln663">  change_image(self);</a>
+<a name="ln664"> </a>
+<a name="ln665">  self-&gt;widget = GTK_WIDGET(gtk_box_new(GTK_ORIENTATION_VERTICAL, DT_BAUHAUS_SPACE));</a>
+<a name="ln666"> </a>
+<a name="ln667">  g-&gt;sl_black_point = dt_bauhaus_slider_new_with_range(self, -0.10, 0.10, .001, p-&gt;black_point, 4);</a>
+<a name="ln668">  dt_bauhaus_slider_enable_soft_boundaries(g-&gt;sl_black_point, -1.0, 1.0);</a>
+<a name="ln669">  dt_bauhaus_widget_set_label(g-&gt;sl_black_point, NULL, _(&quot;black level correction&quot;));</a>
+<a name="ln670">  dt_bauhaus_slider_set_format(g-&gt;sl_black_point, &quot;%.4f&quot;);</a>
+<a name="ln671">  g_object_set(g-&gt;sl_black_point, &quot;tooltip-text&quot;, _(&quot;adjust the black level to unclip negative RGB values.\n&quot;</a>
+<a name="ln672">                                                    &quot;you should never use it to add more density in blacks!\n&quot;</a>
+<a name="ln673">                                                    &quot;if poorly set, it will clip near-black colors out of gamut\n&quot;</a>
+<a name="ln674">                                                    &quot;by pushing RGB values into negatives&quot;),</a>
+<a name="ln675">               (char *)NULL);</a>
+<a name="ln676">  g_signal_connect(G_OBJECT(g-&gt;sl_black_point), &quot;value-changed&quot;, G_CALLBACK(_black_point_callback), self);</a>
+<a name="ln677">  gtk_box_pack_start(GTK_BOX(self-&gt;widget), g-&gt;sl_black_point, TRUE, TRUE, 0);</a>
+<a name="ln678"> </a>
+<a name="ln679">  g-&gt;sl_exposure = dt_bauhaus_slider_new_with_range(self, -4.0, 4.0, .02, p-&gt;exposure, 2);</a>
+<a name="ln680">  dt_bauhaus_slider_enable_soft_boundaries(g-&gt;sl_exposure, -18.0, 18.0);</a>
+<a name="ln681">  dt_bauhaus_widget_set_label(g-&gt;sl_exposure, NULL, _(&quot;exposure&quot;));</a>
+<a name="ln682">  dt_bauhaus_slider_set_format(g-&gt;sl_exposure, &quot;%.2fEV&quot;);</a>
+<a name="ln683">  g_object_set(g-&gt;sl_exposure, &quot;tooltip-text&quot;, _(&quot;adjust the exposure correction&quot;), (char *)NULL);</a>
+<a name="ln684">  g_signal_connect(G_OBJECT(g-&gt;sl_exposure), &quot;value-changed&quot;, G_CALLBACK(_exposure_callback), self);</a>
+<a name="ln685">  gtk_box_pack_start(GTK_BOX(self-&gt;widget), g-&gt;sl_exposure, TRUE, TRUE, 0);</a>
+<a name="ln686"> </a>
+<a name="ln687">  g-&gt;sl_hlcompr = dt_bauhaus_slider_new_with_range(self, 0.0, 100.0, 1.0, p-&gt;hlcompr, 2);</a>
+<a name="ln688">  dt_bauhaus_slider_enable_soft_boundaries(g-&gt;sl_hlcompr, 0.0, 500.0);</a>
+<a name="ln689">  dt_bauhaus_widget_set_label(g-&gt;sl_hlcompr, NULL, _(&quot;highlight compression&quot;));</a>
+<a name="ln690">  g_object_set(g-&gt;sl_hlcompr, &quot;tooltip-text&quot;, _(&quot;highlight compression adjustment&quot;), (char *)NULL);</a>
+<a name="ln691">  g_signal_connect(G_OBJECT(g-&gt;sl_hlcompr), &quot;value-changed&quot;, G_CALLBACK(_hlcompr_callback), self);</a>
+<a name="ln692">  gtk_box_pack_start(GTK_BOX(self-&gt;widget), g-&gt;sl_hlcompr, TRUE, TRUE, 0);</a>
+<a name="ln693"> </a>
+<a name="ln694">  g-&gt;sl_contrast = dt_bauhaus_slider_new_with_range(self, -1.0, 1.0, .01, p-&gt;contrast, 2);</a>
+<a name="ln695">  dt_bauhaus_slider_enable_soft_boundaries(g-&gt;sl_contrast, -1.0, 5.0);</a>
+<a name="ln696">  dt_bauhaus_widget_set_label(g-&gt;sl_contrast, NULL, _(&quot;contrast&quot;));</a>
+<a name="ln697">  g_object_set(g-&gt;sl_contrast, &quot;tooltip-text&quot;, _(&quot;contrast adjustment&quot;), (char *)NULL);</a>
+<a name="ln698">  g_signal_connect(G_OBJECT(g-&gt;sl_contrast), &quot;value-changed&quot;, G_CALLBACK(_contrast_callback), self);</a>
+<a name="ln699">  gtk_box_pack_start(GTK_BOX(self-&gt;widget), g-&gt;sl_contrast, TRUE, TRUE, 0);</a>
+<a name="ln700"> </a>
+<a name="ln701">  g-&gt;cmb_preserve_colors = dt_bauhaus_combobox_new(self);</a>
+<a name="ln702">  dt_bauhaus_widget_set_label(g-&gt;cmb_preserve_colors, NULL, _(&quot;preserve colors&quot;));</a>
+<a name="ln703">  dt_bauhaus_combobox_add(g-&gt;cmb_preserve_colors, _(&quot;none&quot;));</a>
+<a name="ln704">  dt_bauhaus_combobox_add(g-&gt;cmb_preserve_colors, _(&quot;luminance&quot;));</a>
+<a name="ln705">  gtk_box_pack_start(GTK_BOX(self-&gt;widget), g-&gt;cmb_preserve_colors, TRUE, TRUE, 0);</a>
+<a name="ln706">  gtk_widget_set_tooltip_text(g-&gt;cmb_preserve_colors, _(&quot;method to preserve colors when applying contrast&quot;));</a>
+<a name="ln707">  g_signal_connect(G_OBJECT(g-&gt;cmb_preserve_colors), &quot;value-changed&quot;, G_CALLBACK(preserve_colors_callback), self);</a>
+<a name="ln708"> </a>
+<a name="ln709">  g-&gt;sl_middle_grey = dt_bauhaus_slider_new_with_range(self, 0.05, 100.0, .5, p-&gt;middle_grey, 2);</a>
+<a name="ln710">  dt_bauhaus_widget_set_label(g-&gt;sl_middle_grey, NULL, _(&quot;middle grey&quot;));</a>
+<a name="ln711">  dt_bauhaus_slider_set_format(g-&gt;sl_middle_grey, &quot;%.2f %%&quot;);</a>
+<a name="ln712">  g_object_set(g-&gt;sl_middle_grey, &quot;tooltip-text&quot;, _(&quot;middle grey adjustment&quot;), (char *)NULL);</a>
+<a name="ln713">  g_signal_connect(G_OBJECT(g-&gt;sl_middle_grey), &quot;value-changed&quot;, G_CALLBACK(_middle_grey_callback), self);</a>
+<a name="ln714">  gtk_box_pack_start(GTK_BOX(self-&gt;widget), g-&gt;sl_middle_grey, TRUE, TRUE, 0);</a>
+<a name="ln715"> </a>
+<a name="ln716">  dt_bauhaus_widget_set_quad_paint(g-&gt;sl_middle_grey, dtgtk_cairo_paint_colorpicker,</a>
+<a name="ln717">                                   CPF_STYLE_FLAT | CPF_DO_NOT_USE_BORDER, NULL);</a>
+<a name="ln718">  dt_bauhaus_widget_set_quad_toggle(g-&gt;sl_middle_grey, TRUE);</a>
+<a name="ln719">  g_signal_connect(G_OBJECT(g-&gt;sl_middle_grey), &quot;quad-pressed&quot;, G_CALLBACK(_color_picker_callback),</a>
+<a name="ln720">                   &amp;g-&gt;color_picker);</a>
+<a name="ln721"> </a>
+<a name="ln722">  g-&gt;sl_brightness = dt_bauhaus_slider_new_with_range(self, -1.0, 1.0, .01, p-&gt;brightness, 2);</a>
+<a name="ln723">  dt_bauhaus_slider_enable_soft_boundaries(g-&gt;sl_brightness, -4.0, 4.0);</a>
+<a name="ln724">  dt_bauhaus_widget_set_label(g-&gt;sl_brightness, NULL, _(&quot;brightness&quot;));</a>
+<a name="ln725">  g_object_set(g-&gt;sl_brightness, &quot;tooltip-text&quot;, _(&quot;brightness adjustment&quot;), (char *)NULL);</a>
+<a name="ln726">  g_signal_connect(G_OBJECT(g-&gt;sl_brightness), &quot;value-changed&quot;, G_CALLBACK(_brightness_callback), self);</a>
+<a name="ln727">  gtk_box_pack_start(GTK_BOX(self-&gt;widget), g-&gt;sl_brightness, TRUE, TRUE, 0);</a>
+<a name="ln728"> </a>
+<a name="ln729">  g-&gt;sl_saturation = dt_bauhaus_slider_new_with_range(self, -1.0, 1.0, .01, p-&gt;saturation, 2);</a>
+<a name="ln730">  dt_bauhaus_widget_set_label(g-&gt;sl_saturation, NULL, _(&quot;saturation&quot;));</a>
+<a name="ln731">  g_object_set(g-&gt;sl_saturation, &quot;tooltip-text&quot;, _(&quot;saturation adjustment&quot;), (char *)NULL);</a>
+<a name="ln732">  g_signal_connect(G_OBJECT(g-&gt;sl_saturation), &quot;value-changed&quot;, G_CALLBACK(_saturation_callback), self);</a>
+<a name="ln733">  gtk_box_pack_start(GTK_BOX(self-&gt;widget), g-&gt;sl_saturation, TRUE, TRUE, 0);</a>
+<a name="ln734"> </a>
+<a name="ln735">  GtkWidget *autolevels_box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, DT_PIXEL_APPLY_DPI(10));</a>
+<a name="ln736"> </a>
+<a name="ln737">  g-&gt;bt_auto_levels = gtk_button_new_with_label(_(&quot;auto&quot;));</a>
+<a name="ln738">  g_object_set(G_OBJECT(g-&gt;bt_auto_levels), &quot;tooltip-text&quot;, _(&quot;apply auto exposure based on the entire image&quot;),</a>
+<a name="ln739">               (char *)NULL);</a>
+<a name="ln740">  g_signal_connect(G_OBJECT(g-&gt;bt_auto_levels), &quot;clicked&quot;, G_CALLBACK(_auto_levels_callback), self);</a>
+<a name="ln741">  gtk_widget_set_size_request(g-&gt;bt_auto_levels, -1, DT_PIXEL_APPLY_DPI(24));</a>
+<a name="ln742">  gtk_box_pack_start(GTK_BOX(autolevels_box), g-&gt;bt_auto_levels, TRUE, TRUE, 0);</a>
+<a name="ln743"> </a>
+<a name="ln744">  g-&gt;bt_select_region = dtgtk_togglebutton_new(dtgtk_cairo_paint_colorpicker, CPF_STYLE_FLAT, NULL);</a>
+<a name="ln745">  g_object_set(G_OBJECT(g-&gt;bt_select_region), &quot;tooltip-text&quot;,</a>
+<a name="ln746">               _(&quot;apply auto exposure based on a region defined by the user\n&quot;</a>
+<a name="ln747">                 &quot;click and drag to draw the area\n&quot;</a>
+<a name="ln748">                 &quot;right click to cancel&quot;),</a>
+<a name="ln749">               (char *)NULL);</a>
+<a name="ln750">  g_signal_connect(G_OBJECT(g-&gt;bt_select_region), &quot;toggled&quot;, G_CALLBACK(_select_region_toggled_callback), self);</a>
+<a name="ln751">  gtk_box_pack_start(GTK_BOX(autolevels_box), g-&gt;bt_select_region, TRUE, TRUE, 0);</a>
+<a name="ln752"> </a>
+<a name="ln753">  gtk_box_pack_start(GTK_BOX(self-&gt;widget), autolevels_box, TRUE, TRUE, 0);</a>
+<a name="ln754"> </a>
+<a name="ln755">  g-&gt;sl_clip = dt_bauhaus_slider_new_with_range(self, -1.0, 1.0, .01, p-&gt;clip, 3);</a>
+<a name="ln756">  dt_bauhaus_widget_set_label(g-&gt;sl_clip, NULL, _(&quot;clip&quot;));</a>
+<a name="ln757">  g_object_set(g-&gt;sl_clip, &quot;tooltip-text&quot;, _(&quot;adjusts clipping value for auto exposure calculation&quot;), (char *)NULL);</a>
+<a name="ln758">  g_signal_connect(G_OBJECT(g-&gt;sl_clip), &quot;value-changed&quot;, G_CALLBACK(_clip_callback), self);</a>
+<a name="ln759">  gtk_box_pack_start(GTK_BOX(self-&gt;widget), g-&gt;sl_clip, TRUE, TRUE, 0);</a>
+<a name="ln760"> </a>
+<a name="ln761">  // add signal handler for preview pipe finish</a>
+<a name="ln762">  dt_control_signal_connect(darktable.signals, DT_SIGNAL_DEVELOP_PREVIEW_PIPE_FINISHED,</a>
+<a name="ln763">                            G_CALLBACK(_develop_ui_pipe_finished_callback), self);</a>
+<a name="ln764">  // and profile change</a>
+<a name="ln765">  dt_control_signal_connect(darktable.signals, DT_SIGNAL_CONTROL_PROFILE_USER_CHANGED,</a>
+<a name="ln766">                            G_CALLBACK(_signal_profile_user_changed), self);</a>
+<a name="ln767"> </a>
+<a name="ln768">  dt_iop_init_single_picker(&amp;g-&gt;color_picker, self, GTK_WIDGET(g-&gt;sl_middle_grey), DT_COLOR_PICKER_AREA,</a>
+<a name="ln769">                            _iop_color_picker_apply);</a>
+<a name="ln770">}</a>
+<a name="ln771"> </a>
+<a name="ln772">void gui_cleanup(struct dt_iop_module_t *self)</a>
+<a name="ln773">{</a>
+<a name="ln774">  dt_control_signal_disconnect(darktable.signals, G_CALLBACK(_develop_ui_pipe_finished_callback), self);</a>
+<a name="ln775">  dt_control_signal_disconnect(darktable.signals, G_CALLBACK(_signal_profile_user_changed), self);</a>
+<a name="ln776"> </a>
+<a name="ln777">  dt_iop_basicadj_gui_data_t *g = (dt_iop_basicadj_gui_data_t *)self-&gt;gui_data;</a>
+<a name="ln778">  if(g)</a>
+<a name="ln779">  {</a>
+<a name="ln780">    dt_pthread_mutex_destroy(&amp;g-&gt;lock);</a>
+<a name="ln781">  }</a>
+<a name="ln782">  free(self-&gt;gui_data);</a>
+<a name="ln783">  self-&gt;gui_data = NULL;</a>
+<a name="ln784">}</a>
+<a name="ln785"> </a>
+<a name="ln786">static inline double mla(double x, double y, double z)</a>
+<a name="ln787">{</a>
+<a name="ln788">  return x * y + z;</a>
+<a name="ln789">}</a>
+<a name="ln790">static inline int xisinf(double x)</a>
+<a name="ln791">{</a>
+<a name="ln792">  return x == INFINITY || x == -INFINITY;</a>
+<a name="ln793">}</a>
+<a name="ln794"> </a>
+<a name="ln795">static inline int64_t doubleToRawLongBits(double d)</a>
+<a name="ln796">{</a>
+<a name="ln797">  union {</a>
+<a name="ln798">    double f;</a>
+<a name="ln799">    int64_t i;</a>
+<a name="ln800">  } tmp;</a>
+<a name="ln801">  tmp.f = d;</a>
+<a name="ln802">  return tmp.i;</a>
+<a name="ln803">}</a>
+<a name="ln804"> </a>
+<a name="ln805">static inline double longBitsToDouble(int64_t i)</a>
+<a name="ln806">{</a>
+<a name="ln807">  union {</a>
+<a name="ln808">    double f;</a>
+<a name="ln809">    int64_t i;</a>
+<a name="ln810">  } tmp;</a>
+<a name="ln811">  tmp.i = i;</a>
+<a name="ln812">  return tmp.f;</a>
+<a name="ln813">}</a>
+<a name="ln814"> </a>
+<a name="ln815">static inline int ilogbp1(double d)</a>
+<a name="ln816">{</a>
+<a name="ln817">  const int m = d &lt; 4.9090934652977266E-91;</a>
+<a name="ln818">  d = m ? 2.037035976334486E90 * d : d;</a>
+<a name="ln819">  int q = (doubleToRawLongBits(d) &gt;&gt; 52) &amp; 0x7ff;</a>
+<a name="ln820">  q = m ? q - (300 + 0x03fe) : q - 0x03fe;</a>
+<a name="ln821">  return q;</a>
+<a name="ln822">}</a>
+<a name="ln823"> </a>
+<a name="ln824">static inline double ldexpk(double x, int q)</a>
+<a name="ln825">{</a>
+<a name="ln826">  double u;</a>
+<a name="ln827">  int m;</a>
+<a name="ln828">  m = q &gt;&gt; 31;</a>
+<a name="ln829">  m = (((m + q) &gt;&gt; 9) - m) &lt;&lt; 7;</a>
+<a name="ln830">  q = q - (m &lt;&lt; 2);</a>
+<a name="ln831">  u = longBitsToDouble(((int64_t)(m + 0x3ff)) &lt;&lt; 52);</a>
+<a name="ln832">  double u2 = u * u;</a>
+<a name="ln833">  u2 = u2 * u2;</a>
+<a name="ln834">  x = x * u2;</a>
+<a name="ln835">  u = longBitsToDouble(((int64_t)(q + 0x3ff)) &lt;&lt; 52);</a>
+<a name="ln836">  return x * u;</a>
+<a name="ln837">}</a>
+<a name="ln838"> </a>
+<a name="ln839">static inline double xlog(double d)</a>
+<a name="ln840">{</a>
+<a name="ln841">  double x, x2, t;</a>
+<a name="ln842">  const int e = ilogbp1(d * 0.7071);</a>
+<a name="ln843">  const double m = ldexpk(d, -e);</a>
+<a name="ln844"> </a>
+<a name="ln845">  x = (m - 1) / (m + 1);</a>
+<a name="ln846">  x2 = x * x;</a>
+<a name="ln847"> </a>
+<a name="ln848">  t = 0.148197055177935105296783;</a>
+<a name="ln849">  t = mla(t, x2, 0.153108178020442575739679);</a>
+<a name="ln850">  t = mla(t, x2, 0.181837339521549679055568);</a>
+<a name="ln851">  t = mla(t, x2, 0.22222194152736701733275);</a>
+<a name="ln852">  t = mla(t, x2, 0.285714288030134544449368);</a>
+<a name="ln853">  t = mla(t, x2, 0.399999999989941956712869);</a>
+<a name="ln854">  t = mla(t, x2, 0.666666666666685503450651);</a>
+<a name="ln855">  t = mla(t, x2, 2);</a>
+<a name="ln856"> </a>
+<a name="ln857">  x = x * t + 0.693147180559945286226764 * e;</a>
+<a name="ln858"> </a>
+<a name="ln859">  if(xisinf(d)) x = INFINITY;</a>
+<a name="ln860">  if(d &lt; 0) x = NAN;</a>
+<a name="ln861">  if(d == 0) x = -INFINITY;</a>
+<a name="ln862"> </a>
+<a name="ln863">  return x;</a>
+<a name="ln864">}</a>
+<a name="ln865"> </a>
+<a name="ln866">static inline double gamma2(double x)</a>
+<a name="ln867">{</a>
+<a name="ln868">  const double sRGBGammaCurve = 2.4;</a>
+<a name="ln869">  return (x &lt;= 0.00304) ? (x * 12.92) : (1.055 * exp(log(x) / sRGBGammaCurve) - 0.055);</a>
+<a name="ln870">}</a>
+<a name="ln871"> </a>
+<a name="ln872">static inline double igamma2(double x)</a>
+<a name="ln873">{</a>
+<a name="ln874">  const double sRGBGammaCurve = 2.4;</a>
+<a name="ln875">  return (x &lt;= 0.03928) ? (x / 12.92) : (exp(log((x + 0.055) / 1.055) * sRGBGammaCurve));</a>
+<a name="ln876">}</a>
+<a name="ln877"> </a>
+<a name="ln878">static void _get_auto_exp_histogram(const float *const img, const int width, const int height, int *box_area,</a>
+<a name="ln879">                                    uint32_t **_histogram, unsigned int *_hist_size, int *_histcompr)</a>
+<a name="ln880">{</a>
+<a name="ln881">  const int ch = 4;</a>
+<a name="ln882">  const int histcompr = 3;</a>
+<a name="ln883">  const unsigned int hist_size = 65536 &gt;&gt; histcompr;</a>
+<a name="ln884">  uint32_t *histogram = NULL;</a>
+<a name="ln885">  const float mul = hist_size;</a>
+<a name="ln886"> </a>
+<a name="ln887">  histogram = dt_alloc_align(64, hist_size * sizeof(uint32_t));</a>
+<a name="ln888">  if(histogram == NULL) goto cleanup;</a>
+<a name="ln889"> </a>
+<a name="ln890">  memset(histogram, 0, hist_size * sizeof(uint32_t));</a>
+<a name="ln891"> </a>
+<a name="ln892">  if(box_area[2] &gt; box_area[0] &amp;&amp; box_area[3] &gt; box_area[1])</a>
+<a name="ln893">  {</a>
+<a name="ln894">    for(int y = box_area[1]; y &lt;= box_area[3]; y++)</a>
+<a name="ln895">    {</a>
+<a name="ln896">      const float *const in = img + (size_t)ch * width * y;</a>
+<a name="ln897">      for(int x = box_area[0]; x &lt;= box_area[2]; x++)</a>
+<a name="ln898">      {</a>
+<a name="ln899">        const float *const pixel = in + x * ch;</a>
+<a name="ln900"> </a>
+<a name="ln901">        for(int c = 0; c &lt; 3; c++)</a>
+<a name="ln902">        {</a>
+<a name="ln903">          if(pixel[c] &lt;= 0.f)</a>
+<a name="ln904">          {</a>
+<a name="ln905">            histogram[0]++;</a>
+<a name="ln906">          }</a>
+<a name="ln907">          else if(pixel[c] &gt;= 1.f)</a>
+<a name="ln908">          {</a>
+<a name="ln909">            histogram[hist_size - 1]++;</a>
+<a name="ln910">          }</a>
+<a name="ln911">          else</a>
+<a name="ln912">          {</a>
+<a name="ln913">            const uint32_t R = (uint32_t)(pixel[c] * mul);</a>
+<a name="ln914">            histogram[R]++;</a>
+<a name="ln915">          }</a>
+<a name="ln916">        }</a>
+<a name="ln917">      }</a>
+<a name="ln918">    }</a>
+<a name="ln919">  }</a>
+<a name="ln920">  else</a>
+<a name="ln921">  {</a>
+<a name="ln922">    for(int i = 0; i &lt; width * height * ch; i += ch)</a>
+<a name="ln923">    {</a>
+<a name="ln924">      const float *const pixel = img + i;</a>
+<a name="ln925"> </a>
+<a name="ln926">      for(int c = 0; c &lt; 3; c++)</a>
+<a name="ln927">      {</a>
+<a name="ln928">        if(pixel[c] &lt;= 0.f)</a>
+<a name="ln929">        {</a>
+<a name="ln930">          histogram[0]++;</a>
+<a name="ln931">        }</a>
+<a name="ln932">        else if(pixel[c] &gt;= 1.f)</a>
+<a name="ln933">        {</a>
+<a name="ln934">          histogram[hist_size - 1]++;</a>
+<a name="ln935">        }</a>
+<a name="ln936">        else</a>
+<a name="ln937">        {</a>
+<a name="ln938">          const uint32_t R = (uint32_t)(pixel[c] * mul);</a>
+<a name="ln939">          histogram[R]++;</a>
+<a name="ln940">        }</a>
+<a name="ln941">      }</a>
+<a name="ln942">    }</a>
+<a name="ln943">  }</a>
+<a name="ln944"> </a>
+<a name="ln945">cleanup:</a>
+<a name="ln946">  *_histogram = histogram;</a>
+<a name="ln947">  *_hist_size = hist_size;</a>
+<a name="ln948">  *_histcompr = histcompr;</a>
+<a name="ln949">}</a>
+<a name="ln950"> </a>
+<a name="ln951">static void _get_sum_and_average(const uint32_t *const histogram, const int hist_size, float *_sum, float *_avg)</a>
+<a name="ln952">{</a>
+<a name="ln953">  float sum = 0.f;</a>
+<a name="ln954">  float avg = 0.f;</a>
+<a name="ln955"> </a>
+<a name="ln956">  for(int i = 0; i &lt; hist_size; i++)</a>
+<a name="ln957">  {</a>
+<a name="ln958">    float val = histogram[i];</a>
+<a name="ln959">    sum += val;</a>
+<a name="ln960">    avg += i * val;</a>
+<a name="ln961">  }</a>
+<a name="ln962"> </a>
+<a name="ln963">  avg /= sum;</a>
+<a name="ln964"> </a>
+<a name="ln965">  *_sum = sum;</a>
+<a name="ln966">  *_avg = avg;</a>
+<a name="ln967">}</a>
+<a name="ln968"> </a>
+<a name="ln969">static inline float hlcurve(const float level, const float hlcomp, const float hlrange)</a>
+<a name="ln970">{</a>
+<a name="ln971">  if(hlcomp &gt; 0.0f)</a>
+<a name="ln972">  {</a>
+<a name="ln973">    float val = level + (hlrange - 1.f);</a>
+<a name="ln974"> </a>
+<a name="ln975">    // to avoid division by zero</a>
+<a name="ln976">    if(val == 0.0f)</a>
+<a name="ln977">    {</a>
+<a name="ln978">      val = 0.000001f;</a>
+<a name="ln979">    }</a>
+<a name="ln980"> </a>
+<a name="ln981">    float Y = val / hlrange;</a>
+<a name="ln982">    Y *= hlcomp;</a>
+<a name="ln983"> </a>
+<a name="ln984">    // to avoid log(&lt;=0)</a>
+<a name="ln985">    if(Y &lt;= -1.0f)</a>
+<a name="ln986">    {</a>
+<a name="ln987">      Y = -.999999f;</a>
+<a name="ln988">    }</a>
+<a name="ln989"> </a>
+<a name="ln990">    float R = hlrange / (val * hlcomp);</a>
+<a name="ln991">    return log1p(Y) * R;</a>
+<a name="ln992">  }</a>
+<a name="ln993">  else</a>
+<a name="ln994">  {</a>
+<a name="ln995">    return 1.f;</a>
+<a name="ln996">  }</a>
+<a name="ln997">}</a>
+<a name="ln998"> </a>
+<a name="ln999">static void _get_auto_exp(const uint32_t *const histogram, const unsigned int hist_size, const int histcompr,</a>
+<a name="ln1000">                          const float defgain, const float clip, const float midgray, float *_expcomp,</a>
+<a name="ln1001">                          float *_bright, float *_contr, float *_black, float *_hlcompr, float *_hlcomprthresh)</a>
+<a name="ln1002">{</a>
+<a name="ln1003">  float expcomp = 0.f;</a>
+<a name="ln1004">  float black = 0.f;</a>
+<a name="ln1005">  float bright = 0.f;</a>
+<a name="ln1006">  float contr = 0.f;</a>
+<a name="ln1007">  float hlcompr = 0.f;</a>
+<a name="ln1008">  float hlcomprthresh = 0.f;</a>
+<a name="ln1009"> </a>
+<a name="ln1010">  float scale = 65536.0f;</a>
+<a name="ln1011"> </a>
+<a name="ln1012">  const int imax = 65536 &gt;&gt; histcompr;</a>
+<a name="ln1013">  int overex = 0;</a>
+<a name="ln1014">  float sum = 0.f, hisum = 0.f, losum = 0.f;</a>
+<a name="ln1015">  float ave = 0.f, hidev = 0.f, lodev = 0.f;</a>
+<a name="ln1016"> </a>
+<a name="ln1017">  // find average luminance</a>
+<a name="ln1018">  _get_sum_and_average(histogram, hist_size, &amp;sum, &amp;ave);</a>
+<a name="ln1019"> </a>
+<a name="ln1020">  // find median of luminance</a>
+<a name="ln1021">  int median = 0, count = histogram[0];</a>
+<a name="ln1022"> </a>
+<a name="ln1023">  while(count &lt; sum / 2)</a>
+<a name="ln1024">  {</a>
+<a name="ln1025">    median++;</a>
+<a name="ln1026">    count += histogram[median];</a>
+<a name="ln1027">  }</a>
+<a name="ln1028"> </a>
+<a name="ln1029">  if(median == 0 || ave &lt; 1.f) // probably the image is a blackframe</a>
+<a name="ln1030">  {</a>
+<a name="ln1031">    expcomp = 0.f;</a>
+<a name="ln1032">    black = 0.f;</a>
+<a name="ln1033">    bright = 0.f;</a>
+<a name="ln1034">    contr = 0.f;</a>
+<a name="ln1035">    hlcompr = 0.f;</a>
+<a name="ln1036">    hlcomprthresh = 0.f;</a>
+<a name="ln1037">    goto cleanup;</a>
+<a name="ln1038">  }</a>
+<a name="ln1039"> </a>
+<a name="ln1040">  // compute std dev on the high and low side of median</a>
+<a name="ln1041">  // and octiles of histogram</a>
+<a name="ln1042">  float octile[8] = { 0.f, 0.f, 0.f, 0.f, 0.f, 0.f, 0.f, 0.f }, ospread = 0.f;</a>
+<a name="ln1043">  count = 0;</a>
+<a name="ln1044"> </a>
+<a name="ln1045">  int i = 0;</a>
+<a name="ln1046"> </a>
+<a name="ln1047">  for(; i &lt; MIN((int)ave, imax); i++)</a>
+<a name="ln1048">  {</a>
+<a name="ln1049">    if(count &lt; 8)</a>
+<a name="ln1050">    {</a>
+<a name="ln1051">      octile[count] += histogram[i];</a>
+<a name="ln1052"> </a>
+<a name="ln1053">      if(octile[count] &gt; sum / 8.f || (count == 7 &amp;&amp; octile[count] &gt; sum / 16.f))</a>
+<a name="ln1054">      {</a>
+<a name="ln1055">        octile[count] = xlog(1. + (float)i) / log(2.f);</a>
+<a name="ln1056">        count++;</a>
+<a name="ln1057">      }</a>
+<a name="ln1058">    }</a>
+<a name="ln1059"> </a>
+<a name="ln1060">    lodev += (xlog(ave + 1.f) - xlog((float)i + 1.f)) * histogram[i];</a>
+<a name="ln1061">    losum += histogram[i];</a>
+<a name="ln1062">  }</a>
+<a name="ln1063"> </a>
+<a name="ln1064">  for(; i &lt; imax; i++)</a>
+<a name="ln1065">  {</a>
+<a name="ln1066">    if(count &lt; 8)</a>
+<a name="ln1067">    {</a>
+<a name="ln1068">      octile[count] += histogram[i];</a>
+<a name="ln1069"> </a>
+<a name="ln1070">      if(octile[count] &gt; sum / 8.f || (count == 7 &amp;&amp; octile[count] &gt; sum / 16.f))</a>
+<a name="ln1071">      {</a>
+<a name="ln1072">        octile[count] = xlog(1.f + (float)i) / log(2.f);</a>
+<a name="ln1073">        count++;</a>
+<a name="ln1074">      }</a>
+<a name="ln1075">    }</a>
+<a name="ln1076"> </a>
+<a name="ln1077">    hidev += (xlog((float)i + 1.f) - xlog(ave + 1.f)) * histogram[i];</a>
+<a name="ln1078">    hisum += histogram[i];</a>
+<a name="ln1079">  }</a>
+<a name="ln1080"> </a>
+<a name="ln1081">  // probably the image is a blackframe</a>
+<a name="ln1082">  if(losum == 0.f || hisum == 0.f)</a>
+<a name="ln1083">  {</a>
+<a name="ln1084">    expcomp = 0.f;</a>
+<a name="ln1085">    black = 0.f;</a>
+<a name="ln1086">    bright = 0.f;</a>
+<a name="ln1087">    contr = 0.f;</a>
+<a name="ln1088">    hlcompr = 0.f;</a>
+<a name="ln1089">    hlcomprthresh = 0.f;</a>
+<a name="ln1090">    goto cleanup;</a>
+<a name="ln1091">  }</a>
+<a name="ln1092"> </a>
+<a name="ln1093">  // if very overxposed image</a>
+<a name="ln1094">  if(octile[6] &gt; log1p((float)imax) / log2(2.f))</a>
+<a name="ln1095">  {</a>
+<a name="ln1096">    octile[6] = 1.5f * octile[5] - 0.5f * octile[4];</a>
+<a name="ln1097">    overex = 2;</a>
+<a name="ln1098">  }</a>
+<a name="ln1099"> </a>
+<a name="ln1100">  // if overexposed</a>
+<a name="ln1101">  if(octile[7] &gt; log1p((float)imax) / log2(2.f))</a>
+<a name="ln1102">  {</a>
+<a name="ln1103">    octile[7] = 1.5f * octile[6] - 0.5f * octile[5];</a>
+<a name="ln1104">    overex = 1;</a>
+<a name="ln1105">  }</a>
+<a name="ln1106"> </a>
+<a name="ln1107">  // store values of octile[6] and octile[7] for calculation of exposure compensation</a>
+<a name="ln1108">  // if we don't do this and the pixture is underexposed, calculation of exposure compensation assumes</a>
+<a name="ln1109">  // that it's overexposed and calculates the wrong direction</a>
+<a name="ln1110">  float oct6, oct7;</a>
+<a name="ln1111">  oct6 = octile[6];</a>
+<a name="ln1112">  oct7 = octile[7];</a>
+<a name="ln1113"> </a>
+<a name="ln1114">  for(int ii = 1; ii &lt; 8; ii++)</a>
+<a name="ln1115">  {</a>
+<a name="ln1116">    if(octile[ii] == 0.0f)</a>
+<a name="ln1117">    {</a>
+<a name="ln1118">      octile[ii] = octile[ii - 1];</a>
+<a name="ln1119">    }</a>
+<a name="ln1120">  }</a>
+<a name="ln1121"> </a>
+<a name="ln1122">  // compute weighted average separation of octiles</a>
+<a name="ln1123">  // for future use in contrast setting</a>
+<a name="ln1124">  for(int ii = 1; ii &lt; 6; ii++)</a>
+<a name="ln1125">  {</a>
+<a name="ln1126">    ospread += (octile[ii + 1] - octile[ii])</a>
+<a name="ln1127">               / MAX(0.5f, (ii &gt; 2 ? (octile[ii + 1] - octile[3]) : (octile[3] - octile[ii])));</a>
+<a name="ln1128">  }</a>
+<a name="ln1129"> </a>
+<a name="ln1130">  ospread /= 5.f;</a>
+<a name="ln1131"> </a>
+<a name="ln1132">  // probably the image is a blackframe</a>
+<a name="ln1133">  if(ospread &lt;= 0.f)</a>
+<a name="ln1134">  {</a>
+<a name="ln1135">    expcomp = 0.f;</a>
+<a name="ln1136">    black = 0.f;</a>
+<a name="ln1137">    bright = 0.f;</a>
+<a name="ln1138">    contr = 0.f;</a>
+<a name="ln1139">    hlcompr = 0.f;</a>
+<a name="ln1140">    hlcomprthresh = 0.f;</a>
+<a name="ln1141">    goto cleanup;</a>
+<a name="ln1142">  }</a>
+<a name="ln1143"> </a>
+<a name="ln1144">  // compute clipping points based on the original histograms (linear, without exp comp.)</a>
+<a name="ln1145">  unsigned int clipped = 0;</a>
+<a name="ln1146">  int rawmax = (imax)-1;</a>
+<a name="ln1147"> </a>
+<a name="ln1148">  while(histogram[rawmax] + clipped &lt;= 0 &amp;&amp; rawmax &gt; 1)</a>
+<a name="ln1149">  {</a>
+<a name="ln1150">    clipped += histogram[rawmax];</a>
+<a name="ln1151">    rawmax--;</a>
+<a name="ln1152">  }</a>
+<a name="ln1153"> </a>
+<a name="ln1154">  // compute clipped white point</a>
+<a name="ln1155">  unsigned int clippable = (int)(sum * clip);</a>
+<a name="ln1156">  clipped = 0;</a>
+<a name="ln1157">  int whiteclip = (imax)-1;</a>
+<a name="ln1158"> </a>
+<a name="ln1159">  while(whiteclip &gt; 1 &amp;&amp; (histogram[whiteclip] + clipped) &lt;= clippable)</a>
+<a name="ln1160">  {</a>
+<a name="ln1161">    clipped += histogram[whiteclip];</a>
+<a name="ln1162">    whiteclip--;</a>
+<a name="ln1163">  }</a>
+<a name="ln1164"> </a>
+<a name="ln1165">  // compute clipped black point</a>
+<a name="ln1166">  clipped = 0;</a>
+<a name="ln1167">  int shc = 0;</a>
+<a name="ln1168"> </a>
+<a name="ln1169">  while(shc &lt; whiteclip - 1 &amp;&amp; histogram[shc] + clipped &lt;= clippable)</a>
+<a name="ln1170">  {</a>
+<a name="ln1171">    clipped += histogram[shc];</a>
+<a name="ln1172">    shc++;</a>
+<a name="ln1173">  }</a>
+<a name="ln1174"> </a>
+<a name="ln1175">  // rescale to 65535 max</a>
+<a name="ln1176">  rawmax &lt;&lt;= histcompr;</a>
+<a name="ln1177">  whiteclip &lt;&lt;= histcompr;</a>
+<a name="ln1178">  ave = ave * (1 &lt;&lt; histcompr);</a>
+<a name="ln1179">  median &lt;&lt;= histcompr;</a>
+<a name="ln1180">  shc &lt;&lt;= histcompr;</a>
+<a name="ln1181"> </a>
+<a name="ln1182">  // compute exposure compensation as geometric mean of the amount that</a>
+<a name="ln1183">  // sets the mean or median at middle gray, and the amount that sets the estimated top</a>
+<a name="ln1184">  // of the histogram at or near clipping.</a>
+<a name="ln1185">  const float expcomp1 = (log(midgray * scale / (ave - shc + midgray * shc))) / log(2.f);</a>
+<a name="ln1186">  float expcomp2;</a>
+<a name="ln1187"> </a>
+<a name="ln1188">  if(overex == 0) // image is not overexposed</a>
+<a name="ln1189">  {</a>
+<a name="ln1190">    expcomp2 = 0.5f * ((15.5f - histcompr - (2.f * oct7 - oct6)) + log(scale / rawmax) / log(2.f));</a>
+<a name="ln1191">  }</a>
+<a name="ln1192">  else</a>
+<a name="ln1193">  {</a>
+<a name="ln1194">    expcomp2 = 0.5f * ((15.5f - histcompr - (2.f * octile[7] - octile[6])) + log(scale / rawmax) / log(2.f));</a>
+<a name="ln1195">  }</a>
+<a name="ln1196"> </a>
+<a name="ln1197">  if(fabs(expcomp1) - fabs(expcomp2) &gt; 1.f) // for great expcomp</a>
+<a name="ln1198">  {</a>
+<a name="ln1199">    expcomp = (expcomp1 * fabs(expcomp2) + expcomp2 * fabs(expcomp1)) / (fabs(expcomp1) + fabs(expcomp2));</a>
+<a name="ln1200">  }</a>
+<a name="ln1201">  else</a>
+<a name="ln1202">  {</a>
+<a name="ln1203">    expcomp = 0.5 * (double)expcomp1 + 0.5 * (double)expcomp2; // for small expcomp</a>
+<a name="ln1204">  }</a>
+<a name="ln1205"> </a>
+<a name="ln1206">  float gain = exp((float)expcomp * log(2.f));</a>
+<a name="ln1207"> </a>
+<a name="ln1208">  float corr = sqrt(gain * scale / rawmax);</a>
+<a name="ln1209">  black = shc * corr;</a>
+<a name="ln1210"> </a>
+<a name="ln1211">  // now tune hlcompr to bring back rawmax to 65535</a>
+<a name="ln1212">  hlcomprthresh = 0.f;</a>
+<a name="ln1213">  // this is a series approximation of the actual formula for comp,</a>
+<a name="ln1214">  // which is a transcendental equation</a>
+<a name="ln1215">  float comp = (gain * ((float)whiteclip) / scale - 1.f) * 2.3f; // 2.3 instead of 2 to increase slightly comp</a>
+<a name="ln1216">  hlcompr = (comp / (fmaxf(0.0f, expcomp) + 1.0f));</a>
+<a name="ln1217">  hlcompr = fmaxf(0.f, fminf(100.f, hlcompr));</a>
+<a name="ln1218"> </a>
+<a name="ln1219">  // now find brightness if gain didn't bring ave to midgray using</a>
+<a name="ln1220">  // the envelope of the actual 'control cage' brightness curve for simplicity</a>
+<a name="ln1221">  float midtmp = gain * sqrt(median * ave) / scale;</a>
+<a name="ln1222"> </a>
+<a name="ln1223">  if(midtmp &lt; 0.1f)</a>
+<a name="ln1224">  {</a>
+<a name="ln1225">    bright = (midgray - midtmp) * 15.0f / (midtmp);</a>
+<a name="ln1226">  }</a>
+<a name="ln1227">  else</a>
+<a name="ln1228">  {</a>
+<a name="ln1229">    bright = (midgray - midtmp) * 15.0f / (0.10833 - 0.0833f * midtmp);</a>
+<a name="ln1230">  }</a>
+<a name="ln1231"> </a>
+<a name="ln1232">  bright = 0.25f * MAX(0.f, bright);</a>
+<a name="ln1233"> </a>
+<a name="ln1234">  // compute contrast that spreads the average spacing of octiles</a>
+<a name="ln1235">  contr = 50.0f * (1.1f - ospread);</a>
+<a name="ln1236">  contr = MAX(0.f, MIN(100.f, contr));</a>
+<a name="ln1237">  // take gamma into account</a>
+<a name="ln1238">  double whiteclipg = gamma2(whiteclip * corr);</a>
+<a name="ln1239"> </a>
+<a name="ln1240">  float gavg = 0.f;</a>
+<a name="ln1241"> </a>
+<a name="ln1242">  float val = 0.f;</a>
+<a name="ln1243">  const float increment = corr * (1 &lt;&lt; histcompr);</a>
+<a name="ln1244"> </a>
+<a name="ln1245">  for(int ii = 0; ii&lt;65536&gt;&gt; histcompr; ii++)</a>
+<a name="ln1246">  {</a>
+<a name="ln1247">    // gavg += histogram[ii] * _get_LUTf(gamma2curve, gamma2curve_size, val);</a>
+<a name="ln1248">    gavg += histogram[ii] * gamma2(val);</a>
+<a name="ln1249">    val += increment;</a>
+<a name="ln1250">  }</a>
+<a name="ln1251"> </a>
+<a name="ln1252">  gavg /= sum;</a>
+<a name="ln1253"> </a>
+<a name="ln1254">  if(black &lt; gavg)</a>
+<a name="ln1255">  {</a>
+<a name="ln1256">    const int maxwhiteclip = (gavg - black) * 4 / 3</a>
+<a name="ln1257">                             + black; // dont let whiteclip be such large that the histogram average goes above 3/4</a>
+<a name="ln1258"> </a>
+<a name="ln1259">    if(whiteclipg &lt; maxwhiteclip)</a>
+<a name="ln1260">    {</a>
+<a name="ln1261">      whiteclipg = maxwhiteclip;</a>
+<a name="ln1262">    }</a>
+<a name="ln1263">  }</a>
+<a name="ln1264"> </a>
+<a name="ln1265">  whiteclipg</a>
+<a name="ln1266">      = igamma2(whiteclipg); // need to inverse gamma transform to get correct exposure compensation parameter</a>
+<a name="ln1267"> </a>
+<a name="ln1268">  // corection with gamma</a>
+<a name="ln1269">  black = (black / whiteclipg);</a>
+<a name="ln1270"> </a>
+<a name="ln1271">  expcomp = CLAMP(expcomp, -5.0f, 12.0f);</a>
+<a name="ln1272"> </a>
+<a name="ln1273">  bright = MAX(-100.f, MIN(bright, 100.f));</a>
+<a name="ln1274"> </a>
+<a name="ln1275">cleanup:</a>
+<a name="ln1276">  black /= 100.f;</a>
+<a name="ln1277">  bright /= 100.f;</a>
+<a name="ln1278">  contr /= 100.f;</a>
+<a name="ln1279"> </a>
+<a name="ln1280">  if(isnan(expcomp))</a>
+<a name="ln1281">  {</a>
+<a name="ln1282">    expcomp = 0.f;</a>
+<a name="ln1283">    fprintf(stderr, &quot;[_get_auto_exp] expcomp is NaN!!!\n&quot;);</a>
+<a name="ln1284">  }</a>
+<a name="ln1285">  if(isnan(black))</a>
+<a name="ln1286">  {</a>
+<a name="ln1287">    black = 0.f;</a>
+<a name="ln1288">    fprintf(stderr, &quot;[_get_auto_exp] black is NaN!!!\n&quot;);</a>
+<a name="ln1289">  }</a>
+<a name="ln1290">  if(isnan(bright))</a>
+<a name="ln1291">  {</a>
+<a name="ln1292">    bright = 0.f;</a>
+<a name="ln1293">    fprintf(stderr, &quot;[_get_auto_exp] bright is NaN!!!\n&quot;);</a>
+<a name="ln1294">  }</a>
+<a name="ln1295">  if(isnan(contr))</a>
+<a name="ln1296">  {</a>
+<a name="ln1297">    contr = 0.f;</a>
+<a name="ln1298">    fprintf(stderr, &quot;[_get_auto_exp] contr is NaN!!!\n&quot;);</a>
+<a name="ln1299">  }</a>
+<a name="ln1300">  if(isnan(hlcompr))</a>
+<a name="ln1301">  {</a>
+<a name="ln1302">    hlcompr = 0.f;</a>
+<a name="ln1303">    fprintf(stderr, &quot;[_get_auto_exp] hlcompr is NaN!!!\n&quot;);</a>
+<a name="ln1304">  }</a>
+<a name="ln1305">  if(isnan(hlcomprthresh))</a>
+<a name="ln1306">  {</a>
+<a name="ln1307">    hlcomprthresh = 0.f;</a>
+<a name="ln1308">    fprintf(stderr, &quot;[_get_auto_exp] hlcomprthresh is NaN!!!\n&quot;);</a>
+<a name="ln1309">  }</a>
+<a name="ln1310"> </a>
+<a name="ln1311">  *_expcomp = expcomp;</a>
+<a name="ln1312">  *_black = black;</a>
+<a name="ln1313">  *_bright = bright;</a>
+<a name="ln1314">  *_contr = contr;</a>
+<a name="ln1315">  *_hlcompr = hlcompr;</a>
+<a name="ln1316">  *_hlcomprthresh = hlcomprthresh;</a>
+<a name="ln1317">}</a>
+<a name="ln1318"> </a>
+<a name="ln1319">static void _auto_exposure(const float *const img, const int width, const int height, int *box_area,</a>
+<a name="ln1320">                           const float clip, const float midgray, float *_expcomp, float *_bright, float *_contr,</a>
+<a name="ln1321">                           float *_black, float *_hlcompr, float *_hlcomprthresh)</a>
+<a name="ln1322">{</a>
+<a name="ln1323">  uint32_t *histogram = NULL;</a>
+<a name="ln1324">  unsigned int hist_size = 0;</a>
+<a name="ln1325">  int histcompr = 0;</a>
+<a name="ln1326"> </a>
+<a name="ln1327">  const float defGain = 0.0f;</a>
+<a name="ln1328"> </a>
+<a name="ln1329">  _get_auto_exp_histogram(img, width, height, box_area, &amp;histogram, &amp;hist_size, &amp;histcompr);</a>
+<a name="ln1330">  _get_auto_exp(histogram, hist_size, histcompr, defGain, clip, midgray, _expcomp, _bright, _contr, _black,</a>
+<a name="ln1331">                _hlcompr, _hlcomprthresh);</a>
+<a name="ln1332"> </a>
+<a name="ln1333">  if(histogram) dt_free_align(histogram);</a>
+<a name="ln1334">}</a>
+<a name="ln1335"> </a>
+<a name="ln1336">static void _get_selected_area(struct dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece,</a>
+<a name="ln1337">                               dt_iop_basicadj_gui_data_t *g, const dt_iop_roi_t *const roi_in, int *box_out)</a>
+<a name="ln1338">{</a>
+<a name="ln1339">  box_out[0] = box_out[1] = box_out[2] = box_out[3] = 0;</a>
+<a name="ln1340"> </a>
+<a name="ln1341">  if(g)</a>
+<a name="ln1342">  {</a>
+<a name="ln1343">    const int width = roi_in-&gt;width;</a>
+<a name="ln1344">    const int height = roi_in-&gt;height;</a>
+<a name="ln1345">    float box_cood[4] = { g-&gt;box_cood[0], g-&gt;box_cood[1], g-&gt;box_cood[2], g-&gt;box_cood[3] };</a>
+<a name="ln1346"> </a>
+<a name="ln1347">    box_cood[0] *= piece-&gt;pipe-&gt;iwidth;</a>
+<a name="ln1348">    box_cood[1] *= piece-&gt;pipe-&gt;iheight;</a>
+<a name="ln1349">    box_cood[2] *= piece-&gt;pipe-&gt;iwidth;</a>
+<a name="ln1350">    box_cood[3] *= piece-&gt;pipe-&gt;iheight;</a>
+<a name="ln1351"> </a>
+<a name="ln1352">    dt_dev_distort_transform_plus(self-&gt;dev, piece-&gt;pipe, self-&gt;iop_order, DT_DEV_TRANSFORM_DIR_BACK_INCL,</a>
+<a name="ln1353">                                  box_cood, 2);</a>
+<a name="ln1354"> </a>
+<a name="ln1355">    box_cood[0] *= roi_in-&gt;scale;</a>
+<a name="ln1356">    box_cood[1] *= roi_in-&gt;scale;</a>
+<a name="ln1357">    box_cood[2] *= roi_in-&gt;scale;</a>
+<a name="ln1358">    box_cood[3] *= roi_in-&gt;scale;</a>
+<a name="ln1359"> </a>
+<a name="ln1360">    box_cood[0] -= roi_in-&gt;x;</a>
+<a name="ln1361">    box_cood[1] -= roi_in-&gt;y;</a>
+<a name="ln1362">    box_cood[2] -= roi_in-&gt;x;</a>
+<a name="ln1363">    box_cood[3] -= roi_in-&gt;y;</a>
+<a name="ln1364"> </a>
+<a name="ln1365">    int box[4];</a>
+<a name="ln1366"> </a>
+<a name="ln1367">    // re-order edges of bounding box</a>
+<a name="ln1368">    box[0] = fminf(box_cood[0], box_cood[2]);</a>
+<a name="ln1369">    box[1] = fminf(box_cood[1], box_cood[3]);</a>
+<a name="ln1370">    box[2] = fmaxf(box_cood[0], box_cood[2]);</a>
+<a name="ln1371">    box[3] = fmaxf(box_cood[1], box_cood[3]);</a>
+<a name="ln1372"> </a>
+<a name="ln1373">    // do not continue if box is completely outside of roi</a>
+<a name="ln1374">    if(!(box[0] &gt;= width || box[1] &gt;= height || box[2] &lt; 0 || box[3] &lt; 0))</a>
+<a name="ln1375">    {</a>
+<a name="ln1376">      // clamp bounding box to roi</a>
+<a name="ln1377">      for(int k = 0; k &lt; 4; k += 2) box[k] = MIN(width - 1, MAX(0, box[k]));</a>
+<a name="ln1378">      for(int k = 1; k &lt; 4; k += 2) box[k] = MIN(height - 1, MAX(0, box[k]));</a>
+<a name="ln1379"> </a>
+<a name="ln1380">      // safety check: area needs to have minimum 1 pixel width and height</a>
+<a name="ln1381">      if(!(box[2] - box[0] &lt; 1 || box[3] - box[1] &lt; 1))</a>
+<a name="ln1382">      {</a>
+<a name="ln1383">        box_out[0] = box[0];</a>
+<a name="ln1384">        box_out[1] = box[1];</a>
+<a name="ln1385">        box_out[2] = box[2];</a>
+<a name="ln1386">        box_out[3] = box[3];</a>
+<a name="ln1387">      }</a>
+<a name="ln1388">    }</a>
+<a name="ln1389">  }</a>
+<a name="ln1390">}</a>
+<a name="ln1391"> </a>
+<a name="ln1392">#ifdef HAVE_OPENCL</a>
+<a name="ln1393">int process_cl(struct dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, cl_mem dev_in, cl_mem dev_out,</a>
+<a name="ln1394">               const dt_iop_roi_t *const roi_in, const dt_iop_roi_t *const roi_out)</a>
+<a name="ln1395">{</a>
+<a name="ln1396">  const dt_iop_order_iccprofile_info_t *const work_profile = dt_ioppr_get_pipe_work_profile_info(piece-&gt;pipe);</a>
+<a name="ln1397"> </a>
+<a name="ln1398">  const int ch = piece-&gt;colors;</a>
+<a name="ln1399">  dt_iop_basicadj_data_t *d = (dt_iop_basicadj_data_t *)piece-&gt;data;</a>
+<a name="ln1400">  dt_iop_basicadj_params_t *p = (dt_iop_basicadj_params_t *)&amp;d-&gt;params;</a>
+<a name="ln1401">  dt_iop_basicadj_gui_data_t *g = (dt_iop_basicadj_gui_data_t *)self-&gt;gui_data;</a>
+<a name="ln1402">  dt_iop_basicadj_global_data_t *gd = (dt_iop_basicadj_global_data_t *)self-&gt;data;</a>
+<a name="ln1403"> </a>
+<a name="ln1404">  cl_int err = CL_SUCCESS;</a>
+<a name="ln1405"> </a>
+<a name="ln1406">  float *src_buffer = NULL;</a>
+<a name="ln1407"> </a>
+<a name="ln1408">  cl_mem dev_gamma = NULL;</a>
+<a name="ln1409">  cl_mem dev_contrast = NULL;</a>
+<a name="ln1410"> </a>
+<a name="ln1411">  cl_mem dev_profile_info = NULL;</a>
+<a name="ln1412">  cl_mem dev_profile_lut = NULL;</a>
+<a name="ln1413">  dt_colorspaces_iccprofile_info_cl_t *profile_info_cl;</a>
+<a name="ln1414">  cl_float *profile_lut_cl = NULL;</a>
+<a name="ln1415"> </a>
+<a name="ln1416">  const int devid = piece-&gt;pipe-&gt;devid;</a>
+<a name="ln1417">  const int width = roi_in-&gt;width;</a>
+<a name="ln1418">  const int height = roi_in-&gt;height;</a>
+<a name="ln1419"> </a>
+<a name="ln1420">  // process auto levels</a>
+<a name="ln1421">  if(g &amp;&amp; piece-&gt;pipe-&gt;type == DT_DEV_PIXELPIPE_PREVIEW)</a>
+<a name="ln1422">  {</a>
+<a name="ln1423">    dt_pthread_mutex_lock(&amp;g-&gt;lock);</a>
+<a name="ln1424">    if(g-&gt;call_auto_exposure == 1 &amp;&amp; !darktable.gui-&gt;reset)</a>
+<a name="ln1425">    {</a>
+<a name="ln1426">      g-&gt;call_auto_exposure = -1;</a>
+<a name="ln1427"> </a>
+<a name="ln1428">      dt_pthread_mutex_unlock(&amp;g-&gt;lock);</a>
+<a name="ln1429"> </a>
+<a name="ln1430">      // get the image, this works only in C</a>
+<a name="ln1431">      src_buffer = dt_alloc_align(64, width * height * ch * sizeof(float));</a>
+<a name="ln1432">      if(src_buffer == NULL)</a>
+<a name="ln1433">      {</a>
+<a name="ln1434">        fprintf(stderr, &quot;[basicadj process_cl] error allocating memory for color transformation 1\n&quot;);</a>
+<a name="ln1435">        err = CL_MEM_OBJECT_ALLOCATION_FAILURE;</a>
+<a name="ln1436">        goto cleanup;</a>
+<a name="ln1437">      }</a>
+<a name="ln1438"> </a>
+<a name="ln1439">      err = dt_opencl_copy_device_to_host(devid, src_buffer, dev_in, width, height, ch * sizeof(float));</a>
+<a name="ln1440">      if(err != CL_SUCCESS)</a>
+<a name="ln1441">      {</a>
+<a name="ln1442">        fprintf(stderr, &quot;[basicadj process_cl] error allocating memory for color transformation 2\n&quot;);</a>
+<a name="ln1443">        goto cleanup;</a>
+<a name="ln1444">      }</a>
+<a name="ln1445"> </a>
+<a name="ln1446">      memcpy(&amp;g-&gt;params, p, sizeof(dt_iop_basicadj_params_t));</a>
+<a name="ln1447"> </a>
+<a name="ln1448">      int box[4] = { 0 };</a>
+<a name="ln1449">      _get_selected_area(self, piece, g, roi_in, box);</a>
+<a name="ln1450">      _auto_exposure(src_buffer, roi_in-&gt;width, roi_in-&gt;height, box, g-&gt;params.clip, g-&gt;params.middle_grey / 100.f,</a>
+<a name="ln1451">                     &amp;g-&gt;params.exposure, &amp;g-&gt;params.brightness, &amp;g-&gt;params.contrast, &amp;g-&gt;params.black_point,</a>
+<a name="ln1452">                     &amp;g-&gt;params.hlcompr, &amp;g-&gt;params.hlcomprthresh);</a>
+<a name="ln1453"> </a>
+<a name="ln1454">      dt_free_align(src_buffer);</a>
+<a name="ln1455">      src_buffer = NULL;</a>
+<a name="ln1456"> </a>
+<a name="ln1457">      dt_pthread_mutex_lock(&amp;g-&gt;lock);</a>
+<a name="ln1458"> </a>
+<a name="ln1459">      g-&gt;call_auto_exposure = 2;</a>
+<a name="ln1460"> </a>
+<a name="ln1461">      dt_pthread_mutex_unlock(&amp;g-&gt;lock);</a>
+<a name="ln1462">    }</a>
+<a name="ln1463">    else</a>
+<a name="ln1464">    {</a>
+<a name="ln1465">      dt_pthread_mutex_unlock(&amp;g-&gt;lock);</a>
+<a name="ln1466">    }</a>
+<a name="ln1467">  }</a>
+<a name="ln1468"> </a>
+<a name="ln1469">  const int use_work_profile = (work_profile == NULL) ? 0 : 1;</a>
+<a name="ln1470"> </a>
+<a name="ln1471">  const int plain_contrast = (!p-&gt;preserve_colors &amp;&amp; p-&gt;contrast != 0.f);</a>
+<a name="ln1472">  const int preserve_colors = (p-&gt;contrast != 0.f) ? p-&gt;preserve_colors : 0;</a>
+<a name="ln1473">  const int process_gamma = (p-&gt;brightness != 0.f);</a>
+<a name="ln1474">  const int process_saturation = (p-&gt;saturation != 0.f);</a>
+<a name="ln1475">  const int process_hlcompr = (p-&gt;hlcompr &gt; 0.f);</a>
+<a name="ln1476"> </a>
+<a name="ln1477">  const float black_point = p-&gt;black_point;</a>
+<a name="ln1478">  const float hlcompr = p-&gt;hlcompr;</a>
+<a name="ln1479">  const float hlcomprthresh = p-&gt;hlcomprthresh;</a>
+<a name="ln1480">  const float saturation = p-&gt;saturation + 1.0f;</a>
+<a name="ln1481">  const float contrast = p-&gt;contrast + 1.0f;</a>
+<a name="ln1482">  const float white = exposure2white(p-&gt;exposure);</a>
+<a name="ln1483">  const float scale = 1.0f / (white - p-&gt;black_point);</a>
+<a name="ln1484">  const float middle_grey = (p-&gt;middle_grey &gt; 0.f) ? (p-&gt;middle_grey / 100.f) : 0.1842f;</a>
+<a name="ln1485">  const float inv_middle_grey = 1.f / middle_grey;</a>
+<a name="ln1486">  const float brightness = p-&gt;brightness * 2.f;</a>
+<a name="ln1487">  const float gamma = (brightness &gt;= 0.0f) ? 1.0f / (1.0f + brightness) : (1.0f - brightness);</a>
+<a name="ln1488"> </a>
+<a name="ln1489">  const float hlcomp = hlcompr / 100.0f;</a>
+<a name="ln1490">  const float shoulder = ((hlcomprthresh / 100.f) / 8.0f) + 0.1f;</a>
+<a name="ln1491">  const float hlrange = 1.0f - shoulder;</a>
+<a name="ln1492"> </a>
+<a name="ln1493">  err = dt_ioppr_build_iccprofile_params_cl(work_profile, devid, &amp;profile_info_cl, &amp;profile_lut_cl,</a>
+<a name="ln1494">                                            &amp;dev_profile_info, &amp;dev_profile_lut);</a>
+<a name="ln1495">  if(err != CL_SUCCESS) goto cleanup;</a>
+<a name="ln1496"> </a>
+<a name="ln1497">  dev_gamma = dt_opencl_copy_host_to_device(devid, d-&gt;lut_gamma, 256, 256, sizeof(float));</a>
+<a name="ln1498">  if(dev_gamma == NULL)</a>
+<a name="ln1499">  {</a>
+<a name="ln1500">    fprintf(stderr, &quot;[basicadj process_cl] error allocating memory 3\n&quot;);</a>
+<a name="ln1501">    err = CL_MEM_OBJECT_ALLOCATION_FAILURE;</a>
+<a name="ln1502">    goto cleanup;</a>
+<a name="ln1503">  }</a>
+<a name="ln1504"> </a>
+<a name="ln1505">  dev_contrast = dt_opencl_copy_host_to_device(devid, d-&gt;lut_contrast, 256, 256, sizeof(float));</a>
+<a name="ln1506">  if(dev_contrast == NULL)</a>
+<a name="ln1507">  {</a>
+<a name="ln1508">    fprintf(stderr, &quot;[basicadj process_cl] error allocating memory 4\n&quot;);</a>
+<a name="ln1509">    err = CL_MEM_OBJECT_ALLOCATION_FAILURE;</a>
+<a name="ln1510">    goto cleanup;</a>
+<a name="ln1511">  }</a>
+<a name="ln1512"> </a>
+<a name="ln1513">  size_t sizes[] = { ROUNDUPWD(width), ROUNDUPHT(height), 1 };</a>
+<a name="ln1514">  dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_basicadj, 0, sizeof(cl_mem), (void *)&amp;dev_in);</a>
+<a name="ln1515">  dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_basicadj, 1, sizeof(cl_mem), (void *)&amp;dev_out);</a>
+<a name="ln1516">  dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_basicadj, 2, sizeof(int), (void *)&amp;width);</a>
+<a name="ln1517">  dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_basicadj, 3, sizeof(int), (void *)&amp;height);</a>
+<a name="ln1518"> </a>
+<a name="ln1519">  dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_basicadj, 4, sizeof(cl_mem), (void *)&amp;dev_gamma);</a>
+<a name="ln1520">  dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_basicadj, 5, sizeof(cl_mem), (void *)&amp;dev_contrast);</a>
+<a name="ln1521"> </a>
+<a name="ln1522">  dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_basicadj, 6, sizeof(float), (void *)&amp;black_point);</a>
+<a name="ln1523">  dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_basicadj, 7, sizeof(float), (void *)&amp;scale);</a>
+<a name="ln1524"> </a>
+<a name="ln1525">  dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_basicadj, 8, sizeof(int), (void *)&amp;process_gamma);</a>
+<a name="ln1526">  dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_basicadj, 9, sizeof(float), (void *)&amp;gamma);</a>
+<a name="ln1527"> </a>
+<a name="ln1528">  dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_basicadj, 10, sizeof(int), (void *)&amp;plain_contrast);</a>
+<a name="ln1529">  dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_basicadj, 11, sizeof(int), (void *)&amp;preserve_colors);</a>
+<a name="ln1530">  dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_basicadj, 12, sizeof(float), (void *)&amp;contrast);</a>
+<a name="ln1531"> </a>
+<a name="ln1532">  dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_basicadj, 13, sizeof(int), (void *)&amp;process_saturation);</a>
+<a name="ln1533">  dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_basicadj, 14, sizeof(float), (void *)&amp;saturation);</a>
+<a name="ln1534"> </a>
+<a name="ln1535">  dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_basicadj, 15, sizeof(int), (void *)&amp;process_hlcompr);</a>
+<a name="ln1536">  dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_basicadj, 16, sizeof(float), (void *)&amp;hlcomp);</a>
+<a name="ln1537">  dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_basicadj, 17, sizeof(float), (void *)&amp;hlrange);</a>
+<a name="ln1538"> </a>
+<a name="ln1539">  dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_basicadj, 18, sizeof(float), (void *)&amp;middle_grey);</a>
+<a name="ln1540">  dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_basicadj, 19, sizeof(float), (void *)&amp;inv_middle_grey);</a>
+<a name="ln1541"> </a>
+<a name="ln1542">  dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_basicadj, 20, sizeof(cl_mem), (void *)&amp;dev_profile_info);</a>
+<a name="ln1543">  dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_basicadj, 21, sizeof(cl_mem), (void *)&amp;dev_profile_lut);</a>
+<a name="ln1544"> </a>
+<a name="ln1545">  dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_basicadj, 22, sizeof(int), (void *)&amp;use_work_profile);</a>
+<a name="ln1546">  err = dt_opencl_enqueue_kernel_2d(devid, gd-&gt;kernel_basicadj, sizes);</a>
+<a name="ln1547">  if(err != CL_SUCCESS)</a>
+<a name="ln1548">  {</a>
+<a name="ln1549">    fprintf(stderr, &quot;[basicadj process_cl] error %i enqueue kernel\n&quot;, err);</a>
+<a name="ln1550">    goto cleanup;</a>
+<a name="ln1551">  }</a>
+<a name="ln1552"> </a>
+<a name="ln1553">cleanup:</a>
+<a name="ln1554">  if(dev_gamma) dt_opencl_release_mem_object(dev_gamma);</a>
+<a name="ln1555">  if(dev_contrast) dt_opencl_release_mem_object(dev_contrast);</a>
+<a name="ln1556">  dt_ioppr_free_iccprofile_params_cl(&amp;profile_info_cl, &amp;profile_lut_cl, &amp;dev_profile_info, &amp;dev_profile_lut);</a>
+<a name="ln1557"> </a>
+<a name="ln1558">  if(src_buffer) dt_free_align(src_buffer);</a>
+<a name="ln1559"> </a>
+<a name="ln1560">  if(err != CL_SUCCESS) dt_print(DT_DEBUG_OPENCL, &quot;[opencl_basicadj] couldn't enqueue kernel! %d\n&quot;, err);</a>
+<a name="ln1561"> </a>
+<a name="ln1562">  return (err == CL_SUCCESS) ? TRUE : FALSE;</a>
+<a name="ln1563">}</a>
+<a name="ln1564">#endif</a>
+<a name="ln1565"> </a>
+<a name="ln1566">void process(struct dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, const void *const ivoid,</a>
+<a name="ln1567">             void *const ovoid, const dt_iop_roi_t *const roi_in, const dt_iop_roi_t *const roi_out)</a>
+<a name="ln1568">{</a>
+<a name="ln1569">  const dt_iop_order_iccprofile_info_t *const work_profile = dt_ioppr_get_pipe_work_profile_info(piece-&gt;pipe);</a>
+<a name="ln1570"> </a>
+<a name="ln1571">  const int ch = piece-&gt;colors;</a>
+<a name="ln1572">  dt_iop_basicadj_data_t *d = (dt_iop_basicadj_data_t *)piece-&gt;data;</a>
+<a name="ln1573">  dt_iop_basicadj_params_t *p = (dt_iop_basicadj_params_t *)&amp;d-&gt;params;</a>
+<a name="ln1574">  dt_iop_basicadj_gui_data_t *g = (dt_iop_basicadj_gui_data_t *)self-&gt;gui_data;</a>
+<a name="ln1575"> </a>
+<a name="ln1576">  // process auto levels</a>
+<a name="ln1577">  if(g &amp;&amp; piece-&gt;pipe-&gt;type == DT_DEV_PIXELPIPE_PREVIEW)</a>
+<a name="ln1578">  {</a>
+<a name="ln1579">    dt_pthread_mutex_lock(&amp;g-&gt;lock);</a>
+<a name="ln1580">    if(g-&gt;call_auto_exposure == 1 &amp;&amp; !darktable.gui-&gt;reset)</a>
+<a name="ln1581">    {</a>
+<a name="ln1582">      g-&gt;call_auto_exposure = -1;</a>
+<a name="ln1583"> </a>
+<a name="ln1584">      dt_pthread_mutex_unlock(&amp;g-&gt;lock);</a>
+<a name="ln1585"> </a>
+<a name="ln1586">      memcpy(&amp;g-&gt;params, p, sizeof(dt_iop_basicadj_params_t));</a>
+<a name="ln1587"> </a>
+<a name="ln1588">      int box[4] = { 0 };</a>
+<a name="ln1589">      _get_selected_area(self, piece, g, roi_in, box);</a>
+<a name="ln1590">      _auto_exposure((const float *const)ivoid, roi_in-&gt;width, roi_in-&gt;height, box, g-&gt;params.clip,</a>
+<a name="ln1591">                     g-&gt;params.middle_grey / 100.f, &amp;g-&gt;params.exposure, &amp;g-&gt;params.brightness,</a>
+<a name="ln1592">                     &amp;g-&gt;params.contrast, &amp;g-&gt;params.black_point, &amp;g-&gt;params.hlcompr, &amp;g-&gt;params.hlcomprthresh);</a>
+<a name="ln1593"> </a>
+<a name="ln1594">      dt_pthread_mutex_lock(&amp;g-&gt;lock);</a>
+<a name="ln1595"> </a>
+<a name="ln1596">      g-&gt;call_auto_exposure = 2;</a>
+<a name="ln1597"> </a>
+<a name="ln1598">      dt_pthread_mutex_unlock(&amp;g-&gt;lock);</a>
+<a name="ln1599">    }</a>
+<a name="ln1600">    else</a>
+<a name="ln1601">    {</a>
+<a name="ln1602">      dt_pthread_mutex_unlock(&amp;g-&gt;lock);</a>
+<a name="ln1603">    }</a>
+<a name="ln1604">  }</a>
+<a name="ln1605"> </a>
+<a name="ln1606">  const float black_point = p-&gt;black_point;</a>
+<a name="ln1607">  const float hlcompr = p-&gt;hlcompr;</a>
+<a name="ln1608">  const float hlcomprthresh = p-&gt;hlcomprthresh;</a>
+<a name="ln1609">  const float saturation = p-&gt;saturation + 1.0f;</a>
+<a name="ln1610">  const float contrast = p-&gt;contrast + 1.0f;</a>
+<a name="ln1611">  const float white = exposure2white(p-&gt;exposure);</a>
+<a name="ln1612">  const float scale = 1.0f / (white - p-&gt;black_point);</a>
+<a name="ln1613">  const float middle_grey = (p-&gt;middle_grey &gt; 0.f) ? (p-&gt;middle_grey / 100.f) : 0.1842f;</a>
+<a name="ln1614">  const float inv_middle_grey = 1.f / middle_grey;</a>
+<a name="ln1615">  const float brightness = p-&gt;brightness * 2.f;</a>
+<a name="ln1616">  const float gamma = (brightness &gt;= 0.0f) ? 1.0f / (1.0f + brightness) : (1.0f - brightness);</a>
+<a name="ln1617"> </a>
+<a name="ln1618">  const float hlcomp = hlcompr / 100.0f;</a>
+<a name="ln1619">  const float shoulder = ((hlcomprthresh / 100.f) / 8.0f) + 0.1f;</a>
+<a name="ln1620">  const float hlrange = 1.0f - shoulder;</a>
+<a name="ln1621"> </a>
+<a name="ln1622">  const int plain_contrast = (!p-&gt;preserve_colors &amp;&amp; p-&gt;contrast != 0.f);</a>
+<a name="ln1623">  const int preserve_colors = (p-&gt;contrast != 0.f) ? p-&gt;preserve_colors : 0;</a>
+<a name="ln1624">  const int process_gamma = (p-&gt;brightness != 0.f);</a>
+<a name="ln1625">  const int process_saturation = (p-&gt;saturation != 0.f);</a>
+<a name="ln1626">  const int process_hlcompr = (p-&gt;hlcompr &gt; 0.f);</a>
+<a name="ln1627"> </a>
+<a name="ln1628">  const float *const in = (const float *const)ivoid;</a>
+<a name="ln1629">  float *const out = (float *const)ovoid;</a>
+<a name="ln1630">  const size_t stride = (size_t)roi_out-&gt;height * roi_out-&gt;width * ch;</a>
+<a name="ln1631"> </a>
+<a name="ln1632">#ifdef _OPENMP</a>
+<a name="ln1633">#pragma omp parallel for default(none) shared(d) schedule(static)</a>
+<a name="ln1634">#endif</a>
+<a name="ln1635">  for(size_t k = 0; k &lt; stride; k += ch)</a>
+<a name="ln1636">  {</a>
+<a name="ln1637">    for(size_t c = 0; c &lt; 3; c++)</a>
+<a name="ln1638">    {</a>
+<a name="ln1639">      // exposure</a>
+<a name="ln1640">      out[k + c] = (in[k + c] - black_point) * scale;</a>
+<a name="ln1641">    }</a>
+<a name="ln1642"> </a>
+<a name="ln1643">    // highlight compression</a>
+<a name="ln1644">    if(process_hlcompr)</a>
+<a name="ln1645">    {</a>
+<a name="ln1646">      const float lum = (work_profile) ? dt_ioppr_get_rgb_matrix_luminance(out + k, work_profile)</a>
+<a name="ln1647">                                       : dt_camera_rgb_luminance(out + k);</a>
+<a name="ln1648">      if(lum &gt; 0.f)</a>
+<a name="ln1649">      {</a>
+<a name="ln1650">        const float ratio = hlcurve(lum, hlcomp, hlrange);</a>
+<a name="ln1651"> </a>
+<a name="ln1652">        for(size_t c = 0; c &lt; 3; c++)</a>
+<a name="ln1653">        {</a>
+<a name="ln1654">          out[k + c] = (ratio * out[k + c]);</a>
+<a name="ln1655">        }</a>
+<a name="ln1656">      }</a>
+<a name="ln1657">    }</a>
+<a name="ln1658"> </a>
+<a name="ln1659">    for(size_t c = 0; c &lt; 3; c++)</a>
+<a name="ln1660">    {</a>
+<a name="ln1661">      // gamma</a>
+<a name="ln1662">      if(process_gamma &amp;&amp; out[k + c] &gt; 0.f) out[k + c] = get_lut_gamma(out[k + c], gamma, d-&gt;lut_gamma);</a>
+<a name="ln1663"> </a>
+<a name="ln1664">      // contrast</a>
+<a name="ln1665">      if(plain_contrast &amp;&amp; out[k + c] &gt; 0.f)</a>
+<a name="ln1666">        out[k + c] = get_lut_contrast(out[k + c], contrast, middle_grey, inv_middle_grey, d-&gt;lut_contrast);</a>
+<a name="ln1667">    }</a>
+<a name="ln1668"> </a>
+<a name="ln1669">    // contrast (with preserve colors)</a>
+<a name="ln1670">    if(preserve_colors == DT_BASICADJ_PRESERVE_LUMINANCE)</a>
+<a name="ln1671">    {</a>
+<a name="ln1672">      float ratio = 1.f;</a>
+<a name="ln1673">      const float lum = (work_profile) ? dt_ioppr_get_rgb_matrix_luminance(out + k, work_profile)</a>
+<a name="ln1674">                                       : dt_camera_rgb_luminance(out + k);</a>
+<a name="ln1675">      if(lum &gt; 0.f)</a>
+<a name="ln1676">      {</a>
+<a name="ln1677">        const float contrast_lum = powf(lum * inv_middle_grey, contrast) * middle_grey;</a>
+<a name="ln1678">        ratio = contrast_lum / lum;</a>
+<a name="ln1679">      }</a>
+<a name="ln1680"> </a>
+<a name="ln1681">      for(size_t c = 0; c &lt; 3; c++)</a>
+<a name="ln1682">      {</a>
+<a name="ln1683">        out[k + c] = (ratio * out[k + c]);</a>
+<a name="ln1684">      }</a>
+<a name="ln1685">    }</a>
+<a name="ln1686"> </a>
+<a name="ln1687">    // saturation</a>
+<a name="ln1688">    if(process_saturation)</a>
+<a name="ln1689">    {</a>
+<a name="ln1690">      const float luminance = (work_profile) ? dt_ioppr_get_rgb_matrix_luminance(out + k, work_profile)</a>
+<a name="ln1691">                                             : dt_camera_rgb_luminance(out + k);</a>
+<a name="ln1692"> </a>
+<a name="ln1693">      for(size_t c = 0; c &lt; 3; c++)</a>
+<a name="ln1694">      {</a>
+<a name="ln1695">        out[k + c] = luminance + saturation * (out[k + c] - luminance);</a>
+<a name="ln1696">      }</a>
+<a name="ln1697">    }</a>
+<a name="ln1698"> </a>
+<a name="ln1699">    out[k + 3] = in[k + 3];</a>
+<a name="ln1700">  }</a>
+<a name="ln1701">}</a>
+<a name="ln1702"> </a>
+<a name="ln1703">#undef exposure2white</a>
+<a name="ln1704"> </a>
+<a name="ln1705">// modelines: These editor modelines have been set for all relevant files by tools/update_modelines.sh</a>
+<a name="ln1706">// vim: shiftwidth=2 expandtab tabstop=2 cindent</a>
+<a name="ln1707">// kate: tab-indents: off; indent-width 2; replace-tabs on; indent-mode cstyle; remove-trailing-spaces modified;</a>
+
+</code></pre>
+<div class="balloon" rel="508"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v522/" target="_blank">V522</a> There might be dereferencing of a potential null pointer 'gd'. Check lines: 508, 505.</p></div>
+<div class="balloon" rel="630"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v575/" target="_blank">V575</a> The potential null pointer is passed into 'memcpy' function. Inspect the first argument. Check lines: 630, 620.</p></div>
+<div class="balloon" rel="631"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v575/" target="_blank">V575</a> The potential null pointer is passed into 'memcpy' function. Inspect the first argument. Check lines: 631, 621.</p></div>
+<div class="balloon" rel="662"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v522/" target="_blank">V522</a> There might be dereferencing of a potential null pointer 'g'. Check lines: 662, 658.</p></div>
+<div class="balloon" rel="831"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v1028/" target="_blank">V1028</a> Possible overflow. Consider casting operands of the 'm + 0x3ff' operator to the 'int64_t' type, not the result.</p></div>
+<div class="balloon" rel="835"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v1028/" target="_blank">V1028</a> Possible overflow. Consider casting operands of the 'q + 0x3ff' operator to the 'int64_t' type, not the result.</p></div>
+<div class="balloon" rel="1330"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v595/" target="_blank">V595</a> The 'histogram' pointer was utilized before it was verified against nullptr. Check lines: 1330, 1333.</p></div>
+
+<link rel="stylesheet" href="highlight.css">
+<script src="highlight.pack.js"></script>
+<script src="highlightjs-line-numbers.js"></script>
+<script>hljs.initHighlightingOnLoad();</script>
+<script>hljs.initLineNumbersOnLoad();</script>
+<script>
+  $(document).ready(function() {
+      $('.balloon').each(function () {
+          var bl = $(this);
+          var line = bl.attr('rel');
+          var text = $('a[name="ln'+line+'"]').text();
+
+          var space_count = 0;
+          for(var i = 0; i<text.length; i++){
+              var char = text[i];
+              if((char !== ' ')&&(char !== '\t'))break;
+              if(char === '\t')space_count++;
+              space_count++;
+          }
+
+          bl.css('margin-left', space_count*8);
+          $('a[name="ln'+line+'"]').after(bl);
+      });
+
+      window.location = window.location;
+  });
+</script>
+</body>
+</html>

@@ -1,0 +1,306 @@
+
+<html>
+<head>
+  <link rel="stylesheet" href="../style.css"/>
+  <script src="../jquery-3.2.1.min.js"></script>
+</head>
+<body>
+<pre><code class = "cpp">
+<a name="ln1">/*</a>
+<a name="ln2">    This file is part of darktable,</a>
+<a name="ln3">    copyright (c) 2011-2012 Henrik Andersson.</a>
+<a name="ln4"> </a>
+<a name="ln5">    darktable is free software: you can redistribute it and/or modify</a>
+<a name="ln6">    it under the terms of the GNU General Public License as published by</a>
+<a name="ln7">    the Free Software Foundation, either version 3 of the License, or</a>
+<a name="ln8">    (at your option) any later version.</a>
+<a name="ln9"> </a>
+<a name="ln10">    darktable is distributed in the hope that it will be useful,</a>
+<a name="ln11">    but WITHOUT ANY WARRANTY; without even the implied warranty of</a>
+<a name="ln12">    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the</a>
+<a name="ln13">    GNU General Public License for more details.</a>
+<a name="ln14"> </a>
+<a name="ln15">    You should have received a copy of the GNU General Public License</a>
+<a name="ln16">    along with darktable.  If not, see &lt;http://www.gnu.org/licenses/&gt;.</a>
+<a name="ln17">*/</a>
+<a name="ln18">#ifdef HAVE_CONFIG_H</a>
+<a name="ln19">#include &quot;config.h&quot;</a>
+<a name="ln20">#endif</a>
+<a name="ln21">#include &lt;assert.h&gt;</a>
+<a name="ln22">#include &lt;math.h&gt;</a>
+<a name="ln23">#include &lt;stdlib.h&gt;</a>
+<a name="ln24">#include &lt;string.h&gt;</a>
+<a name="ln25"> </a>
+<a name="ln26">#include &quot;bauhaus/bauhaus.h&quot;</a>
+<a name="ln27">#include &quot;common/opencl.h&quot;</a>
+<a name="ln28">#include &quot;control/control.h&quot;</a>
+<a name="ln29">#include &quot;develop/develop.h&quot;</a>
+<a name="ln30">#include &quot;develop/imageop.h&quot;</a>
+<a name="ln31">#include &quot;gui/accelerators.h&quot;</a>
+<a name="ln32">#include &quot;gui/gtk.h&quot;</a>
+<a name="ln33">#include &quot;iop/iop_api.h&quot;</a>
+<a name="ln34">#include &lt;gtk/gtk.h&gt;</a>
+<a name="ln35">#include &lt;inttypes.h&gt;</a>
+<a name="ln36"> </a>
+<a name="ln37">// NaN-safe clip: NaN compares false and will result in 0.0</a>
+<a name="ln38">#define CLIP(x) (((x) &gt;= 0.0) ? ((x) &lt;= 1.0 ? (x) : 1.0) : 0.0)</a>
+<a name="ln39">DT_MODULE_INTROSPECTION(2, dt_iop_vibrance_params_t)</a>
+<a name="ln40"> </a>
+<a name="ln41">typedef struct dt_iop_vibrance_params_t</a>
+<a name="ln42">{</a>
+<a name="ln43">  float amount;</a>
+<a name="ln44">} dt_iop_vibrance_params_t;</a>
+<a name="ln45"> </a>
+<a name="ln46">typedef struct dt_iop_vibrance_gui_data_t</a>
+<a name="ln47">{</a>
+<a name="ln48">  GtkWidget *amount_scale;</a>
+<a name="ln49">} dt_iop_vibrance_gui_data_t;</a>
+<a name="ln50"> </a>
+<a name="ln51">typedef struct dt_iop_vibrance_data_t</a>
+<a name="ln52">{</a>
+<a name="ln53">  float amount;</a>
+<a name="ln54">} dt_iop_vibrance_data_t;</a>
+<a name="ln55"> </a>
+<a name="ln56">typedef struct dt_iop_vibrance_global_data_t</a>
+<a name="ln57">{</a>
+<a name="ln58">  int kernel_vibrance;</a>
+<a name="ln59">} dt_iop_vibrance_global_data_t;</a>
+<a name="ln60"> </a>
+<a name="ln61"> </a>
+<a name="ln62">const char *name()</a>
+<a name="ln63">{</a>
+<a name="ln64">  return _(&quot;vibrance&quot;);</a>
+<a name="ln65">}</a>
+<a name="ln66"> </a>
+<a name="ln67">int flags()</a>
+<a name="ln68">{</a>
+<a name="ln69">  return IOP_FLAGS_INCLUDE_IN_STYLES | IOP_FLAGS_SUPPORTS_BLENDING | IOP_FLAGS_ALLOW_TILING;</a>
+<a name="ln70">}</a>
+<a name="ln71"> </a>
+<a name="ln72">int default_group()</a>
+<a name="ln73">{</a>
+<a name="ln74">  return IOP_GROUP_COLOR;</a>
+<a name="ln75">}</a>
+<a name="ln76"> </a>
+<a name="ln77">int default_colorspace(dt_iop_module_t *self, dt_dev_pixelpipe_t *pipe, dt_dev_pixelpipe_iop_t *piece)</a>
+<a name="ln78">{</a>
+<a name="ln79">  return iop_cs_Lab;</a>
+<a name="ln80">}</a>
+<a name="ln81"> </a>
+<a name="ln82">#if 0 // BAUHAUS doesn't support keyaccels yet...</a>
+<a name="ln83">void init_key_accels(dt_iop_module_so_t *self)</a>
+<a name="ln84">{</a>
+<a name="ln85">  dt_accel_register_slider_iop(self, FALSE, NC_(&quot;accel&quot;, &quot;vibrance&quot;));</a>
+<a name="ln86">}</a>
+<a name="ln87"> </a>
+<a name="ln88">void connect_key_accels(dt_iop_module_t *self)</a>
+<a name="ln89">{</a>
+<a name="ln90">  dt_iop_vibrance_gui_data_t *g = (dt_iop_vibrance_gui_data_t*)self-&gt;gui_data;</a>
+<a name="ln91"> </a>
+<a name="ln92">  dt_accel_connect_slider_iop(self, &quot;vibrance&quot;,</a>
+<a name="ln93">                              GTK_WIDGET(g-&gt;amount_scale));</a>
+<a name="ln94">}</a>
+<a name="ln95">#endif</a>
+<a name="ln96"> </a>
+<a name="ln97">void process(struct dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, const void *const ivoid,</a>
+<a name="ln98">             void *const ovoid, const dt_iop_roi_t *const roi_in, const dt_iop_roi_t *const roi_out)</a>
+<a name="ln99">{</a>
+<a name="ln100">  dt_iop_vibrance_data_t *d = (dt_iop_vibrance_data_t *)piece-&gt;data;</a>
+<a name="ln101">  const float *in = (float *)ivoid;</a>
+<a name="ln102">  float *out = (float *)ovoid;</a>
+<a name="ln103">  const int ch = piece-&gt;colors;</a>
+<a name="ln104"> </a>
+<a name="ln105">  const float amount = (d-&gt;amount * 0.01);</a>
+<a name="ln106"> </a>
+<a name="ln107">#ifdef _OPENMP</a>
+<a name="ln108">#pragma omp parallel for default(none) shared(in, out) schedule(static)</a>
+<a name="ln109">#endif</a>
+<a name="ln110">  for(int k = 0; k &lt; roi_out-&gt;height; k++)</a>
+<a name="ln111">  {</a>
+<a name="ln112">    size_t offs = (size_t)k * roi_out-&gt;width * ch;</a>
+<a name="ln113">    for(int l = 0; l &lt; (roi_out-&gt;width * ch); l += ch)</a>
+<a name="ln114">    {</a>
+<a name="ln115">      /* saturation weight 0 - 1 */</a>
+<a name="ln116">      float sw = sqrt((in[offs + l + 1] * in[offs + l + 1]) + (in[offs + l + 2] * in[offs + l + 2])) / 256.0;</a>
+<a name="ln117">      float ls = 1.0 - ((amount * sw) * .25);</a>
+<a name="ln118">      float ss = 1.0 + (amount * sw);</a>
+<a name="ln119">      out[offs + l + 0] = in[offs + l + 0] * ls;</a>
+<a name="ln120">      out[offs + l + 1] = in[offs + l + 1] * ss;</a>
+<a name="ln121">      out[offs + l + 2] = in[offs + l + 2] * ss;</a>
+<a name="ln122">      out[offs + l + 3] = in[offs + l + 3];</a>
+<a name="ln123">    }</a>
+<a name="ln124">  }</a>
+<a name="ln125">}</a>
+<a name="ln126"> </a>
+<a name="ln127"> </a>
+<a name="ln128">#ifdef HAVE_OPENCL</a>
+<a name="ln129">int process_cl(struct dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, cl_mem dev_in, cl_mem dev_out,</a>
+<a name="ln130">               const dt_iop_roi_t *const roi_in, const dt_iop_roi_t *const roi_out)</a>
+<a name="ln131">{</a>
+<a name="ln132">  dt_iop_vibrance_data_t *data = (dt_iop_vibrance_data_t *)piece-&gt;data;</a>
+<a name="ln133">  dt_iop_vibrance_global_data_t *gd = (dt_iop_vibrance_global_data_t *)self-&gt;data;</a>
+<a name="ln134">  cl_int err = -999;</a>
+<a name="ln135"> </a>
+<a name="ln136">  const int devid = piece-&gt;pipe-&gt;devid;</a>
+<a name="ln137">  const int width = roi_in-&gt;width;</a>
+<a name="ln138">  const int height = roi_in-&gt;height;</a>
+<a name="ln139"> </a>
+<a name="ln140">  const float amount = data-&gt;amount * 0.01f;</a>
+<a name="ln141"> </a>
+<a name="ln142">  size_t sizes[] = { ROUNDUPWD(width), ROUNDUPHT(height), 1 };</a>
+<a name="ln143"> </a>
+<a name="ln144">  dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_vibrance, 0, sizeof(cl_mem), (void *)&amp;dev_in);</a>
+<a name="ln145">  dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_vibrance, 1, sizeof(cl_mem), (void *)&amp;dev_out);</a>
+<a name="ln146">  dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_vibrance, 2, sizeof(int), (void *)&amp;width);</a>
+<a name="ln147">  dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_vibrance, 3, sizeof(int), (void *)&amp;height);</a>
+<a name="ln148">  dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_vibrance, 4, sizeof(float), (void *)&amp;amount);</a>
+<a name="ln149">  err = dt_opencl_enqueue_kernel_2d(devid, gd-&gt;kernel_vibrance, sizes);</a>
+<a name="ln150">  if(err != CL_SUCCESS) goto error;</a>
+<a name="ln151"> </a>
+<a name="ln152">  return TRUE;</a>
+<a name="ln153"> </a>
+<a name="ln154">error:</a>
+<a name="ln155">  dt_print(DT_DEBUG_OPENCL, &quot;[opencl_vibrance] couldn't enqueue kernel! %d\n&quot;, err);</a>
+<a name="ln156">  return FALSE;</a>
+<a name="ln157">}</a>
+<a name="ln158">#endif</a>
+<a name="ln159"> </a>
+<a name="ln160"> </a>
+<a name="ln161"> </a>
+<a name="ln162">void init_global(dt_iop_module_so_t *module)</a>
+<a name="ln163">{</a>
+<a name="ln164">  const int program = 8; // extended.cl, from programs.conf</a>
+<a name="ln165">  dt_iop_vibrance_global_data_t *gd</a>
+<a name="ln166">      = (dt_iop_vibrance_global_data_t *)malloc(sizeof(dt_iop_vibrance_global_data_t));</a>
+<a name="ln167">  module-&gt;data = gd;</a>
+<a name="ln168">  gd-&gt;kernel_vibrance = dt_opencl_create_kernel(program, &quot;vibrance&quot;);</a>
+<a name="ln169">}</a>
+<a name="ln170"> </a>
+<a name="ln171">void cleanup_global(dt_iop_module_so_t *module)</a>
+<a name="ln172">{</a>
+<a name="ln173">  dt_iop_vibrance_global_data_t *gd = (dt_iop_vibrance_global_data_t *)module-&gt;data;</a>
+<a name="ln174">  dt_opencl_free_kernel(gd-&gt;kernel_vibrance);</a>
+<a name="ln175">  free(module-&gt;data);</a>
+<a name="ln176">  module-&gt;data = NULL;</a>
+<a name="ln177">}</a>
+<a name="ln178"> </a>
+<a name="ln179"> </a>
+<a name="ln180"> </a>
+<a name="ln181">static void amount_callback(GtkWidget *slider, gpointer user_data)</a>
+<a name="ln182">{</a>
+<a name="ln183">  dt_iop_module_t *self = (dt_iop_module_t *)user_data;</a>
+<a name="ln184">  if(self-&gt;dt-&gt;gui-&gt;reset) return;</a>
+<a name="ln185">  dt_iop_vibrance_params_t *p = (dt_iop_vibrance_params_t *)self-&gt;params;</a>
+<a name="ln186">  p-&gt;amount = dt_bauhaus_slider_get(slider);</a>
+<a name="ln187">  dt_dev_add_history_item(darktable.develop, self, TRUE);</a>
+<a name="ln188">}</a>
+<a name="ln189"> </a>
+<a name="ln190">void commit_params(struct dt_iop_module_t *self, dt_iop_params_t *p1, dt_dev_pixelpipe_t *pipe,</a>
+<a name="ln191">                   dt_dev_pixelpipe_iop_t *piece)</a>
+<a name="ln192">{</a>
+<a name="ln193">  dt_iop_vibrance_params_t *p = (dt_iop_vibrance_params_t *)p1;</a>
+<a name="ln194">  dt_iop_vibrance_data_t *d = (dt_iop_vibrance_data_t *)piece-&gt;data;</a>
+<a name="ln195">  d-&gt;amount = p-&gt;amount;</a>
+<a name="ln196">}</a>
+<a name="ln197"> </a>
+<a name="ln198">void init_pipe(struct dt_iop_module_t *self, dt_dev_pixelpipe_t *pipe, dt_dev_pixelpipe_iop_t *piece)</a>
+<a name="ln199">{</a>
+<a name="ln200">  piece-&gt;data = calloc(1, sizeof(dt_iop_vibrance_data_t));</a>
+<a name="ln201">  self-&gt;commit_params(self, self-&gt;default_params, pipe, piece);</a>
+<a name="ln202">}</a>
+<a name="ln203"> </a>
+<a name="ln204">void cleanup_pipe(struct dt_iop_module_t *self, dt_dev_pixelpipe_t *pipe, dt_dev_pixelpipe_iop_t *piece)</a>
+<a name="ln205">{</a>
+<a name="ln206">  free(piece-&gt;data);</a>
+<a name="ln207">  piece-&gt;data = NULL;</a>
+<a name="ln208">}</a>
+<a name="ln209"> </a>
+<a name="ln210">void gui_update(struct dt_iop_module_t *self)</a>
+<a name="ln211">{</a>
+<a name="ln212">  dt_iop_module_t *module = (dt_iop_module_t *)self;</a>
+<a name="ln213">  dt_iop_vibrance_gui_data_t *g = (dt_iop_vibrance_gui_data_t *)self-&gt;gui_data;</a>
+<a name="ln214">  dt_iop_vibrance_params_t *p = (dt_iop_vibrance_params_t *)module-&gt;params;</a>
+<a name="ln215">  dt_bauhaus_slider_set(g-&gt;amount_scale, p-&gt;amount);</a>
+<a name="ln216">}</a>
+<a name="ln217"> </a>
+<a name="ln218">void init(dt_iop_module_t *module)</a>
+<a name="ln219">{</a>
+<a name="ln220">  module-&gt;params = calloc(1, sizeof(dt_iop_vibrance_params_t));</a>
+<a name="ln221">  module-&gt;default_params = calloc(1, sizeof(dt_iop_vibrance_params_t));</a>
+<a name="ln222">  module-&gt;default_enabled = 0;</a>
+<a name="ln223">  module-&gt;params_size = sizeof(dt_iop_vibrance_params_t);</a>
+<a name="ln224">  module-&gt;gui_data = NULL;</a>
+<a name="ln225">  dt_iop_vibrance_params_t tmp = (dt_iop_vibrance_params_t){ 25 };</a>
+<a name="ln226">  memcpy(module-&gt;params, &amp;tmp, sizeof(dt_iop_vibrance_params_t));</a>
+<a name="ln227">  memcpy(module-&gt;default_params, &amp;tmp, sizeof(dt_iop_vibrance_params_t));</a>
+<a name="ln228">}</a>
+<a name="ln229"> </a>
+<a name="ln230">void cleanup(dt_iop_module_t *module)</a>
+<a name="ln231">{</a>
+<a name="ln232">  free(module-&gt;params);</a>
+<a name="ln233">  module-&gt;params = NULL;</a>
+<a name="ln234">}</a>
+<a name="ln235"> </a>
+<a name="ln236">void gui_init(struct dt_iop_module_t *self)</a>
+<a name="ln237">{</a>
+<a name="ln238">  self-&gt;gui_data = malloc(sizeof(dt_iop_vibrance_gui_data_t));</a>
+<a name="ln239">  dt_iop_vibrance_gui_data_t *g = (dt_iop_vibrance_gui_data_t *)self-&gt;gui_data;</a>
+<a name="ln240">  dt_iop_vibrance_params_t *p = (dt_iop_vibrance_params_t *)self-&gt;params;</a>
+<a name="ln241"> </a>
+<a name="ln242">  self-&gt;widget = gtk_box_new(GTK_ORIENTATION_VERTICAL, DT_BAUHAUS_SPACE);</a>
+<a name="ln243">  dt_gui_add_help_link(self-&gt;widget, dt_get_help_url(self-&gt;op));</a>
+<a name="ln244">  ;</a>
+<a name="ln245"> </a>
+<a name="ln246">  /* vibrance */</a>
+<a name="ln247">  g-&gt;amount_scale = dt_bauhaus_slider_new_with_range(self, 0.0, 100.0, 1, p-&gt;amount, 0);</a>
+<a name="ln248">  dt_bauhaus_slider_set_format(g-&gt;amount_scale, &quot;%.0f%%&quot;);</a>
+<a name="ln249">  dt_bauhaus_widget_set_label(g-&gt;amount_scale, NULL, _(&quot;vibrance&quot;));</a>
+<a name="ln250">  gtk_box_pack_start(GTK_BOX(self-&gt;widget), GTK_WIDGET(g-&gt;amount_scale), TRUE, TRUE, 0);</a>
+<a name="ln251">  gtk_widget_set_tooltip_text(g-&gt;amount_scale, _(&quot;the amount of vibrance&quot;));</a>
+<a name="ln252">  g_signal_connect(G_OBJECT(g-&gt;amount_scale), &quot;value-changed&quot;, G_CALLBACK(amount_callback), self);</a>
+<a name="ln253">}</a>
+<a name="ln254"> </a>
+<a name="ln255">void gui_cleanup(struct dt_iop_module_t *self)</a>
+<a name="ln256">{</a>
+<a name="ln257">  free(self-&gt;gui_data);</a>
+<a name="ln258">  self-&gt;gui_data = NULL;</a>
+<a name="ln259">}</a>
+<a name="ln260">// modelines: These editor modelines have been set for all relevant files by tools/update_modelines.sh</a>
+<a name="ln261">// vim: shiftwidth=2 expandtab tabstop=2 cindent</a>
+<a name="ln262">// kate: tab-indents: off; indent-width 2; replace-tabs on; indent-mode cstyle; remove-trailing-spaces modified;</a>
+
+</code></pre>
+<div class="balloon" rel="168"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v522/" target="_blank">V522</a> There might be dereferencing of a potential null pointer 'gd'. Check lines: 168, 166.</p></div>
+<div class="balloon" rel="226"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v575/" target="_blank">V575</a> The potential null pointer is passed into 'memcpy' function. Inspect the first argument. Check lines: 226, 220.</p></div>
+<div class="balloon" rel="227"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v575/" target="_blank">V575</a> The potential null pointer is passed into 'memcpy' function. Inspect the first argument. Check lines: 227, 221.</p></div>
+<div class="balloon" rel="247"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v522/" target="_blank">V522</a> There might be dereferencing of a potential null pointer 'g'. Check lines: 247, 238.</p></div>
+
+<link rel="stylesheet" href="highlight.css">
+<script src="highlight.pack.js"></script>
+<script src="highlightjs-line-numbers.js"></script>
+<script>hljs.initHighlightingOnLoad();</script>
+<script>hljs.initLineNumbersOnLoad();</script>
+<script>
+  $(document).ready(function() {
+      $('.balloon').each(function () {
+          var bl = $(this);
+          var line = bl.attr('rel');
+          var text = $('a[name="ln'+line+'"]').text();
+
+          var space_count = 0;
+          for(var i = 0; i<text.length; i++){
+              var char = text[i];
+              if((char !== ' ')&&(char !== '\t'))break;
+              if(char === '\t')space_count++;
+              space_count++;
+          }
+
+          bl.css('margin-left', space_count*8);
+          $('a[name="ln'+line+'"]').after(bl);
+      });
+
+      window.location = window.location;
+  });
+</script>
+</body>
+</html>

@@ -1,0 +1,1444 @@
+
+<html>
+<head>
+  <link rel="stylesheet" href="../style.css"/>
+  <script src="../jquery-3.2.1.min.js"></script>
+</head>
+<body>
+<pre><code class = "cpp">
+<a name="ln1">/*</a>
+<a name="ln2">    This file is part of darktable,</a>
+<a name="ln3">    copyright (c) 2011 henrik andersson.</a>
+<a name="ln4">    copyright (c) 2012-2016 tobias ellinghaus.</a>
+<a name="ln5"> </a>
+<a name="ln6">    darktable is free software: you can redistribute it and/or modify</a>
+<a name="ln7">    it under the terms of the GNU General Public License as published by</a>
+<a name="ln8">    the Free Software Foundation, either version 3 of the License, or</a>
+<a name="ln9">    (at your option) any later version.</a>
+<a name="ln10"> </a>
+<a name="ln11">    darktable is distributed in the hope that it will be useful,</a>
+<a name="ln12">    but WITHOUT ANY WARRANTY; without even the implied warranty of</a>
+<a name="ln13">    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the</a>
+<a name="ln14">    GNU General Public License for more details.</a>
+<a name="ln15"> </a>
+<a name="ln16">    You should have received a copy of the GNU General Public License</a>
+<a name="ln17">    along with darktable.  If not, see &lt;http://www.gnu.org/licenses/&gt;.</a>
+<a name="ln18">*/</a>
+<a name="ln19"> </a>
+<a name="ln20">#include &quot;common/collection.h&quot;</a>
+<a name="ln21">#include &quot;common/darktable.h&quot;</a>
+<a name="ln22">#include &quot;common/debug.h&quot;</a>
+<a name="ln23">#include &quot;common/geo.h&quot;</a>
+<a name="ln24">#include &quot;common/image_cache.h&quot;</a>
+<a name="ln25">#include &quot;common/mipmap_cache.h&quot;</a>
+<a name="ln26">#include &quot;common/undo.h&quot;</a>
+<a name="ln27">#include &quot;control/conf.h&quot;</a>
+<a name="ln28">#include &quot;control/control.h&quot;</a>
+<a name="ln29">#include &quot;gui/accelerators.h&quot;</a>
+<a name="ln30">#include &quot;gui/drag_and_drop.h&quot;</a>
+<a name="ln31">#include &quot;gui/draw.h&quot;</a>
+<a name="ln32">#include &quot;libs/lib.h&quot;</a>
+<a name="ln33">#include &quot;views/view.h&quot;</a>
+<a name="ln34">#include &quot;views/view_api.h&quot;</a>
+<a name="ln35">#include &lt;gdk/gdkkeysyms.h&gt;</a>
+<a name="ln36"> </a>
+<a name="ln37">#include &lt;osm-gps-map.h&gt;</a>
+<a name="ln38"> </a>
+<a name="ln39">DT_MODULE(1)</a>
+<a name="ln40"> </a>
+<a name="ln41">typedef struct dt_undo_geotag_t</a>
+<a name="ln42">{</a>
+<a name="ln43">  int imgid;</a>
+<a name="ln44">  dt_image_geoloc_t before;</a>
+<a name="ln45">  dt_image_geoloc_t after;</a>
+<a name="ln46">} dt_undo_geotag_t;</a>
+<a name="ln47"> </a>
+<a name="ln48">typedef struct dt_map_t</a>
+<a name="ln49">{</a>
+<a name="ln50">  GtkWidget *center;</a>
+<a name="ln51">  OsmGpsMap *map;</a>
+<a name="ln52">  OsmGpsMapSource_t map_source;</a>
+<a name="ln53">  OsmGpsMapLayer *osd;</a>
+<a name="ln54">  GSList *images;</a>
+<a name="ln55">  GdkPixbuf *image_pin, *place_pin;</a>
+<a name="ln56">  gint selected_image;</a>
+<a name="ln57">  gboolean start_drag;</a>
+<a name="ln58">  struct</a>
+<a name="ln59">  {</a>
+<a name="ln60">    sqlite3_stmt *main_query;</a>
+<a name="ln61">  } statements;</a>
+<a name="ln62">  gboolean drop_filmstrip_activated;</a>
+<a name="ln63">  gboolean filter_images_drawn;</a>
+<a name="ln64">  int max_images_drawn;</a>
+<a name="ln65">} dt_map_t;</a>
+<a name="ln66"> </a>
+<a name="ln67">typedef struct dt_map_image_t</a>
+<a name="ln68">{</a>
+<a name="ln69">  gint imgid;</a>
+<a name="ln70">  OsmGpsMapImage *image;</a>
+<a name="ln71">  gint width, height;</a>
+<a name="ln72">} dt_map_image_t;</a>
+<a name="ln73"> </a>
+<a name="ln74">static const int thumb_size = 64, thumb_border = 1, image_pin_size = 13, place_pin_size = 72;</a>
+<a name="ln75">static const uint32_t thumb_frame_color = 0x000000aa;</a>
+<a name="ln76">static const uint32_t pin_outer_color = 0x0000aaaa;</a>
+<a name="ln77">static const uint32_t pin_inner_color = 0xffffffee;</a>
+<a name="ln78">static const uint32_t pin_line_color = 0x000000ff;</a>
+<a name="ln79"> </a>
+<a name="ln80">/* proxy function to center map view on location at a zoom level */</a>
+<a name="ln81">static void _view_map_center_on_location(const dt_view_t *view, gdouble lon, gdouble lat, gdouble zoom);</a>
+<a name="ln82">/* proxy function to center map view on a bounding box */</a>
+<a name="ln83">static void _view_map_center_on_bbox(const dt_view_t *view, gdouble lon1, gdouble lat1, gdouble lon2, gdouble lat2);</a>
+<a name="ln84">/* proxy function to show or hide the osd */</a>
+<a name="ln85">static void _view_map_show_osd(const dt_view_t *view, gboolean enabled);</a>
+<a name="ln86">/* proxy function to set the map source */</a>
+<a name="ln87">static void _view_map_set_map_source(const dt_view_t *view, OsmGpsMapSource_t map_source);</a>
+<a name="ln88">/* wrapper for setting the map source in the GObject */</a>
+<a name="ln89">static void _view_map_set_map_source_g_object(const dt_view_t *view, OsmGpsMapSource_t map_source);</a>
+<a name="ln90">/* proxy function to check if preferences have changed */</a>
+<a name="ln91">static void _view_map_check_preference_changed(gpointer instance, gpointer user_data);</a>
+<a name="ln92">/* proxy function to add a marker to the map */</a>
+<a name="ln93">static GObject *_view_map_add_marker(const dt_view_t *view, dt_geo_map_display_t type, GList *points);</a>
+<a name="ln94">/* proxy function to remove a marker from the map */</a>
+<a name="ln95">static gboolean _view_map_remove_marker(const dt_view_t *view, dt_geo_map_display_t type, GObject *marker);</a>
+<a name="ln96"> </a>
+<a name="ln97">/* callback when the collection changs */</a>
+<a name="ln98">static void _view_map_collection_changed(gpointer instance, gpointer user_data);</a>
+<a name="ln99">/* callback when an image is selected in filmstrip, centers map */</a>
+<a name="ln100">static void _view_map_filmstrip_activate_callback(gpointer instance, gpointer user_data);</a>
+<a name="ln101">/* callback when an image is dropped from filmstrip */</a>
+<a name="ln102">static void drag_and_drop_received(GtkWidget *widget, GdkDragContext *context, gint x, gint y,</a>
+<a name="ln103">                                   GtkSelectionData *selection_data, guint target_type, guint time,</a>
+<a name="ln104">                                   gpointer data);</a>
+<a name="ln105">/* callback when the user drags images FROM the map */</a>
+<a name="ln106">static void _view_map_dnd_get_callback(GtkWidget *widget, GdkDragContext *context,</a>
+<a name="ln107">                                       GtkSelectionData *selection_data, guint target_type, guint time,</a>
+<a name="ln108">                                       dt_view_t *self);</a>
+<a name="ln109">/* callback that readds the images to the map */</a>
+<a name="ln110">static void _view_map_changed_callback(OsmGpsMap *map, dt_view_t *self);</a>
+<a name="ln111">/* callback that handles double clicks on the map */</a>
+<a name="ln112">static gboolean _view_map_button_press_callback(GtkWidget *w, GdkEventButton *e, dt_view_t *self);</a>
+<a name="ln113">/* callback when the mouse is moved */</a>
+<a name="ln114">static gboolean _view_map_motion_notify_callback(GtkWidget *w, GdkEventMotion *e, dt_view_t *self);</a>
+<a name="ln115">static gboolean _view_map_dnd_failed_callback(GtkWidget *widget, GdkDragContext *drag_context,</a>
+<a name="ln116">                                              GtkDragResult result, dt_view_t *self);</a>
+<a name="ln117">static void _view_map_dnd_remove_callback(GtkWidget *widget, GdkDragContext *context, gint x, gint y,</a>
+<a name="ln118">                                          GtkSelectionData *selection_data, guint target_type, guint time,</a>
+<a name="ln119">                                          gpointer data);</a>
+<a name="ln120"> </a>
+<a name="ln121">static void _set_image_location(dt_view_t *self, int imgid, dt_image_geoloc_t *geoloc, gboolean set_elevation);</a>
+<a name="ln122"> </a>
+<a name="ln123">static gboolean _view_map_prefs_changed(dt_map_t *lib);</a>
+<a name="ln124">static void _view_map_build_main_query(dt_map_t *lib);</a>
+<a name="ln125"> </a>
+<a name="ln126">/* center map to on the baricenter of the image list */</a>
+<a name="ln127">static gboolean _view_map_center_on_image_list(dt_view_t *self, const GList *selected_images);</a>
+<a name="ln128">/* center map on the given image */</a>
+<a name="ln129">static void _view_map_center_on_image(dt_view_t *self, const int32_t imgid);</a>
+<a name="ln130"> </a>
+<a name="ln131">const char *name(dt_view_t *self)</a>
+<a name="ln132">{</a>
+<a name="ln133">  return _(&quot;map&quot;);</a>
+<a name="ln134">}</a>
+<a name="ln135"> </a>
+<a name="ln136">uint32_t view(const dt_view_t *self)</a>
+<a name="ln137">{</a>
+<a name="ln138">  return DT_VIEW_MAP;</a>
+<a name="ln139">}</a>
+<a name="ln140"> </a>
+<a name="ln141">#ifdef USE_LUA</a>
+<a name="ln142"> </a>
+<a name="ln143">static int latitude_member(lua_State *L)</a>
+<a name="ln144">{</a>
+<a name="ln145">  dt_view_t *module = *(dt_view_t **)lua_touserdata(L, 1);</a>
+<a name="ln146">  dt_map_t *lib = (dt_map_t *)module-&gt;data;</a>
+<a name="ln147">  if(lua_gettop(L) != 3)</a>
+<a name="ln148">  {</a>
+<a name="ln149">    if(dt_view_manager_get_current_view(darktable.view_manager) != module)</a>
+<a name="ln150">    {</a>
+<a name="ln151">      lua_pushnumber(L, dt_conf_get_float(&quot;plugins/map/latitude&quot;));</a>
+<a name="ln152">    }</a>
+<a name="ln153">    else</a>
+<a name="ln154">    {</a>
+<a name="ln155">      float value;</a>
+<a name="ln156">      g_object_get(G_OBJECT(lib-&gt;map), &quot;latitude&quot;, &amp;value, NULL);</a>
+<a name="ln157">      lua_pushnumber(L, value);</a>
+<a name="ln158">    }</a>
+<a name="ln159">    return 1;</a>
+<a name="ln160">  }</a>
+<a name="ln161">  else</a>
+<a name="ln162">  {</a>
+<a name="ln163">    luaL_checktype(L, 3, LUA_TNUMBER);</a>
+<a name="ln164">    float lat = lua_tonumber(L, 3);</a>
+<a name="ln165">    lat = CLAMP(lat, -90, 90);</a>
+<a name="ln166">    if(dt_view_manager_get_current_view(darktable.view_manager) != module)</a>
+<a name="ln167">    {</a>
+<a name="ln168">      dt_conf_set_float(&quot;plugins/map/latitude&quot;, lat);</a>
+<a name="ln169">    }</a>
+<a name="ln170">    else</a>
+<a name="ln171">    {</a>
+<a name="ln172">      float value;</a>
+<a name="ln173">      g_object_get(G_OBJECT(lib-&gt;map), &quot;longitude&quot;, &amp;value, NULL);</a>
+<a name="ln174">      osm_gps_map_set_center(lib-&gt;map, lat, value);</a>
+<a name="ln175">    }</a>
+<a name="ln176">    return 0;</a>
+<a name="ln177">  }</a>
+<a name="ln178">}</a>
+<a name="ln179"> </a>
+<a name="ln180">static int longitude_member(lua_State *L)</a>
+<a name="ln181">{</a>
+<a name="ln182">  dt_view_t *module = *(dt_view_t **)lua_touserdata(L, 1);</a>
+<a name="ln183">  dt_map_t *lib = (dt_map_t *)module-&gt;data;</a>
+<a name="ln184">  if(lua_gettop(L) != 3)</a>
+<a name="ln185">  {</a>
+<a name="ln186">    if(dt_view_manager_get_current_view(darktable.view_manager) != module)</a>
+<a name="ln187">    {</a>
+<a name="ln188">      lua_pushnumber(L, dt_conf_get_float(&quot;plugins/map/longitude&quot;));</a>
+<a name="ln189">    }</a>
+<a name="ln190">    else</a>
+<a name="ln191">    {</a>
+<a name="ln192">      float value;</a>
+<a name="ln193">      g_object_get(G_OBJECT(lib-&gt;map), &quot;longitude&quot;, &amp;value, NULL);</a>
+<a name="ln194">      lua_pushnumber(L, value);</a>
+<a name="ln195">    }</a>
+<a name="ln196">    return 1;</a>
+<a name="ln197">  }</a>
+<a name="ln198">  else</a>
+<a name="ln199">  {</a>
+<a name="ln200">    luaL_checktype(L, 3, LUA_TNUMBER);</a>
+<a name="ln201">    float longi = lua_tonumber(L, 3);</a>
+<a name="ln202">    longi = CLAMP(longi, -180, 180);</a>
+<a name="ln203">    if(dt_view_manager_get_current_view(darktable.view_manager) != module)</a>
+<a name="ln204">    {</a>
+<a name="ln205">      dt_conf_set_float(&quot;plugins/map/longitude&quot;, longi);</a>
+<a name="ln206">    }</a>
+<a name="ln207">    else</a>
+<a name="ln208">    {</a>
+<a name="ln209">      float value;</a>
+<a name="ln210">      g_object_get(G_OBJECT(lib-&gt;map), &quot;latitude&quot;, &amp;value, NULL);</a>
+<a name="ln211">      osm_gps_map_set_center(lib-&gt;map, value, longi);</a>
+<a name="ln212">    }</a>
+<a name="ln213">    return 0;</a>
+<a name="ln214">  }</a>
+<a name="ln215">}</a>
+<a name="ln216"> </a>
+<a name="ln217">static int zoom_member(lua_State *L)</a>
+<a name="ln218">{</a>
+<a name="ln219">  dt_view_t *module = *(dt_view_t **)lua_touserdata(L, 1);</a>
+<a name="ln220">  dt_map_t *lib = (dt_map_t *)module-&gt;data;</a>
+<a name="ln221">  if(lua_gettop(L) != 3)</a>
+<a name="ln222">  {</a>
+<a name="ln223">    if(dt_view_manager_get_current_view(darktable.view_manager) != module)</a>
+<a name="ln224">    {</a>
+<a name="ln225">      lua_pushnumber(L, dt_conf_get_float(&quot;plugins/map/zoom&quot;));</a>
+<a name="ln226">    }</a>
+<a name="ln227">    else</a>
+<a name="ln228">    {</a>
+<a name="ln229">      int value;</a>
+<a name="ln230">      g_object_get(G_OBJECT(lib-&gt;map), &quot;zoom&quot;, &amp;value, NULL);</a>
+<a name="ln231">      lua_pushnumber(L, value);</a>
+<a name="ln232">    }</a>
+<a name="ln233">    return 1;</a>
+<a name="ln234">  }</a>
+<a name="ln235">  else</a>
+<a name="ln236">  {</a>
+<a name="ln237">    // we rely on osm to correctly clamp zoom (checked in osm source</a>
+<a name="ln238">    // lua can have temporarily false values but it will fix itself when entering map</a>
+<a name="ln239">    // unfortunately we can't get the min max when lib-&gt;map doesn't exist</a>
+<a name="ln240">    luaL_checktype(L, 3, LUA_TNUMBER);</a>
+<a name="ln241">    int zoom = luaL_checkinteger(L, 3);</a>
+<a name="ln242">    if(dt_view_manager_get_current_view(darktable.view_manager) != module)</a>
+<a name="ln243">    {</a>
+<a name="ln244">      dt_conf_set_int(&quot;plugins/map/zoom&quot;, zoom);</a>
+<a name="ln245">    }</a>
+<a name="ln246">    else</a>
+<a name="ln247">    {</a>
+<a name="ln248">      osm_gps_map_set_zoom(lib-&gt;map, zoom);</a>
+<a name="ln249">    }</a>
+<a name="ln250">    return 0;</a>
+<a name="ln251">  }</a>
+<a name="ln252">}</a>
+<a name="ln253">#endif // USE_LUA</a>
+<a name="ln254"> </a>
+<a name="ln255">#ifndef HAVE_OSMGPSMAP_110_OR_NEWER</a>
+<a name="ln256">// the following functions were taken from libosmgpsmap</a>
+<a name="ln257">// Copyright (C) Marcus Bauer 2008 &lt;marcus.bauer@gmail.com&gt;</a>
+<a name="ln258">// Copyright (C) 2013 John Stowers &lt;john.stowers@gmail.com&gt;</a>
+<a name="ln259">// Copyright (C) 2014 Martijn Goedhart &lt;goedhart.martijn@gmail.com&gt;</a>
+<a name="ln260"> </a>
+<a name="ln261">#if FLT_RADIX == 2</a>
+<a name="ln262">  #define LOG2(x) (ilogb(x))</a>
+<a name="ln263">#else</a>
+<a name="ln264">  #define LOG2(x) ((int)floor(log2(abs(x))))</a>
+<a name="ln265">#endif</a>
+<a name="ln266"> </a>
+<a name="ln267">#define TILESIZE 256</a>
+<a name="ln268"> </a>
+<a name="ln269">static float deg2rad(float deg)</a>
+<a name="ln270">{</a>
+<a name="ln271">  return (deg * M_PI / 180.0);</a>
+<a name="ln272">}</a>
+<a name="ln273"> </a>
+<a name="ln274">static int latlon2zoom(int pix_height, int pix_width, float lat1, float lat2, float lon1, float lon2)</a>
+<a name="ln275">{</a>
+<a name="ln276">  float lat1_m = atanh(sin(lat1));</a>
+<a name="ln277">  float lat2_m = atanh(sin(lat2));</a>
+<a name="ln278">  int zoom_lon = LOG2((double)(2 * pix_width * M_PI) / (TILESIZE * (lon2 - lon1)));</a>
+<a name="ln279">  int zoom_lat = LOG2((double)(2 * pix_height * M_PI) / (TILESIZE * (lat2_m - lat1_m)));</a>
+<a name="ln280">  return MIN(zoom_lon, zoom_lat);</a>
+<a name="ln281">}</a>
+<a name="ln282"> </a>
+<a name="ln283">#undef LOG2</a>
+<a name="ln284">#undef TILESIZE</a>
+<a name="ln285"> </a>
+<a name="ln286">//  Copyright (C) 2013 John Stowers &lt;john.stowers@gmail.com&gt;</a>
+<a name="ln287">//  Copyright (C) Marcus Bauer 2008 &lt;marcus.bauer@gmail.com&gt;</a>
+<a name="ln288">//  Copyright (C) John Stowers 2009 &lt;john.stowers@gmail.com&gt;</a>
+<a name="ln289">//  Copyright (C) Till Harbaum 2009 &lt;till@harbaum.org&gt;</a>
+<a name="ln290">//</a>
+<a name="ln291">//  Contributions by</a>
+<a name="ln292">//  Everaldo Canuto 2009 &lt;everaldo.canuto@gmail.com&gt;</a>
+<a name="ln293">static void osm_gps_map_zoom_fit_bbox(OsmGpsMap *map, float latitude1, float latitude2, float longitude1, float longitude2)</a>
+<a name="ln294">{</a>
+<a name="ln295">  GtkAllocation allocation;</a>
+<a name="ln296">  int zoom;</a>
+<a name="ln297">  gtk_widget_get_allocation(GTK_WIDGET (map), &amp;allocation);</a>
+<a name="ln298">  zoom = latlon2zoom(allocation.height, allocation.width, deg2rad(latitude1), deg2rad(latitude2), deg2rad(longitude1), deg2rad(longitude2));</a>
+<a name="ln299">  osm_gps_map_set_center(map, (latitude1 + latitude2) / 2, (longitude1 + longitude2) / 2);</a>
+<a name="ln300">  osm_gps_map_set_zoom(map, zoom);</a>
+<a name="ln301">}</a>
+<a name="ln302">#endif // HAVE_OSMGPSMAP_110_OR_NEWER</a>
+<a name="ln303"> </a>
+<a name="ln304">static GdkPixbuf *init_image_pin()</a>
+<a name="ln305">{</a>
+<a name="ln306">  int w = DT_PIXEL_APPLY_DPI(thumb_size + 2 * thumb_border), h = DT_PIXEL_APPLY_DPI(image_pin_size);</a>
+<a name="ln307">  float r, g, b, a;</a>
+<a name="ln308">  r = ((thumb_frame_color &amp; 0xff000000) &gt;&gt; 24) / 255.0;</a>
+<a name="ln309">  g = ((thumb_frame_color &amp; 0x00ff0000) &gt;&gt; 16) / 255.0;</a>
+<a name="ln310">  b = ((thumb_frame_color &amp; 0x0000ff00) &gt;&gt; 8) / 255.0;</a>
+<a name="ln311">  a = ((thumb_frame_color &amp; 0x000000ff) &gt;&gt; 0) / 255.0;</a>
+<a name="ln312"> </a>
+<a name="ln313">  cairo_surface_t *cst = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, w, h);</a>
+<a name="ln314">  cairo_t *cr = cairo_create(cst);</a>
+<a name="ln315">  cairo_set_source_rgba(cr, r, g, b, a);</a>
+<a name="ln316">  dtgtk_cairo_paint_map_pin(cr, 0, 0, w, h, 0, NULL);</a>
+<a name="ln317">  cairo_destroy(cr);</a>
+<a name="ln318">  uint8_t *data = cairo_image_surface_get_data(cst);</a>
+<a name="ln319">  dt_draw_cairo_to_gdk_pixbuf(data, w, h);</a>
+<a name="ln320">  size_t size = w * h * 4;</a>
+<a name="ln321">  uint8_t *buf = (uint8_t *)malloc(size);</a>
+<a name="ln322">  memcpy(buf, data, size);</a>
+<a name="ln323">  GdkPixbuf *pixbuf = gdk_pixbuf_new_from_data(buf, GDK_COLORSPACE_RGB, TRUE, 8, w, h, w * 4,</a>
+<a name="ln324">                                               (GdkPixbufDestroyNotify)free, NULL);</a>
+<a name="ln325">  cairo_surface_destroy(cst);</a>
+<a name="ln326">  return pixbuf;</a>
+<a name="ln327">}</a>
+<a name="ln328"> </a>
+<a name="ln329">static GdkPixbuf *init_place_pin()</a>
+<a name="ln330">{</a>
+<a name="ln331">  int w = DT_PIXEL_APPLY_DPI(place_pin_size), h = DT_PIXEL_APPLY_DPI(place_pin_size);</a>
+<a name="ln332">  float r, g, b, a;</a>
+<a name="ln333"> </a>
+<a name="ln334">  cairo_surface_t *cst = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, w, h);</a>
+<a name="ln335">  cairo_t *cr = cairo_create(cst);</a>
+<a name="ln336"> </a>
+<a name="ln337">  // outer shape</a>
+<a name="ln338">  r = ((pin_outer_color &amp; 0xff000000) &gt;&gt; 24) / 255.0;</a>
+<a name="ln339">  g = ((pin_outer_color &amp; 0x00ff0000) &gt;&gt; 16) / 255.0;</a>
+<a name="ln340">  b = ((pin_outer_color &amp; 0x0000ff00) &gt;&gt; 8) / 255.0;</a>
+<a name="ln341">  a = ((pin_outer_color &amp; 0x000000ff) &gt;&gt; 0) / 255.0;</a>
+<a name="ln342">  cairo_set_source_rgba(cr, r, g, b, a);</a>
+<a name="ln343">  cairo_arc(cr, 0.5 * w, 0.333 * h, 0.333 * h - 2, 150.0 * (M_PI / 180.0), 30.0 * (M_PI / 180.0));</a>
+<a name="ln344">  cairo_line_to(cr, 0.5 * w, h - 2);</a>
+<a name="ln345">  cairo_close_path(cr);</a>
+<a name="ln346">  cairo_fill_preserve(cr);</a>
+<a name="ln347"> </a>
+<a name="ln348">  r = ((pin_line_color &amp; 0xff000000) &gt;&gt; 24) / 255.0;</a>
+<a name="ln349">  g = ((pin_line_color &amp; 0x00ff0000) &gt;&gt; 16) / 255.0;</a>
+<a name="ln350">  b = ((pin_line_color &amp; 0x0000ff00) &gt;&gt; 8) / 255.0;</a>
+<a name="ln351">  a = ((pin_line_color &amp; 0x000000ff) &gt;&gt; 0) / 255.0;</a>
+<a name="ln352">  cairo_set_source_rgba(cr, r, g, b, a);</a>
+<a name="ln353">  cairo_set_line_width(cr, DT_PIXEL_APPLY_DPI(1));</a>
+<a name="ln354">  cairo_stroke(cr);</a>
+<a name="ln355"> </a>
+<a name="ln356">  // inner circle</a>
+<a name="ln357">  r = ((pin_inner_color &amp; 0xff000000) &gt;&gt; 24) / 255.0;</a>
+<a name="ln358">  g = ((pin_inner_color &amp; 0x00ff0000) &gt;&gt; 16) / 255.0;</a>
+<a name="ln359">  b = ((pin_inner_color &amp; 0x0000ff00) &gt;&gt; 8) / 255.0;</a>
+<a name="ln360">  a = ((pin_inner_color &amp; 0x000000ff) &gt;&gt; 0) / 255.0;</a>
+<a name="ln361">  cairo_set_source_rgba(cr, r, g, b, a);</a>
+<a name="ln362">  cairo_arc(cr, 0.5 * w, 0.333 * h, 0.17 * h, 0, 2.0 * M_PI);</a>
+<a name="ln363">  cairo_fill(cr);</a>
+<a name="ln364"> </a>
+<a name="ln365">  cairo_destroy(cr);</a>
+<a name="ln366">  uint8_t *data = cairo_image_surface_get_data(cst);</a>
+<a name="ln367">  dt_draw_cairo_to_gdk_pixbuf(data, w, h);</a>
+<a name="ln368">  size_t size = w * h * 4;</a>
+<a name="ln369">  uint8_t *buf = (uint8_t *)malloc(size);</a>
+<a name="ln370">  memcpy(buf, data, size);</a>
+<a name="ln371">  GdkPixbuf *pixbuf = gdk_pixbuf_new_from_data(buf, GDK_COLORSPACE_RGB, TRUE, 8, w, h, w * 4,</a>
+<a name="ln372">                                               (GdkPixbufDestroyNotify)free, NULL);</a>
+<a name="ln373">  cairo_surface_destroy(cst);</a>
+<a name="ln374">  return pixbuf;</a>
+<a name="ln375">}</a>
+<a name="ln376"> </a>
+<a name="ln377">void init(dt_view_t *self)</a>
+<a name="ln378">{</a>
+<a name="ln379">  self-&gt;data = calloc(1, sizeof(dt_map_t));</a>
+<a name="ln380"> </a>
+<a name="ln381">  dt_map_t *lib = (dt_map_t *)self-&gt;data;</a>
+<a name="ln382"> </a>
+<a name="ln383">  if(darktable.gui)</a>
+<a name="ln384">  {</a>
+<a name="ln385">    lib-&gt;image_pin = init_image_pin();</a>
+<a name="ln386">    lib-&gt;place_pin = init_place_pin();</a>
+<a name="ln387">    lib-&gt;drop_filmstrip_activated = FALSE;</a>
+<a name="ln388"> </a>
+<a name="ln389">    OsmGpsMapSource_t map_source</a>
+<a name="ln390">        = OSM_GPS_MAP_SOURCE_OPENSTREETMAP; // open street map should be a nice default ...</a>
+<a name="ln391">    gchar *old_map_source = dt_conf_get_string(&quot;plugins/map/map_source&quot;);</a>
+<a name="ln392">    if(old_map_source &amp;&amp; old_map_source[0] != '\0')</a>
+<a name="ln393">    {</a>
+<a name="ln394">      // find the number of the stored map_source</a>
+<a name="ln395">      for(int i = 0; i &lt;= OSM_GPS_MAP_SOURCE_LAST; i++)</a>
+<a name="ln396">      {</a>
+<a name="ln397">        const gchar *new_map_source = osm_gps_map_source_get_friendly_name(i);</a>
+<a name="ln398">        if(!g_strcmp0(old_map_source, new_map_source))</a>
+<a name="ln399">        {</a>
+<a name="ln400">          if(osm_gps_map_source_is_valid(i)) map_source = i;</a>
+<a name="ln401">          break;</a>
+<a name="ln402">        }</a>
+<a name="ln403">      }</a>
+<a name="ln404">    }</a>
+<a name="ln405">    else</a>
+<a name="ln406">      dt_conf_set_string(&quot;plugins/map/map_source&quot;, osm_gps_map_source_get_friendly_name(map_source));</a>
+<a name="ln407">    g_free(old_map_source);</a>
+<a name="ln408"> </a>
+<a name="ln409">    lib-&gt;map_source = map_source;</a>
+<a name="ln410"> </a>
+<a name="ln411">    lib-&gt;map = g_object_new(OSM_TYPE_GPS_MAP, &quot;map-source&quot;, OSM_GPS_MAP_SOURCE_NULL, &quot;proxy-uri&quot;,</a>
+<a name="ln412">                            g_getenv(&quot;http_proxy&quot;), NULL);</a>
+<a name="ln413"> </a>
+<a name="ln414">    GtkWidget *parent = gtk_widget_get_parent(gtk_widget_get_parent(dt_ui_center(darktable.gui-&gt;ui)));</a>
+<a name="ln415">    gtk_box_pack_start(GTK_BOX(parent), GTK_WIDGET(lib-&gt;map), TRUE, TRUE, 0);</a>
+<a name="ln416"> </a>
+<a name="ln417">    lib-&gt;osd = g_object_new(OSM_TYPE_GPS_MAP_OSD, &quot;show-scale&quot;, TRUE, &quot;show-coordinates&quot;, TRUE, &quot;show-dpad&quot;,</a>
+<a name="ln418">                            TRUE, &quot;show-zoom&quot;, TRUE,</a>
+<a name="ln419">#ifdef HAVE_OSMGPSMAP_NEWER_THAN_110</a>
+<a name="ln420">                            &quot;show-copyright&quot;, TRUE,</a>
+<a name="ln421">#endif</a>
+<a name="ln422">                            NULL);</a>
+<a name="ln423"> </a>
+<a name="ln424">    if(dt_conf_get_bool(&quot;plugins/map/show_map_osd&quot;))</a>
+<a name="ln425">    {</a>
+<a name="ln426">      osm_gps_map_layer_add(OSM_GPS_MAP(lib-&gt;map), lib-&gt;osd);</a>
+<a name="ln427">    }</a>
+<a name="ln428"> </a>
+<a name="ln429">    /* allow drag&amp;drop of images from filmstrip */</a>
+<a name="ln430">    gtk_drag_dest_set(GTK_WIDGET(lib-&gt;map), GTK_DEST_DEFAULT_ALL, target_list_internal, n_targets_internal,</a>
+<a name="ln431">                      GDK_ACTION_COPY);</a>
+<a name="ln432">    g_signal_connect(GTK_WIDGET(lib-&gt;map), &quot;drag-data-received&quot;, G_CALLBACK(drag_and_drop_received), self);</a>
+<a name="ln433">    g_signal_connect(GTK_WIDGET(lib-&gt;map), &quot;changed&quot;, G_CALLBACK(_view_map_changed_callback), self);</a>
+<a name="ln434">    g_signal_connect_after(G_OBJECT(lib-&gt;map), &quot;button-press-event&quot;,</a>
+<a name="ln435">                           G_CALLBACK(_view_map_button_press_callback), self);</a>
+<a name="ln436">    g_signal_connect(G_OBJECT(lib-&gt;map), &quot;motion-notify-event&quot;, G_CALLBACK(_view_map_motion_notify_callback),</a>
+<a name="ln437">                     self);</a>
+<a name="ln438"> </a>
+<a name="ln439">    /* allow drag&amp;drop of images from the map, too */</a>
+<a name="ln440">    g_signal_connect(GTK_WIDGET(lib-&gt;map), &quot;drag-data-get&quot;, G_CALLBACK(_view_map_dnd_get_callback), self);</a>
+<a name="ln441">    g_signal_connect(GTK_WIDGET(lib-&gt;map), &quot;drag-failed&quot;, G_CALLBACK(_view_map_dnd_failed_callback), self);</a>
+<a name="ln442">  }</a>
+<a name="ln443"> </a>
+<a name="ln444">  /* build the query string */</a>
+<a name="ln445">  lib-&gt;statements.main_query = NULL;</a>
+<a name="ln446">  _view_map_build_main_query(lib);</a>
+<a name="ln447"> </a>
+<a name="ln448">#ifdef USE_LUA</a>
+<a name="ln449">  lua_State *L = darktable.lua_state.state;</a>
+<a name="ln450">  luaA_Type my_type = dt_lua_module_entry_get_type(L, &quot;view&quot;, self-&gt;module_name);</a>
+<a name="ln451">  lua_pushcfunction(L, latitude_member);</a>
+<a name="ln452">  dt_lua_gtk_wrap(L);</a>
+<a name="ln453">  dt_lua_type_register_type(L, my_type, &quot;latitude&quot;);</a>
+<a name="ln454">  lua_pushcfunction(L, longitude_member);</a>
+<a name="ln455">  dt_lua_gtk_wrap(L);</a>
+<a name="ln456">  dt_lua_type_register_type(L, my_type, &quot;longitude&quot;);</a>
+<a name="ln457">  lua_pushcfunction(L, zoom_member);</a>
+<a name="ln458">  dt_lua_gtk_wrap(L);</a>
+<a name="ln459">  dt_lua_type_register_type(L, my_type, &quot;zoom&quot;);</a>
+<a name="ln460"> </a>
+<a name="ln461">#endif // USE_LUA</a>
+<a name="ln462">  /* connect collection changed signal */</a>
+<a name="ln463">  dt_control_signal_connect(darktable.signals, DT_SIGNAL_COLLECTION_CHANGED,</a>
+<a name="ln464">                            G_CALLBACK(_view_map_collection_changed), (gpointer)self);</a>
+<a name="ln465">  /* connect preference changed signal */</a>
+<a name="ln466">  dt_control_signal_connect(darktable.signals, DT_SIGNAL_PREFERENCES_CHANGE,</a>
+<a name="ln467">                            G_CALLBACK(_view_map_check_preference_changed), (gpointer)self);</a>
+<a name="ln468">}</a>
+<a name="ln469"> </a>
+<a name="ln470">void cleanup(dt_view_t *self)</a>
+<a name="ln471">{</a>
+<a name="ln472">  dt_map_t *lib = (dt_map_t *)self-&gt;data;</a>
+<a name="ln473"> </a>
+<a name="ln474">  dt_control_signal_disconnect(darktable.signals, G_CALLBACK(_view_map_collection_changed), self);</a>
+<a name="ln475">  dt_control_signal_disconnect(darktable.signals, G_CALLBACK(_view_map_check_preference_changed), self);</a>
+<a name="ln476"> </a>
+<a name="ln477">  if(darktable.gui)</a>
+<a name="ln478">  {</a>
+<a name="ln479">    g_object_unref(G_OBJECT(lib-&gt;image_pin));</a>
+<a name="ln480">    g_object_unref(G_OBJECT(lib-&gt;place_pin));</a>
+<a name="ln481">    g_object_unref(G_OBJECT(lib-&gt;osd));</a>
+<a name="ln482">    osm_gps_map_image_remove_all(lib-&gt;map);</a>
+<a name="ln483">    if(lib-&gt;images)</a>
+<a name="ln484">    {</a>
+<a name="ln485">      g_slist_free_full(lib-&gt;images, g_free);</a>
+<a name="ln486">      lib-&gt;images = NULL;</a>
+<a name="ln487">    }</a>
+<a name="ln488">    // FIXME: it would be nice to cleanly destroy the object, but we are doing this inside expose() so</a>
+<a name="ln489">    // removing the widget can cause segfaults.</a>
+<a name="ln490">    //     g_object_unref(G_OBJECT(lib-&gt;map));</a>
+<a name="ln491">  }</a>
+<a name="ln492">  if(lib-&gt;statements.main_query) sqlite3_finalize(lib-&gt;statements.main_query);</a>
+<a name="ln493">  free(self-&gt;data);</a>
+<a name="ln494">}</a>
+<a name="ln495"> </a>
+<a name="ln496">void configure(dt_view_t *self, int wd, int ht)</a>
+<a name="ln497">{</a>
+<a name="ln498">  // dt_capture_t *lib=(dt_capture_t*)self-&gt;data;</a>
+<a name="ln499">}</a>
+<a name="ln500"> </a>
+<a name="ln501">int try_enter(dt_view_t *self)</a>
+<a name="ln502">{</a>
+<a name="ln503">  return 0;</a>
+<a name="ln504">}</a>
+<a name="ln505"> </a>
+<a name="ln506">static gboolean _view_map_redraw(gpointer user_data)</a>
+<a name="ln507">{</a>
+<a name="ln508">  dt_view_t *self = (dt_view_t *)user_data;</a>
+<a name="ln509">  dt_map_t *lib = (dt_map_t *)self-&gt;data;</a>
+<a name="ln510">  g_signal_emit_by_name(lib-&gt;map, &quot;changed&quot;);</a>
+<a name="ln511">  return FALSE; // remove the function again</a>
+<a name="ln512">}</a>
+<a name="ln513"> </a>
+<a name="ln514">static void _view_map_changed_callback(OsmGpsMap *map, dt_view_t *self)</a>
+<a name="ln515">{</a>
+<a name="ln516">  dt_map_t *lib = (dt_map_t *)self-&gt;data;</a>
+<a name="ln517"> </a>
+<a name="ln518">  OsmGpsMapPoint bb[2];</a>
+<a name="ln519"> </a>
+<a name="ln520">  /* get bounding box coords */</a>
+<a name="ln521">  osm_gps_map_get_bbox(map, &amp;bb[0], &amp;bb[1]);</a>
+<a name="ln522">  float bb_0_lat = 0.0, bb_0_lon = 0.0, bb_1_lat = 0.0, bb_1_lon = 0.0;</a>
+<a name="ln523">  osm_gps_map_point_get_degrees(&amp;bb[0], &amp;bb_0_lat, &amp;bb_0_lon);</a>
+<a name="ln524">  osm_gps_map_point_get_degrees(&amp;bb[1], &amp;bb_1_lat, &amp;bb_1_lon);</a>
+<a name="ln525"> </a>
+<a name="ln526">  /* make the bounding box a little bigger to the west and south */</a>
+<a name="ln527">  float lat0 = 0.0, lon0 = 0.0, lat1 = 0.0, lon1 = 0.0;</a>
+<a name="ln528">  OsmGpsMapPoint *pt0 = osm_gps_map_point_new_degrees(0.0, 0.0),</a>
+<a name="ln529">                 *pt1 = osm_gps_map_point_new_degrees(0.0, 0.0);</a>
+<a name="ln530">  osm_gps_map_convert_screen_to_geographic(map, 0, 0, pt0);</a>
+<a name="ln531">  osm_gps_map_convert_screen_to_geographic(map, 1.5 * thumb_size, 1.5 * thumb_size, pt1);</a>
+<a name="ln532">  osm_gps_map_point_get_degrees(pt0, &amp;lat0, &amp;lon0);</a>
+<a name="ln533">  osm_gps_map_point_get_degrees(pt1, &amp;lat1, &amp;lon1);</a>
+<a name="ln534">  osm_gps_map_point_free(pt0);</a>
+<a name="ln535">  osm_gps_map_point_free(pt1);</a>
+<a name="ln536">  double south_border = lat0 - lat1, west_border = lon1 - lon0;</a>
+<a name="ln537"> </a>
+<a name="ln538">  /* get map view state and store  */</a>
+<a name="ln539">  int zoom;</a>
+<a name="ln540">  float center_lat, center_lon;</a>
+<a name="ln541">  g_object_get(G_OBJECT(map), &quot;zoom&quot;, &amp;zoom, &quot;latitude&quot;, &amp;center_lat, &quot;longitude&quot;, &amp;center_lon, NULL);</a>
+<a name="ln542">  dt_conf_set_float(&quot;plugins/map/longitude&quot;, center_lon);</a>
+<a name="ln543">  dt_conf_set_float(&quot;plugins/map/latitude&quot;, center_lat);</a>
+<a name="ln544">  dt_conf_set_int(&quot;plugins/map/zoom&quot;, zoom);</a>
+<a name="ln545"> </a>
+<a name="ln546">  /* check if the prefs have changed and rebuild main_query if needed */</a>
+<a name="ln547">  if(_view_map_prefs_changed(lib)) _view_map_build_main_query(lib);</a>
+<a name="ln548"> </a>
+<a name="ln549">  /* let's reset and reuse the main_query statement */</a>
+<a name="ln550">  DT_DEBUG_SQLITE3_CLEAR_BINDINGS(lib-&gt;statements.main_query);</a>
+<a name="ln551">  DT_DEBUG_SQLITE3_RESET(lib-&gt;statements.main_query);</a>
+<a name="ln552"> </a>
+<a name="ln553">  /* bind bounding box coords for the main query */</a>
+<a name="ln554">  DT_DEBUG_SQLITE3_BIND_DOUBLE(lib-&gt;statements.main_query, 1, bb_0_lon - west_border);</a>
+<a name="ln555">  DT_DEBUG_SQLITE3_BIND_DOUBLE(lib-&gt;statements.main_query, 2, bb_1_lon);</a>
+<a name="ln556">  DT_DEBUG_SQLITE3_BIND_DOUBLE(lib-&gt;statements.main_query, 3, bb_0_lat);</a>
+<a name="ln557">  DT_DEBUG_SQLITE3_BIND_DOUBLE(lib-&gt;statements.main_query, 4, bb_1_lat - south_border);</a>
+<a name="ln558">  DT_DEBUG_SQLITE3_BIND_DOUBLE(lib-&gt;statements.main_query, 5, center_lat);</a>
+<a name="ln559">  DT_DEBUG_SQLITE3_BIND_DOUBLE(lib-&gt;statements.main_query, 6, center_lon);</a>
+<a name="ln560"> </a>
+<a name="ln561">  /* remove the old images */</a>
+<a name="ln562">  if(lib-&gt;images)</a>
+<a name="ln563">  {</a>
+<a name="ln564">    // we can't use osm_gps_map_image_remove_all() because we want to keep the marker</a>
+<a name="ln565">    for(GSList *iter = lib-&gt;images; iter; iter = g_slist_next(iter))</a>
+<a name="ln566">    {</a>
+<a name="ln567">      dt_map_image_t *image = (dt_map_image_t *)iter-&gt;data;</a>
+<a name="ln568">      osm_gps_map_image_remove(map, image-&gt;image);</a>
+<a name="ln569">    }</a>
+<a name="ln570">    g_slist_free_full(lib-&gt;images, g_free);</a>
+<a name="ln571">    lib-&gt;images = NULL;</a>
+<a name="ln572">  }</a>
+<a name="ln573"> </a>
+<a name="ln574">  /* add all images to the map */</a>
+<a name="ln575">  gboolean needs_redraw = FALSE;</a>
+<a name="ln576">  const int _thumb_size = DT_PIXEL_APPLY_DPI(thumb_size);</a>
+<a name="ln577">  dt_mipmap_size_t mip = dt_mipmap_cache_get_matching_size(darktable.mipmap_cache, _thumb_size, _thumb_size);</a>
+<a name="ln578">  while(sqlite3_step(lib-&gt;statements.main_query) == SQLITE_ROW)</a>
+<a name="ln579">  {</a>
+<a name="ln580">    int imgid = sqlite3_column_int(lib-&gt;statements.main_query, 0);</a>
+<a name="ln581">    dt_mipmap_buffer_t buf;</a>
+<a name="ln582">    dt_mipmap_cache_get(darktable.mipmap_cache, &amp;buf, imgid, mip, DT_MIPMAP_BEST_EFFORT, 'r');</a>
+<a name="ln583"> </a>
+<a name="ln584">    if(buf.buf)</a>
+<a name="ln585">    {</a>
+<a name="ln586">      GdkPixbuf *source = NULL, *thumb = NULL;</a>
+<a name="ln587"> </a>
+<a name="ln588">      for(size_t i = 3; i &lt; (size_t)4 * buf.width * buf.height; i += 4) buf.buf[i] = UINT8_MAX;</a>
+<a name="ln589"> </a>
+<a name="ln590">      int w = _thumb_size, h = _thumb_size;</a>
+<a name="ln591">      const float _thumb_border = DT_PIXEL_APPLY_DPI(thumb_border), _pin_size = DT_PIXEL_APPLY_DPI(image_pin_size);</a>
+<a name="ln592">      if(buf.width &lt; buf.height)</a>
+<a name="ln593">        w = (buf.width * _thumb_size) / buf.height; // portrait</a>
+<a name="ln594">      else</a>
+<a name="ln595">        h = (buf.height * _thumb_size) / buf.width; // landscape</a>
+<a name="ln596"> </a>
+<a name="ln597">      // next we get a pixbuf for the image</a>
+<a name="ln598">      source = gdk_pixbuf_new_from_data(buf.buf, GDK_COLORSPACE_RGB, TRUE, 8, buf.width, buf.height,</a>
+<a name="ln599">                                        buf.width * 4, NULL, NULL);</a>
+<a name="ln600">      if(!source) goto map_changed_failure;</a>
+<a name="ln601"> </a>
+<a name="ln602">      // now we want a slightly larger pixbuf that we can put the image on</a>
+<a name="ln603">      thumb = gdk_pixbuf_new(GDK_COLORSPACE_RGB, TRUE, 8, w + 2 * _thumb_border,</a>
+<a name="ln604">                             h + 2 * _thumb_border + _pin_size);</a>
+<a name="ln605">      if(!thumb) goto map_changed_failure;</a>
+<a name="ln606">      gdk_pixbuf_fill(thumb, thumb_frame_color);</a>
+<a name="ln607"> </a>
+<a name="ln608">      // put the image onto the frame</a>
+<a name="ln609">      gdk_pixbuf_scale(source, thumb, _thumb_border, _thumb_border, w, h, _thumb_border, _thumb_border,</a>
+<a name="ln610">                       (1.0 * w) / buf.width, (1.0 * h) / buf.height, GDK_INTERP_HYPER);</a>
+<a name="ln611"> </a>
+<a name="ln612">      // and finally add the pin</a>
+<a name="ln613">      gdk_pixbuf_copy_area(lib-&gt;image_pin, 0, 0, w + 2 * _thumb_border, _pin_size, thumb, 0, h + 2 * _thumb_border);</a>
+<a name="ln614"> </a>
+<a name="ln615">      const dt_image_t *cimg = dt_image_cache_get(darktable.image_cache, imgid, 'r');</a>
+<a name="ln616">      if(!cimg) goto map_changed_failure;</a>
+<a name="ln617">      dt_map_image_t *entry = (dt_map_image_t *)malloc(sizeof(dt_map_image_t));</a>
+<a name="ln618">      if(!entry)</a>
+<a name="ln619">      {</a>
+<a name="ln620">        dt_image_cache_read_release(darktable.image_cache, cimg);</a>
+<a name="ln621">        goto map_changed_failure;</a>
+<a name="ln622">      }</a>
+<a name="ln623">      entry-&gt;imgid = imgid;</a>
+<a name="ln624">      entry-&gt;image = osm_gps_map_image_add_with_alignment(map, cimg-&gt;geoloc.latitude, cimg-&gt;geoloc.longitude, thumb, 0, 1);</a>
+<a name="ln625">      entry-&gt;width = w;</a>
+<a name="ln626">      entry-&gt;height = h;</a>
+<a name="ln627">      lib-&gt;images = g_slist_prepend(lib-&gt;images, entry);</a>
+<a name="ln628">      dt_image_cache_read_release(darktable.image_cache, cimg);</a>
+<a name="ln629"> </a>
+<a name="ln630">    map_changed_failure:</a>
+<a name="ln631">      if(source) g_object_unref(source);</a>
+<a name="ln632">      if(thumb) g_object_unref(thumb);</a>
+<a name="ln633">    }</a>
+<a name="ln634">    else</a>
+<a name="ln635">      needs_redraw = TRUE;</a>
+<a name="ln636">    dt_mipmap_cache_release(darktable.mipmap_cache, &amp;buf);</a>
+<a name="ln637">  }</a>
+<a name="ln638"> </a>
+<a name="ln639">  // not exactly thread safe, but should be good enough for updating the display</a>
+<a name="ln640">  static int timeout_event_source = 0;</a>
+<a name="ln641">  if(needs_redraw &amp;&amp; timeout_event_source == 0)</a>
+<a name="ln642">    timeout_event_source = g_timeout_add_seconds(</a>
+<a name="ln643">        1, _view_map_redraw, self); // try again in a second, maybe some pictures have loaded by then</a>
+<a name="ln644">  else</a>
+<a name="ln645">    timeout_event_source = 0;</a>
+<a name="ln646"> </a>
+<a name="ln647">  // activate this callback late in the process as we need the filmstrip proxy to be setup. This is not the</a>
+<a name="ln648">  // case in the initialization phase.</a>
+<a name="ln649">  if(!lib-&gt;drop_filmstrip_activated &amp;&amp; darktable.view_manager-&gt;proxy.filmstrip.module)</a>
+<a name="ln650">  {</a>
+<a name="ln651">    g_signal_connect(</a>
+<a name="ln652">        darktable.view_manager-&gt;proxy.filmstrip.widget(darktable.view_manager-&gt;proxy.filmstrip.module),</a>
+<a name="ln653">        &quot;drag-data-received&quot;, G_CALLBACK(_view_map_dnd_remove_callback), self);</a>
+<a name="ln654">    lib-&gt;drop_filmstrip_activated = TRUE;</a>
+<a name="ln655">  }</a>
+<a name="ln656">}</a>
+<a name="ln657"> </a>
+<a name="ln658">static int _view_map_get_img_at_pos(dt_view_t *self, double x, double y)</a>
+<a name="ln659">{</a>
+<a name="ln660">  dt_map_t *lib = (dt_map_t *)self-&gt;data;</a>
+<a name="ln661">  GSList *iter;</a>
+<a name="ln662"> </a>
+<a name="ln663">  for(iter = lib-&gt;images; iter != NULL; iter = iter-&gt;next)</a>
+<a name="ln664">  {</a>
+<a name="ln665">    dt_map_image_t *entry = (dt_map_image_t *)iter-&gt;data;</a>
+<a name="ln666">    OsmGpsMapImage *image = entry-&gt;image;</a>
+<a name="ln667">    OsmGpsMapPoint *pt = (OsmGpsMapPoint *)osm_gps_map_image_get_point(image);</a>
+<a name="ln668">    gint img_x = 0, img_y = 0;</a>
+<a name="ln669">    osm_gps_map_convert_geographic_to_screen(lib-&gt;map, pt, &amp;img_x, &amp;img_y);</a>
+<a name="ln670">    img_y -= DT_PIXEL_APPLY_DPI(image_pin_size);</a>
+<a name="ln671">    if(x &gt;= img_x &amp;&amp; x &lt;= img_x + entry-&gt;width &amp;&amp; y &lt;= img_y &amp;&amp; y &gt;= img_y - entry-&gt;height)</a>
+<a name="ln672">      return entry-&gt;imgid;</a>
+<a name="ln673">  }</a>
+<a name="ln674"> </a>
+<a name="ln675">  return 0;</a>
+<a name="ln676">}</a>
+<a name="ln677"> </a>
+<a name="ln678">static gboolean _view_map_motion_notify_callback(GtkWidget *widget, GdkEventMotion *e, dt_view_t *self)</a>
+<a name="ln679">{</a>
+<a name="ln680">  dt_map_t *lib = (dt_map_t *)self-&gt;data;</a>
+<a name="ln681"> </a>
+<a name="ln682">  if(lib-&gt;start_drag &amp;&amp; lib-&gt;selected_image &gt; 0)</a>
+<a name="ln683">  {</a>
+<a name="ln684">    for(GSList *iter = lib-&gt;images; iter != NULL; iter = iter-&gt;next)</a>
+<a name="ln685">    {</a>
+<a name="ln686">      dt_map_image_t *entry = (dt_map_image_t *)iter-&gt;data;</a>
+<a name="ln687">      OsmGpsMapImage *image = entry-&gt;image;</a>
+<a name="ln688">      if(entry-&gt;imgid == lib-&gt;selected_image)</a>
+<a name="ln689">      {</a>
+<a name="ln690">        osm_gps_map_image_remove(lib-&gt;map, image);</a>
+<a name="ln691">        break;</a>
+<a name="ln692">      }</a>
+<a name="ln693">    }</a>
+<a name="ln694"> </a>
+<a name="ln695">    lib-&gt;start_drag = FALSE;</a>
+<a name="ln696">    GtkTargetList *targets = gtk_target_list_new(target_list_all, n_targets_all);</a>
+<a name="ln697"> </a>
+<a name="ln698">    // FIXME: for some reason the image is only shown when it's above a certain size,</a>
+<a name="ln699">    // which happens to be &gt; than the normal-DPI one. When dragging from filmstrip it works though.</a>
+<a name="ln700">    const int _thumb_size = DT_PIXEL_APPLY_DPI(thumb_size);</a>
+<a name="ln701">    dt_mipmap_buffer_t buf;</a>
+<a name="ln702">    dt_mipmap_size_t mip = dt_mipmap_cache_get_matching_size(darktable.mipmap_cache, _thumb_size, _thumb_size);</a>
+<a name="ln703">    dt_mipmap_cache_get(darktable.mipmap_cache, &amp;buf, lib-&gt;selected_image, mip, DT_MIPMAP_BLOCKING, 'r');</a>
+<a name="ln704"> </a>
+<a name="ln705">    if(buf.buf)</a>
+<a name="ln706">    {</a>
+<a name="ln707">      GdkPixbuf *source = NULL, *thumb = NULL;</a>
+<a name="ln708"> </a>
+<a name="ln709">      for(size_t i = 3; i &lt; (size_t)4 * buf.width * buf.height; i += 4) buf.buf[i] = UINT8_MAX;</a>
+<a name="ln710"> </a>
+<a name="ln711">      int w = _thumb_size, h = _thumb_size;</a>
+<a name="ln712">      const float _thumb_border = DT_PIXEL_APPLY_DPI(thumb_border);</a>
+<a name="ln713">      if(buf.width &lt; buf.height)</a>
+<a name="ln714">        w = (buf.width * _thumb_size) / buf.height; // portrait</a>
+<a name="ln715">      else</a>
+<a name="ln716">        h = (buf.height * _thumb_size) / buf.width; // landscape</a>
+<a name="ln717"> </a>
+<a name="ln718">      // next we get a pixbuf for the image</a>
+<a name="ln719">      source = gdk_pixbuf_new_from_data(buf.buf, GDK_COLORSPACE_RGB, TRUE, 8, buf.width, buf.height,</a>
+<a name="ln720">                                        buf.width * 4, NULL, NULL);</a>
+<a name="ln721"> </a>
+<a name="ln722">      // now we want a slightly larger pixbuf that we can put the image on</a>
+<a name="ln723">      thumb = gdk_pixbuf_new(GDK_COLORSPACE_RGB, TRUE, 8, w + 2 * _thumb_border, h + 2 * _thumb_border);</a>
+<a name="ln724">      gdk_pixbuf_fill(thumb, thumb_frame_color);</a>
+<a name="ln725"> </a>
+<a name="ln726">      // put the image onto the frame</a>
+<a name="ln727">      gdk_pixbuf_scale(source, thumb, _thumb_border, _thumb_border, w, h, _thumb_border, _thumb_border,</a>
+<a name="ln728">                       (1.0 * w) / buf.width, (1.0 * h) / buf.height, GDK_INTERP_HYPER);</a>
+<a name="ln729"> </a>
+<a name="ln730">      GdkDragContext *context = gtk_drag_begin_with_coordinates(GTK_WIDGET(lib-&gt;map), targets,</a>
+<a name="ln731">                                                                GDK_ACTION_COPY, 1, (GdkEvent *)e, -1, -1);</a>
+<a name="ln732"> </a>
+<a name="ln733">      gtk_drag_set_icon_pixbuf(context, thumb, 0, h + 2 * _thumb_border);</a>
+<a name="ln734"> </a>
+<a name="ln735">      if(source) g_object_unref(source);</a>
+<a name="ln736">      if(thumb) g_object_unref(thumb);</a>
+<a name="ln737">    }</a>
+<a name="ln738"> </a>
+<a name="ln739">    dt_mipmap_cache_release(darktable.mipmap_cache, &amp;buf);</a>
+<a name="ln740"> </a>
+<a name="ln741">    gtk_target_list_unref(targets);</a>
+<a name="ln742">    return TRUE;</a>
+<a name="ln743">  }</a>
+<a name="ln744">  return FALSE;</a>
+<a name="ln745">}</a>
+<a name="ln746"> </a>
+<a name="ln747">static gboolean _view_map_button_press_callback(GtkWidget *w, GdkEventButton *e, dt_view_t *self)</a>
+<a name="ln748">{</a>
+<a name="ln749">  dt_map_t *lib = (dt_map_t *)self-&gt;data;</a>
+<a name="ln750">  if(e-&gt;button == 1)</a>
+<a name="ln751">  {</a>
+<a name="ln752">    // check if the click was on an image or just some random position</a>
+<a name="ln753">    lib-&gt;selected_image = _view_map_get_img_at_pos(self, e-&gt;x, e-&gt;y);</a>
+<a name="ln754">    if(e-&gt;type == GDK_BUTTON_PRESS &amp;&amp; lib-&gt;selected_image &gt; 0)</a>
+<a name="ln755">    {</a>
+<a name="ln756">      lib-&gt;start_drag = TRUE;</a>
+<a name="ln757">      return TRUE;</a>
+<a name="ln758">    }</a>
+<a name="ln759">    if(e-&gt;type == GDK_2BUTTON_PRESS)</a>
+<a name="ln760">    {</a>
+<a name="ln761">      if(lib-&gt;selected_image &gt; 0)</a>
+<a name="ln762">      {</a>
+<a name="ln763">        // open the image in darkroom</a>
+<a name="ln764">        dt_control_set_mouse_over_id(lib-&gt;selected_image);</a>
+<a name="ln765">        dt_ctl_switch_mode_to(&quot;darkroom&quot;);</a>
+<a name="ln766">        return TRUE;</a>
+<a name="ln767">      }</a>
+<a name="ln768">      else</a>
+<a name="ln769">      {</a>
+<a name="ln770">        // zoom into that position</a>
+<a name="ln771">        float longitude, latitude;</a>
+<a name="ln772">        OsmGpsMapPoint *pt = osm_gps_map_point_new_degrees(0.0, 0.0);</a>
+<a name="ln773">        osm_gps_map_convert_screen_to_geographic(lib-&gt;map, e-&gt;x, e-&gt;y, pt);</a>
+<a name="ln774">        osm_gps_map_point_get_degrees(pt, &amp;latitude, &amp;longitude);</a>
+<a name="ln775">        osm_gps_map_point_free(pt);</a>
+<a name="ln776">        int zoom, max_zoom;</a>
+<a name="ln777">        g_object_get(G_OBJECT(lib-&gt;map), &quot;zoom&quot;, &amp;zoom, &quot;max-zoom&quot;, &amp;max_zoom, NULL);</a>
+<a name="ln778">        zoom = MIN(zoom + 1, max_zoom);</a>
+<a name="ln779">        _view_map_center_on_location(self, longitude, latitude, zoom);</a>
+<a name="ln780">      }</a>
+<a name="ln781">      return TRUE;</a>
+<a name="ln782">    }</a>
+<a name="ln783">  }</a>
+<a name="ln784">  return FALSE;</a>
+<a name="ln785">}</a>
+<a name="ln786"> </a>
+<a name="ln787">static gboolean _display_selected(gpointer user_data)</a>
+<a name="ln788">{</a>
+<a name="ln789">  dt_view_t *self = (dt_view_t *)user_data;</a>
+<a name="ln790">  gboolean done = FALSE;</a>
+<a name="ln791"> </a>
+<a name="ln792">  GList *selected_images = dt_collection_get_selected(darktable.collection, -1);</a>
+<a name="ln793">  if(selected_images)</a>
+<a name="ln794">  {</a>
+<a name="ln795">    done = _view_map_center_on_image_list(self, selected_images);</a>
+<a name="ln796">    g_list_free(selected_images);</a>
+<a name="ln797">  }</a>
+<a name="ln798"> </a>
+<a name="ln799">  if(!done)</a>
+<a name="ln800">  {</a>
+<a name="ln801">    dt_map_t *lib = (dt_map_t *)self-&gt;data;</a>
+<a name="ln802">    GList *collection_images = dt_collection_get_all(darktable.collection, lib-&gt;max_images_drawn);</a>
+<a name="ln803">    if(collection_images)</a>
+<a name="ln804">    {</a>
+<a name="ln805">      done = _view_map_center_on_image_list(self, collection_images);</a>
+<a name="ln806">      g_list_free(collection_images);</a>
+<a name="ln807">    }</a>
+<a name="ln808">  }</a>
+<a name="ln809">  return FALSE; // don't call again</a>
+<a name="ln810">}</a>
+<a name="ln811"> </a>
+<a name="ln812">void enter(dt_view_t *self)</a>
+<a name="ln813">{</a>
+<a name="ln814">  dt_map_t *lib = (dt_map_t *)self-&gt;data;</a>
+<a name="ln815"> </a>
+<a name="ln816">  lib-&gt;selected_image = 0;</a>
+<a name="ln817">  lib-&gt;start_drag = FALSE;</a>
+<a name="ln818"> </a>
+<a name="ln819">  /* set the correct map source */</a>
+<a name="ln820">  _view_map_set_map_source_g_object(self, lib-&gt;map_source);</a>
+<a name="ln821"> </a>
+<a name="ln822">  /* replace center widget */</a>
+<a name="ln823">  GtkWidget *parent = gtk_widget_get_parent(gtk_widget_get_parent(dt_ui_center(darktable.gui-&gt;ui)));</a>
+<a name="ln824">  gtk_widget_hide(gtk_widget_get_parent(dt_ui_center(darktable.gui-&gt;ui)));</a>
+<a name="ln825"> </a>
+<a name="ln826">  gtk_box_reorder_child(GTK_BOX(parent), GTK_WIDGET(lib-&gt;map), 2);</a>
+<a name="ln827"> </a>
+<a name="ln828">  gtk_widget_show_all(GTK_WIDGET(lib-&gt;map));</a>
+<a name="ln829"> </a>
+<a name="ln830">  /* setup proxy functions */</a>
+<a name="ln831">  darktable.view_manager-&gt;proxy.map.view = self;</a>
+<a name="ln832">  darktable.view_manager-&gt;proxy.map.center_on_location = _view_map_center_on_location;</a>
+<a name="ln833">  darktable.view_manager-&gt;proxy.map.center_on_bbox = _view_map_center_on_bbox;</a>
+<a name="ln834">  darktable.view_manager-&gt;proxy.map.show_osd = _view_map_show_osd;</a>
+<a name="ln835">  darktable.view_manager-&gt;proxy.map.set_map_source = _view_map_set_map_source;</a>
+<a name="ln836">  darktable.view_manager-&gt;proxy.map.add_marker = _view_map_add_marker;</a>
+<a name="ln837">  darktable.view_manager-&gt;proxy.map.remove_marker = _view_map_remove_marker;</a>
+<a name="ln838"> </a>
+<a name="ln839">  /* restore last zoom,location in map */</a>
+<a name="ln840">  float lon = dt_conf_get_float(&quot;plugins/map/longitude&quot;);</a>
+<a name="ln841">  lon = CLAMP(lon, -180, 180);</a>
+<a name="ln842">  float lat = dt_conf_get_float(&quot;plugins/map/latitude&quot;);</a>
+<a name="ln843">  lat = CLAMP(lat, -90, 90);</a>
+<a name="ln844">  const int zoom = dt_conf_get_int(&quot;plugins/map/zoom&quot;);</a>
+<a name="ln845"> </a>
+<a name="ln846">  osm_gps_map_set_center_and_zoom(lib-&gt;map, lat, lon, zoom);</a>
+<a name="ln847"> </a>
+<a name="ln848">  /* connect signal for filmstrip image activate */</a>
+<a name="ln849">  dt_control_signal_connect(darktable.signals, DT_SIGNAL_VIEWMANAGER_FILMSTRIP_ACTIVATE,</a>
+<a name="ln850">                            G_CALLBACK(_view_map_filmstrip_activate_callback), self);</a>
+<a name="ln851"> </a>
+<a name="ln852">  /* scroll filmstrip to the first selected image */</a>
+<a name="ln853">  GList *selected_images = dt_collection_get_selected(darktable.collection, 1);</a>
+<a name="ln854">  if(selected_images)</a>
+<a name="ln855">  {</a>
+<a name="ln856">    dt_view_filmstrip_scroll_to_image(darktable.view_manager, GPOINTER_TO_INT(selected_images-&gt;data), FALSE);</a>
+<a name="ln857">    g_list_free(selected_images);</a>
+<a name="ln858">  }</a>
+<a name="ln859"> </a>
+<a name="ln860">  g_timeout_add(250, _display_selected, self);</a>
+<a name="ln861">}</a>
+<a name="ln862"> </a>
+<a name="ln863">void leave(dt_view_t *self)</a>
+<a name="ln864">{</a>
+<a name="ln865">  /* disable the map source again. no need to risk network traffic while we are not in map mode. */</a>
+<a name="ln866">  _view_map_set_map_source_g_object(self, OSM_GPS_MAP_SOURCE_NULL);</a>
+<a name="ln867"> </a>
+<a name="ln868">  /* disconnect from filmstrip image activate */</a>
+<a name="ln869">  dt_control_signal_disconnect(darktable.signals, G_CALLBACK(_view_map_filmstrip_activate_callback),</a>
+<a name="ln870">                               (gpointer)self);</a>
+<a name="ln871"> </a>
+<a name="ln872">  dt_map_t *lib = (dt_map_t *)self-&gt;data;</a>
+<a name="ln873"> </a>
+<a name="ln874">  gtk_widget_hide(GTK_WIDGET(lib-&gt;map));</a>
+<a name="ln875">  gtk_widget_show_all(gtk_widget_get_parent(dt_ui_center(darktable.gui-&gt;ui)));</a>
+<a name="ln876"> </a>
+<a name="ln877">  /* reset proxy */</a>
+<a name="ln878">  darktable.view_manager-&gt;proxy.map.view = NULL;</a>
+<a name="ln879">}</a>
+<a name="ln880"> </a>
+<a name="ln881">void mouse_moved(dt_view_t *self, double x, double y, double pressure, int which)</a>
+<a name="ln882">{</a>
+<a name="ln883">  // redraw center on mousemove</a>
+<a name="ln884">  dt_control_queue_redraw_center();</a>
+<a name="ln885">}</a>
+<a name="ln886"> </a>
+<a name="ln887">void init_key_accels(dt_view_t *self)</a>
+<a name="ln888">{</a>
+<a name="ln889">  dt_accel_register_view(self, NC_(&quot;accel&quot;, &quot;undo&quot;), GDK_KEY_z, GDK_CONTROL_MASK);</a>
+<a name="ln890">  dt_accel_register_view(self, NC_(&quot;accel&quot;, &quot;redo&quot;), GDK_KEY_y, GDK_CONTROL_MASK);</a>
+<a name="ln891">  // Film strip shortcuts</a>
+<a name="ln892">  dt_accel_register_view(self, NC_(&quot;accel&quot;, &quot;toggle film strip&quot;), GDK_KEY_f, GDK_CONTROL_MASK);</a>
+<a name="ln893">}</a>
+<a name="ln894"> </a>
+<a name="ln895">static gboolean _view_map_undo_callback(GtkAccelGroup *accel_group, GObject *acceleratable, guint keyval,</a>
+<a name="ln896">                                        GdkModifierType modifier, gpointer data)</a>
+<a name="ln897">{</a>
+<a name="ln898">  dt_undo_do_undo(darktable.undo, DT_UNDO_GEOTAG);</a>
+<a name="ln899">  return TRUE;</a>
+<a name="ln900">}</a>
+<a name="ln901"> </a>
+<a name="ln902">static gboolean _view_map_redo_callback(GtkAccelGroup *accel_group, GObject *acceleratable, guint keyval,</a>
+<a name="ln903">                                        GdkModifierType modifier, gpointer data)</a>
+<a name="ln904">{</a>
+<a name="ln905">  dt_undo_do_redo(darktable.undo, DT_UNDO_GEOTAG);</a>
+<a name="ln906">  return TRUE;</a>
+<a name="ln907">}</a>
+<a name="ln908"> </a>
+<a name="ln909">static gboolean film_strip_key_accel(GtkAccelGroup *accel_group, GObject *acceleratable, guint keyval,</a>
+<a name="ln910">                                     GdkModifierType modifier, gpointer data)</a>
+<a name="ln911">{</a>
+<a name="ln912">  dt_lib_module_t *m = darktable.view_manager-&gt;proxy.filmstrip.module;</a>
+<a name="ln913">  gboolean vs = dt_lib_is_visible(m);</a>
+<a name="ln914">  dt_lib_set_visible(m, !vs);</a>
+<a name="ln915">  return TRUE;</a>
+<a name="ln916">}</a>
+<a name="ln917"> </a>
+<a name="ln918">void connect_key_accels(dt_view_t *self)</a>
+<a name="ln919">{</a>
+<a name="ln920">  // undo/redo</a>
+<a name="ln921">  GClosure *closure = g_cclosure_new(G_CALLBACK(_view_map_undo_callback), (gpointer)self, NULL);</a>
+<a name="ln922">  dt_accel_connect_view(self, &quot;undo&quot;, closure);</a>
+<a name="ln923">  closure = g_cclosure_new(G_CALLBACK(_view_map_redo_callback), (gpointer)self, NULL);</a>
+<a name="ln924">  dt_accel_connect_view(self, &quot;redo&quot;, closure);</a>
+<a name="ln925">  // Film strip shortcuts</a>
+<a name="ln926">  closure = g_cclosure_new(G_CALLBACK(film_strip_key_accel), (gpointer)self, NULL);</a>
+<a name="ln927">  dt_accel_connect_view(self, &quot;toggle film strip&quot;, closure);</a>
+<a name="ln928">}</a>
+<a name="ln929"> </a>
+<a name="ln930"> </a>
+<a name="ln931">static void _view_map_center_on_location(const dt_view_t *view, gdouble lon, gdouble lat, gdouble zoom)</a>
+<a name="ln932">{</a>
+<a name="ln933">  dt_map_t *lib = (dt_map_t *)view-&gt;data;</a>
+<a name="ln934">  osm_gps_map_set_center_and_zoom(lib-&gt;map, lat, lon, zoom);</a>
+<a name="ln935">}</a>
+<a name="ln936"> </a>
+<a name="ln937">static void _view_map_center_on_bbox(const dt_view_t *view, gdouble lon1, gdouble lat1, gdouble lon2, gdouble lat2)</a>
+<a name="ln938">{</a>
+<a name="ln939">  dt_map_t *lib = (dt_map_t *)view-&gt;data;</a>
+<a name="ln940">  osm_gps_map_zoom_fit_bbox(lib-&gt;map, lat1, lat2, lon1, lon2);</a>
+<a name="ln941">}</a>
+<a name="ln942"> </a>
+<a name="ln943">static void _view_map_show_osd(const dt_view_t *view, gboolean enabled)</a>
+<a name="ln944">{</a>
+<a name="ln945">  dt_map_t *lib = (dt_map_t *)view-&gt;data;</a>
+<a name="ln946"> </a>
+<a name="ln947">  gboolean old_value = dt_conf_get_bool(&quot;plugins/map/show_map_osd&quot;);</a>
+<a name="ln948">  if(enabled == old_value) return;</a>
+<a name="ln949"> </a>
+<a name="ln950">  dt_conf_set_bool(&quot;plugins/map/show_map_osd&quot;, enabled);</a>
+<a name="ln951">  if(enabled)</a>
+<a name="ln952">    osm_gps_map_layer_add(OSM_GPS_MAP(lib-&gt;map), lib-&gt;osd);</a>
+<a name="ln953">  else</a>
+<a name="ln954">    osm_gps_map_layer_remove(OSM_GPS_MAP(lib-&gt;map), lib-&gt;osd);</a>
+<a name="ln955"> </a>
+<a name="ln956">  g_signal_emit_by_name(lib-&gt;map, &quot;changed&quot;);</a>
+<a name="ln957">}</a>
+<a name="ln958"> </a>
+<a name="ln959">static void _view_map_set_map_source_g_object(const dt_view_t *view, OsmGpsMapSource_t map_source)</a>
+<a name="ln960">{</a>
+<a name="ln961">  dt_map_t *lib = (dt_map_t *)view-&gt;data;</a>
+<a name="ln962"> </a>
+<a name="ln963">  GValue value = {</a>
+<a name="ln964">    0,</a>
+<a name="ln965">  };</a>
+<a name="ln966">  g_value_init(&amp;value, G_TYPE_INT);</a>
+<a name="ln967">  g_value_set_int(&amp;value, map_source);</a>
+<a name="ln968">  g_object_set_property(G_OBJECT(lib-&gt;map), &quot;map-source&quot;, &amp;value);</a>
+<a name="ln969">  g_value_unset(&amp;value);</a>
+<a name="ln970">}</a>
+<a name="ln971"> </a>
+<a name="ln972">static void _view_map_set_map_source(const dt_view_t *view, OsmGpsMapSource_t map_source)</a>
+<a name="ln973">{</a>
+<a name="ln974">  dt_map_t *lib = (dt_map_t *)view-&gt;data;</a>
+<a name="ln975"> </a>
+<a name="ln976">  if(map_source == lib-&gt;map_source) return;</a>
+<a name="ln977"> </a>
+<a name="ln978">  lib-&gt;map_source = map_source;</a>
+<a name="ln979">  dt_conf_set_string(&quot;plugins/map/map_source&quot;, osm_gps_map_source_get_friendly_name(map_source));</a>
+<a name="ln980">  _view_map_set_map_source_g_object(view, map_source);</a>
+<a name="ln981">}</a>
+<a name="ln982"> </a>
+<a name="ln983">static OsmGpsMapImage *_view_map_add_pin(const dt_view_t *view, GList *points)</a>
+<a name="ln984">{</a>
+<a name="ln985">  dt_map_t *lib = (dt_map_t *)view-&gt;data;</a>
+<a name="ln986">  dt_geo_map_display_point_t *p = (dt_geo_map_display_point_t *)points-&gt;data;</a>
+<a name="ln987">  return osm_gps_map_image_add_with_alignment(lib-&gt;map, p-&gt;lat, p-&gt;lon, lib-&gt;place_pin, 0.5, 1);</a>
+<a name="ln988">}</a>
+<a name="ln989"> </a>
+<a name="ln990">static gboolean _view_map_remove_pin(const dt_view_t *view, OsmGpsMapImage *pin)</a>
+<a name="ln991">{</a>
+<a name="ln992">  dt_map_t *lib = (dt_map_t *)view-&gt;data;</a>
+<a name="ln993">  return osm_gps_map_image_remove(lib-&gt;map, pin);</a>
+<a name="ln994">}</a>
+<a name="ln995"> </a>
+<a name="ln996">#ifdef HAVE_OSMGPSMAP_110_OR_NEWER</a>
+<a name="ln997">static OsmGpsMapPolygon *_view_map_add_polygon(const dt_view_t *view, GList *points)</a>
+<a name="ln998">{</a>
+<a name="ln999">  dt_map_t *lib = (dt_map_t *)view-&gt;data;</a>
+<a name="ln1000"> </a>
+<a name="ln1001">  OsmGpsMapPolygon *poly = osm_gps_map_polygon_new();</a>
+<a name="ln1002">  OsmGpsMapTrack* track = osm_gps_map_track_new();</a>
+<a name="ln1003"> </a>
+<a name="ln1004">  for(GList *iter = g_list_first(points); iter; iter = g_list_next(iter))</a>
+<a name="ln1005">  {</a>
+<a name="ln1006">    dt_geo_map_display_point_t *p = (dt_geo_map_display_point_t *)iter-&gt;data;</a>
+<a name="ln1007">    OsmGpsMapPoint* point = osm_gps_map_point_new_degrees(p-&gt;lat, p-&gt;lon);</a>
+<a name="ln1008">    osm_gps_map_track_add_point(track, point);</a>
+<a name="ln1009">  }</a>
+<a name="ln1010"> </a>
+<a name="ln1011">  g_object_set(poly, &quot;track&quot;, track, (gchar *)0);</a>
+<a name="ln1012">  g_object_set(poly, &quot;editable&quot;, FALSE, (gchar *)0);</a>
+<a name="ln1013">  g_object_set(poly, &quot;shaded&quot;, FALSE, (gchar *)0);</a>
+<a name="ln1014"> </a>
+<a name="ln1015">  osm_gps_map_polygon_add(lib-&gt;map, poly);</a>
+<a name="ln1016"> </a>
+<a name="ln1017">  return poly;</a>
+<a name="ln1018">}</a>
+<a name="ln1019"> </a>
+<a name="ln1020">static gboolean _view_map_remove_polygon(const dt_view_t *view, OsmGpsMapPolygon *polygon)</a>
+<a name="ln1021">{</a>
+<a name="ln1022">  dt_map_t *lib = (dt_map_t *)view-&gt;data;</a>
+<a name="ln1023">  return osm_gps_map_polygon_remove(lib-&gt;map, polygon);</a>
+<a name="ln1024">}</a>
+<a name="ln1025">#endif</a>
+<a name="ln1026"> </a>
+<a name="ln1027">static OsmGpsMapTrack *_view_map_add_track(const dt_view_t *view, GList *points)</a>
+<a name="ln1028">{</a>
+<a name="ln1029">  dt_map_t *lib = (dt_map_t *)view-&gt;data;</a>
+<a name="ln1030"> </a>
+<a name="ln1031">  OsmGpsMapTrack* track = osm_gps_map_track_new();</a>
+<a name="ln1032"> </a>
+<a name="ln1033">  for(GList *iter = g_list_first(points); iter; iter = g_list_next(iter))</a>
+<a name="ln1034">  {</a>
+<a name="ln1035">    dt_geo_map_display_point_t *p = (dt_geo_map_display_point_t *)iter-&gt;data;</a>
+<a name="ln1036">    OsmGpsMapPoint* point = osm_gps_map_point_new_degrees(p-&gt;lat, p-&gt;lon);</a>
+<a name="ln1037">    osm_gps_map_track_add_point(track, point);</a>
+<a name="ln1038">  }</a>
+<a name="ln1039"> </a>
+<a name="ln1040">  g_object_set(track, &quot;editable&quot;, FALSE, (gchar *)0);</a>
+<a name="ln1041"> </a>
+<a name="ln1042">  osm_gps_map_track_add(lib-&gt;map, track);</a>
+<a name="ln1043"> </a>
+<a name="ln1044">  return track;</a>
+<a name="ln1045">}</a>
+<a name="ln1046"> </a>
+<a name="ln1047">static gboolean _view_map_remove_track(const dt_view_t *view, OsmGpsMapTrack *track)</a>
+<a name="ln1048">{</a>
+<a name="ln1049">  dt_map_t *lib = (dt_map_t *)view-&gt;data;</a>
+<a name="ln1050">  return osm_gps_map_track_remove(lib-&gt;map, track);</a>
+<a name="ln1051">}</a>
+<a name="ln1052"> </a>
+<a name="ln1053">static GObject *_view_map_add_marker(const dt_view_t *view, dt_geo_map_display_t type, GList *points)</a>
+<a name="ln1054">{</a>
+<a name="ln1055">  switch(type)</a>
+<a name="ln1056">  {</a>
+<a name="ln1057">    case MAP_DISPLAY_POINT: return G_OBJECT(_view_map_add_pin(view, points));</a>
+<a name="ln1058">    case MAP_DISPLAY_TRACK: return G_OBJECT(_view_map_add_track(view, points));</a>
+<a name="ln1059">#ifdef HAVE_OSMGPSMAP_110_OR_NEWER</a>
+<a name="ln1060">    case MAP_DISPLAY_POLYGON: return G_OBJECT(_view_map_add_polygon(view, points));</a>
+<a name="ln1061">#endif</a>
+<a name="ln1062">    default: return NULL;</a>
+<a name="ln1063">  }</a>
+<a name="ln1064">}</a>
+<a name="ln1065"> </a>
+<a name="ln1066">static gboolean _view_map_remove_marker(const dt_view_t *view, dt_geo_map_display_t type, GObject *marker)</a>
+<a name="ln1067">{</a>
+<a name="ln1068">  if(type == MAP_DISPLAY_NONE) return FALSE;</a>
+<a name="ln1069"> </a>
+<a name="ln1070">  switch(type)</a>
+<a name="ln1071">  {</a>
+<a name="ln1072">    case MAP_DISPLAY_POINT: return _view_map_remove_pin(view, OSM_GPS_MAP_IMAGE(marker));</a>
+<a name="ln1073">    case MAP_DISPLAY_TRACK: return _view_map_remove_track(view, OSM_GPS_MAP_TRACK(marker));</a>
+<a name="ln1074">#ifdef HAVE_OSMGPSMAP_110_OR_NEWER</a>
+<a name="ln1075">    case MAP_DISPLAY_POLYGON: return _view_map_remove_polygon(view, OSM_GPS_MAP_POLYGON(marker));</a>
+<a name="ln1076">#endif</a>
+<a name="ln1077">    default: return FALSE;</a>
+<a name="ln1078">  }</a>
+<a name="ln1079">}</a>
+<a name="ln1080"> </a>
+<a name="ln1081"> </a>
+<a name="ln1082">static void _view_map_check_preference_changed(gpointer instance, gpointer user_data)</a>
+<a name="ln1083">{</a>
+<a name="ln1084">  dt_view_t *view = (dt_view_t *)user_data;</a>
+<a name="ln1085">  dt_map_t *lib = (dt_map_t *)view-&gt;data;</a>
+<a name="ln1086"> </a>
+<a name="ln1087">  if(_view_map_prefs_changed(lib)) g_signal_emit_by_name(lib-&gt;map, &quot;changed&quot;);</a>
+<a name="ln1088">}</a>
+<a name="ln1089"> </a>
+<a name="ln1090">static void _view_map_collection_changed(gpointer instance, gpointer user_data)</a>
+<a name="ln1091">{</a>
+<a name="ln1092">  dt_view_t *self = (dt_view_t *)user_data;</a>
+<a name="ln1093">   dt_map_t *lib = (dt_map_t *)self-&gt;data;</a>
+<a name="ln1094"> </a>
+<a name="ln1095">  if(darktable.view_manager-&gt;proxy.map.view)</a>
+<a name="ln1096">  {</a>
+<a name="ln1097">    GList *collection_images = dt_collection_get_all(darktable.collection, lib-&gt;max_images_drawn);</a>
+<a name="ln1098">    if(collection_images)</a>
+<a name="ln1099">    {</a>
+<a name="ln1100">      _view_map_center_on_image_list(self, collection_images);</a>
+<a name="ln1101">      g_list_free(collection_images);</a>
+<a name="ln1102">    }</a>
+<a name="ln1103">  }</a>
+<a name="ln1104"> </a>
+<a name="ln1105">  if(dt_conf_get_bool(&quot;plugins/map/filter_images_drawn&quot;))</a>
+<a name="ln1106">  {</a>
+<a name="ln1107">    /* only redraw when map mode is currently active, otherwise enter() does the magic */</a>
+<a name="ln1108">    if(darktable.view_manager-&gt;proxy.map.view) g_signal_emit_by_name(lib-&gt;map, &quot;changed&quot;);</a>
+<a name="ln1109">  }</a>
+<a name="ln1110">}</a>
+<a name="ln1111"> </a>
+<a name="ln1112">static void _view_map_center_on_image(dt_view_t *self, const int32_t imgid)</a>
+<a name="ln1113">{</a>
+<a name="ln1114">  if(imgid)</a>
+<a name="ln1115">  {</a>
+<a name="ln1116">    const dt_map_t *lib = (dt_map_t *)self-&gt;data;</a>
+<a name="ln1117">    dt_image_geoloc_t geoloc;</a>
+<a name="ln1118">    dt_image_get_location(imgid, &amp;geoloc);</a>
+<a name="ln1119"> </a>
+<a name="ln1120">    if(!isnan(geoloc.longitude) &amp;&amp; !isnan(geoloc.latitude))</a>
+<a name="ln1121">    {</a>
+<a name="ln1122">      int zoom;</a>
+<a name="ln1123">      g_object_get(G_OBJECT(lib-&gt;map), &quot;zoom&quot;, &amp;zoom, NULL);</a>
+<a name="ln1124">      _view_map_center_on_location(self, geoloc.longitude, geoloc.latitude, zoom);</a>
+<a name="ln1125">    }</a>
+<a name="ln1126">  }</a>
+<a name="ln1127">}</a>
+<a name="ln1128"> </a>
+<a name="ln1129">static gboolean _view_map_center_on_image_list(dt_view_t *self, const GList *selected_images)</a>
+<a name="ln1130">{</a>
+<a name="ln1131">  // TODO: do something better than this approximation</a>
+<a name="ln1132">  const float FIVE_KM = (0.01f * 1.852) * 5.0; // minimum context around single image/place</a>
+<a name="ln1133"> </a>
+<a name="ln1134">  GList const *l = selected_images;</a>
+<a name="ln1135">  float max_longitude = -INFINITY;</a>
+<a name="ln1136">  float max_latitude = -INFINITY;</a>
+<a name="ln1137">  float min_longitude = INFINITY;</a>
+<a name="ln1138">  float min_latitude = INFINITY;</a>
+<a name="ln1139">  int count = 0;</a>
+<a name="ln1140"> </a>
+<a name="ln1141">  while(l)</a>
+<a name="ln1142">  {</a>
+<a name="ln1143">    const int imgid = GPOINTER_TO_INT(l-&gt;data);</a>
+<a name="ln1144">    dt_image_geoloc_t geoloc = { 0.0, 0.0, 0.0 };</a>
+<a name="ln1145">    dt_image_get_location(imgid, &amp;geoloc);</a>
+<a name="ln1146"> </a>
+<a name="ln1147">    if(!isnan(geoloc.longitude) &amp;&amp; !isnan(geoloc.latitude))</a>
+<a name="ln1148">    {</a>
+<a name="ln1149">      max_longitude = MAX(max_longitude, geoloc.longitude);</a>
+<a name="ln1150">      min_longitude = MIN(min_longitude, geoloc.longitude);</a>
+<a name="ln1151">      max_latitude = MAX(max_latitude, geoloc.latitude);</a>
+<a name="ln1152">      min_latitude = MIN(min_latitude, geoloc.latitude);</a>
+<a name="ln1153">      count++;</a>
+<a name="ln1154">    }</a>
+<a name="ln1155">    l = g_list_next(l);</a>
+<a name="ln1156">  }</a>
+<a name="ln1157"> </a>
+<a name="ln1158">  if(count&gt;0)</a>
+<a name="ln1159">  {</a>
+<a name="ln1160">    // enlarge the bounding box to avoid having the pictures on the border, and this will give a bit of context.</a>
+<a name="ln1161"> </a>
+<a name="ln1162">    float d_lon = max_longitude - min_longitude;</a>
+<a name="ln1163">    float d_lat = max_latitude - min_latitude;</a>
+<a name="ln1164"> </a>
+<a name="ln1165">    if(d_lon&gt;1.0)</a>
+<a name="ln1166">      d_lon /= 100.0;</a>
+<a name="ln1167">    else</a>
+<a name="ln1168">      d_lon = (FIVE_KM - d_lon) / 2.0;</a>
+<a name="ln1169"> </a>
+<a name="ln1170">    if(d_lat&gt;1.0)</a>
+<a name="ln1171">      d_lat /= 100.0;</a>
+<a name="ln1172">    else</a>
+<a name="ln1173">      d_lat = (FIVE_KM - d_lat) / 2.0;</a>
+<a name="ln1174"> </a>
+<a name="ln1175">    max_longitude = CLAMP(max_longitude + d_lon, -180, 180);</a>
+<a name="ln1176">    min_longitude = CLAMP(min_longitude - d_lon, -180, 180);</a>
+<a name="ln1177"> </a>
+<a name="ln1178">    max_latitude = CLAMP(max_latitude + d_lat, -90, 90);</a>
+<a name="ln1179">    min_latitude = CLAMP(min_latitude - d_lat, -90, 90);</a>
+<a name="ln1180"> </a>
+<a name="ln1181">    _view_map_center_on_bbox(self, min_longitude, min_latitude, max_longitude, max_latitude);</a>
+<a name="ln1182">    return TRUE;</a>
+<a name="ln1183">  }</a>
+<a name="ln1184">  else</a>
+<a name="ln1185">    return FALSE;</a>
+<a name="ln1186">}</a>
+<a name="ln1187"> </a>
+<a name="ln1188">static void _view_map_filmstrip_activate_callback(gpointer instance, gpointer user_data)</a>
+<a name="ln1189">{</a>
+<a name="ln1190">  dt_view_t *self = (dt_view_t *)user_data;</a>
+<a name="ln1191">  const int32_t imgid = dt_view_filmstrip_get_activated_imgid(darktable.view_manager);</a>
+<a name="ln1192">  _view_map_center_on_image(self, imgid);</a>
+<a name="ln1193">}</a>
+<a name="ln1194"> </a>
+<a name="ln1195">static void _pop_undo(gpointer user_data, dt_undo_type_t type, dt_undo_data_t *data, dt_undo_action_t action)</a>
+<a name="ln1196">{</a>
+<a name="ln1197">  dt_view_t *self = (dt_view_t *)user_data;</a>
+<a name="ln1198">  dt_map_t *lib = (dt_map_t *)self-&gt;data;</a>
+<a name="ln1199"> </a>
+<a name="ln1200">  if(type == DT_UNDO_GEOTAG)</a>
+<a name="ln1201">  {</a>
+<a name="ln1202">    dt_undo_geotag_t *geotag = (dt_undo_geotag_t *)data;</a>
+<a name="ln1203">    dt_image_geoloc_t *pos;</a>
+<a name="ln1204"> </a>
+<a name="ln1205">    if(action == DT_ACTION_UNDO)</a>
+<a name="ln1206">      pos = &amp;(geotag-&gt;before);</a>
+<a name="ln1207">    else</a>
+<a name="ln1208">      pos = &amp;(geotag-&gt;after);</a>
+<a name="ln1209"> </a>
+<a name="ln1210">    _set_image_location(self, geotag-&gt;imgid, pos, TRUE);</a>
+<a name="ln1211">    g_signal_emit_by_name(lib-&gt;map, &quot;changed&quot;);</a>
+<a name="ln1212">  }</a>
+<a name="ln1213">}</a>
+<a name="ln1214"> </a>
+<a name="ln1215">static void _set_image_location(dt_view_t *self, int imgid, dt_image_geoloc_t *geoloc, gboolean set_elevation)</a>
+<a name="ln1216">{</a>
+<a name="ln1217">  if(set_elevation)</a>
+<a name="ln1218">    dt_image_set_location_and_elevation(imgid, geoloc);</a>
+<a name="ln1219">  else</a>
+<a name="ln1220">    dt_image_set_location(imgid, geoloc);</a>
+<a name="ln1221"> </a>
+<a name="ln1222">  dt_control_signal_raise(darktable.signals, DT_SIGNAL_MOUSE_OVER_IMAGE_CHANGE);</a>
+<a name="ln1223">}</a>
+<a name="ln1224"> </a>
+<a name="ln1225">static void _view_map_add_image_to_map(dt_view_t *self, int imgid, gint x, gint y)</a>
+<a name="ln1226">{</a>
+<a name="ln1227">  dt_map_t *lib = (dt_map_t *)self-&gt;data;</a>
+<a name="ln1228">  float longitude, latitude;</a>
+<a name="ln1229">  OsmGpsMapPoint *pt = osm_gps_map_point_new_degrees(0.0, 0.0);</a>
+<a name="ln1230">  osm_gps_map_convert_screen_to_geographic(lib-&gt;map, x, y, pt);</a>
+<a name="ln1231">  osm_gps_map_point_get_degrees(pt, &amp;latitude, &amp;longitude);</a>
+<a name="ln1232">  osm_gps_map_point_free(pt);</a>
+<a name="ln1233"> </a>
+<a name="ln1234">  // create the undo/redo data</a>
+<a name="ln1235"> </a>
+<a name="ln1236">  dt_undo_geotag_t *geotag = malloc(sizeof(dt_undo_geotag_t));</a>
+<a name="ln1237"> </a>
+<a name="ln1238">  geotag-&gt;imgid = imgid;</a>
+<a name="ln1239">  dt_image_get_location(imgid, &amp;(geotag-&gt;before));</a>
+<a name="ln1240"> </a>
+<a name="ln1241">  geotag-&gt;after.longitude = longitude;</a>
+<a name="ln1242">  geotag-&gt;after.latitude = latitude;</a>
+<a name="ln1243">  geotag-&gt;after.elevation = 0.0;</a>
+<a name="ln1244"> </a>
+<a name="ln1245">  dt_undo_record(darktable.undo, self, DT_UNDO_GEOTAG, (dt_undo_data_t *)geotag, &amp;_pop_undo, free);</a>
+<a name="ln1246"> </a>
+<a name="ln1247">  _set_image_location(self, imgid, &amp;(geotag-&gt;after), FALSE);</a>
+<a name="ln1248">}</a>
+<a name="ln1249"> </a>
+<a name="ln1250">static void drag_and_drop_received(GtkWidget *widget, GdkDragContext *context, gint x, gint y,</a>
+<a name="ln1251">                                   GtkSelectionData *selection_data, guint target_type, guint time,</a>
+<a name="ln1252">                                   gpointer data)</a>
+<a name="ln1253">{</a>
+<a name="ln1254">  dt_view_t *self = (dt_view_t *)data;</a>
+<a name="ln1255">  dt_map_t *lib = (dt_map_t *)self-&gt;data;</a>
+<a name="ln1256"> </a>
+<a name="ln1257">  gboolean success = FALSE;</a>
+<a name="ln1258"> </a>
+<a name="ln1259">  if((selection_data != NULL) &amp;&amp; (gtk_selection_data_get_length(selection_data) &gt;= 0)</a>
+<a name="ln1260">     &amp;&amp; target_type == DND_TARGET_IMGID)</a>
+<a name="ln1261">  {</a>
+<a name="ln1262">    int *imgid = (int *)gtk_selection_data_get_data(selection_data);</a>
+<a name="ln1263">    if(*imgid &gt; 0)</a>
+<a name="ln1264">    {</a>
+<a name="ln1265">      dt_undo_start_group(darktable.undo, DT_UNDO_GEOTAG);</a>
+<a name="ln1266">      _view_map_add_image_to_map(self, *imgid, x, y);</a>
+<a name="ln1267">      dt_undo_end_group(darktable.undo);</a>
+<a name="ln1268">      success = TRUE;</a>
+<a name="ln1269">    }</a>
+<a name="ln1270">    else if(*imgid == -1) // everything which is selected</a>
+<a name="ln1271">    {</a>
+<a name="ln1272">      sqlite3_stmt *stmt;</a>
+<a name="ln1273"> </a>
+<a name="ln1274">      // record initial image position for images not yet in the undo list</a>
+<a name="ln1275"> </a>
+<a name="ln1276">      DT_DEBUG_SQLITE3_PREPARE_V2(dt_database_get(darktable.db), &quot;SELECT DISTINCT imgid FROM main.selected_images&quot;,</a>
+<a name="ln1277">                                  -1, &amp;stmt, NULL);</a>
+<a name="ln1278"> </a>
+<a name="ln1279">      // create an undo group for the set of change</a>
+<a name="ln1280"> </a>
+<a name="ln1281">      dt_undo_start_group(darktable.undo, DT_UNDO_GEOTAG);</a>
+<a name="ln1282"> </a>
+<a name="ln1283">      while(sqlite3_step(stmt) == SQLITE_ROW)</a>
+<a name="ln1284">        _view_map_add_image_to_map(self, sqlite3_column_int(stmt, 0), x, y);</a>
+<a name="ln1285"> </a>
+<a name="ln1286">      dt_undo_end_group(darktable.undo);</a>
+<a name="ln1287"> </a>
+<a name="ln1288">      sqlite3_finalize(stmt);</a>
+<a name="ln1289">      success = TRUE;</a>
+<a name="ln1290">    }</a>
+<a name="ln1291">  }</a>
+<a name="ln1292">  gtk_drag_finish(context, success, FALSE, time);</a>
+<a name="ln1293">  if(success) g_signal_emit_by_name(lib-&gt;map, &quot;changed&quot;);</a>
+<a name="ln1294">}</a>
+<a name="ln1295"> </a>
+<a name="ln1296">static void _view_map_dnd_get_callback(GtkWidget *widget, GdkDragContext *context,</a>
+<a name="ln1297">                                       GtkSelectionData *selection_data, guint target_type, guint time,</a>
+<a name="ln1298">                                       dt_view_t *self)</a>
+<a name="ln1299">{</a>
+<a name="ln1300">  dt_map_t *lib = (dt_map_t *)self-&gt;data;</a>
+<a name="ln1301"> </a>
+<a name="ln1302">  g_assert(selection_data != NULL);</a>
+<a name="ln1303"> </a>
+<a name="ln1304">  int imgid = lib-&gt;selected_image;</a>
+<a name="ln1305"> </a>
+<a name="ln1306">  switch(target_type)</a>
+<a name="ln1307">  {</a>
+<a name="ln1308">    case DND_TARGET_IMGID:</a>
+<a name="ln1309">      gtk_selection_data_set(selection_data, gtk_selection_data_get_target(selection_data), _DWORD,</a>
+<a name="ln1310">                             (guchar *)&amp;imgid, sizeof(imgid));</a>
+<a name="ln1311">      break;</a>
+<a name="ln1312">    default: // return the location of the file as a last resort</a>
+<a name="ln1313">    case DND_TARGET_URI:</a>
+<a name="ln1314">    {</a>
+<a name="ln1315">      gchar pathname[PATH_MAX] = { 0 };</a>
+<a name="ln1316">      gboolean from_cache = TRUE;</a>
+<a name="ln1317">      dt_image_full_path(imgid, pathname, sizeof(pathname), &amp;from_cache);</a>
+<a name="ln1318">      gchar *uri = g_strdup_printf(&quot;file://%s&quot;, pathname); // TODO: should we add the host?</a>
+<a name="ln1319">      gtk_selection_data_set(selection_data, gtk_selection_data_get_target(selection_data), _BYTE,</a>
+<a name="ln1320">                             (guchar *)uri, strlen(uri));</a>
+<a name="ln1321">      g_free(uri);</a>
+<a name="ln1322">      break;</a>
+<a name="ln1323">    }</a>
+<a name="ln1324">  }</a>
+<a name="ln1325">}</a>
+<a name="ln1326"> </a>
+<a name="ln1327">static void _view_map_dnd_remove_callback(GtkWidget *widget, GdkDragContext *context, gint x, gint y,</a>
+<a name="ln1328">                                          GtkSelectionData *selection_data, guint target_type, guint time,</a>
+<a name="ln1329">                                          gpointer data)</a>
+<a name="ln1330">{</a>
+<a name="ln1331">  dt_view_t *self = (dt_view_t *)data;</a>
+<a name="ln1332">  dt_map_t *lib = (dt_map_t *)self-&gt;data;</a>
+<a name="ln1333"> </a>
+<a name="ln1334">  gboolean success = FALSE;</a>
+<a name="ln1335"> </a>
+<a name="ln1336">  if((selection_data != NULL) &amp;&amp; (gtk_selection_data_get_length(selection_data) &gt;= 0)</a>
+<a name="ln1337">     &amp;&amp; target_type == DND_TARGET_IMGID)</a>
+<a name="ln1338">  {</a>
+<a name="ln1339">    int *imgid = (int *)gtk_selection_data_get_data(selection_data);</a>
+<a name="ln1340">    if(*imgid &gt; 0)</a>
+<a name="ln1341">    {</a>
+<a name="ln1342">      //  the image was dropped into the filmstrip, let's remove it in this case</a>
+<a name="ln1343">      dt_image_geoloc_t geoloc = { NAN, NAN, NAN };</a>
+<a name="ln1344">      _set_image_location(self, *imgid, &amp;geoloc, TRUE);</a>
+<a name="ln1345">      success = TRUE;</a>
+<a name="ln1346">    }</a>
+<a name="ln1347">  }</a>
+<a name="ln1348">  gtk_drag_finish(context, success, FALSE, time);</a>
+<a name="ln1349">  if(success) g_signal_emit_by_name(lib-&gt;map, &quot;changed&quot;);</a>
+<a name="ln1350">}</a>
+<a name="ln1351"> </a>
+<a name="ln1352">static gboolean _view_map_dnd_failed_callback(GtkWidget *widget, GdkDragContext *drag_context,</a>
+<a name="ln1353">                                              GtkDragResult result, dt_view_t *self)</a>
+<a name="ln1354">{</a>
+<a name="ln1355">  dt_map_t *lib = (dt_map_t *)self-&gt;data;</a>
+<a name="ln1356"> </a>
+<a name="ln1357">  g_signal_emit_by_name(lib-&gt;map, &quot;changed&quot;);</a>
+<a name="ln1358"> </a>
+<a name="ln1359">  return TRUE;</a>
+<a name="ln1360">}</a>
+<a name="ln1361"> </a>
+<a name="ln1362">static gboolean _view_map_prefs_changed(dt_map_t *lib)</a>
+<a name="ln1363">{</a>
+<a name="ln1364">  gboolean prefs_changed = FALSE;</a>
+<a name="ln1365">  int max_images_drawn = dt_conf_get_int(&quot;plugins/map/max_images_drawn&quot;);</a>
+<a name="ln1366">  gboolean filter_images_drawn = dt_conf_get_bool(&quot;plugins/map/filter_images_drawn&quot;);</a>
+<a name="ln1367"> </a>
+<a name="ln1368">  if(lib-&gt;max_images_drawn != max_images_drawn) prefs_changed = TRUE;</a>
+<a name="ln1369">  if(lib-&gt;filter_images_drawn != filter_images_drawn) prefs_changed = TRUE;</a>
+<a name="ln1370"> </a>
+<a name="ln1371">  return prefs_changed;</a>
+<a name="ln1372">}</a>
+<a name="ln1373"> </a>
+<a name="ln1374">static void _view_map_build_main_query(dt_map_t *lib)</a>
+<a name="ln1375">{</a>
+<a name="ln1376">  char *geo_query;</a>
+<a name="ln1377"> </a>
+<a name="ln1378">  if(lib-&gt;statements.main_query) sqlite3_finalize(lib-&gt;statements.main_query);</a>
+<a name="ln1379"> </a>
+<a name="ln1380">  lib-&gt;max_images_drawn = dt_conf_get_int(&quot;plugins/map/max_images_drawn&quot;);</a>
+<a name="ln1381">  if(lib-&gt;max_images_drawn == 0) lib-&gt;max_images_drawn = 100;</a>
+<a name="ln1382">  lib-&gt;filter_images_drawn = dt_conf_get_bool(&quot;plugins/map/filter_images_drawn&quot;);</a>
+<a name="ln1383">  geo_query = g_strdup_printf(&quot;SELECT * FROM (SELECT id, latitude FROM %s WHERE longitude &gt;= ?1 AND &quot;</a>
+<a name="ln1384">                              &quot;longitude &lt;= ?2 AND latitude &lt;= ?3 AND latitude &gt;= ?4 AND longitude NOT NULL AND &quot;</a>
+<a name="ln1385">                              &quot;latitude NOT NULL ORDER BY ABS(latitude - ?5), ABS(longitude - ?6) LIMIT 0, %d) &quot;</a>
+<a name="ln1386">                              &quot;ORDER BY (180 - latitude), id&quot;,</a>
+<a name="ln1387">                              lib-&gt;filter_images_drawn</a>
+<a name="ln1388">                              ? &quot;main.images i INNER JOIN memory.collected_images c ON i.id = c.imgid&quot;</a>
+<a name="ln1389">                              : &quot;main.images&quot;,</a>
+<a name="ln1390">                              lib-&gt;max_images_drawn);</a>
+<a name="ln1391"> </a>
+<a name="ln1392">  /* prepare the main query statement */</a>
+<a name="ln1393">  DT_DEBUG_SQLITE3_PREPARE_V2(dt_database_get(darktable.db), geo_query, -1, &amp;lib-&gt;statements.main_query, NULL);</a>
+<a name="ln1394"> </a>
+<a name="ln1395">  g_free(geo_query);</a>
+<a name="ln1396">}</a>
+<a name="ln1397"> </a>
+<a name="ln1398">// modelines: These editor modelines have been set for all relevant files by tools/update_modelines.sh</a>
+<a name="ln1399">// vim: shiftwidth=2 expandtab tabstop=2 cindent</a>
+<a name="ln1400">// kate: tab-indents: off; indent-width 2; replace-tabs on; indent-mode cstyle; remove-trailing-spaces modified;</a>
+
+</code></pre>
+<div class="balloon" rel="322"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v575/" target="_blank">V575</a> The potential null pointer is passed into 'memcpy' function. Inspect the first argument. Check lines: 322, 321.</p></div>
+<div class="balloon" rel="370"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v575/" target="_blank">V575</a> The potential null pointer is passed into 'memcpy' function. Inspect the first argument. Check lines: 370, 369.</p></div>
+<div class="balloon" rel="385"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v522/" target="_blank">V522</a> There might be dereferencing of a potential null pointer 'lib'. Check lines: 385, 379.</p></div>
+<div class="balloon" rel="1238"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v522/" target="_blank">V522</a> There might be dereferencing of a potential null pointer 'geotag'. Check lines: 1238, 1236.</p></div>
+
+<link rel="stylesheet" href="highlight.css">
+<script src="highlight.pack.js"></script>
+<script src="highlightjs-line-numbers.js"></script>
+<script>hljs.initHighlightingOnLoad();</script>
+<script>hljs.initLineNumbersOnLoad();</script>
+<script>
+  $(document).ready(function() {
+      $('.balloon').each(function () {
+          var bl = $(this);
+          var line = bl.attr('rel');
+          var text = $('a[name="ln'+line+'"]').text();
+
+          var space_count = 0;
+          for(var i = 0; i<text.length; i++){
+              var char = text[i];
+              if((char !== ' ')&&(char !== '\t'))break;
+              if(char === '\t')space_count++;
+              space_count++;
+          }
+
+          bl.css('margin-left', space_count*8);
+          $('a[name="ln'+line+'"]').after(bl);
+      });
+
+      window.location = window.location;
+  });
+</script>
+</body>
+</html>

@@ -1,0 +1,1922 @@
+
+<html>
+<head>
+  <link rel="stylesheet" href="../style.css"/>
+  <script src="../jquery-3.2.1.min.js"></script>
+</head>
+<body>
+<pre><code class = "cpp">
+<a name="ln1">/*</a>
+<a name="ln2">   This file is part of darktable,</a>
+<a name="ln3">   copyright (c) 2018 Aurélien Pierre, with guidance of Troy James Sobotka.</a>
+<a name="ln4"> </a>
+<a name="ln5">   darktable is free software: you can redistribute it and/or modify</a>
+<a name="ln6">   it under the terms of the GNU General Public License as published by</a>
+<a name="ln7">   the Free Software Foundation, either version 3 of the License, or</a>
+<a name="ln8">   (at your option) any later version.</a>
+<a name="ln9"> </a>
+<a name="ln10">   darktable is distributed in the hope that it will be useful,</a>
+<a name="ln11">   but WITHOUT ANY WARRANTY; without even the implied warranty of</a>
+<a name="ln12">   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the</a>
+<a name="ln13">   GNU General Public License for more details.</a>
+<a name="ln14"> </a>
+<a name="ln15">   You should have received a copy of the GNU General Public License</a>
+<a name="ln16">   along with darktable.  If not, see &lt;http://www.gnu.org/licenses/&gt;.</a>
+<a name="ln17">*/</a>
+<a name="ln18">#ifdef HAVE_CONFIG_H</a>
+<a name="ln19">#include &quot;config.h&quot;</a>
+<a name="ln20">#endif</a>
+<a name="ln21">#include &quot;bauhaus/bauhaus.h&quot;</a>
+<a name="ln22">#include &quot;common/colorspaces_inline_conversions.h&quot;</a>
+<a name="ln23">#include &quot;common/darktable.h&quot;</a>
+<a name="ln24">#include &quot;common/opencl.h&quot;</a>
+<a name="ln25">#include &quot;control/control.h&quot;</a>
+<a name="ln26">#include &quot;develop/develop.h&quot;</a>
+<a name="ln27">#include &quot;develop/imageop_math.h&quot;</a>
+<a name="ln28">#include &quot;dtgtk/button.h&quot;</a>
+<a name="ln29">#include &quot;dtgtk/drawingarea.h&quot;</a>
+<a name="ln30">#include &quot;dtgtk/expander.h&quot;</a>
+<a name="ln31">#include &quot;dtgtk/paint.h&quot;</a>
+<a name="ln32">#include &quot;gui/accelerators.h&quot;</a>
+<a name="ln33">#include &quot;gui/gtk.h&quot;</a>
+<a name="ln34">#include &quot;gui/presets.h&quot;</a>
+<a name="ln35">#include &quot;gui/color_picker_proxy.h&quot;</a>
+<a name="ln36">#include &quot;iop/iop_api.h&quot;</a>
+<a name="ln37"> </a>
+<a name="ln38"> </a>
+<a name="ln39">#include &quot;develop/imageop.h&quot;</a>
+<a name="ln40">#include &quot;gui/draw.h&quot;</a>
+<a name="ln41">#include &quot;libs/colorpicker.h&quot;</a>
+<a name="ln42"> </a>
+<a name="ln43">#include &lt;assert.h&gt;</a>
+<a name="ln44">#include &lt;math.h&gt;</a>
+<a name="ln45">#include &lt;stdlib.h&gt;</a>
+<a name="ln46">#include &lt;string.h&gt;</a>
+<a name="ln47"> </a>
+<a name="ln48">#ifdef __SSE2__</a>
+<a name="ln49">#include &quot;common/sse.h&quot;</a>
+<a name="ln50">#endif</a>
+<a name="ln51"> </a>
+<a name="ln52">#define DT_GUI_CURVE_EDITOR_INSET DT_PIXEL_APPLY_DPI(1)</a>
+<a name="ln53"> </a>
+<a name="ln54"> </a>
+<a name="ln55">DT_MODULE_INTROSPECTION(3, dt_iop_filmic_params_t)</a>
+<a name="ln56"> </a>
+<a name="ln57">/**</a>
+<a name="ln58"> * DOCUMENTATION</a>
+<a name="ln59"> *</a>
+<a name="ln60"> * This code ports :</a>
+<a name="ln61"> * 1. Troy Sobotka's filmic curves for Blender (and other softs)</a>
+<a name="ln62"> *      https://github.com/sobotka/OpenAgX/blob/master/lib/agx_colour.py</a>
+<a name="ln63"> * 2. ACES camera logarithmic encoding</a>
+<a name="ln64"> *        https://github.com/ampas/aces-dev/blob/master/transforms/ctl/utilities/ACESutil.Lin_to_Log2_param.ctl</a>
+<a name="ln65"> *</a>
+<a name="ln66"> * The ACES log implementation is taken from the profile_gamma.c IOP</a>
+<a name="ln67"> * where it works in camera RGB space. Here, it works on an arbitrary RGB</a>
+<a name="ln68"> * space. ProPhotoRGB has been chosen for its wide gamut coverage and</a>
+<a name="ln69"> * for conveniency because it's already in darktable's libs. Any other</a>
+<a name="ln70"> * RGB working space could work. This chouice could (should) also be</a>
+<a name="ln71"> * exposed to the user.</a>
+<a name="ln72"> *</a>
+<a name="ln73"> * The filmic curves are tonecurves intended to simulate the luminance</a>
+<a name="ln74"> * transfer function of film with &quot;S&quot; curves. These could be reproduced in</a>
+<a name="ln75"> * the tonecurve.c IOP, however what we offer here is a parametric</a>
+<a name="ln76"> * interface useful to remap accurately and promptly the middle grey</a>
+<a name="ln77"> * to any arbitrary value chosen accordingly to the destination space.</a>
+<a name="ln78"> *</a>
+<a name="ln79"> * The combined use of both define a modern way to deal with large</a>
+<a name="ln80"> * dynamic range photographs by remapping the values with a comprehensive</a>
+<a name="ln81"> * interface avoiding many of the back and forth adjustements darktable</a>
+<a name="ln82"> * is prone to enforce.</a>
+<a name="ln83"> *</a>
+<a name="ln84"> * */</a>
+<a name="ln85"> </a>
+<a name="ln86">typedef enum dt_iop_filmic_pickcolor_type_t</a>
+<a name="ln87">{</a>
+<a name="ln88">  DT_PICKPROFLOG_NONE = 0,</a>
+<a name="ln89">  DT_PICKPROFLOG_GREY_POINT = 1,</a>
+<a name="ln90">  DT_PICKPROFLOG_BLACK_POINT = 2,</a>
+<a name="ln91">  DT_PICKPROFLOG_WHITE_POINT = 3,</a>
+<a name="ln92">  DT_PICKPROFLOG_AUTOTUNE = 4</a>
+<a name="ln93">} dt_iop_filmic_pickcolor_type_t;</a>
+<a name="ln94"> </a>
+<a name="ln95">typedef struct dt_iop_filmic_params_t</a>
+<a name="ln96">{</a>
+<a name="ln97">  float grey_point_source;</a>
+<a name="ln98">  float black_point_source;</a>
+<a name="ln99">  float white_point_source;</a>
+<a name="ln100">  float security_factor;</a>
+<a name="ln101">  float grey_point_target;</a>
+<a name="ln102">  float black_point_target;</a>
+<a name="ln103">  float white_point_target;</a>
+<a name="ln104">  float output_power;</a>
+<a name="ln105">  float latitude_stops;</a>
+<a name="ln106">  float contrast;</a>
+<a name="ln107">  float saturation;</a>
+<a name="ln108">  float global_saturation;</a>
+<a name="ln109">  float balance;</a>
+<a name="ln110">  int interpolator;</a>
+<a name="ln111">  int preserve_color;</a>
+<a name="ln112">} dt_iop_filmic_params_t;</a>
+<a name="ln113"> </a>
+<a name="ln114">typedef struct dt_iop_filmic_gui_data_t</a>
+<a name="ln115">{</a>
+<a name="ln116">  GtkWidget *white_point_source;</a>
+<a name="ln117">  GtkWidget *grey_point_source;</a>
+<a name="ln118">  GtkWidget *black_point_source;</a>
+<a name="ln119">  GtkWidget *security_factor;</a>
+<a name="ln120">  GtkWidget *auto_button;</a>
+<a name="ln121">  GtkWidget *grey_point_target;</a>
+<a name="ln122">  GtkWidget *white_point_target;</a>
+<a name="ln123">  GtkWidget *black_point_target;</a>
+<a name="ln124">  GtkWidget *output_power;</a>
+<a name="ln125">  GtkWidget *latitude_stops;</a>
+<a name="ln126">  GtkWidget *contrast;</a>
+<a name="ln127">  GtkWidget *global_saturation;</a>
+<a name="ln128">  GtkWidget *saturation;</a>
+<a name="ln129">  GtkWidget *balance;</a>
+<a name="ln130">  GtkWidget *interpolator;</a>
+<a name="ln131">  GtkWidget *preserve_color;</a>
+<a name="ln132">  GtkWidget *extra_expander;</a>
+<a name="ln133">  GtkWidget *extra_toggle;</a>
+<a name="ln134">  dt_iop_color_picker_t color_picker;</a>
+<a name="ln135">  GtkDrawingArea *area;</a>
+<a name="ln136">  float table[256];      // precomputed look-up table</a>
+<a name="ln137">  float table_temp[256]; // precomputed look-up for the optimized interpolation</a>
+<a name="ln138">} dt_iop_filmic_gui_data_t;</a>
+<a name="ln139"> </a>
+<a name="ln140">typedef struct dt_iop_filmic_data_t</a>
+<a name="ln141">{</a>
+<a name="ln142">  float table[0x10000];      // precomputed look-up table</a>
+<a name="ln143">  float table_temp[0x10000]; // precomputed look-up for the optimized interpolation</a>
+<a name="ln144">  float grad_2[0x10000];</a>
+<a name="ln145">  float max_grad;</a>
+<a name="ln146">  float grey_source;</a>
+<a name="ln147">  float black_source;</a>
+<a name="ln148">  float dynamic_range;</a>
+<a name="ln149">  float saturation;</a>
+<a name="ln150">  float global_saturation;</a>
+<a name="ln151">  float output_power;</a>
+<a name="ln152">  float contrast;</a>
+<a name="ln153">  int preserve_color;</a>
+<a name="ln154">  float latitude_min;</a>
+<a name="ln155">  float latitude_max;</a>
+<a name="ln156">} dt_iop_filmic_data_t;</a>
+<a name="ln157"> </a>
+<a name="ln158">typedef struct dt_iop_filmic_nodes_t</a>
+<a name="ln159">{</a>
+<a name="ln160">  int nodes;</a>
+<a name="ln161">  float y[5];</a>
+<a name="ln162">  float x[5];</a>
+<a name="ln163">} dt_iop_filmic_nodes_t;</a>
+<a name="ln164"> </a>
+<a name="ln165">typedef struct dt_iop_filmic_global_data_t</a>
+<a name="ln166">{</a>
+<a name="ln167">  int kernel_filmic;</a>
+<a name="ln168">  int kernel_filmic_log;</a>
+<a name="ln169">} dt_iop_filmic_global_data_t;</a>
+<a name="ln170"> </a>
+<a name="ln171"> </a>
+<a name="ln172">const char *name()</a>
+<a name="ln173">{</a>
+<a name="ln174">  return _(&quot;filmic&quot;);</a>
+<a name="ln175">}</a>
+<a name="ln176"> </a>
+<a name="ln177">int default_group()</a>
+<a name="ln178">{</a>
+<a name="ln179">  return IOP_GROUP_TONE;</a>
+<a name="ln180">}</a>
+<a name="ln181"> </a>
+<a name="ln182">int flags()</a>
+<a name="ln183">{</a>
+<a name="ln184">  return IOP_FLAGS_ALLOW_TILING | IOP_FLAGS_INCLUDE_IN_STYLES | IOP_FLAGS_SUPPORTS_BLENDING;</a>
+<a name="ln185">}</a>
+<a name="ln186"> </a>
+<a name="ln187">int default_colorspace(dt_iop_module_t *self, dt_dev_pixelpipe_t *pipe, dt_dev_pixelpipe_iop_t *piece)</a>
+<a name="ln188">{</a>
+<a name="ln189">  return iop_cs_Lab;</a>
+<a name="ln190">}</a>
+<a name="ln191"> </a>
+<a name="ln192">int legacy_params(dt_iop_module_t *self, const void *const old_params, const int old_version, void *new_params,</a>
+<a name="ln193">                  const int new_version)</a>
+<a name="ln194">{</a>
+<a name="ln195">  if(old_version == 1 &amp;&amp; new_version == 3)</a>
+<a name="ln196">  {</a>
+<a name="ln197">    typedef struct dt_iop_filmic_params_v1_t</a>
+<a name="ln198">    {</a>
+<a name="ln199">      float grey_point_source;</a>
+<a name="ln200">      float black_point_source;</a>
+<a name="ln201">      float white_point_source;</a>
+<a name="ln202">      float security_factor;</a>
+<a name="ln203">      float grey_point_target;</a>
+<a name="ln204">      float black_point_target;</a>
+<a name="ln205">      float white_point_target;</a>
+<a name="ln206">      float output_power;</a>
+<a name="ln207">      float latitude_stops;</a>
+<a name="ln208">      float contrast;</a>
+<a name="ln209">      float saturation;</a>
+<a name="ln210">      float balance;</a>
+<a name="ln211">      int interpolator;</a>
+<a name="ln212">    } dt_iop_filmic_params_v1_t;</a>
+<a name="ln213"> </a>
+<a name="ln214">    dt_iop_filmic_params_v1_t *o = (dt_iop_filmic_params_v1_t *)old_params;</a>
+<a name="ln215">    dt_iop_filmic_params_t *n = (dt_iop_filmic_params_t *)new_params;</a>
+<a name="ln216">    dt_iop_filmic_params_t *d = (dt_iop_filmic_params_t *)self-&gt;default_params;</a>
+<a name="ln217"> </a>
+<a name="ln218">    *n = *d; // start with a fresh copy of default parameters</a>
+<a name="ln219"> </a>
+<a name="ln220">    n-&gt;grey_point_source = o-&gt;grey_point_source;</a>
+<a name="ln221">    n-&gt;white_point_source = o-&gt;white_point_source;</a>
+<a name="ln222">    n-&gt;black_point_source = o-&gt;black_point_source;</a>
+<a name="ln223">    n-&gt;security_factor = o-&gt;security_factor;</a>
+<a name="ln224">    n-&gt;grey_point_target = o-&gt;grey_point_target;</a>
+<a name="ln225">    n-&gt;black_point_target = o-&gt;black_point_target;</a>
+<a name="ln226">    n-&gt;white_point_target = o-&gt;white_point_target;</a>
+<a name="ln227">    n-&gt;output_power = o-&gt;output_power;</a>
+<a name="ln228">    n-&gt;latitude_stops = o-&gt;latitude_stops;</a>
+<a name="ln229">    n-&gt;contrast = o-&gt;contrast;</a>
+<a name="ln230">    n-&gt;saturation = o-&gt;saturation;</a>
+<a name="ln231">    n-&gt;balance = o-&gt;balance;</a>
+<a name="ln232">    n-&gt;interpolator = o-&gt;interpolator;</a>
+<a name="ln233">    n-&gt;preserve_color = 0;</a>
+<a name="ln234">    n-&gt;global_saturation = 100;</a>
+<a name="ln235">    return 0;</a>
+<a name="ln236">  }</a>
+<a name="ln237"> </a>
+<a name="ln238">  if (old_version == 2 &amp;&amp; new_version == 3)</a>
+<a name="ln239">  {</a>
+<a name="ln240">    typedef struct dt_iop_filmic_params_v2_t</a>
+<a name="ln241">    {</a>
+<a name="ln242">      float grey_point_source;</a>
+<a name="ln243">      float black_point_source;</a>
+<a name="ln244">      float white_point_source;</a>
+<a name="ln245">      float security_factor;</a>
+<a name="ln246">      float grey_point_target;</a>
+<a name="ln247">      float black_point_target;</a>
+<a name="ln248">      float white_point_target;</a>
+<a name="ln249">      float output_power;</a>
+<a name="ln250">      float latitude_stops;</a>
+<a name="ln251">      float contrast;</a>
+<a name="ln252">      float saturation;</a>
+<a name="ln253">      float balance;</a>
+<a name="ln254">      int interpolator;</a>
+<a name="ln255">      int preserve_color;</a>
+<a name="ln256">    } dt_iop_filmic_params_v2_t;</a>
+<a name="ln257"> </a>
+<a name="ln258">    dt_iop_filmic_params_v2_t *o = (dt_iop_filmic_params_v2_t *)old_params;</a>
+<a name="ln259">    dt_iop_filmic_params_t *n = (dt_iop_filmic_params_t *)new_params;</a>
+<a name="ln260">    dt_iop_filmic_params_t *d = (dt_iop_filmic_params_t *)self-&gt;default_params;</a>
+<a name="ln261"> </a>
+<a name="ln262">    *n = *d; // start with a fresh copy of default parameters</a>
+<a name="ln263"> </a>
+<a name="ln264">    n-&gt;grey_point_source = o-&gt;grey_point_source;</a>
+<a name="ln265">    n-&gt;white_point_source = o-&gt;white_point_source;</a>
+<a name="ln266">    n-&gt;black_point_source = o-&gt;black_point_source;</a>
+<a name="ln267">    n-&gt;security_factor = o-&gt;security_factor;</a>
+<a name="ln268">    n-&gt;grey_point_target = o-&gt;grey_point_target;</a>
+<a name="ln269">    n-&gt;black_point_target = o-&gt;black_point_target;</a>
+<a name="ln270">    n-&gt;white_point_target = o-&gt;white_point_target;</a>
+<a name="ln271">    n-&gt;output_power = o-&gt;output_power;</a>
+<a name="ln272">    n-&gt;latitude_stops = o-&gt;latitude_stops;</a>
+<a name="ln273">    n-&gt;contrast = o-&gt;contrast;</a>
+<a name="ln274">    n-&gt;saturation = o-&gt;saturation;</a>
+<a name="ln275">    n-&gt;balance = o-&gt;balance;</a>
+<a name="ln276">    n-&gt;interpolator = o-&gt;interpolator;</a>
+<a name="ln277">    n-&gt;preserve_color = o-&gt;preserve_color;</a>
+<a name="ln278">    n-&gt;global_saturation = 100;</a>
+<a name="ln279">    return 0;</a>
+<a name="ln280">  }</a>
+<a name="ln281">  return 1;</a>
+<a name="ln282">}</a>
+<a name="ln283"> </a>
+<a name="ln284">void init_presets(dt_iop_module_so_t *self)</a>
+<a name="ln285">{</a>
+<a name="ln286">  dt_iop_filmic_params_t p;</a>
+<a name="ln287">  memset(&amp;p, 0, sizeof(p));</a>
+<a name="ln288"> </a>
+<a name="ln289">  // Fine-tune settings, no use here</a>
+<a name="ln290">  p.interpolator = CUBIC_SPLINE;</a>
+<a name="ln291"> </a>
+<a name="ln292">  // Output - standard display, gamma 2.2</a>
+<a name="ln293">  p.output_power = 2.2f;</a>
+<a name="ln294">  p.white_point_target = 100.0f;</a>
+<a name="ln295">  p.black_point_target = 0.0f;</a>
+<a name="ln296">  p.grey_point_target = 18.0f;</a>
+<a name="ln297"> </a>
+<a name="ln298">  // Input - standard raw picture</a>
+<a name="ln299">  p.security_factor = 0.0f;</a>
+<a name="ln300">  p.contrast = 1.618f;</a>
+<a name="ln301">  p.preserve_color = 1;</a>
+<a name="ln302">  p.balance = -12.0f;</a>
+<a name="ln303">  p.saturation = 60.0f;</a>
+<a name="ln304">  p.global_saturation = 70.0f;</a>
+<a name="ln305"> </a>
+<a name="ln306">  // Presets low-key</a>
+<a name="ln307">  p.grey_point_source = 25.4f;</a>
+<a name="ln308">  p.latitude_stops = 2.25f;</a>
+<a name="ln309">  p.white_point_source = 1.95f;</a>
+<a name="ln310">  p.black_point_source = -7.05f;</a>
+<a name="ln311">  dt_gui_presets_add_generic(_(&quot;09 EV (low-key)&quot;), self-&gt;op, self-&gt;version(), &amp;p, sizeof(p), 1);</a>
+<a name="ln312"> </a>
+<a name="ln313">  // Presets indoors</a>
+<a name="ln314">  p.grey_point_source = 18.0f;</a>
+<a name="ln315">  p.latitude_stops = 2.75f;</a>
+<a name="ln316">  p.white_point_source = 2.45f;</a>
+<a name="ln317">  p.black_point_source = -7.55f;</a>
+<a name="ln318">  dt_gui_presets_add_generic(_(&quot;10 EV (indoors)&quot;), self-&gt;op, self-&gt;version(), &amp;p, sizeof(p), 1);</a>
+<a name="ln319"> </a>
+<a name="ln320">  // Presets dim-outdoors</a>
+<a name="ln321">  p.grey_point_source = 12.77f;</a>
+<a name="ln322">  p.latitude_stops = 3.0f;</a>
+<a name="ln323">  p.white_point_source = 2.95f;</a>
+<a name="ln324">  p.black_point_source = -8.05f;</a>
+<a name="ln325">  dt_gui_presets_add_generic(_(&quot;11 EV (dim outdoors)&quot;), self-&gt;op, self-&gt;version(), &amp;p, sizeof(p), 1);</a>
+<a name="ln326"> </a>
+<a name="ln327">  // Presets outdoors</a>
+<a name="ln328">  p.grey_point_source = 9.0f;</a>
+<a name="ln329">  p.latitude_stops = 3.5f;</a>
+<a name="ln330">  p.white_point_source = 3.45f;</a>
+<a name="ln331">  p.black_point_source = -8.55f;</a>
+<a name="ln332">  dt_gui_presets_add_generic(_(&quot;12 EV (outdoors)&quot;), self-&gt;op, self-&gt;version(), &amp;p, sizeof(p), 1);</a>
+<a name="ln333"> </a>
+<a name="ln334">  // Presets outdoors</a>
+<a name="ln335">  p.grey_point_source = 6.38f;</a>
+<a name="ln336">  p.latitude_stops = 3.75f;</a>
+<a name="ln337">  p.white_point_source = 3.95f;</a>
+<a name="ln338">  p.black_point_source = -9.05f;</a>
+<a name="ln339">  dt_gui_presets_add_generic(_(&quot;13 EV (bright outdoors)&quot;), self-&gt;op, self-&gt;version(), &amp;p, sizeof(p), 1);</a>
+<a name="ln340"> </a>
+<a name="ln341">  // Presets backlighting</a>
+<a name="ln342">  p.grey_point_source = 4.5f;</a>
+<a name="ln343">  p.latitude_stops = 4.25f;</a>
+<a name="ln344">  p.white_point_source = 4.45f;</a>
+<a name="ln345">  p.black_point_source = -9.55f;</a>
+<a name="ln346">  dt_gui_presets_add_generic(_(&quot;14 EV (backlighting)&quot;), self-&gt;op, self-&gt;version(), &amp;p, sizeof(p), 1);</a>
+<a name="ln347"> </a>
+<a name="ln348">  // Presets sunset</a>
+<a name="ln349">  p.grey_point_source = 3.19f;</a>
+<a name="ln350">  p.latitude_stops = 4.50f;</a>
+<a name="ln351">  p.white_point_source = 4.95f;</a>
+<a name="ln352">  p.black_point_source = -10.05f;</a>
+<a name="ln353">  dt_gui_presets_add_generic(_(&quot;15 EV (sunset)&quot;), self-&gt;op, self-&gt;version(), &amp;p, sizeof(p), 1);</a>
+<a name="ln354"> </a>
+<a name="ln355">  // Presets HDR</a>
+<a name="ln356">  p.grey_point_source = 2.25f;</a>
+<a name="ln357">  p.latitude_stops = 5.0f;</a>
+<a name="ln358">  p.white_point_source = 5.45f;</a>
+<a name="ln359">  p.black_point_source = -10.55f;</a>
+<a name="ln360">  dt_gui_presets_add_generic(_(&quot;16 EV (HDR)&quot;), self-&gt;op, self-&gt;version(), &amp;p, sizeof(p), 1);</a>
+<a name="ln361"> </a>
+<a name="ln362">  // Presets HDR+</a>
+<a name="ln363">  p.grey_point_source = 1.125f;</a>
+<a name="ln364">  p.latitude_stops = 6.0f;</a>
+<a name="ln365">  p.white_point_source = 6.45f;</a>
+<a name="ln366">  p.black_point_source = -11.55f;</a>
+<a name="ln367">  dt_gui_presets_add_generic(_(&quot;18 EV (HDR++)&quot;), self-&gt;op, self-&gt;version(), &amp;p, sizeof(p), 1);</a>
+<a name="ln368">}</a>
+<a name="ln369"> </a>
+<a name="ln370">static inline float Log2(float x)</a>
+<a name="ln371">{</a>
+<a name="ln372">  if(x &gt; 0.0f)</a>
+<a name="ln373">  {</a>
+<a name="ln374">    return logf(x) / logf(2.0f);</a>
+<a name="ln375">  }</a>
+<a name="ln376">  else</a>
+<a name="ln377">  {</a>
+<a name="ln378">    return x;</a>
+<a name="ln379">  }</a>
+<a name="ln380">}</a>
+<a name="ln381"> </a>
+<a name="ln382">static inline float Log2Thres(float x, float Thres)</a>
+<a name="ln383">{</a>
+<a name="ln384">  if(x &gt; Thres)</a>
+<a name="ln385">  {</a>
+<a name="ln386">    return logf(x) / logf(2.f);</a>
+<a name="ln387">  }</a>
+<a name="ln388">  else</a>
+<a name="ln389">  {</a>
+<a name="ln390">    return logf(Thres) / logf(2.f);</a>
+<a name="ln391">  }</a>
+<a name="ln392">}</a>
+<a name="ln393"> </a>
+<a name="ln394"> </a>
+<a name="ln395">// From data/kernels/extended.cl</a>
+<a name="ln396">static inline float fastlog2(float x)</a>
+<a name="ln397">{</a>
+<a name="ln398">  union { float f; unsigned int i; } vx = { x };</a>
+<a name="ln399">  union { unsigned int i; float f; } mx = { (vx.i &amp; 0x007FFFFF) | 0x3f000000 };</a>
+<a name="ln400">  float y = vx.i;</a>
+<a name="ln401"> </a>
+<a name="ln402">  y *= 1.1920928955078125e-7f;</a>
+<a name="ln403"> </a>
+<a name="ln404">  return y - 124.22551499f</a>
+<a name="ln405">    - 1.498030302f * mx.f</a>
+<a name="ln406">    - 1.72587999f / (0.3520887068f + mx.f);</a>
+<a name="ln407">}</a>
+<a name="ln408"> </a>
+<a name="ln409">static inline float gaussian(float x, float std)</a>
+<a name="ln410">{</a>
+<a name="ln411">  return expf(- (x * x) / (2.0f * std * std)) / (std * powf(2.0f * M_PI, 0.5f));</a>
+<a name="ln412">}</a>
+<a name="ln413"> </a>
+<a name="ln414">void process(dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, const void *const ivoid, void *const ovoid,</a>
+<a name="ln415">             const dt_iop_roi_t *const roi_in, const dt_iop_roi_t *const roi_out)</a>
+<a name="ln416">{</a>
+<a name="ln417">  dt_iop_filmic_data_t *const data = (dt_iop_filmic_data_t *)piece-&gt;data;</a>
+<a name="ln418"> </a>
+<a name="ln419">  const int ch = piece-&gt;colors;</a>
+<a name="ln420"> </a>
+<a name="ln421">  /** The log2(x) -&gt; -INF when x -&gt; 0</a>
+<a name="ln422">  * thus very low values (noise) will get even lower, resulting in noise negative amplification,</a>
+<a name="ln423">  * which leads to pepper noise in shadows. To avoid that, we need to clip values that are noise for sure.</a>
+<a name="ln424">  * Using 16 bits RAW data, the black value (known by rawspeed for every manufacturer) could be used as a threshold.</a>
+<a name="ln425">  * However, at this point of the pixelpipe, the RAW levels have already been corrected and everything can happen with black levels</a>
+<a name="ln426">  * in the exposure module. So we define the threshold as the first non-null 16 bit integer</a>
+<a name="ln427">  */</a>
+<a name="ln428">  const float EPS = powf(2.0f, -16);</a>
+<a name="ln429">  const int preserve_color = data-&gt;preserve_color;</a>
+<a name="ln430"> </a>
+<a name="ln431">  // If saturation == 100, we have a no-op. Disable the op then.</a>
+<a name="ln432">  const int desaturate = (data-&gt;global_saturation == 100.0f) ? FALSE : TRUE;</a>
+<a name="ln433">  const float saturation = data-&gt;global_saturation / 100.0f;</a>
+<a name="ln434"> </a>
+<a name="ln435">#ifdef _OPENMP</a>
+<a name="ln436">#pragma omp parallel for SIMD() default(none) schedule(static)</a>
+<a name="ln437">#endif</a>
+<a name="ln438">  for(size_t k = 0; k &lt; roi_out-&gt;height * roi_out-&gt;width * ch; k += ch)</a>
+<a name="ln439">  {</a>
+<a name="ln440">    float *in = ((float *)ivoid) + k;</a>
+<a name="ln441">    float *out = ((float *)ovoid) + k;</a>
+<a name="ln442"> </a>
+<a name="ln443">    float XYZ[3];</a>
+<a name="ln444">    dt_Lab_to_XYZ(in, XYZ);</a>
+<a name="ln445"> </a>
+<a name="ln446">    float rgb[3] = { 0.0f };</a>
+<a name="ln447">    dt_XYZ_to_prophotorgb(XYZ, rgb);</a>
+<a name="ln448"> </a>
+<a name="ln449">    float concavity, luma;</a>
+<a name="ln450"> </a>
+<a name="ln451">    // Global desaturation</a>
+<a name="ln452">    if (desaturate)</a>
+<a name="ln453">    {</a>
+<a name="ln454">      luma = XYZ[1];</a>
+<a name="ln455"> </a>
+<a name="ln456">      for(int c = 0; c &lt; 3; c++)</a>
+<a name="ln457">      {</a>
+<a name="ln458">        rgb[c] = luma + saturation * (rgb[c] - luma);</a>
+<a name="ln459">      }</a>
+<a name="ln460">    }</a>
+<a name="ln461"> </a>
+<a name="ln462">    if (preserve_color)</a>
+<a name="ln463">    {</a>
+<a name="ln464">      int index;</a>
+<a name="ln465">      float ratios[4];</a>
+<a name="ln466">      float max = fmaxf(fmaxf(rgb[0], rgb[1]), rgb[2]);</a>
+<a name="ln467"> </a>
+<a name="ln468">      // Save the ratios</a>
+<a name="ln469">      for (int c = 0; c &lt; 3; ++c) ratios[c] = rgb[c] / max;</a>
+<a name="ln470"> </a>
+<a name="ln471">      // Log tone-mapping</a>
+<a name="ln472">      max = max / data-&gt;grey_source;</a>
+<a name="ln473">      max = (max &gt; EPS) ? (fastlog2(max) - data-&gt;black_source) / data-&gt;dynamic_range : EPS;</a>
+<a name="ln474">      max = CLAMP(max, 0.0f, 1.0f);</a>
+<a name="ln475"> </a>
+<a name="ln476">      // Filmic S curve on the max RGB</a>
+<a name="ln477">      index = CLAMP(max * 0x10000ul, 0, 0xffff);</a>
+<a name="ln478">      max = data-&gt;table[index];</a>
+<a name="ln479">      concavity = data-&gt;grad_2[index];</a>
+<a name="ln480"> </a>
+<a name="ln481">      // Re-apply ratios</a>
+<a name="ln482">      for (int c = 0; c &lt; 3; ++c) rgb[c] = ratios[c] * max;</a>
+<a name="ln483"> </a>
+<a name="ln484">      luma = max;</a>
+<a name="ln485">    }</a>
+<a name="ln486">    else</a>
+<a name="ln487">    {</a>
+<a name="ln488">      int index[3];</a>
+<a name="ln489"> </a>
+<a name="ln490">      for(int c = 0; c &lt; 3; c++)</a>
+<a name="ln491">      {</a>
+<a name="ln492">        // Log tone-mapping on RGB</a>
+<a name="ln493">        rgb[c] = rgb[c] / data-&gt;grey_source;</a>
+<a name="ln494">        rgb[c] = (rgb[c] &gt; EPS) ? (fastlog2(rgb[c]) - data-&gt;black_source) / data-&gt;dynamic_range : EPS;</a>
+<a name="ln495">        rgb[c] = CLAMP(rgb[c], 0.0f, 1.0f);</a>
+<a name="ln496"> </a>
+<a name="ln497">        // Store the index of the LUT</a>
+<a name="ln498">        index[c] = CLAMP(rgb[c] * 0x10000ul, 0, 0xffff);</a>
+<a name="ln499">      }</a>
+<a name="ln500"> </a>
+<a name="ln501">      // Concavity</a>
+<a name="ln502">      dt_prophotorgb_to_XYZ(rgb, XYZ);</a>
+<a name="ln503">      concavity = data-&gt;grad_2[(int)CLAMP(XYZ[1] * 0x10000ul, 0, 0xffff)];</a>
+<a name="ln504"> </a>
+<a name="ln505">      // Filmic S curve</a>
+<a name="ln506">      for(int c = 0; c &lt; 3; c++) rgb[c] = data-&gt;table[index[c]];</a>
+<a name="ln507"> </a>
+<a name="ln508">      dt_prophotorgb_to_XYZ(rgb, XYZ);</a>
+<a name="ln509">      luma = XYZ[1];</a>
+<a name="ln510">    }</a>
+<a name="ln511"> </a>
+<a name="ln512">    // Desaturate on the non-linear parts of the curve</a>
+<a name="ln513">    for(int c = 0; c &lt; 3; c++)</a>
+<a name="ln514">    {</a>
+<a name="ln515">      // Desaturate on the non-linear parts of the curve</a>
+<a name="ln516">      rgb[c] = luma + concavity * (rgb[c] - luma);</a>
+<a name="ln517"> </a>
+<a name="ln518">      // Apply the transfer function of the display</a>
+<a name="ln519">      rgb[c] = powf(CLAMP(rgb[c], 0.0f, 1.0f), data-&gt;output_power);</a>
+<a name="ln520">    }</a>
+<a name="ln521"> </a>
+<a name="ln522">    // transform the result back to Lab</a>
+<a name="ln523">    // sRGB -&gt; XYZ</a>
+<a name="ln524">    dt_prophotorgb_to_Lab(rgb, out);</a>
+<a name="ln525">  }</a>
+<a name="ln526"> </a>
+<a name="ln527">  if(piece-&gt;pipe-&gt;mask_display &amp; DT_DEV_PIXELPIPE_DISPLAY_MASK)</a>
+<a name="ln528">    dt_iop_alpha_copy(ivoid, ovoid, roi_out-&gt;width, roi_out-&gt;height);</a>
+<a name="ln529">}</a>
+<a name="ln530"> </a>
+<a name="ln531"> </a>
+<a name="ln532">#if defined(__SSE__)</a>
+<a name="ln533">void process_sse2(struct dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, const void *const ivoid,</a>
+<a name="ln534">             void *const ovoid, const dt_iop_roi_t *const roi_in, const dt_iop_roi_t *const roi_out)</a>
+<a name="ln535">{</a>
+<a name="ln536">  dt_iop_filmic_data_t *const data = (dt_iop_filmic_data_t *)piece-&gt;data;</a>
+<a name="ln537"> </a>
+<a name="ln538">  const int ch = piece-&gt;colors;</a>
+<a name="ln539">  const int preserve_color = data-&gt;preserve_color;</a>
+<a name="ln540"> </a>
+<a name="ln541">  const float grey = data-&gt;grey_source;</a>
+<a name="ln542">  const float black = data-&gt;black_source;</a>
+<a name="ln543">  const float dynamic_range = data-&gt;dynamic_range;</a>
+<a name="ln544">  const float saturation = (data-&gt;global_saturation / 100.0f);</a>
+<a name="ln545"> </a>
+<a name="ln546">  const __m128 grey_sse = _mm_set1_ps(grey);</a>
+<a name="ln547">  const __m128 black_sse = _mm_set1_ps(black);</a>
+<a name="ln548">  const __m128 dynamic_range_sse = _mm_set1_ps(dynamic_range);</a>
+<a name="ln549">  const __m128 power = _mm_set1_ps(data-&gt;output_power);</a>
+<a name="ln550">  const __m128 saturation_sse = _mm_set1_ps(saturation);</a>
+<a name="ln551"> </a>
+<a name="ln552">  // If saturation == 100, we have a no-op. Disable the op then.</a>
+<a name="ln553">  const int desaturate = (data-&gt;global_saturation == 100.0f) ? FALSE : TRUE;</a>
+<a name="ln554"> </a>
+<a name="ln555">  const float eps = powf(2.0f, -16);</a>
+<a name="ln556">  const __m128 EPS = _mm_setr_ps(eps, eps, eps, 0.0f);</a>
+<a name="ln557">  const __m128 zero = _mm_setzero_ps();</a>
+<a name="ln558">  const __m128 one = _mm_set1_ps(1.0f);</a>
+<a name="ln559"> </a>
+<a name="ln560">#ifdef _OPENMP</a>
+<a name="ln561">#pragma omp parallel for default(none) schedule(static)</a>
+<a name="ln562">#endif</a>
+<a name="ln563">  for(size_t k = 0; k &lt; roi_out-&gt;height * roi_out-&gt;width * ch; k += ch)</a>
+<a name="ln564">  {</a>
+<a name="ln565">    float *in = ((float *)ivoid) + k;</a>
+<a name="ln566">    float *out = ((float *)ovoid) + k;</a>
+<a name="ln567"> </a>
+<a name="ln568">    __m128 XYZ = dt_Lab_to_XYZ_sse2(_mm_load_ps(in));</a>
+<a name="ln569">    __m128 rgb = dt_XYZ_to_prophotoRGB_sse2(XYZ);</a>
+<a name="ln570"> </a>
+<a name="ln571">    __m128 concavity;</a>
+<a name="ln572">    __m128 luma;</a>
+<a name="ln573"> </a>
+<a name="ln574">    // Global saturation adjustment</a>
+<a name="ln575">    if (desaturate)</a>
+<a name="ln576">    {</a>
+<a name="ln577">      luma = _mm_set1_ps(XYZ[1]);</a>
+<a name="ln578">      rgb = luma + saturation_sse * (rgb - luma);</a>
+<a name="ln579">    }</a>
+<a name="ln580"> </a>
+<a name="ln581">    if (preserve_color)</a>
+<a name="ln582">    {</a>
+<a name="ln583">      // Get the max of the RGB values</a>
+<a name="ln584">      float max = fmax(fmaxf(rgb[0], rgb[1]), rgb[2]);</a>
+<a name="ln585">      __m128 max_sse = _mm_set1_ps(max);</a>
+<a name="ln586"> </a>
+<a name="ln587">      // Save the ratios</a>
+<a name="ln588">      const __m128 ratios = rgb / max_sse;</a>
+<a name="ln589"> </a>
+<a name="ln590">      // Log tone-mapping</a>
+<a name="ln591">      max = max / grey;</a>
+<a name="ln592">      max = (max &gt; eps) ? (fastlog2(max) - black) / dynamic_range : eps;</a>
+<a name="ln593">      max = CLAMP(max, 0.0f, 1.0f);</a>
+<a name="ln594"> </a>
+<a name="ln595">      // Filmic S curve on the max RGB</a>
+<a name="ln596">      const int index = CLAMP(max * 0x10000ul, 0, 0xffff);</a>
+<a name="ln597">      max = data-&gt;table[index];</a>
+<a name="ln598">      concavity = _mm_set1_ps(data-&gt;grad_2[index]);</a>
+<a name="ln599"> </a>
+<a name="ln600">      // Re-apply ratios</a>
+<a name="ln601">      max_sse = _mm_set1_ps(max);</a>
+<a name="ln602">      rgb = ratios * max_sse;</a>
+<a name="ln603">      luma = max_sse;</a>
+<a name="ln604">    }</a>
+<a name="ln605">    else</a>
+<a name="ln606">    {</a>
+<a name="ln607">      // Log tone-mapping</a>
+<a name="ln608">      rgb = rgb / grey_sse;</a>
+<a name="ln609">      rgb = _mm_max_ps(rgb, EPS);</a>
+<a name="ln610">      rgb = _mm_log2_ps(rgb);</a>
+<a name="ln611">      rgb -= black_sse;</a>
+<a name="ln612">      rgb /=  dynamic_range_sse;</a>
+<a name="ln613">      rgb = _mm_max_ps(rgb, zero);</a>
+<a name="ln614">      rgb = _mm_min_ps(rgb, one);</a>
+<a name="ln615"> </a>
+<a name="ln616">      // Store the derivative at the pixel luminance</a>
+<a name="ln617">      XYZ = dt_prophotoRGB_to_XYZ_sse2(rgb);</a>
+<a name="ln618">      concavity = _mm_set1_ps(data-&gt;grad_2[(int)CLAMP(XYZ[1] * 0x10000ul, 0, 0xffff)]);</a>
+<a name="ln619"> </a>
+<a name="ln620">      // Unpack SSE vector to regular array</a>
+<a name="ln621">      float rgb_unpack[4];</a>
+<a name="ln622"> </a>
+<a name="ln623">      // Filmic S curve</a>
+<a name="ln624">      for (int c = 0; c &lt; 4; ++c)</a>
+<a name="ln625">      {</a>
+<a name="ln626">        rgb_unpack[c] = data-&gt;table[(int)CLAMP(rgb[c] * 0x10000ul, 0, 0xffff)];</a>
+<a name="ln627">      }</a>
+<a name="ln628"> </a>
+<a name="ln629">      rgb = _mm_load_ps(rgb_unpack);</a>
+<a name="ln630">      XYZ = dt_prophotoRGB_to_XYZ_sse2(rgb);</a>
+<a name="ln631">      luma = _mm_set1_ps(XYZ[1]);</a>
+<a name="ln632">    }</a>
+<a name="ln633"> </a>
+<a name="ln634">    rgb = luma + concavity * (rgb - luma);</a>
+<a name="ln635">    rgb = _mm_max_ps(rgb, zero);</a>
+<a name="ln636">    rgb = _mm_min_ps(rgb, one);</a>
+<a name="ln637"> </a>
+<a name="ln638">    // Apply the transfer function of the display</a>
+<a name="ln639">    rgb = _mm_pow_ps(rgb, power);</a>
+<a name="ln640"> </a>
+<a name="ln641">    // transform the result back to Lab</a>
+<a name="ln642">    // sRGB -&gt; XYZ</a>
+<a name="ln643">    XYZ = dt_prophotoRGB_to_XYZ_sse2(rgb);</a>
+<a name="ln644">    // XYZ -&gt; Lab</a>
+<a name="ln645">    _mm_stream_ps(out, dt_XYZ_to_Lab_sse2(XYZ));</a>
+<a name="ln646">  }</a>
+<a name="ln647"> </a>
+<a name="ln648">  if(piece-&gt;pipe-&gt;mask_display &amp; DT_DEV_PIXELPIPE_DISPLAY_MASK) dt_iop_alpha_copy(ivoid, ovoid, roi_out-&gt;width, roi_out-&gt;height);</a>
+<a name="ln649">}</a>
+<a name="ln650">#endif</a>
+<a name="ln651"> </a>
+<a name="ln652"> </a>
+<a name="ln653">#ifdef HAVE_OPENCL</a>
+<a name="ln654">int process_cl(struct dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, cl_mem dev_in, cl_mem dev_out,</a>
+<a name="ln655">               const dt_iop_roi_t *const roi_in, const dt_iop_roi_t *const roi_out)</a>
+<a name="ln656">{</a>
+<a name="ln657">  dt_iop_filmic_data_t *d = (dt_iop_filmic_data_t *)piece-&gt;data;</a>
+<a name="ln658">  dt_iop_filmic_global_data_t *gd = (dt_iop_filmic_global_data_t *)self-&gt;data;</a>
+<a name="ln659"> </a>
+<a name="ln660">  cl_int err = -999;</a>
+<a name="ln661">  const int devid = piece-&gt;pipe-&gt;devid;</a>
+<a name="ln662">  const int width = roi_in-&gt;width;</a>
+<a name="ln663">  const int height = roi_in-&gt;height;</a>
+<a name="ln664"> </a>
+<a name="ln665">  size_t sizes[] = { ROUNDUPWD(width), ROUNDUPHT(height), 1 };</a>
+<a name="ln666"> </a>
+<a name="ln667">  cl_mem dev_table = NULL;</a>
+<a name="ln668">  cl_mem diff_table = NULL;</a>
+<a name="ln669"> </a>
+<a name="ln670">  dev_table = dt_opencl_copy_host_to_device(devid, d-&gt;table, 256, 256, sizeof(float));</a>
+<a name="ln671">  if(dev_table == NULL) goto error;</a>
+<a name="ln672"> </a>
+<a name="ln673">  diff_table = dt_opencl_copy_host_to_device(devid, d-&gt;grad_2, 256, 256, sizeof(float));</a>
+<a name="ln674">  if(diff_table == NULL) goto error;</a>
+<a name="ln675"> </a>
+<a name="ln676">  const float dynamic_range = d-&gt;dynamic_range;</a>
+<a name="ln677">  const float shadows_range = d-&gt;black_source;</a>
+<a name="ln678">  const float grey = d-&gt;grey_source;</a>
+<a name="ln679">  const float contrast = d-&gt;contrast;</a>
+<a name="ln680">  const float power = d-&gt;output_power;</a>
+<a name="ln681">  const int preserve_color = d-&gt;preserve_color;</a>
+<a name="ln682">  const float saturation = d-&gt;global_saturation / 100.0f;</a>
+<a name="ln683"> </a>
+<a name="ln684">  dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_filmic, 0, sizeof(cl_mem), (void *)&amp;dev_in);</a>
+<a name="ln685">  dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_filmic, 1, sizeof(cl_mem), (void *)&amp;dev_out);</a>
+<a name="ln686">  dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_filmic, 2, sizeof(int), (void *)&amp;width);</a>
+<a name="ln687">  dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_filmic, 3, sizeof(int), (void *)&amp;height);</a>
+<a name="ln688">  dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_filmic, 4, sizeof(float), (void *)&amp;dynamic_range);</a>
+<a name="ln689">  dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_filmic, 5, sizeof(float), (void *)&amp;shadows_range);</a>
+<a name="ln690">  dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_filmic, 6, sizeof(float), (void *)&amp;grey);</a>
+<a name="ln691">  dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_filmic, 7, sizeof(cl_mem), (void *)&amp;dev_table);</a>
+<a name="ln692">  dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_filmic, 8, sizeof(cl_mem), (void *)&amp;diff_table);</a>
+<a name="ln693">  dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_filmic, 9, sizeof(float), (void *)&amp;contrast);</a>
+<a name="ln694">  dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_filmic, 10, sizeof(float), (void *)&amp;power);</a>
+<a name="ln695">  dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_filmic, 11, sizeof(int), (void *)&amp;preserve_color);</a>
+<a name="ln696">  dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_filmic, 12, sizeof(int), (void *)&amp;saturation);</a>
+<a name="ln697"> </a>
+<a name="ln698">  err = dt_opencl_enqueue_kernel_2d(devid, gd-&gt;kernel_filmic, sizes);</a>
+<a name="ln699">  if(err != CL_SUCCESS) goto error;</a>
+<a name="ln700">  dt_opencl_release_mem_object(dev_table);</a>
+<a name="ln701">  dt_opencl_release_mem_object(diff_table);</a>
+<a name="ln702">  return TRUE;</a>
+<a name="ln703"> </a>
+<a name="ln704">error:</a>
+<a name="ln705">  dt_opencl_release_mem_object(dev_table);</a>
+<a name="ln706">  dt_opencl_release_mem_object(diff_table);</a>
+<a name="ln707">  dt_print(DT_DEBUG_OPENCL, &quot;[opencl_filmic] couldn't enqueue kernel! %d\n&quot;, err);</a>
+<a name="ln708">  return FALSE;</a>
+<a name="ln709">}</a>
+<a name="ln710">#endif</a>
+<a name="ln711"> </a>
+<a name="ln712">static void sanitize_latitude(dt_iop_filmic_params_t *p, dt_iop_filmic_gui_data_t *g)</a>
+<a name="ln713">{</a>
+<a name="ln714">  if (p-&gt;latitude_stops &gt; (p-&gt;white_point_source - p-&gt;black_point_source) * 0.99f)</a>
+<a name="ln715">  {</a>
+<a name="ln716">    // The film latitude is its linear part</a>
+<a name="ln717">    // it can never be higher than the dynamic range</a>
+<a name="ln718">    p-&gt;latitude_stops =  (p-&gt;white_point_source - p-&gt;black_point_source) * 0.99f;</a>
+<a name="ln719">    darktable.gui-&gt;reset = 1;</a>
+<a name="ln720">    dt_bauhaus_slider_set_soft(g-&gt;latitude_stops, p-&gt;latitude_stops);</a>
+<a name="ln721">    darktable.gui-&gt;reset = 0;</a>
+<a name="ln722">  }</a>
+<a name="ln723">}</a>
+<a name="ln724"> </a>
+<a name="ln725">static void apply_auto_grey(dt_iop_module_t *self)</a>
+<a name="ln726">{</a>
+<a name="ln727">  if(self-&gt;dt-&gt;gui-&gt;reset) return;</a>
+<a name="ln728">  dt_iop_filmic_params_t *p = (dt_iop_filmic_params_t *)self-&gt;params;</a>
+<a name="ln729">  dt_iop_filmic_gui_data_t *g = (dt_iop_filmic_gui_data_t *)self-&gt;gui_data;</a>
+<a name="ln730"> </a>
+<a name="ln731">  float XYZ[3] = { 0.0f };</a>
+<a name="ln732">  dt_Lab_to_XYZ(self-&gt;picked_color, XYZ);</a>
+<a name="ln733"> </a>
+<a name="ln734">  const float grey = XYZ[1];</a>
+<a name="ln735">  const float prev_grey = p-&gt;grey_point_source;</a>
+<a name="ln736">  p-&gt;grey_point_source = 100.f * grey;</a>
+<a name="ln737">  const float grey_var = Log2(prev_grey / p-&gt;grey_point_source);</a>
+<a name="ln738">  p-&gt;black_point_source = p-&gt;black_point_source - grey_var;</a>
+<a name="ln739">  p-&gt;white_point_source = p-&gt;white_point_source + grey_var;</a>
+<a name="ln740"> </a>
+<a name="ln741">  darktable.gui-&gt;reset = 1;</a>
+<a name="ln742">  dt_bauhaus_slider_set_soft(g-&gt;grey_point_source, p-&gt;grey_point_source);</a>
+<a name="ln743">  dt_bauhaus_slider_set_soft(g-&gt;black_point_source, p-&gt;black_point_source);</a>
+<a name="ln744">  dt_bauhaus_slider_set_soft(g-&gt;white_point_source, p-&gt;white_point_source);</a>
+<a name="ln745">  darktable.gui-&gt;reset = 0;</a>
+<a name="ln746"> </a>
+<a name="ln747">  dt_dev_add_history_item(darktable.develop, self, TRUE);</a>
+<a name="ln748">  gtk_widget_queue_draw(self-&gt;widget);</a>
+<a name="ln749">}</a>
+<a name="ln750"> </a>
+<a name="ln751">static void apply_auto_black(dt_iop_module_t *self)</a>
+<a name="ln752">{</a>
+<a name="ln753">  if(self-&gt;dt-&gt;gui-&gt;reset) return;</a>
+<a name="ln754">  dt_iop_filmic_params_t *p = (dt_iop_filmic_params_t *)self-&gt;params;</a>
+<a name="ln755">  dt_iop_filmic_gui_data_t *g = (dt_iop_filmic_gui_data_t *)self-&gt;gui_data;</a>
+<a name="ln756"> </a>
+<a name="ln757">  const float noise = powf(2.0f, -16.0f);</a>
+<a name="ln758">  float XYZ[3] = { 0.0f };</a>
+<a name="ln759"> </a>
+<a name="ln760">  // Black</a>
+<a name="ln761">  dt_Lab_to_XYZ(self-&gt;picked_color_min, XYZ);</a>
+<a name="ln762">  const float black = XYZ[1];</a>
+<a name="ln763">  float EVmin = Log2Thres(black / (p-&gt;grey_point_source / 100.0f), noise);</a>
+<a name="ln764">  EVmin *= (1.0f + p-&gt;security_factor / 100.0f);</a>
+<a name="ln765"> </a>
+<a name="ln766">  p-&gt;black_point_source = EVmin;</a>
+<a name="ln767"> </a>
+<a name="ln768">  darktable.gui-&gt;reset = 1;</a>
+<a name="ln769">  dt_bauhaus_slider_set_soft(g-&gt;black_point_source, p-&gt;black_point_source);</a>
+<a name="ln770">  darktable.gui-&gt;reset = 0;</a>
+<a name="ln771"> </a>
+<a name="ln772">  sanitize_latitude(p, g);</a>
+<a name="ln773"> </a>
+<a name="ln774">  dt_dev_add_history_item(darktable.develop, self, TRUE);</a>
+<a name="ln775">  gtk_widget_queue_draw(self-&gt;widget);</a>
+<a name="ln776">}</a>
+<a name="ln777"> </a>
+<a name="ln778"> </a>
+<a name="ln779">static void apply_auto_white_point_source(dt_iop_module_t *self)</a>
+<a name="ln780">{</a>
+<a name="ln781">  if(self-&gt;dt-&gt;gui-&gt;reset) return;</a>
+<a name="ln782">  dt_iop_filmic_params_t *p = (dt_iop_filmic_params_t *)self-&gt;params;</a>
+<a name="ln783">  dt_iop_filmic_gui_data_t *g = (dt_iop_filmic_gui_data_t *)self-&gt;gui_data;</a>
+<a name="ln784"> </a>
+<a name="ln785">  const float noise = powf(2.0f, -16.0f);</a>
+<a name="ln786">  float XYZ[3] = { 0.0f };</a>
+<a name="ln787"> </a>
+<a name="ln788">  // White</a>
+<a name="ln789">  dt_Lab_to_XYZ(self-&gt;picked_color_max, XYZ);</a>
+<a name="ln790">  const float white = XYZ[1];</a>
+<a name="ln791">  float EVmax = Log2Thres(white / (p-&gt;grey_point_source / 100.0f), noise);</a>
+<a name="ln792">  EVmax *= (1.0f + p-&gt;security_factor / 100.0f);</a>
+<a name="ln793"> </a>
+<a name="ln794">  p-&gt;white_point_source = EVmax;</a>
+<a name="ln795"> </a>
+<a name="ln796">  darktable.gui-&gt;reset = 1;</a>
+<a name="ln797">  dt_bauhaus_slider_set_soft(g-&gt;white_point_source, p-&gt;white_point_source);</a>
+<a name="ln798">  darktable.gui-&gt;reset = 0;</a>
+<a name="ln799"> </a>
+<a name="ln800">  sanitize_latitude(p, g);</a>
+<a name="ln801"> </a>
+<a name="ln802">  dt_dev_add_history_item(darktable.develop, self, TRUE);</a>
+<a name="ln803">  gtk_widget_queue_draw(self-&gt;widget);</a>
+<a name="ln804">}</a>
+<a name="ln805"> </a>
+<a name="ln806">static void security_threshold_callback(GtkWidget *slider, gpointer user_data)</a>
+<a name="ln807">{</a>
+<a name="ln808">  dt_iop_module_t *self = (dt_iop_module_t *)user_data;</a>
+<a name="ln809">  if(self-&gt;dt-&gt;gui-&gt;reset) return;</a>
+<a name="ln810">  dt_iop_filmic_params_t *p = (dt_iop_filmic_params_t *)self-&gt;params;</a>
+<a name="ln811">  dt_iop_filmic_gui_data_t *g = (dt_iop_filmic_gui_data_t *)self-&gt;gui_data;</a>
+<a name="ln812"> </a>
+<a name="ln813">  float previous = p-&gt;security_factor;</a>
+<a name="ln814">  p-&gt;security_factor = dt_bauhaus_slider_get(slider);</a>
+<a name="ln815">  float ratio = (p-&gt;security_factor - previous) / (previous + 100.0f);</a>
+<a name="ln816"> </a>
+<a name="ln817">  float EVmin = p-&gt;black_point_source;</a>
+<a name="ln818">  EVmin = EVmin + ratio * EVmin;</a>
+<a name="ln819"> </a>
+<a name="ln820">  float EVmax = p-&gt;white_point_source;</a>
+<a name="ln821">  EVmax = EVmax + ratio * EVmax;</a>
+<a name="ln822"> </a>
+<a name="ln823">  p-&gt;white_point_source = EVmax;</a>
+<a name="ln824">  p-&gt;black_point_source = EVmin;</a>
+<a name="ln825"> </a>
+<a name="ln826">  darktable.gui-&gt;reset = 1;</a>
+<a name="ln827">  dt_bauhaus_slider_set_soft(g-&gt;white_point_source, p-&gt;white_point_source);</a>
+<a name="ln828">  dt_bauhaus_slider_set_soft(g-&gt;black_point_source, p-&gt;black_point_source);</a>
+<a name="ln829">  darktable.gui-&gt;reset = 0;</a>
+<a name="ln830"> </a>
+<a name="ln831">  sanitize_latitude(p, g);</a>
+<a name="ln832"> </a>
+<a name="ln833">  dt_iop_color_picker_reset(self, TRUE);</a>
+<a name="ln834"> </a>
+<a name="ln835">  dt_dev_add_history_item(darktable.develop, self, TRUE);</a>
+<a name="ln836">  gtk_widget_queue_draw(self-&gt;widget);</a>
+<a name="ln837">}</a>
+<a name="ln838"> </a>
+<a name="ln839">static void apply_autotune(dt_iop_module_t *self)</a>
+<a name="ln840">{</a>
+<a name="ln841">  dt_iop_filmic_gui_data_t *g = (dt_iop_filmic_gui_data_t *)self-&gt;gui_data;</a>
+<a name="ln842">  dt_iop_filmic_params_t *p = (dt_iop_filmic_params_t *)self-&gt;params;</a>
+<a name="ln843"> </a>
+<a name="ln844">  const float noise = powf(2.0f, -16.0f);</a>
+<a name="ln845">  float XYZ[3] = { 0.0f };</a>
+<a name="ln846"> </a>
+<a name="ln847">  // Grey</a>
+<a name="ln848">  dt_Lab_to_XYZ(self-&gt;picked_color, XYZ);</a>
+<a name="ln849">  const float grey = XYZ[1];</a>
+<a name="ln850">  p-&gt;grey_point_source = 100.f * grey;</a>
+<a name="ln851"> </a>
+<a name="ln852">  // Black</a>
+<a name="ln853">  dt_Lab_to_XYZ(self-&gt;picked_color_min, XYZ);</a>
+<a name="ln854">  const float black = XYZ[1];</a>
+<a name="ln855">  float EVmin = Log2Thres(black / (p-&gt;grey_point_source / 100.0f), noise);</a>
+<a name="ln856">  EVmin *= (1.0f + p-&gt;security_factor / 100.0f);</a>
+<a name="ln857"> </a>
+<a name="ln858">  // White</a>
+<a name="ln859">  dt_Lab_to_XYZ(self-&gt;picked_color_max, XYZ);</a>
+<a name="ln860">  const float white = XYZ[1];</a>
+<a name="ln861">  float EVmax = Log2Thres(white / (p-&gt;grey_point_source / 100.0f), noise);</a>
+<a name="ln862">  EVmax *= (1.0f + p-&gt;security_factor / 100.0f);</a>
+<a name="ln863"> </a>
+<a name="ln864">  p-&gt;black_point_source = EVmin;</a>
+<a name="ln865">  p-&gt;white_point_source = EVmax;</a>
+<a name="ln866"> </a>
+<a name="ln867">  darktable.gui-&gt;reset = 1;</a>
+<a name="ln868">  dt_bauhaus_slider_set_soft(g-&gt;grey_point_source, p-&gt;grey_point_source);</a>
+<a name="ln869">  dt_bauhaus_slider_set_soft(g-&gt;black_point_source, p-&gt;black_point_source);</a>
+<a name="ln870">  dt_bauhaus_slider_set_soft(g-&gt;white_point_source, p-&gt;white_point_source);</a>
+<a name="ln871">  darktable.gui-&gt;reset = 0;</a>
+<a name="ln872"> </a>
+<a name="ln873">  sanitize_latitude(p, g);</a>
+<a name="ln874"> </a>
+<a name="ln875">  dt_dev_add_history_item(darktable.develop, self, TRUE);</a>
+<a name="ln876">  gtk_widget_queue_draw(self-&gt;widget);</a>
+<a name="ln877">}</a>
+<a name="ln878"> </a>
+<a name="ln879">static int _iop_color_picker_get_set(dt_iop_module_t *self, GtkWidget *button)</a>
+<a name="ln880">{</a>
+<a name="ln881">  dt_iop_filmic_gui_data_t *g =  (dt_iop_filmic_gui_data_t *)self-&gt;gui_data;</a>
+<a name="ln882"> </a>
+<a name="ln883">  const int current_picker = g-&gt;color_picker.current_picker;</a>
+<a name="ln884"> </a>
+<a name="ln885">  g-&gt;color_picker.current_picker = DT_PICKPROFLOG_NONE;</a>
+<a name="ln886"> </a>
+<a name="ln887">  if(button == g-&gt;grey_point_source)</a>
+<a name="ln888">    g-&gt;color_picker.current_picker = DT_PICKPROFLOG_GREY_POINT;</a>
+<a name="ln889">  else if(button == g-&gt;black_point_source)</a>
+<a name="ln890">    g-&gt;color_picker.current_picker = DT_PICKPROFLOG_BLACK_POINT;</a>
+<a name="ln891">  else if(button == g-&gt;white_point_source)</a>
+<a name="ln892">    g-&gt;color_picker.current_picker = DT_PICKPROFLOG_WHITE_POINT;</a>
+<a name="ln893">  else if(button == g-&gt;auto_button)</a>
+<a name="ln894">    g-&gt;color_picker.current_picker = DT_PICKPROFLOG_AUTOTUNE;</a>
+<a name="ln895"> </a>
+<a name="ln896">  if (current_picker == g-&gt;color_picker.current_picker)</a>
+<a name="ln897">    return DT_COLOR_PICKER_ALREADY_SELECTED;</a>
+<a name="ln898">  else</a>
+<a name="ln899">    return g-&gt;color_picker.current_picker;</a>
+<a name="ln900">}</a>
+<a name="ln901"> </a>
+<a name="ln902">static void _iop_color_picker_apply(struct dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece)</a>
+<a name="ln903">{</a>
+<a name="ln904">  dt_iop_filmic_gui_data_t *g = (dt_iop_filmic_gui_data_t *)self-&gt;gui_data;</a>
+<a name="ln905">  switch(g-&gt;color_picker.current_picker)</a>
+<a name="ln906">  {</a>
+<a name="ln907">     case DT_PICKPROFLOG_GREY_POINT:</a>
+<a name="ln908">       apply_auto_grey(self);</a>
+<a name="ln909">       break;</a>
+<a name="ln910">     case DT_PICKPROFLOG_BLACK_POINT:</a>
+<a name="ln911">       apply_auto_black(self);</a>
+<a name="ln912">       break;</a>
+<a name="ln913">     case DT_PICKPROFLOG_WHITE_POINT:</a>
+<a name="ln914">       apply_auto_white_point_source(self);</a>
+<a name="ln915">       break;</a>
+<a name="ln916">     case DT_PICKPROFLOG_AUTOTUNE:</a>
+<a name="ln917">       apply_autotune(self);</a>
+<a name="ln918">       break;</a>
+<a name="ln919">     default:</a>
+<a name="ln920">       break;</a>
+<a name="ln921">  }</a>
+<a name="ln922">}</a>
+<a name="ln923"> </a>
+<a name="ln924">static void _iop_color_picker_update(dt_iop_module_t *self)</a>
+<a name="ln925">{</a>
+<a name="ln926">  dt_iop_filmic_gui_data_t *g = (dt_iop_filmic_gui_data_t *)self-&gt;gui_data;</a>
+<a name="ln927">  const int which_colorpicker = g-&gt;color_picker.current_picker;</a>
+<a name="ln928">  dt_bauhaus_widget_set_quad_active(g-&gt;grey_point_source, which_colorpicker == DT_PICKPROFLOG_GREY_POINT);</a>
+<a name="ln929">  dt_bauhaus_widget_set_quad_active(g-&gt;black_point_source, which_colorpicker == DT_PICKPROFLOG_BLACK_POINT);</a>
+<a name="ln930">  dt_bauhaus_widget_set_quad_active(g-&gt;white_point_source, which_colorpicker == DT_PICKPROFLOG_WHITE_POINT);</a>
+<a name="ln931">  dt_bauhaus_widget_set_quad_active(g-&gt;auto_button, which_colorpicker == DT_PICKPROFLOG_AUTOTUNE);</a>
+<a name="ln932">}</a>
+<a name="ln933"> </a>
+<a name="ln934">static void grey_point_source_callback(GtkWidget *slider, gpointer user_data)</a>
+<a name="ln935">{</a>
+<a name="ln936">  dt_iop_module_t *self = (dt_iop_module_t *)user_data;</a>
+<a name="ln937">  if(self-&gt;dt-&gt;gui-&gt;reset) return;</a>
+<a name="ln938">  dt_iop_filmic_gui_data_t *g = (dt_iop_filmic_gui_data_t *)self-&gt;gui_data;</a>
+<a name="ln939">  dt_iop_filmic_params_t *p = (dt_iop_filmic_params_t *)self-&gt;params;</a>
+<a name="ln940">  float prev_grey = p-&gt;grey_point_source;</a>
+<a name="ln941">  p-&gt;grey_point_source = dt_bauhaus_slider_get(slider);</a>
+<a name="ln942"> </a>
+<a name="ln943">  float grey_var = Log2(prev_grey / p-&gt;grey_point_source);</a>
+<a name="ln944">  p-&gt;black_point_source = p-&gt;black_point_source - grey_var;</a>
+<a name="ln945">  p-&gt;white_point_source = p-&gt;white_point_source + grey_var;</a>
+<a name="ln946"> </a>
+<a name="ln947">  darktable.gui-&gt;reset = 1;</a>
+<a name="ln948">  dt_bauhaus_slider_set_soft(g-&gt;white_point_source, p-&gt;white_point_source);</a>
+<a name="ln949">  dt_bauhaus_slider_set_soft(g-&gt;black_point_source, p-&gt;black_point_source);</a>
+<a name="ln950">  darktable.gui-&gt;reset = 0;</a>
+<a name="ln951"> </a>
+<a name="ln952">  dt_iop_color_picker_reset(self, TRUE);</a>
+<a name="ln953"> </a>
+<a name="ln954">  dt_dev_add_history_item(darktable.develop, self, TRUE);</a>
+<a name="ln955">  gtk_widget_queue_draw(self-&gt;widget);</a>
+<a name="ln956">}</a>
+<a name="ln957"> </a>
+<a name="ln958">static void white_point_source_callback(GtkWidget *slider, gpointer user_data)</a>
+<a name="ln959">{</a>
+<a name="ln960">  dt_iop_module_t *self = (dt_iop_module_t *)user_data;</a>
+<a name="ln961">  if(self-&gt;dt-&gt;gui-&gt;reset) return;</a>
+<a name="ln962">  dt_iop_filmic_params_t *p = (dt_iop_filmic_params_t *)self-&gt;params;</a>
+<a name="ln963">  dt_iop_filmic_gui_data_t *g = (dt_iop_filmic_gui_data_t *)self-&gt;gui_data;</a>
+<a name="ln964">  p-&gt;white_point_source = dt_bauhaus_slider_get(slider);</a>
+<a name="ln965"> </a>
+<a name="ln966">  sanitize_latitude(p, g);</a>
+<a name="ln967"> </a>
+<a name="ln968">  dt_iop_color_picker_reset(self, TRUE);</a>
+<a name="ln969"> </a>
+<a name="ln970">  dt_dev_add_history_item(darktable.develop, self, TRUE);</a>
+<a name="ln971">  gtk_widget_queue_draw(self-&gt;widget);</a>
+<a name="ln972">}</a>
+<a name="ln973"> </a>
+<a name="ln974">static void black_point_source_callback(GtkWidget *slider, gpointer user_data)</a>
+<a name="ln975">{</a>
+<a name="ln976">  dt_iop_module_t *self = (dt_iop_module_t *)user_data;</a>
+<a name="ln977">  if(self-&gt;dt-&gt;gui-&gt;reset) return;</a>
+<a name="ln978">  dt_iop_filmic_params_t *p = (dt_iop_filmic_params_t *)self-&gt;params;</a>
+<a name="ln979">  dt_iop_filmic_gui_data_t *g = (dt_iop_filmic_gui_data_t *)self-&gt;gui_data;</a>
+<a name="ln980">  p-&gt;black_point_source = dt_bauhaus_slider_get(slider);</a>
+<a name="ln981"> </a>
+<a name="ln982">  sanitize_latitude(p, g);</a>
+<a name="ln983"> </a>
+<a name="ln984">  dt_iop_color_picker_reset(self, TRUE);</a>
+<a name="ln985"> </a>
+<a name="ln986">  dt_dev_add_history_item(darktable.develop, self, TRUE);</a>
+<a name="ln987">  gtk_widget_queue_draw(self-&gt;widget);</a>
+<a name="ln988">}</a>
+<a name="ln989"> </a>
+<a name="ln990">static void grey_point_target_callback(GtkWidget *slider, gpointer user_data)</a>
+<a name="ln991">{</a>
+<a name="ln992">  dt_iop_module_t *self = (dt_iop_module_t *)user_data;</a>
+<a name="ln993">  if(self-&gt;dt-&gt;gui-&gt;reset) return;</a>
+<a name="ln994">  dt_iop_filmic_params_t *p = (dt_iop_filmic_params_t *)self-&gt;params;</a>
+<a name="ln995">  p-&gt;grey_point_target = dt_bauhaus_slider_get(slider);</a>
+<a name="ln996">  dt_iop_color_picker_reset(self, TRUE);</a>
+<a name="ln997">  dt_dev_add_history_item(darktable.develop, self, TRUE);</a>
+<a name="ln998">  gtk_widget_queue_draw(self-&gt;widget);</a>
+<a name="ln999">}</a>
+<a name="ln1000"> </a>
+<a name="ln1001">static void latitude_stops_callback(GtkWidget *slider, gpointer user_data)</a>
+<a name="ln1002">{</a>
+<a name="ln1003">  dt_iop_module_t *self = (dt_iop_module_t *)user_data;</a>
+<a name="ln1004">  if(self-&gt;dt-&gt;gui-&gt;reset) return;</a>
+<a name="ln1005">  dt_iop_filmic_params_t *p = (dt_iop_filmic_params_t *)self-&gt;params;</a>
+<a name="ln1006">  dt_iop_filmic_gui_data_t *g = (dt_iop_filmic_gui_data_t *)self-&gt;gui_data;</a>
+<a name="ln1007"> </a>
+<a name="ln1008">  p-&gt;latitude_stops = dt_bauhaus_slider_get(slider);</a>
+<a name="ln1009"> </a>
+<a name="ln1010">  sanitize_latitude(p, g);</a>
+<a name="ln1011"> </a>
+<a name="ln1012">  dt_iop_color_picker_reset(self, TRUE);</a>
+<a name="ln1013">  dt_dev_add_history_item(darktable.develop, self, TRUE);</a>
+<a name="ln1014">  gtk_widget_queue_draw(self-&gt;widget);</a>
+<a name="ln1015">}</a>
+<a name="ln1016"> </a>
+<a name="ln1017">static void contrast_callback(GtkWidget *slider, gpointer user_data)</a>
+<a name="ln1018">{</a>
+<a name="ln1019">  dt_iop_module_t *self = (dt_iop_module_t *)user_data;</a>
+<a name="ln1020">  if(self-&gt;dt-&gt;gui-&gt;reset) return;</a>
+<a name="ln1021">  dt_iop_filmic_params_t *p = (dt_iop_filmic_params_t *)self-&gt;params;</a>
+<a name="ln1022">  p-&gt;contrast = dt_bauhaus_slider_get(slider);</a>
+<a name="ln1023">  dt_iop_color_picker_reset(self, TRUE);</a>
+<a name="ln1024">  dt_dev_add_history_item(darktable.develop, self, TRUE);</a>
+<a name="ln1025">  gtk_widget_queue_draw(self-&gt;widget);</a>
+<a name="ln1026">}</a>
+<a name="ln1027"> </a>
+<a name="ln1028">static void saturation_callback(GtkWidget *slider, gpointer user_data)</a>
+<a name="ln1029">{</a>
+<a name="ln1030">  dt_iop_module_t *self = (dt_iop_module_t *)user_data;</a>
+<a name="ln1031">  if(self-&gt;dt-&gt;gui-&gt;reset) return;</a>
+<a name="ln1032">  dt_iop_filmic_params_t *p = (dt_iop_filmic_params_t *)self-&gt;params;</a>
+<a name="ln1033">  p-&gt;saturation = logf(9.0f * dt_bauhaus_slider_get(slider)/100.0 + 1.0f) / logf(10.0f) * 100.0f;</a>
+<a name="ln1034">  dt_iop_color_picker_reset(self, TRUE);</a>
+<a name="ln1035">  dt_dev_add_history_item(darktable.develop, self, TRUE);</a>
+<a name="ln1036">}</a>
+<a name="ln1037"> </a>
+<a name="ln1038">static void global_saturation_callback(GtkWidget *slider, gpointer user_data)</a>
+<a name="ln1039">{</a>
+<a name="ln1040">  dt_iop_module_t *self = (dt_iop_module_t *)user_data;</a>
+<a name="ln1041">  if(self-&gt;dt-&gt;gui-&gt;reset) return;</a>
+<a name="ln1042">  dt_iop_filmic_params_t *p = (dt_iop_filmic_params_t *)self-&gt;params;</a>
+<a name="ln1043">  p-&gt;global_saturation = dt_bauhaus_slider_get(slider);</a>
+<a name="ln1044">  dt_iop_color_picker_reset(self, TRUE);</a>
+<a name="ln1045">  dt_dev_add_history_item(darktable.develop, self, TRUE);</a>
+<a name="ln1046">}</a>
+<a name="ln1047"> </a>
+<a name="ln1048">static void white_point_target_callback(GtkWidget *slider, gpointer user_data)</a>
+<a name="ln1049">{</a>
+<a name="ln1050">  dt_iop_module_t *self = (dt_iop_module_t *)user_data;</a>
+<a name="ln1051">  if(self-&gt;dt-&gt;gui-&gt;reset) return;</a>
+<a name="ln1052">  dt_iop_filmic_params_t *p = (dt_iop_filmic_params_t *)self-&gt;params;</a>
+<a name="ln1053">  p-&gt;white_point_target = dt_bauhaus_slider_get(slider);</a>
+<a name="ln1054">  dt_iop_color_picker_reset(self, TRUE);</a>
+<a name="ln1055">  dt_dev_add_history_item(darktable.develop, self, TRUE);</a>
+<a name="ln1056">  gtk_widget_queue_draw(self-&gt;widget);</a>
+<a name="ln1057">}</a>
+<a name="ln1058"> </a>
+<a name="ln1059">static void black_point_target_callback(GtkWidget *slider, gpointer user_data)</a>
+<a name="ln1060">{</a>
+<a name="ln1061">  dt_iop_module_t *self = (dt_iop_module_t *)user_data;</a>
+<a name="ln1062">  if(self-&gt;dt-&gt;gui-&gt;reset) return;</a>
+<a name="ln1063">  dt_iop_filmic_params_t *p = (dt_iop_filmic_params_t *)self-&gt;params;</a>
+<a name="ln1064">  p-&gt;black_point_target = dt_bauhaus_slider_get(slider);</a>
+<a name="ln1065">  dt_iop_color_picker_reset(self, TRUE);</a>
+<a name="ln1066">  dt_dev_add_history_item(darktable.develop, self, TRUE);</a>
+<a name="ln1067">  gtk_widget_queue_draw(self-&gt;widget);</a>
+<a name="ln1068">}</a>
+<a name="ln1069"> </a>
+<a name="ln1070">static void output_power_callback(GtkWidget *slider, gpointer user_data)</a>
+<a name="ln1071">{</a>
+<a name="ln1072">  dt_iop_module_t *self = (dt_iop_module_t *)user_data;</a>
+<a name="ln1073">  if(self-&gt;dt-&gt;gui-&gt;reset) return;</a>
+<a name="ln1074">  dt_iop_filmic_params_t *p = (dt_iop_filmic_params_t *)self-&gt;params;</a>
+<a name="ln1075">  p-&gt;output_power = dt_bauhaus_slider_get(slider);</a>
+<a name="ln1076">  dt_iop_color_picker_reset(self, TRUE);</a>
+<a name="ln1077">  dt_dev_add_history_item(darktable.develop, self, TRUE);</a>
+<a name="ln1078">  gtk_widget_queue_draw(self-&gt;widget);</a>
+<a name="ln1079">}</a>
+<a name="ln1080"> </a>
+<a name="ln1081">static void balance_callback(GtkWidget *slider, gpointer user_data)</a>
+<a name="ln1082">{</a>
+<a name="ln1083">  dt_iop_module_t *self = (dt_iop_module_t *)user_data;</a>
+<a name="ln1084">  if(self-&gt;dt-&gt;gui-&gt;reset) return;</a>
+<a name="ln1085">  dt_iop_filmic_params_t *p = (dt_iop_filmic_params_t *)self-&gt;params;</a>
+<a name="ln1086">  p-&gt;balance = dt_bauhaus_slider_get(slider);</a>
+<a name="ln1087">  dt_iop_color_picker_reset(self, TRUE);</a>
+<a name="ln1088">  dt_dev_add_history_item(darktable.develop, self, TRUE);</a>
+<a name="ln1089">  gtk_widget_queue_draw(self-&gt;widget);</a>
+<a name="ln1090">}</a>
+<a name="ln1091"> </a>
+<a name="ln1092">static void interpolator_callback(GtkWidget *widget, dt_iop_module_t *self)</a>
+<a name="ln1093">{</a>
+<a name="ln1094">  if(darktable.gui-&gt;reset) return;</a>
+<a name="ln1095">  dt_iop_filmic_params_t *p = (dt_iop_filmic_params_t *)self-&gt;params;</a>
+<a name="ln1096">  dt_iop_color_picker_reset(self, TRUE);</a>
+<a name="ln1097">  const int combo = dt_bauhaus_combobox_get(widget);</a>
+<a name="ln1098"> </a>
+<a name="ln1099">  switch (combo)</a>
+<a name="ln1100">  {</a>
+<a name="ln1101">    case CUBIC_SPLINE:</a>
+<a name="ln1102">    {</a>
+<a name="ln1103">      p-&gt;interpolator = CUBIC_SPLINE;</a>
+<a name="ln1104">      break;</a>
+<a name="ln1105">    }</a>
+<a name="ln1106">    case CATMULL_ROM:</a>
+<a name="ln1107">    {</a>
+<a name="ln1108">      p-&gt;interpolator = CATMULL_ROM;</a>
+<a name="ln1109">      break;</a>
+<a name="ln1110">    }</a>
+<a name="ln1111">    case MONOTONE_HERMITE:</a>
+<a name="ln1112">    {</a>
+<a name="ln1113">      p-&gt;interpolator = MONOTONE_HERMITE;</a>
+<a name="ln1114">      break;</a>
+<a name="ln1115">    }</a>
+<a name="ln1116">    case 3:</a>
+<a name="ln1117">    {</a>
+<a name="ln1118">      p-&gt;interpolator = 3; // Optimized</a>
+<a name="ln1119">      break;</a>
+<a name="ln1120">    }</a>
+<a name="ln1121">    default:</a>
+<a name="ln1122">    {</a>
+<a name="ln1123">      p-&gt;interpolator = CUBIC_SPLINE;</a>
+<a name="ln1124">      break;</a>
+<a name="ln1125">    }</a>
+<a name="ln1126">  }</a>
+<a name="ln1127"> </a>
+<a name="ln1128">  dt_dev_add_history_item(darktable.develop, self, TRUE);</a>
+<a name="ln1129">  gtk_widget_queue_draw(self-&gt;widget);</a>
+<a name="ln1130">}</a>
+<a name="ln1131"> </a>
+<a name="ln1132">static void preserve_color_callback(GtkWidget *widget, dt_iop_module_t *self)</a>
+<a name="ln1133">{</a>
+<a name="ln1134">  if(darktable.gui-&gt;reset) return;</a>
+<a name="ln1135">  dt_iop_filmic_params_t *p = (dt_iop_filmic_params_t *)self-&gt;params;</a>
+<a name="ln1136">  p-&gt;preserve_color = gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(widget));</a>
+<a name="ln1137">  dt_dev_add_history_item(darktable.develop, self, TRUE);</a>
+<a name="ln1138">}</a>
+<a name="ln1139"> </a>
+<a name="ln1140">void gui_focus(struct dt_iop_module_t *self, gboolean in)</a>
+<a name="ln1141">{</a>
+<a name="ln1142">  if(!in) dt_iop_color_picker_reset(self, TRUE);</a>
+<a name="ln1143">}</a>
+<a name="ln1144"> </a>
+<a name="ln1145">void compute_curve_lut(dt_iop_filmic_params_t *p, float *table, float *table_temp, int res,</a>
+<a name="ln1146">  dt_iop_filmic_data_t *d, dt_iop_filmic_nodes_t *nodes_data)</a>
+<a name="ln1147">{</a>
+<a name="ln1148">  dt_draw_curve_t *curve;</a>
+<a name="ln1149"> </a>
+<a name="ln1150">  const float white_source = p-&gt;white_point_source;</a>
+<a name="ln1151">  const float black_source = p-&gt;black_point_source;</a>
+<a name="ln1152">  const float dynamic_range = white_source - black_source;</a>
+<a name="ln1153"> </a>
+<a name="ln1154">  // luminance after log encoding</a>
+<a name="ln1155">  const float black_log = 0.0f; // assumes user set log as in the autotuner</a>
+<a name="ln1156">  const float grey_log = fabsf(p-&gt;black_point_source) / dynamic_range;</a>
+<a name="ln1157">  const float white_log = 1.0f; // assumes user set log as in the autotuner</a>
+<a name="ln1158"> </a>
+<a name="ln1159">  // target luminance desired after filmic curve</a>
+<a name="ln1160">  const float black_display = CLAMP(p-&gt;black_point_target, 0.0f, p-&gt;grey_point_target) / 100.0f; // in %</a>
+<a name="ln1161">  const float grey_display = powf(CLAMP(p-&gt;grey_point_target, p-&gt;black_point_target, p-&gt;white_point_target) / 100.0f, 1.0f / (p-&gt;output_power));</a>
+<a name="ln1162">  const float white_display = CLAMP(p-&gt;white_point_target, p-&gt;grey_point_target, 100.0f)  / 100.0f; // in %</a>
+<a name="ln1163"> </a>
+<a name="ln1164">  const float latitude = CLAMP(p-&gt;latitude_stops, 0.01f, dynamic_range * 0.99f);</a>
+<a name="ln1165">  const float balance = CLAMP(p-&gt;balance, -50.0f, 50.0f) / 100.0f; // in %</a>
+<a name="ln1166"> </a>
+<a name="ln1167">  const float contrast = p-&gt;contrast;</a>
+<a name="ln1168"> </a>
+<a name="ln1169">  // nodes for mapping from log encoding to desired target luminance</a>
+<a name="ln1170">  // X coordinates</a>
+<a name="ln1171">  float toe_log = grey_log - latitude/dynamic_range * fabsf(black_source/dynamic_range);</a>
+<a name="ln1172">  float shoulder_log = grey_log + latitude/dynamic_range * white_source/dynamic_range;</a>
+<a name="ln1173"> </a>
+<a name="ln1174"> </a>
+<a name="ln1175">  // interception</a>
+<a name="ln1176">  float linear_intercept = grey_display - (contrast * grey_log);</a>
+<a name="ln1177"> </a>
+<a name="ln1178">  // y coordinates</a>
+<a name="ln1179">  float toe_display = (toe_log * contrast + linear_intercept);</a>
+<a name="ln1180">  float shoulder_display = (shoulder_log * contrast + linear_intercept);</a>
+<a name="ln1181"> </a>
+<a name="ln1182">  // Apply the highlights/shadows balance as a shift along the contrast slope</a>
+<a name="ln1183">  const float norm = powf(powf(contrast, 2.0f) + 1.0f, 0.5f);</a>
+<a name="ln1184"> </a>
+<a name="ln1185">  // negative values drag to the left and compress the shadows, on the UI negative is the inverse</a>
+<a name="ln1186">  const float coeff = -(dynamic_range - latitude) / dynamic_range * balance;</a>
+<a name="ln1187"> </a>
+<a name="ln1188">  toe_display += coeff * contrast /norm;</a>
+<a name="ln1189">  shoulder_display += coeff * contrast /norm;</a>
+<a name="ln1190">  toe_log += coeff /norm;</a>
+<a name="ln1191">  shoulder_log += coeff /norm;</a>
+<a name="ln1192"> </a>
+<a name="ln1193">  // Sanitize pass 1</a>
+<a name="ln1194">  toe_log = CLAMP(toe_log, 0.0f, grey_log);</a>
+<a name="ln1195">  shoulder_log = CLAMP(shoulder_log, grey_log, 1.0f);</a>
+<a name="ln1196">  toe_display = CLAMP(toe_display, black_display, grey_display);</a>
+<a name="ln1197">  shoulder_display = CLAMP(shoulder_display, grey_display, white_display);</a>
+<a name="ln1198"> </a>
+<a name="ln1199">  /**</a>
+<a name="ln1200">   * Now we have 3 segments :</a>
+<a name="ln1201">   *  - x = [0.0 ; toe_log], curved part</a>
+<a name="ln1202">   *  - x = [toe_log ; grey_log ; shoulder_log], linear part</a>
+<a name="ln1203">   *  - x = [shoulder_log ; 1.0] curved part</a>
+<a name="ln1204">   *</a>
+<a name="ln1205">   * BUT : in case some nodes overlap, we need to remove them to avoid</a>
+<a name="ln1206">   * degenerating of the curve</a>
+<a name="ln1207">  **/</a>
+<a name="ln1208"> </a>
+<a name="ln1209">  // sanitize pass 2</a>
+<a name="ln1210">  int TOE_LOST = FALSE;</a>
+<a name="ln1211">  int SHOULDER_LOST = FALSE;</a>
+<a name="ln1212"> </a>
+<a name="ln1213">  if ((toe_log == grey_log &amp;&amp; toe_display == grey_display) || (toe_log == 0.0f &amp;&amp; toe_display  == black_display))</a>
+<a name="ln1214">  {</a>
+<a name="ln1215">    TOE_LOST = TRUE;</a>
+<a name="ln1216">  }</a>
+<a name="ln1217">  if ((shoulder_log == grey_log &amp;&amp; shoulder_display == grey_display) || (shoulder_log == 1.0f &amp;&amp; shoulder_display == white_display))</a>
+<a name="ln1218">  {</a>
+<a name="ln1219">    SHOULDER_LOST = TRUE;</a>
+<a name="ln1220">  }</a>
+<a name="ln1221"> </a>
+<a name="ln1222">  // Build the curve from the nodes</a>
+<a name="ln1223"> </a>
+<a name="ln1224">  if (SHOULDER_LOST &amp;&amp; !TOE_LOST)</a>
+<a name="ln1225">  {</a>
+<a name="ln1226">    // shoulder only broke - we remove it</a>
+<a name="ln1227">    nodes_data-&gt;nodes = 4;</a>
+<a name="ln1228">    nodes_data-&gt;x[0] = black_log;</a>
+<a name="ln1229">    nodes_data-&gt;x[1] = toe_log;</a>
+<a name="ln1230">    nodes_data-&gt;x[2] = grey_log;</a>
+<a name="ln1231">    nodes_data-&gt;x[3] = white_log;</a>
+<a name="ln1232"> </a>
+<a name="ln1233">    nodes_data-&gt;y[0] = black_display;</a>
+<a name="ln1234">    nodes_data-&gt;y[1] = toe_display;</a>
+<a name="ln1235">    nodes_data-&gt;y[2] = grey_display;</a>
+<a name="ln1236">    nodes_data-&gt;y[3] = white_display;</a>
+<a name="ln1237"> </a>
+<a name="ln1238">    if(d)</a>
+<a name="ln1239">    {</a>
+<a name="ln1240">      d-&gt;latitude_min = toe_log;</a>
+<a name="ln1241">      d-&gt;latitude_max = white_log;</a>
+<a name="ln1242">    }</a>
+<a name="ln1243"> </a>
+<a name="ln1244">    //dt_control_log(_(&quot;filmic curve using 4 nodes - highlights lost&quot;));</a>
+<a name="ln1245"> </a>
+<a name="ln1246">  }</a>
+<a name="ln1247">  else if (TOE_LOST &amp;&amp; !SHOULDER_LOST)</a>
+<a name="ln1248">  {</a>
+<a name="ln1249">    // toe only broke - we remove it</a>
+<a name="ln1250">    nodes_data-&gt;nodes = 4;</a>
+<a name="ln1251"> </a>
+<a name="ln1252">    nodes_data-&gt;x[0] = black_log;</a>
+<a name="ln1253">    nodes_data-&gt;x[1] = grey_log;</a>
+<a name="ln1254">    nodes_data-&gt;x[2] = shoulder_log;</a>
+<a name="ln1255">    nodes_data-&gt;x[3] = white_log;</a>
+<a name="ln1256"> </a>
+<a name="ln1257">    nodes_data-&gt;y[0] = black_display;</a>
+<a name="ln1258">    nodes_data-&gt;y[1] = grey_display;</a>
+<a name="ln1259">    nodes_data-&gt;y[2] = shoulder_display;</a>
+<a name="ln1260">    nodes_data-&gt;y[3] = white_display;</a>
+<a name="ln1261"> </a>
+<a name="ln1262">    if(d)</a>
+<a name="ln1263">    {</a>
+<a name="ln1264">      d-&gt;latitude_min = black_log;</a>
+<a name="ln1265">      d-&gt;latitude_max = shoulder_log;</a>
+<a name="ln1266">    }</a>
+<a name="ln1267"> </a>
+<a name="ln1268">    //dt_control_log(_(&quot;filmic curve using 4 nodes - shadows lost&quot;));</a>
+<a name="ln1269"> </a>
+<a name="ln1270">  }</a>
+<a name="ln1271">  else if (TOE_LOST &amp;&amp; SHOULDER_LOST)</a>
+<a name="ln1272">  {</a>
+<a name="ln1273">    // toe and shoulder both broke - we remove them</a>
+<a name="ln1274">    nodes_data-&gt;nodes = 3;</a>
+<a name="ln1275"> </a>
+<a name="ln1276">    nodes_data-&gt;x[0] = black_log;</a>
+<a name="ln1277">    nodes_data-&gt;x[1] = grey_log;</a>
+<a name="ln1278">    nodes_data-&gt;x[2] = white_log;</a>
+<a name="ln1279"> </a>
+<a name="ln1280">    nodes_data-&gt;y[0] = black_display;</a>
+<a name="ln1281">    nodes_data-&gt;y[1] = grey_display;</a>
+<a name="ln1282">    nodes_data-&gt;y[2] = white_display;</a>
+<a name="ln1283"> </a>
+<a name="ln1284">    if(d)</a>
+<a name="ln1285">    {</a>
+<a name="ln1286">      d-&gt;latitude_min = black_log;</a>
+<a name="ln1287">      d-&gt;latitude_max = white_log;</a>
+<a name="ln1288">    }</a>
+<a name="ln1289"> </a>
+<a name="ln1290">    //dt_control_log(_(&quot;filmic curve using 3 nodes - highlights &amp; shadows lost&quot;));</a>
+<a name="ln1291"> </a>
+<a name="ln1292">  }</a>
+<a name="ln1293">  else</a>
+<a name="ln1294">  {</a>
+<a name="ln1295">    // everything OK</a>
+<a name="ln1296">    nodes_data-&gt;nodes = 4;</a>
+<a name="ln1297"> </a>
+<a name="ln1298">    nodes_data-&gt;x[0] = black_log;</a>
+<a name="ln1299">    nodes_data-&gt;x[1] = toe_log;</a>
+<a name="ln1300">    //nodes_data-&gt;x[2] = grey_log,</a>
+<a name="ln1301">    nodes_data-&gt;x[2] = shoulder_log;</a>
+<a name="ln1302">    nodes_data-&gt;x[3] = white_log;</a>
+<a name="ln1303"> </a>
+<a name="ln1304">    nodes_data-&gt;y[0] = black_display;</a>
+<a name="ln1305">    nodes_data-&gt;y[1] = toe_display;</a>
+<a name="ln1306">    //nodes_data-&gt;y[2] = grey_display,</a>
+<a name="ln1307">    nodes_data-&gt;y[2] = shoulder_display;</a>
+<a name="ln1308">    nodes_data-&gt;y[3] = white_display;</a>
+<a name="ln1309"> </a>
+<a name="ln1310">    if(d)</a>
+<a name="ln1311">    {</a>
+<a name="ln1312">      d-&gt;latitude_min = toe_log;</a>
+<a name="ln1313">      d-&gt;latitude_max = shoulder_log;</a>
+<a name="ln1314">    }</a>
+<a name="ln1315"> </a>
+<a name="ln1316">    //dt_control_log(_(&quot;filmic curve using 5 nodes - everything alright&quot;));</a>
+<a name="ln1317">  }</a>
+<a name="ln1318"> </a>
+<a name="ln1319">  if (p-&gt;interpolator != 3)</a>
+<a name="ln1320">  {</a>
+<a name="ln1321">    // Compute the interpolation</a>
+<a name="ln1322"> </a>
+<a name="ln1323">    // Catch bad interpolators exceptions (errors in saved params)</a>
+<a name="ln1324">    int interpolator = CUBIC_SPLINE;</a>
+<a name="ln1325">    if (p-&gt;interpolator &gt; CUBIC_SPLINE &amp;&amp; p-&gt;interpolator &lt;= MONOTONE_HERMITE) interpolator = p-&gt;interpolator;</a>
+<a name="ln1326"> </a>
+<a name="ln1327">    curve = dt_draw_curve_new(0.0, 1.0, interpolator);</a>
+<a name="ln1328">    for(int k = 0; k &lt; nodes_data-&gt;nodes; k++) (void)dt_draw_curve_add_point(curve, nodes_data-&gt;x[k], nodes_data-&gt;y[k]);</a>
+<a name="ln1329"> </a>
+<a name="ln1330">    // Compute the LUT</a>
+<a name="ln1331">    dt_draw_curve_calc_values(curve, 0.0f, 1.0f, res, NULL, table);</a>
+<a name="ln1332">    dt_draw_curve_destroy(curve);</a>
+<a name="ln1333"> </a>
+<a name="ln1334">  }</a>
+<a name="ln1335">  else</a>
+<a name="ln1336">  {</a>
+<a name="ln1337">    // Compute the monotonic interpolation</a>
+<a name="ln1338">    curve = dt_draw_curve_new(0.0, 1.0, MONOTONE_HERMITE);</a>
+<a name="ln1339">    for(int k = 0; k &lt; nodes_data-&gt;nodes; k++) (void)dt_draw_curve_add_point(curve, nodes_data-&gt;x[k], nodes_data-&gt;y[k]);</a>
+<a name="ln1340">    dt_draw_curve_calc_values(curve, 0.0f, 1.0f, res, NULL, table_temp);</a>
+<a name="ln1341">    dt_draw_curve_destroy(curve);</a>
+<a name="ln1342"> </a>
+<a name="ln1343">    // Compute the cubic spline interpolation</a>
+<a name="ln1344">    curve = dt_draw_curve_new(0.0, 1.0, CUBIC_SPLINE);</a>
+<a name="ln1345">    for(int k = 0; k &lt; nodes_data-&gt;nodes; k++) (void)dt_draw_curve_add_point(curve, nodes_data-&gt;x[k], nodes_data-&gt;y[k]);</a>
+<a name="ln1346">    dt_draw_curve_calc_values(curve, 0.0f, 1.0f, res, NULL, table);</a>
+<a name="ln1347">    dt_draw_curve_destroy(curve);</a>
+<a name="ln1348"> </a>
+<a name="ln1349">    // Average both LUT</a>
+<a name="ln1350">#ifdef _OPENMP</a>
+<a name="ln1351">#pragma omp parallel for SIMD() default(none) shared(table, table_temp, res) schedule(static)</a>
+<a name="ln1352">#endif</a>
+<a name="ln1353">    for(int k = 0; k &lt; res; k++) table[k] = (table[k] + table_temp[k]) / 2.0f;</a>
+<a name="ln1354">  }</a>
+<a name="ln1355"> </a>
+<a name="ln1356">}</a>
+<a name="ln1357"> </a>
+<a name="ln1358">void commit_params(dt_iop_module_t *self, dt_iop_params_t *p1, dt_dev_pixelpipe_t *pipe,</a>
+<a name="ln1359">                   dt_dev_pixelpipe_iop_t *piece)</a>
+<a name="ln1360">{</a>
+<a name="ln1361">  dt_iop_filmic_params_t *p = (dt_iop_filmic_params_t *)p1;</a>
+<a name="ln1362">  dt_iop_filmic_data_t *d = (dt_iop_filmic_data_t *)piece-&gt;data;</a>
+<a name="ln1363"> </a>
+<a name="ln1364">  d-&gt;preserve_color = p-&gt;preserve_color;</a>
+<a name="ln1365"> </a>
+<a name="ln1366">  // source luminance - Used only in the log encoding</a>
+<a name="ln1367">  const float white_source = p-&gt;white_point_source;</a>
+<a name="ln1368">  const float grey_source = p-&gt;grey_point_source / 100.0f; // in %</a>
+<a name="ln1369">  const float black_source = p-&gt;black_point_source;</a>
+<a name="ln1370">  const float dynamic_range = white_source - black_source;</a>
+<a name="ln1371"> </a>
+<a name="ln1372">  // luminance after log encoding</a>
+<a name="ln1373">  const float grey_log = fabsf(p-&gt;black_point_source) / dynamic_range;</a>
+<a name="ln1374"> </a>
+<a name="ln1375">  // target luminance desired after filmic curve</a>
+<a name="ln1376">  const float grey_display = powf(p-&gt;grey_point_target / 100.0f, 1.0f / (p-&gt;output_power));</a>
+<a name="ln1377"> </a>
+<a name="ln1378">  float contrast = p-&gt;contrast;</a>
+<a name="ln1379">  if (contrast &lt; grey_display / grey_log)</a>
+<a name="ln1380">  {</a>
+<a name="ln1381">    // We need grey_display - (contrast * grey_log) &lt;= 0.0</a>
+<a name="ln1382">    contrast = 1.0001f * grey_display / grey_log;</a>
+<a name="ln1383">  }</a>
+<a name="ln1384"> </a>
+<a name="ln1385">  // commitproducts with no low-pass filter, you will increase the contrast of nois</a>
+<a name="ln1386">  d-&gt;dynamic_range = dynamic_range;</a>
+<a name="ln1387">  d-&gt;black_source = black_source;</a>
+<a name="ln1388">  d-&gt;grey_source = grey_source;</a>
+<a name="ln1389">  d-&gt;output_power = p-&gt;output_power;</a>
+<a name="ln1390">  d-&gt;saturation = p-&gt;saturation;</a>
+<a name="ln1391">  d-&gt;global_saturation = p-&gt;global_saturation;</a>
+<a name="ln1392">  d-&gt;contrast = contrast;</a>
+<a name="ln1393"> </a>
+<a name="ln1394">  // compute the curves and their LUT</a>
+<a name="ln1395">  dt_iop_filmic_nodes_t *nodes_data = (dt_iop_filmic_nodes_t *)malloc(sizeof(dt_iop_filmic_nodes_t));</a>
+<a name="ln1396">  compute_curve_lut(p, d-&gt;table, d-&gt;table_temp, 0x10000, d, nodes_data);</a>
+<a name="ln1397">  free(nodes_data);</a>
+<a name="ln1398">  nodes_data = NULL;</a>
+<a name="ln1399"> </a>
+<a name="ln1400">  // Build a window function based on the log.</a>
+<a name="ln1401">  // This will be used to selectively desaturate the non-linear parts</a>
+<a name="ln1402">  // to avoid over-saturation in the toe and shoulder.</a>
+<a name="ln1403"> </a>
+<a name="ln1404">  const float latitude = d-&gt;latitude_max - d-&gt;latitude_min;</a>
+<a name="ln1405">  const float center = (d-&gt;latitude_max + d-&gt;latitude_min)/2.0f;</a>
+<a name="ln1406">  const float saturation = d-&gt;saturation / 100.0f;</a>
+<a name="ln1407">  const float sigma = saturation * saturation * latitude * latitude;</a>
+<a name="ln1408"> </a>
+<a name="ln1409">#ifdef _OPENMP</a>
+<a name="ln1410">#pragma omp parallel for SIMD() default(none) shared(d) schedule(static)</a>
+<a name="ln1411">#endif</a>
+<a name="ln1412">  for(int k = 0; k &lt; 65536; k++)</a>
+<a name="ln1413">  {</a>
+<a name="ln1414">    const float x = ((float)k) / 65536.0f;</a>
+<a name="ln1415">    if (sigma != 0.0f)</a>
+<a name="ln1416">    {</a>
+<a name="ln1417">      d-&gt;grad_2[k] = expf(-0.5f * (center - x) * (center - x) / sigma);</a>
+<a name="ln1418">    }</a>
+<a name="ln1419">    else</a>
+<a name="ln1420">    {</a>
+<a name="ln1421">      d-&gt;grad_2[k] = 0.0f;</a>
+<a name="ln1422">    }</a>
+<a name="ln1423">  }</a>
+<a name="ln1424"> </a>
+<a name="ln1425">}</a>
+<a name="ln1426"> </a>
+<a name="ln1427">void init_pipe(dt_iop_module_t *self, dt_dev_pixelpipe_t *pipe, dt_dev_pixelpipe_iop_t *piece)</a>
+<a name="ln1428">{</a>
+<a name="ln1429">  piece-&gt;data = calloc(1, sizeof(dt_iop_filmic_data_t));</a>
+<a name="ln1430">  self-&gt;commit_params(self, self-&gt;default_params, pipe, piece);</a>
+<a name="ln1431">}</a>
+<a name="ln1432"> </a>
+<a name="ln1433">void cleanup_pipe(dt_iop_module_t *self, dt_dev_pixelpipe_t *pipe, dt_dev_pixelpipe_iop_t *piece)</a>
+<a name="ln1434">{</a>
+<a name="ln1435">  free(piece-&gt;data);</a>
+<a name="ln1436">  piece-&gt;data = NULL;</a>
+<a name="ln1437">}</a>
+<a name="ln1438"> </a>
+<a name="ln1439">void gui_update(dt_iop_module_t *self)</a>
+<a name="ln1440">{</a>
+<a name="ln1441">  dt_iop_module_t *module = (dt_iop_module_t *)self;</a>
+<a name="ln1442">  dt_iop_filmic_gui_data_t *g = (dt_iop_filmic_gui_data_t *)self-&gt;gui_data;</a>
+<a name="ln1443">  dt_iop_filmic_params_t *p = (dt_iop_filmic_params_t *)module-&gt;params;</a>
+<a name="ln1444"> </a>
+<a name="ln1445">  dt_iop_color_picker_reset(self, TRUE);</a>
+<a name="ln1446"> </a>
+<a name="ln1447">  self-&gt;color_picker_box[0] = self-&gt;color_picker_box[1] = .25f;</a>
+<a name="ln1448">  self-&gt;color_picker_box[2] = self-&gt;color_picker_box[3] = .75f;</a>
+<a name="ln1449">  self-&gt;color_picker_point[0] = self-&gt;color_picker_point[1] = 0.5f;</a>
+<a name="ln1450"> </a>
+<a name="ln1451">  dt_bauhaus_slider_set_soft(g-&gt;white_point_source, p-&gt;white_point_source);</a>
+<a name="ln1452">  dt_bauhaus_slider_set_soft(g-&gt;grey_point_source, p-&gt;grey_point_source);</a>
+<a name="ln1453">  dt_bauhaus_slider_set_soft(g-&gt;black_point_source, p-&gt;black_point_source);</a>
+<a name="ln1454">  dt_bauhaus_slider_set_soft(g-&gt;security_factor, p-&gt;security_factor);</a>
+<a name="ln1455">  dt_bauhaus_slider_set_soft(g-&gt;white_point_target, p-&gt;white_point_target);</a>
+<a name="ln1456">  dt_bauhaus_slider_set_soft(g-&gt;grey_point_target, p-&gt;grey_point_target);</a>
+<a name="ln1457">  dt_bauhaus_slider_set_soft(g-&gt;black_point_target, p-&gt;black_point_target);</a>
+<a name="ln1458">  dt_bauhaus_slider_set_soft(g-&gt;output_power, p-&gt;output_power);</a>
+<a name="ln1459">  dt_bauhaus_slider_set_soft(g-&gt;latitude_stops, p-&gt;latitude_stops);</a>
+<a name="ln1460">  dt_bauhaus_slider_set(g-&gt;contrast, p-&gt;contrast);</a>
+<a name="ln1461">  dt_bauhaus_slider_set(g-&gt;global_saturation, p-&gt;global_saturation);</a>
+<a name="ln1462">  dt_bauhaus_slider_set(g-&gt;saturation, (powf(10.0f, p-&gt;saturation/100.0f) - 1.0f) / 9.0f * 100.0f);</a>
+<a name="ln1463">  dt_bauhaus_slider_set(g-&gt;balance, p-&gt;balance);</a>
+<a name="ln1464"> </a>
+<a name="ln1465">  dt_bauhaus_combobox_set(g-&gt;interpolator, p-&gt;interpolator);</a>
+<a name="ln1466">  gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(g-&gt;preserve_color), p-&gt;preserve_color);</a>
+<a name="ln1467"> </a>
+<a name="ln1468">  dtgtk_expander_set_expanded(DTGTK_EXPANDER(g-&gt;extra_expander),</a>
+<a name="ln1469">                              gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(g-&gt;extra_toggle)));</a>
+<a name="ln1470"> </a>
+<a name="ln1471">  gtk_widget_queue_draw(self-&gt;widget);</a>
+<a name="ln1472"> </a>
+<a name="ln1473">}</a>
+<a name="ln1474"> </a>
+<a name="ln1475">void init(dt_iop_module_t *module)</a>
+<a name="ln1476">{</a>
+<a name="ln1477">  module-&gt;params = calloc(1, sizeof(dt_iop_filmic_params_t));</a>
+<a name="ln1478">  module-&gt;default_params = calloc(1, sizeof(dt_iop_filmic_params_t));</a>
+<a name="ln1479">  module-&gt;default_enabled = 0;</a>
+<a name="ln1480">  module-&gt;params_size = sizeof(dt_iop_filmic_params_t);</a>
+<a name="ln1481">  module-&gt;gui_data = NULL;</a>
+<a name="ln1482"> </a>
+<a name="ln1483">  dt_iop_filmic_params_t tmp</a>
+<a name="ln1484">    = (dt_iop_filmic_params_t){</a>
+<a name="ln1485">                                 .grey_point_source   = 18, // source grey</a>
+<a name="ln1486">                                 .black_point_source  = -8.65,  // source black</a>
+<a name="ln1487">                                 .white_point_source  = 2.45,  // source white</a>
+<a name="ln1488">                                 .security_factor     = 0.0,  // security factor</a>
+<a name="ln1489">                                 .grey_point_target   = 18.0, // target grey</a>
+<a name="ln1490">                                 .black_point_target  = 0.0,  // target black</a>
+<a name="ln1491">                                 .white_point_target  = 100.0,  // target white</a>
+<a name="ln1492">                                 .output_power        = 2.2,  // target power (~ gamma)</a>
+<a name="ln1493">                                 .latitude_stops      = 2.0,  // intent latitude</a>
+<a name="ln1494">                                 .contrast            = 1.5,  // intent contrast</a>
+<a name="ln1495">                                 .saturation          = 100.0,   // intent saturation</a>
+<a name="ln1496">                                 .global_saturation   = 100.0,</a>
+<a name="ln1497">                                 .balance             = 0.0, // balance shadows/highlights</a>
+<a name="ln1498">                                 .interpolator        = CUBIC_SPLINE, //interpolator</a>
+<a name="ln1499">                                 .preserve_color      = 0, // run the saturated variant</a>
+<a name="ln1500">                              };</a>
+<a name="ln1501">  memcpy(module-&gt;params, &amp;tmp, sizeof(dt_iop_filmic_params_t));</a>
+<a name="ln1502">  memcpy(module-&gt;default_params, &amp;tmp, sizeof(dt_iop_filmic_params_t));</a>
+<a name="ln1503">}</a>
+<a name="ln1504"> </a>
+<a name="ln1505">void init_global(dt_iop_module_so_t *module)</a>
+<a name="ln1506">{</a>
+<a name="ln1507">  const int program = 22; // filmic.cl, from programs.conf</a>
+<a name="ln1508">  dt_iop_filmic_global_data_t *gd</a>
+<a name="ln1509">      = (dt_iop_filmic_global_data_t *)malloc(sizeof(dt_iop_filmic_global_data_t));</a>
+<a name="ln1510"> </a>
+<a name="ln1511">  module-&gt;data = gd;</a>
+<a name="ln1512">  gd-&gt;kernel_filmic = dt_opencl_create_kernel(program, &quot;filmic&quot;);</a>
+<a name="ln1513">}</a>
+<a name="ln1514"> </a>
+<a name="ln1515">void cleanup(dt_iop_module_t *module)</a>
+<a name="ln1516">{</a>
+<a name="ln1517">  free(module-&gt;params);</a>
+<a name="ln1518">  module-&gt;params = NULL;</a>
+<a name="ln1519">}</a>
+<a name="ln1520"> </a>
+<a name="ln1521">void cleanup_global(dt_iop_module_so_t *module)</a>
+<a name="ln1522">{</a>
+<a name="ln1523">  dt_iop_filmic_global_data_t *gd = (dt_iop_filmic_global_data_t *)module-&gt;data;</a>
+<a name="ln1524">  dt_opencl_free_kernel(gd-&gt;kernel_filmic);</a>
+<a name="ln1525">  free(module-&gt;data);</a>
+<a name="ln1526">  module-&gt;data = NULL;</a>
+<a name="ln1527">}</a>
+<a name="ln1528"> </a>
+<a name="ln1529">void gui_reset(dt_iop_module_t *self)</a>
+<a name="ln1530">{</a>
+<a name="ln1531">  dt_iop_filmic_gui_data_t *g = (dt_iop_filmic_gui_data_t *)self-&gt;gui_data;</a>
+<a name="ln1532">  dt_iop_color_picker_reset(self, TRUE);</a>
+<a name="ln1533">  dtgtk_expander_set_expanded(DTGTK_EXPANDER(g-&gt;extra_expander), FALSE);</a>
+<a name="ln1534">  dtgtk_togglebutton_set_paint(DTGTK_TOGGLEBUTTON(g-&gt;extra_toggle), dtgtk_cairo_paint_solid_arrow,</a>
+<a name="ln1535">                               CPF_DO_NOT_USE_BORDER | CPF_STYLE_BOX | CPF_DIRECTION_LEFT, NULL);</a>
+<a name="ln1536">  gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(g-&gt;extra_toggle), FALSE);</a>
+<a name="ln1537">}</a>
+<a name="ln1538"> </a>
+<a name="ln1539">static gboolean dt_iop_tonecurve_draw(GtkWidget *widget, cairo_t *crf, gpointer user_data)</a>
+<a name="ln1540">{</a>
+<a name="ln1541">  dt_iop_module_t *self = (dt_iop_module_t *)user_data;</a>
+<a name="ln1542">  dt_iop_filmic_gui_data_t *c = (dt_iop_filmic_gui_data_t *)self-&gt;gui_data;</a>
+<a name="ln1543">  dt_iop_filmic_params_t *p = (dt_iop_filmic_params_t *)self-&gt;params;</a>
+<a name="ln1544">  dt_iop_filmic_nodes_t *nodes_data = (dt_iop_filmic_nodes_t *)malloc(sizeof(dt_iop_filmic_nodes_t));</a>
+<a name="ln1545">  compute_curve_lut(p, c-&gt;table, c-&gt;table_temp, 256, NULL, nodes_data);</a>
+<a name="ln1546"> </a>
+<a name="ln1547">  const int inset = DT_GUI_CURVE_EDITOR_INSET;</a>
+<a name="ln1548">  GtkAllocation allocation;</a>
+<a name="ln1549">  gtk_widget_get_allocation(widget, &amp;allocation);</a>
+<a name="ln1550">  int width = allocation.width, height = allocation.height;</a>
+<a name="ln1551">  cairo_surface_t *cst = dt_cairo_image_surface_create(CAIRO_FORMAT_ARGB32, width, height);</a>
+<a name="ln1552">  cairo_t *cr = cairo_create(cst);</a>
+<a name="ln1553"> </a>
+<a name="ln1554">  // clear bg</a>
+<a name="ln1555">  cairo_set_source_rgb(cr, .2, .2, .2);</a>
+<a name="ln1556">  cairo_paint(cr);</a>
+<a name="ln1557"> </a>
+<a name="ln1558">  cairo_translate(cr, inset, inset);</a>
+<a name="ln1559">  width -= 2 * inset;</a>
+<a name="ln1560">  height -= 2 * inset;</a>
+<a name="ln1561"> </a>
+<a name="ln1562">  cairo_set_source_rgb(cr, .3, .3, .3);</a>
+<a name="ln1563">  cairo_rectangle(cr, 0, 0, width, height);</a>
+<a name="ln1564">  cairo_fill(cr);</a>
+<a name="ln1565"> </a>
+<a name="ln1566">  // draw grid</a>
+<a name="ln1567">  cairo_set_line_width(cr, DT_PIXEL_APPLY_DPI(.4));</a>
+<a name="ln1568">  cairo_set_source_rgb(cr, .1, .1, .1);</a>
+<a name="ln1569">  dt_draw_grid(cr, 4, 0, 0, width, height);</a>
+<a name="ln1570"> </a>
+<a name="ln1571">  // solve the equations for the rescaling parameters</a>
+<a name="ln1572">  const float DR = (p-&gt;white_point_source - p-&gt;black_point_source);</a>
+<a name="ln1573">  const float grey = -p-&gt;black_point_source / DR;</a>
+<a name="ln1574">  int rescale = FALSE;</a>
+<a name="ln1575"> </a>
+<a name="ln1576">  float a, b, d;</a>
+<a name="ln1577">  a = DR;</a>
+<a name="ln1578">  b = Log2( 1.0f / (-1 + powf(2.0f, a)));</a>
+<a name="ln1579">  d = - powf(2.0f, b);</a>
+<a name="ln1580"> </a>
+<a name="ln1581">  if (grey &gt; powf(p-&gt;grey_point_target / 100.0f, p-&gt;output_power))</a>
+<a name="ln1582">  {</a>
+<a name="ln1583">    // The x-coordinate rescaling is valid only when the log grey value (dynamic range center)</a>
+<a name="ln1584">    // is greater or equal to the destination grey value</a>
+<a name="ln1585">    rescale = TRUE;</a>
+<a name="ln1586"> </a>
+<a name="ln1587">    for (int i = 0; i &lt; 50; ++i)</a>
+<a name="ln1588">    { // Optimization loop for the non-linear problem</a>
+<a name="ln1589">      a = Log2((0.5f - d) / (1.0f - d)) / (grey - 1.0f);</a>
+<a name="ln1590">      b = Log2( 1.0f / (-1 + powf(2.0f, a)));</a>
+<a name="ln1591">      d = - powf(2.0f, b);</a>
+<a name="ln1592">    }</a>
+<a name="ln1593">  }</a>
+<a name="ln1594"> </a>
+<a name="ln1595">  const float gamma = (logf(p-&gt;grey_point_target / 100.0f) / logf(0.5f)) / p-&gt;output_power;</a>
+<a name="ln1596"> </a>
+<a name="ln1597">  // draw nodes</a>
+<a name="ln1598">  cairo_set_line_width(cr, DT_PIXEL_APPLY_DPI(1.));</a>
+<a name="ln1599">  cairo_set_source_rgb(cr, 0.9, 0.9, 0.9);</a>
+<a name="ln1600"> </a>
+<a name="ln1601">  for(int k = 0; k &lt; nodes_data-&gt;nodes; k++)</a>
+<a name="ln1602">  {</a>
+<a name="ln1603">    /*</a>
+<a name="ln1604">     * Use double precision locally to avoid cancellation effect on</a>
+<a name="ln1605">     * the &quot;+ d&quot; operation.</a>
+<a name="ln1606">     */</a>
+<a name="ln1607">    const float x = (rescale) ? pow(2.0, (double)a * nodes_data-&gt;x[k] + b) + d : nodes_data-&gt;x[k];</a>
+<a name="ln1608">    const float y = powf(nodes_data-&gt;y[k], 1.0f / gamma);</a>
+<a name="ln1609"> </a>
+<a name="ln1610">    cairo_arc(cr, x * width, (1.0 - y) * (double)height, DT_PIXEL_APPLY_DPI(3), 0, 2. * M_PI);</a>
+<a name="ln1611">    cairo_stroke_preserve(cr);</a>
+<a name="ln1612">    cairo_fill(cr);</a>
+<a name="ln1613">    cairo_stroke(cr);</a>
+<a name="ln1614">  }</a>
+<a name="ln1615">  free(nodes_data);</a>
+<a name="ln1616">  nodes_data = NULL;</a>
+<a name="ln1617"> </a>
+<a name="ln1618">  // draw curve</a>
+<a name="ln1619">  cairo_set_line_width(cr, DT_PIXEL_APPLY_DPI(2.));</a>
+<a name="ln1620">  cairo_set_source_rgb(cr, .9, .9, .9);</a>
+<a name="ln1621">  cairo_move_to(cr, 0, height * (1.0 - c-&gt;table[0]));</a>
+<a name="ln1622"> </a>
+<a name="ln1623">  for(int k = 1; k &lt; 256; k++)</a>
+<a name="ln1624">  {</a>
+<a name="ln1625">    /*</a>
+<a name="ln1626">     * Use double precision locally to avoid cancellation effect on</a>
+<a name="ln1627">     * the &quot;+ d&quot; operation.</a>
+<a name="ln1628">     */</a>
+<a name="ln1629">    const float x = (rescale) ? pow(2.0, (double)a * k / 255.0 + b) + d : k / 255.0;</a>
+<a name="ln1630">    const float y = powf(c-&gt;table[k], 1.0f / gamma);</a>
+<a name="ln1631">    cairo_line_to(cr, x * width, (double)height * (1.0 - y));</a>
+<a name="ln1632">  }</a>
+<a name="ln1633">  cairo_stroke(cr);</a>
+<a name="ln1634">  cairo_destroy(cr);</a>
+<a name="ln1635">  cairo_set_source_surface(crf, cst, 0, 0);</a>
+<a name="ln1636">  cairo_paint(crf);</a>
+<a name="ln1637">  cairo_surface_destroy(cst);</a>
+<a name="ln1638">  return TRUE;</a>
+<a name="ln1639">}</a>
+<a name="ln1640"> </a>
+<a name="ln1641">static void _extra_options_button_changed(GtkDarktableToggleButton *widget, gpointer user_data)</a>
+<a name="ln1642">{</a>
+<a name="ln1643">  dt_iop_module_t *self = (dt_iop_module_t *)user_data;</a>
+<a name="ln1644">  dt_iop_filmic_gui_data_t *g = (dt_iop_filmic_gui_data_t *)self-&gt;gui_data;</a>
+<a name="ln1645">  const gboolean active = gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(g-&gt;extra_toggle));</a>
+<a name="ln1646">  dtgtk_expander_set_expanded(DTGTK_EXPANDER(g-&gt;extra_expander), active);</a>
+<a name="ln1647">  dtgtk_togglebutton_set_paint(DTGTK_TOGGLEBUTTON(g-&gt;extra_toggle), dtgtk_cairo_paint_solid_arrow,</a>
+<a name="ln1648">                               CPF_DO_NOT_USE_BORDER | CPF_STYLE_BOX | (active?CPF_DIRECTION_DOWN:CPF_DIRECTION_LEFT), NULL);</a>
+<a name="ln1649">}</a>
+<a name="ln1650"> </a>
+<a name="ln1651">void gui_init(dt_iop_module_t *self)</a>
+<a name="ln1652">{</a>
+<a name="ln1653">  self-&gt;gui_data = malloc(sizeof(dt_iop_filmic_gui_data_t));</a>
+<a name="ln1654">  dt_iop_filmic_gui_data_t *g = (dt_iop_filmic_gui_data_t *)self-&gt;gui_data;</a>
+<a name="ln1655">  dt_iop_filmic_params_t *p = (dt_iop_filmic_params_t *)self-&gt;params;</a>
+<a name="ln1656">  const int margin_width = (int)dt_conf_get_int(&quot;panel_width&quot;) / 10.0;</a>
+<a name="ln1657"> </a>
+<a name="ln1658">  self-&gt;widget = gtk_box_new(GTK_ORIENTATION_VERTICAL, DT_BAUHAUS_SPACE);</a>
+<a name="ln1659">  dt_gui_add_help_link(self-&gt;widget, dt_get_help_url(self-&gt;op));</a>
+<a name="ln1660"> </a>
+<a name="ln1661">  g-&gt;area = GTK_DRAWING_AREA(dtgtk_drawing_area_new_with_aspect_ratio(1.0));</a>
+<a name="ln1662">  gtk_widget_set_tooltip_text(GTK_WIDGET(g-&gt;area), _(&quot;read-only graph, use the parameters below to set the nodes&quot;));</a>
+<a name="ln1663">  gtk_widget_set_margin_start(GTK_WIDGET(g-&gt;area), margin_width);</a>
+<a name="ln1664">  gtk_widget_set_margin_end(GTK_WIDGET(g-&gt;area), margin_width);</a>
+<a name="ln1665">  gtk_box_pack_start(GTK_BOX(self-&gt;widget), GTK_WIDGET(g-&gt;area), FALSE, FALSE, 0);</a>
+<a name="ln1666">  g_signal_connect(G_OBJECT(g-&gt;area), &quot;draw&quot;, G_CALLBACK(dt_iop_tonecurve_draw), self);</a>
+<a name="ln1667"> </a>
+<a name="ln1668">  gtk_box_pack_start(GTK_BOX(self-&gt;widget), dt_ui_section_label_new(_(&quot;logarithmic shaper&quot;)), FALSE, FALSE, 5);</a>
+<a name="ln1669"> </a>
+<a name="ln1670">  // grey_point_source slider</a>
+<a name="ln1671">  g-&gt;grey_point_source = dt_bauhaus_slider_new_with_range(self, 0.1, 36., 0.1, p-&gt;grey_point_source, 2);</a>
+<a name="ln1672">  dt_bauhaus_slider_enable_soft_boundaries(g-&gt;grey_point_source, 0.0, 100.0);</a>
+<a name="ln1673">  dt_bauhaus_widget_set_label(g-&gt;grey_point_source, NULL, _(&quot;middle grey luminance&quot;));</a>
+<a name="ln1674">  gtk_box_pack_start(GTK_BOX(self-&gt;widget), g-&gt;grey_point_source, TRUE, TRUE, 0);</a>
+<a name="ln1675">  dt_bauhaus_slider_set_format(g-&gt;grey_point_source, &quot;%.2f %%&quot;);</a>
+<a name="ln1676">  gtk_widget_set_tooltip_text(g-&gt;grey_point_source, _(&quot;adjust to match the average luminance of the subject.\n&quot;</a>
+<a name="ln1677">                                                      &quot;except in back-lighting situations, this should be around 18%.&quot;));</a>
+<a name="ln1678">  g_signal_connect(G_OBJECT(g-&gt;grey_point_source), &quot;value-changed&quot;, G_CALLBACK(grey_point_source_callback), self);</a>
+<a name="ln1679">  dt_bauhaus_widget_set_quad_paint(g-&gt;grey_point_source, dtgtk_cairo_paint_colorpicker, CPF_STYLE_FLAT | CPF_DO_NOT_USE_BORDER, NULL);</a>
+<a name="ln1680">  dt_bauhaus_widget_set_quad_toggle(g-&gt;grey_point_source, TRUE);</a>
+<a name="ln1681">  g_signal_connect(G_OBJECT(g-&gt;grey_point_source), &quot;quad-pressed&quot;, G_CALLBACK(dt_iop_color_picker_callback), &amp;g-&gt;color_picker);</a>
+<a name="ln1682"> </a>
+<a name="ln1683">  // White slider</a>
+<a name="ln1684">  g-&gt;white_point_source = dt_bauhaus_slider_new_with_range(self, 2.0, 8.0, 0.1, p-&gt;white_point_source, 2);</a>
+<a name="ln1685">  dt_bauhaus_slider_enable_soft_boundaries(g-&gt;white_point_source, 0.0, 16.0);</a>
+<a name="ln1686">  dt_bauhaus_widget_set_label(g-&gt;white_point_source, NULL, _(&quot;white relative exposure&quot;));</a>
+<a name="ln1687">  gtk_box_pack_start(GTK_BOX(self-&gt;widget), g-&gt;white_point_source, TRUE, TRUE, 0);</a>
+<a name="ln1688">  dt_bauhaus_slider_set_format(g-&gt;white_point_source, &quot;%.2f EV&quot;);</a>
+<a name="ln1689">  gtk_widget_set_tooltip_text(g-&gt;white_point_source, _(&quot;number of stops between middle grey and pure white.\n&quot;</a>
+<a name="ln1690">                                                       &quot;this is a reading a lightmeter would give you on the scene.\n&quot;</a>
+<a name="ln1691">                                                       &quot;adjust so highlights clipping is avoided&quot;));</a>
+<a name="ln1692">  g_signal_connect(G_OBJECT(g-&gt;white_point_source), &quot;value-changed&quot;, G_CALLBACK(white_point_source_callback), self);</a>
+<a name="ln1693">  dt_bauhaus_widget_set_quad_paint(g-&gt;white_point_source, dtgtk_cairo_paint_colorpicker, CPF_STYLE_FLAT | CPF_DO_NOT_USE_BORDER, NULL);</a>
+<a name="ln1694">  dt_bauhaus_widget_set_quad_toggle(g-&gt;white_point_source, TRUE);</a>
+<a name="ln1695">  g_signal_connect(G_OBJECT(g-&gt;white_point_source), &quot;quad-pressed&quot;, G_CALLBACK(dt_iop_color_picker_callback), &amp;g-&gt;color_picker);</a>
+<a name="ln1696"> </a>
+<a name="ln1697">  // Black slider</a>
+<a name="ln1698">  g-&gt;black_point_source = dt_bauhaus_slider_new_with_range(self, -14.0, -3.0, 0.1, p-&gt;black_point_source, 2);</a>
+<a name="ln1699">  dt_bauhaus_slider_enable_soft_boundaries(g-&gt;black_point_source, -16.0, -0.1);</a>
+<a name="ln1700">  dt_bauhaus_widget_set_label(g-&gt;black_point_source, NULL, _(&quot;black relative exposure&quot;));</a>
+<a name="ln1701">  gtk_box_pack_start(GTK_BOX(self-&gt;widget), g-&gt;black_point_source, TRUE, TRUE, 0);</a>
+<a name="ln1702">  dt_bauhaus_slider_set_format(g-&gt;black_point_source, &quot;%.2f EV&quot;);</a>
+<a name="ln1703">  gtk_widget_set_tooltip_text(g-&gt;black_point_source, _(&quot;number of stops between middle grey and pure black.\n&quot;</a>
+<a name="ln1704">                                                       &quot;this is a reading a lightmeter would give you on the scene.\n&quot;</a>
+<a name="ln1705">                                                       &quot;increase to get more contrast.\ndecrease to recover more details in low-lights.&quot;));</a>
+<a name="ln1706">  g_signal_connect(G_OBJECT(g-&gt;black_point_source), &quot;value-changed&quot;, G_CALLBACK(black_point_source_callback), self);</a>
+<a name="ln1707">  dt_bauhaus_widget_set_quad_paint(g-&gt;black_point_source, dtgtk_cairo_paint_colorpicker, CPF_STYLE_FLAT | CPF_DO_NOT_USE_BORDER, NULL);</a>
+<a name="ln1708">  dt_bauhaus_widget_set_quad_toggle(g-&gt;black_point_source, TRUE);</a>
+<a name="ln1709">  g_signal_connect(G_OBJECT(g-&gt;black_point_source), &quot;quad-pressed&quot;, G_CALLBACK(dt_iop_color_picker_callback), &amp;g-&gt;color_picker);</a>
+<a name="ln1710"> </a>
+<a name="ln1711">  // Security factor</a>
+<a name="ln1712">  g-&gt;security_factor = dt_bauhaus_slider_new_with_range(self, -50., 50., 1.0, p-&gt;security_factor, 2);</a>
+<a name="ln1713">  dt_bauhaus_widget_set_label(g-&gt;security_factor, NULL, _(&quot;safety factor&quot;));</a>
+<a name="ln1714">  gtk_box_pack_start(GTK_BOX(self-&gt;widget), g-&gt;security_factor, TRUE, TRUE, 0);</a>
+<a name="ln1715">  dt_bauhaus_slider_set_format(g-&gt;security_factor, &quot;%.2f %%&quot;);</a>
+<a name="ln1716">  gtk_widget_set_tooltip_text(g-&gt;security_factor, _(&quot;enlarge or shrink the computed dynamic range.\n&quot;</a>
+<a name="ln1717">                                                    &quot;useful in conjunction with \&quot;auto tune levels\&quot;.&quot;));</a>
+<a name="ln1718">  g_signal_connect(G_OBJECT(g-&gt;security_factor), &quot;value-changed&quot;, G_CALLBACK(security_threshold_callback), self);</a>
+<a name="ln1719"> </a>
+<a name="ln1720">  // Auto tune slider</a>
+<a name="ln1721">  g-&gt;auto_button = dt_bauhaus_combobox_new(self);</a>
+<a name="ln1722">  dt_bauhaus_widget_set_label(g-&gt;auto_button, NULL, _(&quot;auto tune levels&quot;));</a>
+<a name="ln1723">  dt_bauhaus_widget_set_quad_paint(g-&gt;auto_button, dtgtk_cairo_paint_colorpicker,</a>
+<a name="ln1724">                                   CPF_STYLE_FLAT | CPF_DO_NOT_USE_BORDER, NULL);</a>
+<a name="ln1725">  dt_bauhaus_widget_set_quad_toggle(g-&gt;auto_button, TRUE);</a>
+<a name="ln1726">  g_signal_connect(G_OBJECT(g-&gt;auto_button), &quot;quad-pressed&quot;, G_CALLBACK(dt_iop_color_picker_callback), &amp;g-&gt;color_picker);</a>
+<a name="ln1727">  gtk_widget_set_tooltip_text(g-&gt;auto_button, _(&quot;try to optimize the settings with some guessing.\n&quot;</a>
+<a name="ln1728">                                                &quot;this will fit the luminance range inside the histogram bounds.\n&quot;</a>
+<a name="ln1729">                                                &quot;works better for landscapes and evenly-lit pictures\nbut fails for high-keys and low-keys.&quot; ));</a>
+<a name="ln1730">  gtk_box_pack_start(GTK_BOX(self-&gt;widget), g-&gt;auto_button, TRUE, TRUE, 0);</a>
+<a name="ln1731"> </a>
+<a name="ln1732">  gtk_box_pack_start(GTK_BOX(self-&gt;widget), dt_ui_section_label_new(_(&quot;filmic S curve&quot;)), FALSE, FALSE, 5);</a>
+<a name="ln1733"> </a>
+<a name="ln1734">  // contrast slider</a>
+<a name="ln1735">  g-&gt;contrast = dt_bauhaus_slider_new_with_range(self, 1., 2., 0.01, p-&gt;contrast, 3);</a>
+<a name="ln1736">  dt_bauhaus_slider_enable_soft_boundaries(g-&gt;contrast, 0.0, 5.0);</a>
+<a name="ln1737">  dt_bauhaus_widget_set_label(g-&gt;contrast, NULL, _(&quot;contrast&quot;));</a>
+<a name="ln1738">  gtk_box_pack_start(GTK_BOX(self-&gt;widget), g-&gt;contrast, TRUE, TRUE, 0);</a>
+<a name="ln1739">  gtk_widget_set_tooltip_text(g-&gt;contrast, _(&quot;slope of the linear part of the curve\n&quot;</a>
+<a name="ln1740">                                             &quot;affects mostly the mid-tones&quot;));</a>
+<a name="ln1741">  g_signal_connect(G_OBJECT(g-&gt;contrast), &quot;value-changed&quot;, G_CALLBACK(contrast_callback), self);</a>
+<a name="ln1742"> </a>
+<a name="ln1743">  // latitude slider</a>
+<a name="ln1744">  g-&gt;latitude_stops = dt_bauhaus_slider_new_with_range(self, 2., 8.0, 0.05, p-&gt;latitude_stops, 3);</a>
+<a name="ln1745">  dt_bauhaus_slider_enable_soft_boundaries(g-&gt;latitude_stops, 0.01, 16.0);</a>
+<a name="ln1746">  dt_bauhaus_widget_set_label(g-&gt;latitude_stops, NULL, _(&quot;latitude&quot;));</a>
+<a name="ln1747">  dt_bauhaus_slider_set_format(g-&gt;latitude_stops, &quot;%.2f EV&quot;);</a>
+<a name="ln1748">  gtk_box_pack_start(GTK_BOX(self-&gt;widget), g-&gt;latitude_stops, TRUE, TRUE, 0);</a>
+<a name="ln1749">  gtk_widget_set_tooltip_text(g-&gt;latitude_stops, _(&quot;width of the linear domain in the middle of the curve.\n&quot;</a>
+<a name="ln1750">                                                   &quot;increase to get more contrast at the extreme luminances.\n&quot;</a>
+<a name="ln1751">                                                   &quot;this has no effect on mid-tones.&quot;));</a>
+<a name="ln1752">  g_signal_connect(G_OBJECT(g-&gt;latitude_stops), &quot;value-changed&quot;, G_CALLBACK(latitude_stops_callback), self);</a>
+<a name="ln1753"> </a>
+<a name="ln1754">  // balance slider</a>
+<a name="ln1755">  g-&gt;balance = dt_bauhaus_slider_new_with_range(self, -50., 50., 1.0, p-&gt;balance, 2);</a>
+<a name="ln1756">  dt_bauhaus_widget_set_label(g-&gt;balance, NULL, _(&quot;shadows/highlights balance&quot;));</a>
+<a name="ln1757">  gtk_box_pack_start(GTK_BOX(self-&gt;widget), g-&gt;balance, TRUE, TRUE, 0);</a>
+<a name="ln1758">  dt_bauhaus_slider_set_format(g-&gt;balance, &quot;%.2f %%&quot;);</a>
+<a name="ln1759">  gtk_widget_set_tooltip_text(g-&gt;balance, _(&quot;slides the latitude along the slope\nto give more room to shadows or highlights.\n&quot;</a>
+<a name="ln1760">                                            &quot;use it if you need to protect the details\nat one extremity of the histogram.&quot;));</a>
+<a name="ln1761">  g_signal_connect(G_OBJECT(g-&gt;balance), &quot;value-changed&quot;, G_CALLBACK(balance_callback), self);</a>
+<a name="ln1762"> </a>
+<a name="ln1763">  // saturation slider</a>
+<a name="ln1764">  g-&gt;global_saturation = dt_bauhaus_slider_new_with_range(self, 0., 200., 0.5, p-&gt;global_saturation, 2);</a>
+<a name="ln1765">  dt_bauhaus_widget_set_label(g-&gt;global_saturation, NULL, _(&quot;global saturation&quot;));</a>
+<a name="ln1766">  dt_bauhaus_slider_enable_soft_boundaries(g-&gt;global_saturation, 0.0, 1000.0);</a>
+<a name="ln1767">  dt_bauhaus_slider_set_format(g-&gt;global_saturation, &quot;%.2f %%&quot;);</a>
+<a name="ln1768">  gtk_box_pack_start(GTK_BOX(self-&gt;widget), g-&gt;global_saturation, TRUE, TRUE, 0);</a>
+<a name="ln1769">  gtk_widget_set_tooltip_text(g-&gt;global_saturation, _(&quot;desaturates the input of the module globally.\n&quot;</a>
+<a name="ln1770">                                                      &quot;you need to set this value below 100%\nif the chrominance preservation is enabled.&quot;));</a>
+<a name="ln1771">  g_signal_connect(G_OBJECT(g-&gt;global_saturation), &quot;value-changed&quot;, G_CALLBACK(global_saturation_callback), self);</a>
+<a name="ln1772"> </a>
+<a name="ln1773">  // saturation slider</a>
+<a name="ln1774">  g-&gt;saturation = dt_bauhaus_slider_new_with_range(self, 0., 200., 0.5, (powf(10.0f, p-&gt;saturation/100.0f) - 1.0f) / 9.0f *100.0f, 2);</a>
+<a name="ln1775">  dt_bauhaus_widget_set_label(g-&gt;saturation, NULL, _(&quot;extreme luminance saturation&quot;));</a>
+<a name="ln1776">  dt_bauhaus_slider_enable_soft_boundaries(g-&gt;saturation, 0.0, 1000.0);</a>
+<a name="ln1777">  dt_bauhaus_slider_set_format(g-&gt;saturation, &quot;%.2f %%&quot;);</a>
+<a name="ln1778">  gtk_box_pack_start(GTK_BOX(self-&gt;widget), g-&gt;saturation, TRUE, TRUE, 0);</a>
+<a name="ln1779">  gtk_widget_set_tooltip_text(g-&gt;saturation, _(&quot;desaturates the output of the module\nspecifically at extreme luminances.\n&quot;</a>
+<a name="ln1780">                                               &quot;decrease if shadows and/or highlights are over-saturated.&quot;));</a>
+<a name="ln1781">  g_signal_connect(G_OBJECT(g-&gt;saturation), &quot;value-changed&quot;, G_CALLBACK(saturation_callback), self);</a>
+<a name="ln1782"> </a>
+<a name="ln1783">    /* From src/common/curve_tools.h :</a>
+<a name="ln1784">    #define CUBIC_SPLINE 0</a>
+<a name="ln1785">    #define CATMULL_ROM 1</a>
+<a name="ln1786">    #define MONOTONE_HERMITE 2</a>
+<a name="ln1787">  */</a>
+<a name="ln1788">  g-&gt;interpolator = dt_bauhaus_combobox_new(self);</a>
+<a name="ln1789">  dt_bauhaus_widget_set_label(g-&gt;interpolator, NULL, _(&quot;intent&quot;));</a>
+<a name="ln1790">  dt_bauhaus_combobox_add(g-&gt;interpolator, _(&quot;contrasted&quot;)); // cubic spline</a>
+<a name="ln1791">  dt_bauhaus_combobox_add(g-&gt;interpolator, _(&quot;faded&quot;)); // centripetal spline</a>
+<a name="ln1792">  dt_bauhaus_combobox_add(g-&gt;interpolator, _(&quot;linear&quot;)); // monotonic spline</a>
+<a name="ln1793">  dt_bauhaus_combobox_add(g-&gt;interpolator, _(&quot;optimized&quot;)); // monotonic spline</a>
+<a name="ln1794">  gtk_box_pack_start(GTK_BOX(self-&gt;widget), g-&gt;interpolator , TRUE, TRUE, 0);</a>
+<a name="ln1795">  gtk_widget_set_tooltip_text(g-&gt;interpolator, _(&quot;change this method if you see reversed contrast or faded blacks&quot;));</a>
+<a name="ln1796">  g_signal_connect(G_OBJECT(g-&gt;interpolator), &quot;value-changed&quot;, G_CALLBACK(interpolator_callback), self);</a>
+<a name="ln1797"> </a>
+<a name="ln1798">  // Preserve color</a>
+<a name="ln1799">  g-&gt;preserve_color = gtk_check_button_new_with_label(_(&quot;preserve the chrominance&quot;));</a>
+<a name="ln1800">  gtk_toggle_button_set_active (GTK_TOGGLE_BUTTON(g-&gt;preserve_color), p-&gt;preserve_color);</a>
+<a name="ln1801">  gtk_widget_set_tooltip_text(g-&gt;preserve_color, _(&quot;ensure the original color are preserved.\n&quot;</a>
+<a name="ln1802">                                                   &quot;may reinforce chromatic aberrations.\n&quot;</a>
+<a name="ln1803">                                                   &quot;you need to manually tune the saturation when using this mode.&quot;));</a>
+<a name="ln1804">  gtk_box_pack_start(GTK_BOX(self-&gt;widget), g-&gt;preserve_color , TRUE, TRUE, 0);</a>
+<a name="ln1805">  g_signal_connect(G_OBJECT(g-&gt;preserve_color), &quot;toggled&quot;, G_CALLBACK(preserve_color_callback), self);</a>
+<a name="ln1806"> </a>
+<a name="ln1807"> </a>
+<a name="ln1808">  // add collapsable section for those extra options that are generally not to be used</a>
+<a name="ln1809"> </a>
+<a name="ln1810">  GtkWidget *destdisp_head = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, DT_BAUHAUS_SPACE);</a>
+<a name="ln1811">  GtkWidget *destdisp = dt_ui_section_label_new(_(&quot;destination/display&quot;));</a>
+<a name="ln1812">  g-&gt;extra_toggle = dtgtk_togglebutton_new(dtgtk_cairo_paint_solid_arrow, CPF_DO_NOT_USE_BORDER | CPF_STYLE_BOX | CPF_DIRECTION_LEFT, NULL);</a>
+<a name="ln1813">  gtk_widget_set_size_request(g-&gt;extra_toggle,  DT_PIXEL_APPLY_DPI(15), DT_PIXEL_APPLY_DPI(15));</a>
+<a name="ln1814">  GtkWidget *extra_options = gtk_box_new(GTK_ORIENTATION_VERTICAL, DT_BAUHAUS_SPACE);</a>
+<a name="ln1815">  gtk_box_pack_start(GTK_BOX(destdisp_head), destdisp, TRUE, TRUE, 0);</a>
+<a name="ln1816">  gtk_box_pack_start(GTK_BOX(destdisp_head), g-&gt;extra_toggle, FALSE, FALSE, 0);</a>
+<a name="ln1817">  gtk_widget_set_visible(extra_options, FALSE);</a>
+<a name="ln1818">  g-&gt;extra_expander = dtgtk_expander_new(destdisp_head, extra_options);</a>
+<a name="ln1819">  dtgtk_expander_set_expanded(DTGTK_EXPANDER(g-&gt;extra_expander), TRUE);</a>
+<a name="ln1820">  gtk_box_pack_start(GTK_BOX(self-&gt;widget), g-&gt;extra_expander, FALSE, FALSE, 0);</a>
+<a name="ln1821"> </a>
+<a name="ln1822">  g_signal_connect(G_OBJECT(g-&gt;extra_toggle), &quot;toggled&quot;, G_CALLBACK(_extra_options_button_changed),  (gpointer)self);</a>
+<a name="ln1823"> </a>
+<a name="ln1824">  // Black slider</a>
+<a name="ln1825">  g-&gt;black_point_target = dt_bauhaus_slider_new_with_range(self, 0.0, 100.0, 1, p-&gt;black_point_target, 2);</a>
+<a name="ln1826">  dt_bauhaus_widget_set_label(g-&gt;black_point_target, NULL, _(&quot;target black luminance&quot;));</a>
+<a name="ln1827">  gtk_box_pack_start(GTK_BOX(extra_options), g-&gt;black_point_target, FALSE, FALSE, 0);</a>
+<a name="ln1828">  dt_bauhaus_slider_set_format(g-&gt;black_point_target, &quot;%.2f %%&quot;);</a>
+<a name="ln1829">  gtk_widget_set_tooltip_text(g-&gt;black_point_target, _(&quot;luminance of output pure black, &quot;</a>
+<a name="ln1830">                                                        &quot;this should be 0%\nexcept if you want a faded look&quot;));</a>
+<a name="ln1831">  g_signal_connect(G_OBJECT(g-&gt;black_point_target), &quot;value-changed&quot;, G_CALLBACK(black_point_target_callback), self);</a>
+<a name="ln1832"> </a>
+<a name="ln1833">  // grey_point_source slider</a>
+<a name="ln1834">  g-&gt;grey_point_target = dt_bauhaus_slider_new_with_range(self, 0.1, 50., 0.5, p-&gt;grey_point_target, 2);</a>
+<a name="ln1835">  dt_bauhaus_widget_set_label(g-&gt;grey_point_target, NULL, _(&quot;target middle grey&quot;));</a>
+<a name="ln1836">  gtk_box_pack_start(GTK_BOX(extra_options), g-&gt;grey_point_target, FALSE, FALSE, 0);</a>
+<a name="ln1837">  dt_bauhaus_slider_set_format(g-&gt;grey_point_target, &quot;%.2f %%&quot;);</a>
+<a name="ln1838">  gtk_widget_set_tooltip_text(g-&gt;grey_point_target, _(&quot;midde grey value of the target display or color space.\n&quot;</a>
+<a name="ln1839">                                                      &quot;you should never touch that unless you know what you are doing.&quot;));</a>
+<a name="ln1840">  g_signal_connect(G_OBJECT(g-&gt;grey_point_target), &quot;value-changed&quot;, G_CALLBACK(grey_point_target_callback), self);</a>
+<a name="ln1841"> </a>
+<a name="ln1842">  // White slider</a>
+<a name="ln1843">  g-&gt;white_point_target = dt_bauhaus_slider_new_with_range(self, 0.0, 100.0, 1., p-&gt;white_point_target, 2);</a>
+<a name="ln1844">  dt_bauhaus_widget_set_label(g-&gt;white_point_target, NULL, _(&quot;target white luminance&quot;));</a>
+<a name="ln1845">  gtk_box_pack_start(GTK_BOX(extra_options), g-&gt;white_point_target, FALSE, FALSE, 0);</a>
+<a name="ln1846">  dt_bauhaus_slider_set_format(g-&gt;white_point_target, &quot;%.2f %%&quot;);</a>
+<a name="ln1847">  gtk_widget_set_tooltip_text(g-&gt;white_point_target, _(&quot;luminance of output pure white, &quot;</a>
+<a name="ln1848">                                                        &quot;this should be 100%\nexcept if you want a faded look&quot;));</a>
+<a name="ln1849">  g_signal_connect(G_OBJECT(g-&gt;white_point_target), &quot;value-changed&quot;, G_CALLBACK(white_point_target_callback), self);</a>
+<a name="ln1850"> </a>
+<a name="ln1851">  // power/gamma slider</a>
+<a name="ln1852">  g-&gt;output_power = dt_bauhaus_slider_new_with_range(self, 1.0, 2.4, 0.1, p-&gt;output_power, 2);</a>
+<a name="ln1853">  dt_bauhaus_widget_set_label(g-&gt;output_power, NULL, _(&quot;target gamma&quot;));</a>
+<a name="ln1854">  gtk_box_pack_start(GTK_BOX(extra_options), g-&gt;output_power, FALSE, FALSE, 0);</a>
+<a name="ln1855">  gtk_widget_set_tooltip_text(g-&gt;output_power, _(&quot;power or gamma of the transfer function\nof the display or color space.\n&quot;</a>
+<a name="ln1856">                                                 &quot;you should never touch that unless you know what you are doing.&quot;));</a>
+<a name="ln1857">  g_signal_connect(G_OBJECT(g-&gt;output_power), &quot;value-changed&quot;, G_CALLBACK(output_power_callback), self);</a>
+<a name="ln1858"> </a>
+<a name="ln1859">  dt_iop_init_picker(&amp;g-&gt;color_picker,</a>
+<a name="ln1860">              self,</a>
+<a name="ln1861">              DT_COLOR_PICKER_AREA,</a>
+<a name="ln1862">              _iop_color_picker_get_set,</a>
+<a name="ln1863">              _iop_color_picker_apply,</a>
+<a name="ln1864">              _iop_color_picker_update);</a>
+<a name="ln1865">}</a>
+<a name="ln1866"> </a>
+<a name="ln1867"> </a>
+<a name="ln1868">void gui_cleanup(dt_iop_module_t *self)</a>
+<a name="ln1869">{</a>
+<a name="ln1870">  free(self-&gt;gui_data);</a>
+<a name="ln1871">  self-&gt;gui_data = NULL;</a>
+<a name="ln1872">}</a>
+<a name="ln1873"> </a>
+<a name="ln1874">// modelines: These editor modelines have been set for all relevant files by tools/update_modelines.sh</a>
+<a name="ln1875">// vim: shiftwidth=2 expandtab tabstop=2 cindent</a>
+<a name="ln1876">// kate: tab-indents: off; indent-width 2; replace-tabs on; indent-mode cstyle; remove-trailing-spaces modified;</a>
+
+</code></pre>
+<div class="balloon" rel="1227"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v522/" target="_blank">V522</a> Dereferencing of the null pointer 'nodes_data' might take place. The potential null pointer is passed into 'compute_curve_lut' function. Inspect the sixth argument. Check lines: 1227, 1396, 1395.</p></div>
+<div class="balloon" rel="1501"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v575/" target="_blank">V575</a> The potential null pointer is passed into 'memcpy' function. Inspect the first argument. Check lines: 1501, 1477.</p></div>
+<div class="balloon" rel="1502"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v575/" target="_blank">V575</a> The potential null pointer is passed into 'memcpy' function. Inspect the first argument. Check lines: 1502, 1478.</p></div>
+<div class="balloon" rel="1512"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v522/" target="_blank">V522</a> There might be dereferencing of a potential null pointer 'gd'. Check lines: 1512, 1509.</p></div>
+<div class="balloon" rel="1227"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v522/" target="_blank">V522</a> Dereferencing of the null pointer 'nodes_data' might take place. The potential null pointer is passed into 'compute_curve_lut' function. Inspect the sixth argument. Check lines: 1227, 1545, 1544.</p></div>
+<div class="balloon" rel="1661"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v522/" target="_blank">V522</a> There might be dereferencing of a potential null pointer 'g'. Check lines: 1661, 1653.</p></div>
+
+<link rel="stylesheet" href="highlight.css">
+<script src="highlight.pack.js"></script>
+<script src="highlightjs-line-numbers.js"></script>
+<script>hljs.initHighlightingOnLoad();</script>
+<script>hljs.initLineNumbersOnLoad();</script>
+<script>
+  $(document).ready(function() {
+      $('.balloon').each(function () {
+          var bl = $(this);
+          var line = bl.attr('rel');
+          var text = $('a[name="ln'+line+'"]').text();
+
+          var space_count = 0;
+          for(var i = 0; i<text.length; i++){
+              var char = text[i];
+              if((char !== ' ')&&(char !== '\t'))break;
+              if(char === '\t')space_count++;
+              space_count++;
+          }
+
+          bl.css('margin-left', space_count*8);
+          $('a[name="ln'+line+'"]').after(bl);
+      });
+
+      window.location = window.location;
+  });
+</script>
+</body>
+</html>

@@ -1,0 +1,1256 @@
+
+<html>
+<head>
+  <link rel="stylesheet" href="../style.css"/>
+  <script src="../jquery-3.2.1.min.js"></script>
+</head>
+<body>
+<pre><code class = "cpp">
+<a name="ln1">/*</a>
+<a name="ln2">    This file is part of darktable,</a>
+<a name="ln3">    copyright (c) 2010 Henrik Andersson.</a>
+<a name="ln4"> </a>
+<a name="ln5">    darktable is free software: you can redistribute it and/or modify</a>
+<a name="ln6">    it under the terms of the GNU General Public License as published by</a>
+<a name="ln7">    the Free Software Foundation, either version 3 of the License, or</a>
+<a name="ln8">    (at your option) any later version.</a>
+<a name="ln9"> </a>
+<a name="ln10">    darktable is distributed in the hope that it will be useful,</a>
+<a name="ln11">    but WITHOUT ANY WARRANTY; without even the implied warranty of</a>
+<a name="ln12">    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the</a>
+<a name="ln13">    GNU General Public License for more details.</a>
+<a name="ln14"> </a>
+<a name="ln15">    You should have received a copy of the GNU General Public License</a>
+<a name="ln16">    along with darktable.  If not, see &lt;http://www.gnu.org/licenses/&gt;.</a>
+<a name="ln17">*/</a>
+<a name="ln18">#ifdef HAVE_CONFIG_H</a>
+<a name="ln19">#include &quot;config.h&quot;</a>
+<a name="ln20">#endif</a>
+<a name="ln21">#include &lt;assert.h&gt;</a>
+<a name="ln22">#include &lt;math.h&gt;</a>
+<a name="ln23">#include &lt;stdlib.h&gt;</a>
+<a name="ln24">#include &lt;string.h&gt;</a>
+<a name="ln25"> </a>
+<a name="ln26">#include &quot;bauhaus/bauhaus.h&quot;</a>
+<a name="ln27">#include &quot;common/opencl.h&quot;</a>
+<a name="ln28">#include &quot;control/control.h&quot;</a>
+<a name="ln29">#include &quot;develop/blend.h&quot;</a>
+<a name="ln30">#include &quot;develop/develop.h&quot;</a>
+<a name="ln31">#include &quot;develop/imageop.h&quot;</a>
+<a name="ln32">#include &quot;dtgtk/resetlabel.h&quot;</a>
+<a name="ln33">#include &quot;gui/accelerators.h&quot;</a>
+<a name="ln34">#include &quot;gui/gtk.h&quot;</a>
+<a name="ln35">#include &quot;gui/presets.h&quot;</a>
+<a name="ln36">#include &quot;iop/iop_api.h&quot;</a>
+<a name="ln37">#include &lt;gtk/gtk.h&gt;</a>
+<a name="ln38">#include &lt;inttypes.h&gt;</a>
+<a name="ln39"> </a>
+<a name="ln40">DT_MODULE_INTROSPECTION(4, dt_iop_vignette_params_t)</a>
+<a name="ln41"> </a>
+<a name="ln42">#define CLIP(x) ((x &lt; 0) ? 0.0 : (x &gt; 1.0) ? 1.0 : x)</a>
+<a name="ln43">#define TEA_ROUNDS 8</a>
+<a name="ln44"> </a>
+<a name="ln45">typedef enum dt_iop_dither_t</a>
+<a name="ln46">{</a>
+<a name="ln47">  DITHER_OFF = 0,</a>
+<a name="ln48">  DITHER_8BIT = 1,</a>
+<a name="ln49">  DITHER_16BIT = 2</a>
+<a name="ln50">} dt_iop_dither_t;</a>
+<a name="ln51"> </a>
+<a name="ln52">typedef struct dt_iop_dvector_2d_t</a>
+<a name="ln53">{</a>
+<a name="ln54">  double x;</a>
+<a name="ln55">  double y;</a>
+<a name="ln56">} dt_iop_dvector_2d_t;</a>
+<a name="ln57"> </a>
+<a name="ln58">typedef struct dt_iop_fvector_2d_t</a>
+<a name="ln59">{</a>
+<a name="ln60">  float x;</a>
+<a name="ln61">  float y;</a>
+<a name="ln62">} dt_iop_vector_2d_t;</a>
+<a name="ln63"> </a>
+<a name="ln64">typedef struct dt_iop_vignette_params1_t</a>
+<a name="ln65">{</a>
+<a name="ln66">  double scale;         // 0 - 100 Radie</a>
+<a name="ln67">  double falloff_scale; // 0 - 100 Radie for falloff inner radie of falloff=scale and</a>
+<a name="ln68">                        // outer=scale+falloff_scale</a>
+<a name="ln69">  double strength;      // 0 - 1 strength of effect</a>
+<a name="ln70">  double uniformity;    // 0 - 1 uniformity of center</a>
+<a name="ln71">  double bsratio;       // -1 - +1 ratio of brightness/saturation effect</a>
+<a name="ln72">  gboolean invert_falloff;</a>
+<a name="ln73">  gboolean invert_saturation;</a>
+<a name="ln74">  dt_iop_dvector_2d_t center; // Center of vignette</a>
+<a name="ln75">} dt_iop_vignette_params1_t;</a>
+<a name="ln76"> </a>
+<a name="ln77">typedef struct dt_iop_vignette_params2_t</a>
+<a name="ln78">{</a>
+<a name="ln79">  float scale;               // 0 - 100 Inner radius, percent of largest image dimension</a>
+<a name="ln80">  float falloff_scale;       // 0 - 100 Radius for falloff -- outer radius = inner radius + falloff_scale</a>
+<a name="ln81">  float brightness;          // -1 - 1 Strength of brightness reduction</a>
+<a name="ln82">  float saturation;          // -1 - 1 Strength of saturation reduction</a>
+<a name="ln83">  dt_iop_vector_2d_t center; // Center of vignette</a>
+<a name="ln84">  gboolean autoratio;        //</a>
+<a name="ln85">  float whratio;             // 0-1 = width/height ratio, 1-2 = height/width ratio + 1</a>
+<a name="ln86">  float shape;</a>
+<a name="ln87">} dt_iop_vignette_params2_t;</a>
+<a name="ln88"> </a>
+<a name="ln89">typedef struct dt_iop_vignette_params3_t</a>
+<a name="ln90">{</a>
+<a name="ln91">  float scale;               // 0 - 100 Inner radius, percent of largest image dimension</a>
+<a name="ln92">  float falloff_scale;       // 0 - 100 Radius for falloff -- outer radius = inner radius + falloff_scale</a>
+<a name="ln93">  float brightness;          // -1 - 1 Strength of brightness reduction</a>
+<a name="ln94">  float saturation;          // -1 - 1 Strength of saturation reduction</a>
+<a name="ln95">  dt_iop_vector_2d_t center; // Center of vignette</a>
+<a name="ln96">  gboolean autoratio;        //</a>
+<a name="ln97">  float whratio;             // 0-1 = width/height ratio, 1-2 = height/width ratio + 1</a>
+<a name="ln98">  float shape;</a>
+<a name="ln99">  int dithering; // if and how to perform dithering</a>
+<a name="ln100">} dt_iop_vignette_params3_t;</a>
+<a name="ln101"> </a>
+<a name="ln102">typedef struct dt_iop_vignette_params_t</a>
+<a name="ln103">{</a>
+<a name="ln104">  float scale;               // 0 - 100 Inner radius, percent of largest image dimension</a>
+<a name="ln105">  float falloff_scale;       // 0 - 100 Radius for falloff -- outer radius = inner radius + falloff_scale</a>
+<a name="ln106">  float brightness;          // -1 - 1 Strength of brightness reduction</a>
+<a name="ln107">  float saturation;          // -1 - 1 Strength of saturation reduction</a>
+<a name="ln108">  dt_iop_vector_2d_t center; // Center of vignette</a>
+<a name="ln109">  gboolean autoratio;        //</a>
+<a name="ln110">  float whratio;             // 0-1 = width/height ratio, 1-2 = height/width ratio + 1</a>
+<a name="ln111">  float shape;</a>
+<a name="ln112">  int dithering;    // if and how to perform dithering</a>
+<a name="ln113">  gboolean unbound; // whether the values should be clipped</a>
+<a name="ln114">} dt_iop_vignette_params_t;</a>
+<a name="ln115"> </a>
+<a name="ln116"> </a>
+<a name="ln117">typedef struct dt_iop_vignette_gui_data_t</a>
+<a name="ln118">{</a>
+<a name="ln119">  GtkWidget *scale;</a>
+<a name="ln120">  GtkWidget *falloff_scale;</a>
+<a name="ln121">  GtkWidget *brightness;</a>
+<a name="ln122">  GtkWidget *saturation;</a>
+<a name="ln123">  GtkWidget *center_x;</a>
+<a name="ln124">  GtkWidget *center_y;</a>
+<a name="ln125">  GtkToggleButton *autoratio;</a>
+<a name="ln126">  GtkWidget *whratio;</a>
+<a name="ln127">  GtkWidget *shape;</a>
+<a name="ln128">  GtkWidget *dithering;</a>
+<a name="ln129">} dt_iop_vignette_gui_data_t;</a>
+<a name="ln130"> </a>
+<a name="ln131">typedef struct dt_iop_vignette_data_t</a>
+<a name="ln132">{</a>
+<a name="ln133">  float scale;</a>
+<a name="ln134">  float falloff_scale;</a>
+<a name="ln135">  float brightness;</a>
+<a name="ln136">  float saturation;</a>
+<a name="ln137">  dt_iop_vector_2d_t center; // Center of vignette</a>
+<a name="ln138">  gboolean autoratio;</a>
+<a name="ln139">  float whratio;</a>
+<a name="ln140">  float shape;</a>
+<a name="ln141">  int dithering;</a>
+<a name="ln142">  gboolean unbound;</a>
+<a name="ln143">} dt_iop_vignette_data_t;</a>
+<a name="ln144"> </a>
+<a name="ln145">typedef struct dt_iop_vignette_global_data_t</a>
+<a name="ln146">{</a>
+<a name="ln147">  int kernel_vignette;</a>
+<a name="ln148">} dt_iop_vignette_global_data_t;</a>
+<a name="ln149"> </a>
+<a name="ln150"> </a>
+<a name="ln151">const char *name()</a>
+<a name="ln152">{</a>
+<a name="ln153">  return _(&quot;vignetting&quot;);</a>
+<a name="ln154">}</a>
+<a name="ln155"> </a>
+<a name="ln156">int flags()</a>
+<a name="ln157">{</a>
+<a name="ln158">  return IOP_FLAGS_INCLUDE_IN_STYLES | IOP_FLAGS_SUPPORTS_BLENDING | IOP_FLAGS_ALLOW_TILING</a>
+<a name="ln159">         | IOP_FLAGS_TILING_FULL_ROI;</a>
+<a name="ln160">}</a>
+<a name="ln161"> </a>
+<a name="ln162">int default_group()</a>
+<a name="ln163">{</a>
+<a name="ln164">  return IOP_GROUP_EFFECT;</a>
+<a name="ln165">}</a>
+<a name="ln166"> </a>
+<a name="ln167">int default_colorspace(dt_iop_module_t *self, dt_dev_pixelpipe_t *pipe, dt_dev_pixelpipe_iop_t *piece)</a>
+<a name="ln168">{</a>
+<a name="ln169">  return iop_cs_rgb;</a>
+<a name="ln170">}</a>
+<a name="ln171"> </a>
+<a name="ln172">void init_key_accels(dt_iop_module_so_t *self)</a>
+<a name="ln173">{</a>
+<a name="ln174">  dt_accel_register_slider_iop(self, FALSE, NC_(&quot;accel&quot;, &quot;scale&quot;));</a>
+<a name="ln175">  dt_accel_register_slider_iop(self, FALSE, NC_(&quot;accel&quot;, &quot;fall-off strength&quot;));</a>
+<a name="ln176">  dt_accel_register_slider_iop(self, FALSE, NC_(&quot;accel&quot;, &quot;brightness&quot;));</a>
+<a name="ln177">  dt_accel_register_slider_iop(self, FALSE, NC_(&quot;accel&quot;, &quot;saturation&quot;));</a>
+<a name="ln178">  dt_accel_register_slider_iop(self, FALSE, NC_(&quot;accel&quot;, &quot;horizontal center&quot;));</a>
+<a name="ln179">  dt_accel_register_slider_iop(self, FALSE, NC_(&quot;accel&quot;, &quot;vertical center&quot;));</a>
+<a name="ln180">  dt_accel_register_slider_iop(self, FALSE, NC_(&quot;accel&quot;, &quot;shape&quot;));</a>
+<a name="ln181">  dt_accel_register_slider_iop(self, FALSE, NC_(&quot;accel&quot;, &quot;width-height ratio&quot;));</a>
+<a name="ln182">  dt_accel_register_slider_iop(self, FALSE, NC_(&quot;accel&quot;, &quot;dithering&quot;));</a>
+<a name="ln183">}</a>
+<a name="ln184"> </a>
+<a name="ln185">void connect_key_accels(dt_iop_module_t *self)</a>
+<a name="ln186">{</a>
+<a name="ln187">  dt_iop_vignette_gui_data_t *g = (dt_iop_vignette_gui_data_t *)self-&gt;gui_data;</a>
+<a name="ln188"> </a>
+<a name="ln189">  dt_accel_connect_slider_iop(self, &quot;scale&quot;, GTK_WIDGET(g-&gt;scale));</a>
+<a name="ln190">  dt_accel_connect_slider_iop(self, &quot;fall-off strength&quot;, GTK_WIDGET(g-&gt;falloff_scale));</a>
+<a name="ln191">  dt_accel_connect_slider_iop(self, &quot;brightness&quot;, GTK_WIDGET(g-&gt;brightness));</a>
+<a name="ln192">  dt_accel_connect_slider_iop(self, &quot;saturation&quot;, GTK_WIDGET(g-&gt;saturation));</a>
+<a name="ln193">  dt_accel_connect_slider_iop(self, &quot;horizontal center&quot;, GTK_WIDGET(g-&gt;center_x));</a>
+<a name="ln194">  dt_accel_connect_slider_iop(self, &quot;vertical center&quot;, GTK_WIDGET(g-&gt;center_y));</a>
+<a name="ln195">  dt_accel_connect_slider_iop(self, &quot;shape&quot;, GTK_WIDGET(g-&gt;shape));</a>
+<a name="ln196">  dt_accel_connect_slider_iop(self, &quot;width-height ratio&quot;, GTK_WIDGET(g-&gt;whratio));</a>
+<a name="ln197">  dt_accel_connect_slider_iop(self, &quot;dithering&quot;, GTK_WIDGET(g-&gt;dithering));</a>
+<a name="ln198">}</a>
+<a name="ln199"> </a>
+<a name="ln200">int legacy_params(dt_iop_module_t *self, const void *const old_params, const int old_version,</a>
+<a name="ln201">                  void *new_params, const int new_version)</a>
+<a name="ln202">{</a>
+<a name="ln203">  if(old_version == 1 &amp;&amp; new_version == 4)</a>
+<a name="ln204">  {</a>
+<a name="ln205">    const dt_iop_vignette_params1_t *old = old_params;</a>
+<a name="ln206">    dt_iop_vignette_params_t *new = new_params;</a>
+<a name="ln207">    new-&gt;scale = old-&gt;scale;</a>
+<a name="ln208">    new-&gt;falloff_scale = old-&gt;falloff_scale;</a>
+<a name="ln209">    new-&gt;brightness = -(1.0 - MAX(old-&gt;bsratio, 0.0)) * old-&gt;strength / 100.0;</a>
+<a name="ln210">    new-&gt;saturation = -(1.0 + MIN(old-&gt;bsratio, 0.0)) * old-&gt;strength / 100.0;</a>
+<a name="ln211">    if(old-&gt;invert_saturation) new-&gt;saturation *= -2.0; // Double effect for increasing saturation</a>
+<a name="ln212">    if(old-&gt;invert_falloff) new-&gt;brightness = -new-&gt;brightness;</a>
+<a name="ln213">    new-&gt;center.x = old-&gt;center.x;</a>
+<a name="ln214">    new-&gt;center.y = old-&gt;center.y;</a>
+<a name="ln215">    new-&gt;autoratio = TRUE;</a>
+<a name="ln216">    new-&gt;whratio = 1.0;</a>
+<a name="ln217">    new-&gt;shape = 1.0;</a>
+<a name="ln218">    new-&gt;dithering = DITHER_OFF;</a>
+<a name="ln219">    new-&gt;unbound = FALSE;</a>
+<a name="ln220">    return 0;</a>
+<a name="ln221">  }</a>
+<a name="ln222">  if(old_version == 2 &amp;&amp; new_version == 4)</a>
+<a name="ln223">  {</a>
+<a name="ln224">    const dt_iop_vignette_params2_t *old = old_params;</a>
+<a name="ln225">    dt_iop_vignette_params_t *new = new_params;</a>
+<a name="ln226">    new-&gt;scale = old-&gt;scale;</a>
+<a name="ln227">    new-&gt;falloff_scale = old-&gt;falloff_scale;</a>
+<a name="ln228">    new-&gt;brightness = old-&gt;brightness;</a>
+<a name="ln229">    new-&gt;saturation = old-&gt;saturation;</a>
+<a name="ln230">    new-&gt;center.x = old-&gt;center.x;</a>
+<a name="ln231">    new-&gt;center.y = old-&gt;center.y;</a>
+<a name="ln232">    new-&gt;autoratio = old-&gt;autoratio;</a>
+<a name="ln233">    new-&gt;whratio = old-&gt;whratio;</a>
+<a name="ln234">    new-&gt;shape = old-&gt;shape;</a>
+<a name="ln235">    new-&gt;dithering = DITHER_OFF;</a>
+<a name="ln236">    new-&gt;unbound = FALSE;</a>
+<a name="ln237">    return 0;</a>
+<a name="ln238">  }</a>
+<a name="ln239">  if(old_version == 3 &amp;&amp; new_version == 4)</a>
+<a name="ln240">  {</a>
+<a name="ln241">    const dt_iop_vignette_params3_t *old = old_params;</a>
+<a name="ln242">    dt_iop_vignette_params_t *new = new_params;</a>
+<a name="ln243">    new-&gt;scale = old-&gt;scale;</a>
+<a name="ln244">    new-&gt;falloff_scale = old-&gt;falloff_scale;</a>
+<a name="ln245">    new-&gt;brightness = old-&gt;brightness;</a>
+<a name="ln246">    new-&gt;saturation = old-&gt;saturation;</a>
+<a name="ln247">    new-&gt;center.x = old-&gt;center.x;</a>
+<a name="ln248">    new-&gt;center.y = old-&gt;center.y;</a>
+<a name="ln249">    new-&gt;autoratio = old-&gt;autoratio;</a>
+<a name="ln250">    new-&gt;whratio = old-&gt;whratio;</a>
+<a name="ln251">    new-&gt;shape = old-&gt;shape;</a>
+<a name="ln252">    new-&gt;dithering = old-&gt;dithering;</a>
+<a name="ln253">    new-&gt;unbound = FALSE;</a>
+<a name="ln254">    return 0;</a>
+<a name="ln255">  }</a>
+<a name="ln256"> </a>
+<a name="ln257">  return 1;</a>
+<a name="ln258">}</a>
+<a name="ln259"> </a>
+<a name="ln260"> </a>
+<a name="ln261">static void encrypt_tea(unsigned int *arg)</a>
+<a name="ln262">{</a>
+<a name="ln263">  const unsigned int key[] = { 0xa341316c, 0xc8013ea4, 0xad90777d, 0x7e95761e };</a>
+<a name="ln264">  unsigned int v0 = arg[0], v1 = arg[1];</a>
+<a name="ln265">  unsigned int sum = 0;</a>
+<a name="ln266">  unsigned int delta = 0x9e3779b9;</a>
+<a name="ln267">  for(int i = 0; i &lt; TEA_ROUNDS; i++)</a>
+<a name="ln268">  {</a>
+<a name="ln269">    sum += delta;</a>
+<a name="ln270">    v0 += ((v1 &lt;&lt; 4) + key[0]) ^ (v1 + sum) ^ ((v1 &gt;&gt; 5) + key[1]);</a>
+<a name="ln271">    v1 += ((v0 &lt;&lt; 4) + key[2]) ^ (v0 + sum) ^ ((v0 &gt;&gt; 5) + key[3]);</a>
+<a name="ln272">  }</a>
+<a name="ln273">  arg[0] = v0;</a>
+<a name="ln274">  arg[1] = v1;</a>
+<a name="ln275">}</a>
+<a name="ln276"> </a>
+<a name="ln277">static float tpdf(unsigned int urandom)</a>
+<a name="ln278">{</a>
+<a name="ln279">  float frandom = (float)urandom / 0xFFFFFFFFu;</a>
+<a name="ln280"> </a>
+<a name="ln281">  return (frandom &lt; 0.5f ? (sqrtf(2.0f * frandom) - 1.0f) : (1.0f - sqrtf(2.0f * (1.0f - frandom))));</a>
+<a name="ln282">}</a>
+<a name="ln283"> </a>
+<a name="ln284">static int get_grab(float pointerx, float pointery, float startx, float starty, float endx, float endy,</a>
+<a name="ln285">                    float zoom_scale)</a>
+<a name="ln286">{</a>
+<a name="ln287">  const float radius = 5.0 / zoom_scale;</a>
+<a name="ln288"> </a>
+<a name="ln289">  if(powf(pointerx - startx, 2) + powf(pointery, 2) &lt;= powf(radius, 2)) return 2; // x size</a>
+<a name="ln290">  if(powf(pointerx, 2) + powf(pointery - starty, 2) &lt;= powf(radius, 2)) return 4; // y size</a>
+<a name="ln291">  if(powf(pointerx, 2) + powf(pointery, 2) &lt;= powf(radius, 2)) return 1;          // center</a>
+<a name="ln292">  if(powf(pointerx - endx, 2) + powf(pointery, 2) &lt;= powf(radius, 2)) return 8;   // x falloff</a>
+<a name="ln293">  if(powf(pointerx, 2) + powf(pointery - endy, 2) &lt;= powf(radius, 2)) return 16;  // y falloff</a>
+<a name="ln294"> </a>
+<a name="ln295">  return 0;</a>
+<a name="ln296">}</a>
+<a name="ln297"> </a>
+<a name="ln298">static void draw_overlay(cairo_t *cr, float x, float y, float fx, float fy, int grab, float zoom_scale)</a>
+<a name="ln299">{</a>
+<a name="ln300">  // half width/height of the crosshair</a>
+<a name="ln301">  float crosshair_w = DT_PIXEL_APPLY_DPI(10.0) / zoom_scale;</a>
+<a name="ln302">  float crosshair_h = DT_PIXEL_APPLY_DPI(10.0) / zoom_scale;</a>
+<a name="ln303"> </a>
+<a name="ln304">  // center crosshair</a>
+<a name="ln305">  cairo_move_to(cr, -crosshair_w, 0.0);</a>
+<a name="ln306">  cairo_line_to(cr, crosshair_w, 0.0);</a>
+<a name="ln307">  cairo_move_to(cr, 0.0, -crosshair_h);</a>
+<a name="ln308">  cairo_line_to(cr, 0.0, crosshair_h);</a>
+<a name="ln309">  cairo_stroke(cr);</a>
+<a name="ln310"> </a>
+<a name="ln311">  // inner border of the vignette</a>
+<a name="ln312">  cairo_save(cr);</a>
+<a name="ln313">  if(x &lt;= y)</a>
+<a name="ln314">  {</a>
+<a name="ln315">    cairo_scale(cr, x / y, 1.0);</a>
+<a name="ln316">    cairo_arc(cr, 0.0, 0.0, y, 0.0, M_PI * 2.0);</a>
+<a name="ln317">  }</a>
+<a name="ln318">  else</a>
+<a name="ln319">  {</a>
+<a name="ln320">    cairo_scale(cr, 1.0, y / x);</a>
+<a name="ln321">    cairo_arc(cr, 0.0, 0.0, x, 0.0, M_PI * 2.0);</a>
+<a name="ln322">  }</a>
+<a name="ln323">  cairo_restore(cr);</a>
+<a name="ln324">  cairo_stroke(cr);</a>
+<a name="ln325"> </a>
+<a name="ln326">  // outer border of the vignette</a>
+<a name="ln327">  cairo_save(cr);</a>
+<a name="ln328">  if(fx &lt;= fy)</a>
+<a name="ln329">  {</a>
+<a name="ln330">    cairo_scale(cr, fx / fy, 1.0);</a>
+<a name="ln331">    cairo_arc(cr, 0.0, 0.0, fy, 0.0, M_PI * 2.0);</a>
+<a name="ln332">  }</a>
+<a name="ln333">  else</a>
+<a name="ln334">  {</a>
+<a name="ln335">    cairo_scale(cr, 1.0, fy / fx);</a>
+<a name="ln336">    cairo_arc(cr, 0.0, 0.0, fx, 0.0, M_PI * 2.0);</a>
+<a name="ln337">  }</a>
+<a name="ln338">  cairo_restore(cr);</a>
+<a name="ln339">  cairo_stroke(cr);</a>
+<a name="ln340"> </a>
+<a name="ln341">  // the handles</a>
+<a name="ln342">  const float radius_sel = DT_PIXEL_APPLY_DPI(6.0) / zoom_scale;</a>
+<a name="ln343">  const float radius_reg = DT_PIXEL_APPLY_DPI(4.0) / zoom_scale;</a>
+<a name="ln344">  if(grab == 1)</a>
+<a name="ln345">    cairo_arc(cr, 0.0, 0.0, radius_sel, 0.0, M_PI * 2.0);</a>
+<a name="ln346">  else</a>
+<a name="ln347">    cairo_arc(cr, 0.0, 0.0, radius_reg, 0.0, M_PI * 2.0);</a>
+<a name="ln348">  cairo_stroke(cr);</a>
+<a name="ln349">  if(grab == 2)</a>
+<a name="ln350">    cairo_arc(cr, x, 0.0, radius_sel, 0.0, M_PI * 2.0);</a>
+<a name="ln351">  else</a>
+<a name="ln352">    cairo_arc(cr, x, 0.0, radius_reg, 0.0, M_PI * 2.0);</a>
+<a name="ln353">  cairo_stroke(cr);</a>
+<a name="ln354">  if(grab == 4)</a>
+<a name="ln355">    cairo_arc(cr, 0.0, -y, radius_sel, 0.0, M_PI * 2.0);</a>
+<a name="ln356">  else</a>
+<a name="ln357">    cairo_arc(cr, 0.0, -y, radius_reg, 0.0, M_PI * 2.0);</a>
+<a name="ln358">  cairo_stroke(cr);</a>
+<a name="ln359">  if(grab == 8)</a>
+<a name="ln360">    cairo_arc(cr, fx, 0.0, radius_sel, 0.0, M_PI * 2.0);</a>
+<a name="ln361">  else</a>
+<a name="ln362">    cairo_arc(cr, fx, 0.0, radius_reg, 0.0, M_PI * 2.0);</a>
+<a name="ln363">  cairo_stroke(cr);</a>
+<a name="ln364">  if(grab == 16)</a>
+<a name="ln365">    cairo_arc(cr, 0.0, -fy, radius_sel, 0.0, M_PI * 2.0);</a>
+<a name="ln366">  else</a>
+<a name="ln367">    cairo_arc(cr, 0.0, -fy, radius_reg, 0.0, M_PI * 2.0);</a>
+<a name="ln368">  cairo_stroke(cr);</a>
+<a name="ln369">}</a>
+<a name="ln370"> </a>
+<a name="ln371">// FIXME: For portrait images the overlay is a bit off. The coordinates in mouse_moved seem to be ok though.</a>
+<a name="ln372">// WTF?</a>
+<a name="ln373">void gui_post_expose(struct dt_iop_module_t *self, cairo_t *cr, int32_t width, int32_t height,</a>
+<a name="ln374">                     int32_t pointerx, int32_t pointery)</a>
+<a name="ln375">{</a>
+<a name="ln376">  dt_develop_t *dev = self-&gt;dev;</a>
+<a name="ln377">  //   dt_iop_vignette_gui_data_t *g = (dt_iop_vignette_gui_data_t *)self-&gt;gui_data;</a>
+<a name="ln378">  dt_iop_vignette_params_t *p = (dt_iop_vignette_params_t *)self-&gt;params;</a>
+<a name="ln379"> </a>
+<a name="ln380">  float wd = dev-&gt;preview_pipe-&gt;backbuf_width;</a>
+<a name="ln381">  float ht = dev-&gt;preview_pipe-&gt;backbuf_height;</a>
+<a name="ln382">  float bigger_side, smaller_side;</a>
+<a name="ln383">  if(wd &gt;= ht)</a>
+<a name="ln384">  {</a>
+<a name="ln385">    bigger_side = wd;</a>
+<a name="ln386">    smaller_side = ht;</a>
+<a name="ln387">  }</a>
+<a name="ln388">  else</a>
+<a name="ln389">  {</a>
+<a name="ln390">    bigger_side = ht;</a>
+<a name="ln391">    smaller_side = wd;</a>
+<a name="ln392">  }</a>
+<a name="ln393">  float zoom_y = dt_control_get_dev_zoom_y();</a>
+<a name="ln394">  float zoom_x = dt_control_get_dev_zoom_x();</a>
+<a name="ln395">  dt_dev_zoom_t zoom = dt_control_get_dev_zoom();</a>
+<a name="ln396">  int closeup = dt_control_get_dev_closeup();</a>
+<a name="ln397">  float zoom_scale = dt_dev_get_zoom_scale(dev, zoom, 1&lt;&lt;closeup, 1);</a>
+<a name="ln398">  float pzx, pzy;</a>
+<a name="ln399">  dt_dev_get_pointer_zoom_pos(dev, pointerx, pointery, &amp;pzx, &amp;pzy);</a>
+<a name="ln400">  pzx += 0.5f;</a>
+<a name="ln401">  pzy += 0.5f;</a>
+<a name="ln402"> </a>
+<a name="ln403">  cairo_translate(cr, width / 2.0, height / 2.0);</a>
+<a name="ln404">  cairo_scale(cr, zoom_scale, zoom_scale);</a>
+<a name="ln405">  cairo_translate(cr, -.5f * wd - zoom_x * wd, -.5f * ht - zoom_y * ht);</a>
+<a name="ln406"> </a>
+<a name="ln407">  float vignette_x = (p-&gt;center.x + 1.0) * 0.5 * wd;</a>
+<a name="ln408">  float vignette_y = (p-&gt;center.y + 1.0) * 0.5 * ht;</a>
+<a name="ln409"> </a>
+<a name="ln410">  cairo_translate(cr, vignette_x, vignette_y);</a>
+<a name="ln411"> </a>
+<a name="ln412">  float vignette_w = p-&gt;scale * 0.01 * 0.5 * wd; // start of falloff</a>
+<a name="ln413">  float vignette_h = p-&gt;scale * 0.01 * 0.5 * ht;</a>
+<a name="ln414">  float vignette_fx = vignette_w + p-&gt;falloff_scale * 0.01 * 0.5 * wd; // end of falloff</a>
+<a name="ln415">  float vignette_fy = vignette_h + p-&gt;falloff_scale * 0.01 * 0.5 * ht;</a>
+<a name="ln416"> </a>
+<a name="ln417">  if(p-&gt;autoratio == FALSE)</a>
+<a name="ln418">  {</a>
+<a name="ln419">    float factor1 = bigger_side / smaller_side;</a>
+<a name="ln420">    if(wd &gt;= ht)</a>
+<a name="ln421">    {</a>
+<a name="ln422">      float factor2 = (2.0 - p-&gt;whratio) * factor1;</a>
+<a name="ln423"> </a>
+<a name="ln424">      if(p-&gt;whratio &lt;= 1)</a>
+<a name="ln425">      {</a>
+<a name="ln426">        vignette_h *= factor1;</a>
+<a name="ln427">        vignette_w *= p-&gt;whratio;</a>
+<a name="ln428">        vignette_fx *= p-&gt;whratio;</a>
+<a name="ln429">        vignette_fy *= factor1;</a>
+<a name="ln430">      }</a>
+<a name="ln431">      else</a>
+<a name="ln432">      {</a>
+<a name="ln433">        vignette_h *= factor2;</a>
+<a name="ln434">        vignette_fy *= factor2;</a>
+<a name="ln435">      }</a>
+<a name="ln436">    }</a>
+<a name="ln437">    else</a>
+<a name="ln438">    {</a>
+<a name="ln439">      float factor2 = (p-&gt;whratio) * factor1;</a>
+<a name="ln440"> </a>
+<a name="ln441">      if(p-&gt;whratio &lt;= 1)</a>
+<a name="ln442">      {</a>
+<a name="ln443">        vignette_w *= factor2;</a>
+<a name="ln444">        vignette_fx *= factor2;</a>
+<a name="ln445">      }</a>
+<a name="ln446">      else</a>
+<a name="ln447">      {</a>
+<a name="ln448">        vignette_w *= factor1;</a>
+<a name="ln449">        vignette_h *= (2.0 - p-&gt;whratio);</a>
+<a name="ln450">        vignette_fx *= factor1;</a>
+<a name="ln451">        vignette_fy *= (2.0 - p-&gt;whratio);</a>
+<a name="ln452">      }</a>
+<a name="ln453">    }</a>
+<a name="ln454">  }</a>
+<a name="ln455"> </a>
+<a name="ln456">  int grab = get_grab(pzx * wd - vignette_x, pzy * ht - vignette_y, vignette_w, -vignette_h, vignette_fx,</a>
+<a name="ln457">                      -vignette_fy, zoom_scale);</a>
+<a name="ln458">  cairo_set_line_cap(cr, CAIRO_LINE_CAP_ROUND);</a>
+<a name="ln459">  cairo_set_line_width(cr, DT_PIXEL_APPLY_DPI(3.0) / zoom_scale);</a>
+<a name="ln460">  cairo_set_source_rgba(cr, .3, .3, .3, .8);</a>
+<a name="ln461">  draw_overlay(cr, vignette_w, vignette_h, vignette_fx, vignette_fy, grab, zoom_scale);</a>
+<a name="ln462">  cairo_set_line_width(cr, DT_PIXEL_APPLY_DPI(1.0) / zoom_scale);</a>
+<a name="ln463">  cairo_set_source_rgba(cr, .8, .8, .8, .8);</a>
+<a name="ln464">  draw_overlay(cr, vignette_w, vignette_h, vignette_fx, vignette_fy, grab, zoom_scale);</a>
+<a name="ln465">}</a>
+<a name="ln466"> </a>
+<a name="ln467">// FIXME: Pumping of the opposite direction when changing width/height. See two FIXMEs further down.</a>
+<a name="ln468">int mouse_moved(struct dt_iop_module_t *self, double x, double y, double pressure, int which)</a>
+<a name="ln469">{</a>
+<a name="ln470">  dt_iop_vignette_gui_data_t *g = (dt_iop_vignette_gui_data_t *)self-&gt;gui_data;</a>
+<a name="ln471">  dt_iop_vignette_params_t *p = (dt_iop_vignette_params_t *)self-&gt;params;</a>
+<a name="ln472">  float wd = self-&gt;dev-&gt;preview_pipe-&gt;backbuf_width;</a>
+<a name="ln473">  float ht = self-&gt;dev-&gt;preview_pipe-&gt;backbuf_height;</a>
+<a name="ln474">  float bigger_side, smaller_side;</a>
+<a name="ln475">  if(wd &gt;= ht)</a>
+<a name="ln476">  {</a>
+<a name="ln477">    bigger_side = wd;</a>
+<a name="ln478">    smaller_side = ht;</a>
+<a name="ln479">  }</a>
+<a name="ln480">  else</a>
+<a name="ln481">  {</a>
+<a name="ln482">    bigger_side = ht;</a>
+<a name="ln483">    smaller_side = wd;</a>
+<a name="ln484">  }</a>
+<a name="ln485">  dt_dev_zoom_t zoom = dt_control_get_dev_zoom();</a>
+<a name="ln486">  int closeup = dt_control_get_dev_closeup();</a>
+<a name="ln487">  float zoom_scale = dt_dev_get_zoom_scale(self-&gt;dev, zoom, 1&lt;&lt;closeup, 1);</a>
+<a name="ln488">  float pzx, pzy;</a>
+<a name="ln489">  dt_dev_get_pointer_zoom_pos(self-&gt;dev, x, y, &amp;pzx, &amp;pzy);</a>
+<a name="ln490">  pzx += 0.5f;</a>
+<a name="ln491">  pzy += 0.5f;</a>
+<a name="ln492">  static int old_grab = -1;</a>
+<a name="ln493">  int grab = old_grab;</a>
+<a name="ln494"> </a>
+<a name="ln495">  float vignette_x = (p-&gt;center.x + 1.0) * 0.5 * wd;</a>
+<a name="ln496">  float vignette_y = (p-&gt;center.y + 1.0) * 0.5 * ht;</a>
+<a name="ln497"> </a>
+<a name="ln498">  float vignette_w = p-&gt;scale * 0.01 * 0.5 * wd; // start of falloff</a>
+<a name="ln499">  float vignette_h = p-&gt;scale * 0.01 * 0.5 * ht;</a>
+<a name="ln500">  float vignette_fx = vignette_w + p-&gt;falloff_scale * 0.01 * 0.5 * wd; // end of falloff</a>
+<a name="ln501">  float vignette_fy = vignette_h + p-&gt;falloff_scale * 0.01 * 0.5 * ht;</a>
+<a name="ln502"> </a>
+<a name="ln503">  if(p-&gt;autoratio == FALSE)</a>
+<a name="ln504">  {</a>
+<a name="ln505">    float factor1 = bigger_side / smaller_side;</a>
+<a name="ln506">    if(wd &gt;= ht)</a>
+<a name="ln507">    {</a>
+<a name="ln508">      float factor2 = (2.0 - p-&gt;whratio) * factor1;</a>
+<a name="ln509"> </a>
+<a name="ln510">      if(p-&gt;whratio &lt;= 1)</a>
+<a name="ln511">      {</a>
+<a name="ln512">        vignette_h *= factor1;</a>
+<a name="ln513">        vignette_w *= p-&gt;whratio;</a>
+<a name="ln514">        vignette_fx *= p-&gt;whratio;</a>
+<a name="ln515">        vignette_fy *= factor1;</a>
+<a name="ln516">      }</a>
+<a name="ln517">      else</a>
+<a name="ln518">      {</a>
+<a name="ln519">        vignette_h *= factor2;</a>
+<a name="ln520">        vignette_fy *= factor2;</a>
+<a name="ln521">      }</a>
+<a name="ln522">    }</a>
+<a name="ln523">    else</a>
+<a name="ln524">    {</a>
+<a name="ln525">      float factor2 = (p-&gt;whratio) * factor1;</a>
+<a name="ln526"> </a>
+<a name="ln527">      if(p-&gt;whratio &lt;= 1)</a>
+<a name="ln528">      {</a>
+<a name="ln529">        vignette_w *= factor2;</a>
+<a name="ln530">        vignette_fx *= factor2;</a>
+<a name="ln531">      }</a>
+<a name="ln532">      else</a>
+<a name="ln533">      {</a>
+<a name="ln534">        vignette_w *= factor1;</a>
+<a name="ln535">        vignette_h *= (2.0 - p-&gt;whratio);</a>
+<a name="ln536">        vignette_fx *= factor1;</a>
+<a name="ln537">        vignette_fy *= (2.0 - p-&gt;whratio);</a>
+<a name="ln538">      }</a>
+<a name="ln539">    }</a>
+<a name="ln540">  }</a>
+<a name="ln541"> </a>
+<a name="ln542">  if(grab == 0 || !(darktable.control-&gt;button_down &amp;&amp; darktable.control-&gt;button_down_which == 1))</a>
+<a name="ln543">  {</a>
+<a name="ln544">    grab = get_grab(pzx * wd - vignette_x, pzy * ht - vignette_y, vignette_w, -vignette_h, vignette_fx,</a>
+<a name="ln545">                    -vignette_fy, zoom_scale);</a>
+<a name="ln546">  }</a>
+<a name="ln547"> </a>
+<a name="ln548">  if(darktable.control-&gt;button_down &amp;&amp; darktable.control-&gt;button_down_which == 1)</a>
+<a name="ln549">  {</a>
+<a name="ln550">    if(grab == 0) // pan the image</a>
+<a name="ln551">    {</a>
+<a name="ln552">      dt_control_change_cursor(GDK_HAND1);</a>
+<a name="ln553">      return 0;</a>
+<a name="ln554">    }</a>
+<a name="ln555">    else if(grab == 1) // move the center</a>
+<a name="ln556">    {</a>
+<a name="ln557">      dt_bauhaus_slider_set(g-&gt;center_x, pzx * 2.0 - 1.0);</a>
+<a name="ln558">      dt_bauhaus_slider_set(g-&gt;center_y, pzy * 2.0 - 1.0);</a>
+<a name="ln559">    }</a>
+<a name="ln560">    else if(grab == 2) // change the width</a>
+<a name="ln561">    {</a>
+<a name="ln562">      float max = 0.5 * ((p-&gt;whratio &lt;= 1.0) ? bigger_side * p-&gt;whratio : bigger_side);</a>
+<a name="ln563">      float new_vignette_w = MIN(bigger_side * 0.5, MAX(0.1, pzx * wd - vignette_x));</a>
+<a name="ln564">      float ratio = new_vignette_w / vignette_h;</a>
+<a name="ln565">      float new_scale = 100.0 * new_vignette_w / max;</a>
+<a name="ln566">      // FIXME: When going over the 1.0 boundary from wide to narrow (&gt;1.0 -&gt; &lt;=1.0) the height slightly</a>
+<a name="ln567">      // changes, depending on speed.</a>
+<a name="ln568">      //        I guess we have to split the computation.</a>
+<a name="ln569">      if(ratio &lt;= 1.0)</a>
+<a name="ln570">      {</a>
+<a name="ln571">        if(which == GDK_CONTROL_MASK)</a>
+<a name="ln572">        {</a>
+<a name="ln573">          dt_bauhaus_slider_set(g-&gt;scale, new_scale);</a>
+<a name="ln574">        }</a>
+<a name="ln575">        else</a>
+<a name="ln576">        {</a>
+<a name="ln577">          dt_bauhaus_slider_set(g-&gt;whratio, ratio);</a>
+<a name="ln578">        }</a>
+<a name="ln579">      }</a>
+<a name="ln580">      else</a>
+<a name="ln581">      {</a>
+<a name="ln582">        dt_bauhaus_slider_set(g-&gt;scale, new_scale);</a>
+<a name="ln583"> </a>
+<a name="ln584">        if(which != GDK_CONTROL_MASK)</a>
+<a name="ln585">        {</a>
+<a name="ln586">          float new_whratio = 2.0 - 1.0 / ratio;</a>
+<a name="ln587">          dt_bauhaus_slider_set(g-&gt;whratio, new_whratio);</a>
+<a name="ln588">        }</a>
+<a name="ln589">      }</a>
+<a name="ln590">    }</a>
+<a name="ln591">    else if(grab == 4) // change the height</a>
+<a name="ln592">    {</a>
+<a name="ln593">      float new_vignette_h = MIN(bigger_side * 0.5, MAX(0.1, vignette_y - pzy * ht));</a>
+<a name="ln594">      float ratio = new_vignette_h / vignette_w;</a>
+<a name="ln595">      float max = 0.5 * ((ratio &lt;= 1.0) ? bigger_side * (2.0 - p-&gt;whratio) : bigger_side);</a>
+<a name="ln596">      // FIXME: When going over the 1.0 boundary from narrow to wide (&gt;1.0 -&gt; &lt;=1.0) the width slightly</a>
+<a name="ln597">      // changes, depending on speed.</a>
+<a name="ln598">      //        I guess we have to split the computation.</a>
+<a name="ln599">      if(ratio &lt;= 1.0)</a>
+<a name="ln600">      {</a>
+<a name="ln601">        if(which == GDK_CONTROL_MASK)</a>
+<a name="ln602">        {</a>
+<a name="ln603">          float new_scale = 100.0 * new_vignette_h / max;</a>
+<a name="ln604">          dt_bauhaus_slider_set(g-&gt;scale, new_scale);</a>
+<a name="ln605">        }</a>
+<a name="ln606">        else</a>
+<a name="ln607">        {</a>
+<a name="ln608">          dt_bauhaus_slider_set(g-&gt;whratio, 2.0 - ratio);</a>
+<a name="ln609">        }</a>
+<a name="ln610">      }</a>
+<a name="ln611">      else</a>
+<a name="ln612">      {</a>
+<a name="ln613">        float new_scale = 100.0 * new_vignette_h / max;</a>
+<a name="ln614">        dt_bauhaus_slider_set(g-&gt;scale, new_scale);</a>
+<a name="ln615"> </a>
+<a name="ln616">        if(which != GDK_CONTROL_MASK)</a>
+<a name="ln617">        {</a>
+<a name="ln618">          float new_whratio = 1.0 / ratio;</a>
+<a name="ln619">          dt_bauhaus_slider_set(g-&gt;whratio, new_whratio);</a>
+<a name="ln620">        }</a>
+<a name="ln621">      }</a>
+<a name="ln622">    }</a>
+<a name="ln623">    else if(grab == 8) // change the falloff on the right</a>
+<a name="ln624">    {</a>
+<a name="ln625">      float new_vignette_fx = pzx * wd - vignette_x;</a>
+<a name="ln626">      float max = 0.5 * ((p-&gt;whratio &lt;= 1.0) ? bigger_side * p-&gt;whratio : bigger_side);</a>
+<a name="ln627">      float delta_x = MIN(max, MAX(0.0, new_vignette_fx - vignette_w));</a>
+<a name="ln628">      float new_falloff = 100.0 * delta_x / max;</a>
+<a name="ln629">      dt_bauhaus_slider_set(g-&gt;falloff_scale, new_falloff);</a>
+<a name="ln630">    }</a>
+<a name="ln631">    else if(grab == 16) // change the falloff on the top</a>
+<a name="ln632">    {</a>
+<a name="ln633">      float new_vignette_fy = vignette_y - pzy * ht;</a>
+<a name="ln634">      float max = 0.5 * ((p-&gt;whratio &gt; 1.0) ? bigger_side * (2.0 - p-&gt;whratio) : bigger_side);</a>
+<a name="ln635">      float delta_y = MIN(max, MAX(0.0, new_vignette_fy - vignette_h));</a>
+<a name="ln636">      float new_falloff = 100.0 * delta_y / max;</a>
+<a name="ln637">      dt_bauhaus_slider_set(g-&gt;falloff_scale, new_falloff);</a>
+<a name="ln638">    }</a>
+<a name="ln639">    dt_control_queue_redraw_center();</a>
+<a name="ln640">    return 1;</a>
+<a name="ln641">  }</a>
+<a name="ln642">  else if(grab)</a>
+<a name="ln643">  {</a>
+<a name="ln644">    if(grab == 1)</a>
+<a name="ln645">      dt_control_change_cursor(GDK_FLEUR);</a>
+<a name="ln646">    else if(grab == 2)</a>
+<a name="ln647">      dt_control_change_cursor(GDK_SB_H_DOUBLE_ARROW);</a>
+<a name="ln648">    else if(grab == 4)</a>
+<a name="ln649">      dt_control_change_cursor(GDK_SB_V_DOUBLE_ARROW);</a>
+<a name="ln650">    else if(grab == 8)</a>
+<a name="ln651">      dt_control_change_cursor(GDK_SB_H_DOUBLE_ARROW);</a>
+<a name="ln652">    else if(grab == 16)</a>
+<a name="ln653">      dt_control_change_cursor(GDK_SB_V_DOUBLE_ARROW);</a>
+<a name="ln654">  }</a>
+<a name="ln655">  else</a>
+<a name="ln656">  {</a>
+<a name="ln657">    if(old_grab != grab) dt_control_change_cursor(GDK_LEFT_PTR);</a>
+<a name="ln658">  }</a>
+<a name="ln659">  old_grab = grab;</a>
+<a name="ln660">  dt_control_queue_redraw_center();</a>
+<a name="ln661">  return 0;</a>
+<a name="ln662">}</a>
+<a name="ln663"> </a>
+<a name="ln664">int button_pressed(struct dt_iop_module_t *self, double x, double y, double pressure, int which, int type,</a>
+<a name="ln665">                   uint32_t state)</a>
+<a name="ln666">{</a>
+<a name="ln667">  if(which == 1) return 1;</a>
+<a name="ln668">  return 0;</a>
+<a name="ln669">}</a>
+<a name="ln670"> </a>
+<a name="ln671">int button_released(struct dt_iop_module_t *self, double x, double y, int which, uint32_t state)</a>
+<a name="ln672">{</a>
+<a name="ln673">  if(which == 1) return 1;</a>
+<a name="ln674">  return 0;</a>
+<a name="ln675">}</a>
+<a name="ln676"> </a>
+<a name="ln677">void process(struct dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, const void *const ivoid,</a>
+<a name="ln678">             void *const ovoid, const dt_iop_roi_t *const roi_in, const dt_iop_roi_t *const roi_out)</a>
+<a name="ln679">{</a>
+<a name="ln680">  const dt_iop_vignette_data_t *data = (dt_iop_vignette_data_t *)piece-&gt;data;</a>
+<a name="ln681">  const dt_iop_roi_t *buf_in = &amp;piece-&gt;buf_in;</a>
+<a name="ln682">  const int ch = piece-&gt;colors;</a>
+<a name="ln683">  const gboolean unbound = data-&gt;unbound;</a>
+<a name="ln684"> </a>
+<a name="ln685">  /* Center coordinates of buf_in, these should not consider buf_in-&gt;{x,y}! */</a>
+<a name="ln686">  const dt_iop_vector_2d_t buf_center = { buf_in-&gt;width * .5f, buf_in-&gt;height * .5f };</a>
+<a name="ln687">  /* Center coordinates of vignette center */</a>
+<a name="ln688">  const dt_iop_vector_2d_t vignette_center = { buf_center.x + data-&gt;center.x * buf_in-&gt;width / 2.0,</a>
+<a name="ln689">                                               buf_center.y + data-&gt;center.y * buf_in-&gt;height / 2.0 };</a>
+<a name="ln690">  /* Coordinates of vignette_center in terms of roi_in */</a>
+<a name="ln691">  const dt_iop_vector_2d_t roi_center</a>
+<a name="ln692">      = { vignette_center.x * roi_in-&gt;scale - roi_in-&gt;x, vignette_center.y * roi_in-&gt;scale - roi_in-&gt;y };</a>
+<a name="ln693">  float xscale;</a>
+<a name="ln694">  float yscale;</a>
+<a name="ln695"> </a>
+<a name="ln696">  /* w/h ratio follows piece dimensions */</a>
+<a name="ln697">  if(data-&gt;autoratio)</a>
+<a name="ln698">  {</a>
+<a name="ln699">    xscale = 2.0 / (buf_in-&gt;width * roi_out-&gt;scale);</a>
+<a name="ln700">    yscale = 2.0 / (buf_in-&gt;height * roi_out-&gt;scale);</a>
+<a name="ln701">  }</a>
+<a name="ln702">  else /* specified w/h ratio, scale proportional to longest side */</a>
+<a name="ln703">  {</a>
+<a name="ln704">    const float basis = 2.0 / (MAX(buf_in-&gt;height, buf_in-&gt;width) * roi_out-&gt;scale);</a>
+<a name="ln705">    // w/h ratio from 0-1 use as-is</a>
+<a name="ln706">    if(data-&gt;whratio &lt;= 1.0)</a>
+<a name="ln707">    {</a>
+<a name="ln708">      yscale = basis;</a>
+<a name="ln709">      xscale = yscale / data-&gt;whratio;</a>
+<a name="ln710">    }</a>
+<a name="ln711">    // w/h ratio from 1-2 interpret as 1-inf</a>
+<a name="ln712">    // that is, the h/w ratio + 1</a>
+<a name="ln713">    else</a>
+<a name="ln714">    {</a>
+<a name="ln715">      xscale = basis;</a>
+<a name="ln716">      yscale = xscale / (2.0 - data-&gt;whratio);</a>
+<a name="ln717">    }</a>
+<a name="ln718">  }</a>
+<a name="ln719">  const float dscale = data-&gt;scale / 100.0;</a>
+<a name="ln720">  // A minimum falloff is used, based on the image size, to smooth out aliasing artifacts</a>
+<a name="ln721">  const float min_falloff = 100.0 / MIN(buf_in-&gt;width, buf_in-&gt;height);</a>
+<a name="ln722">  const float fscale = MAX(data-&gt;falloff_scale, min_falloff) / 100.0;</a>
+<a name="ln723">  const float shape = MAX(data-&gt;shape, 0.001);</a>
+<a name="ln724">  const float exp1 = 2.0 / shape;</a>
+<a name="ln725">  const float exp2 = shape / 2.0;</a>
+<a name="ln726">  // Pre-scale the center offset</a>
+<a name="ln727">  const dt_iop_vector_2d_t roi_center_scaled = { roi_center.x * xscale, roi_center.y * yscale };</a>
+<a name="ln728"> </a>
+<a name="ln729">  float dither = 0.0f;</a>
+<a name="ln730"> </a>
+<a name="ln731">  switch(data-&gt;dithering)</a>
+<a name="ln732">  {</a>
+<a name="ln733">    case DITHER_8BIT:</a>
+<a name="ln734">      dither = 1.0f / 256;</a>
+<a name="ln735">      break;</a>
+<a name="ln736">    case DITHER_16BIT:</a>
+<a name="ln737">      dither = 1.0f / 65536;</a>
+<a name="ln738">      break;</a>
+<a name="ln739">    case DITHER_OFF:</a>
+<a name="ln740">    default:</a>
+<a name="ln741">      dither = 0.0f;</a>
+<a name="ln742">  }</a>
+<a name="ln743"> </a>
+<a name="ln744">  unsigned int *const tea_states = calloc(2 * dt_get_num_threads(), sizeof(unsigned int));</a>
+<a name="ln745"> </a>
+<a name="ln746">#ifdef _OPENMP</a>
+<a name="ln747">#pragma omp parallel for default(none) shared(data, yscale, xscale, dither) schedule(static)</a>
+<a name="ln748">#endif</a>
+<a name="ln749">  for(int j = 0; j &lt; roi_out-&gt;height; j++)</a>
+<a name="ln750">  {</a>
+<a name="ln751">    const size_t k = (size_t)ch * roi_out-&gt;width * j;</a>
+<a name="ln752">    const float *in = (const float *)ivoid + k;</a>
+<a name="ln753">    float *out = (float *)ovoid + k;</a>
+<a name="ln754">    unsigned int *tea_state = tea_states + 2 * dt_get_thread_num();</a>
+<a name="ln755">    tea_state[0] = j * roi_out-&gt;height + dt_get_thread_num();</a>
+<a name="ln756">    for(int i = 0; i &lt; roi_out-&gt;width; i++, in += ch, out += ch)</a>
+<a name="ln757">    {</a>
+<a name="ln758">      // current pixel coord translated to local coord</a>
+<a name="ln759">      const dt_iop_vector_2d_t pv</a>
+<a name="ln760">          = { fabsf(i * xscale - roi_center_scaled.x), fabsf(j * yscale - roi_center_scaled.y) };</a>
+<a name="ln761"> </a>
+<a name="ln762">      // Calculate the pixel weight in vignette</a>
+<a name="ln763">      const float cplen = powf(powf(pv.x, exp1) + powf(pv.y, exp1), exp2); // Length from center to pv</a>
+<a name="ln764">      float weight = 0.0;</a>
+<a name="ln765">      float dith = 0.0;</a>
+<a name="ln766"> </a>
+<a name="ln767">      if(cplen &gt;= dscale) // pixel is outside the inner vignette circle, lets calculate weight of vignette</a>
+<a name="ln768">      {</a>
+<a name="ln769">        weight = ((cplen - dscale) / fscale);</a>
+<a name="ln770">        if(weight &gt;= 1.0)</a>
+<a name="ln771">          weight = 1.0;</a>
+<a name="ln772">        else if(weight &lt;= 0.0)</a>
+<a name="ln773">          weight = 0.0;</a>
+<a name="ln774">        else</a>
+<a name="ln775">        {</a>
+<a name="ln776">          weight = 0.5 - cosf(M_PI * weight) / 2.0;</a>
+<a name="ln777">          encrypt_tea(tea_state);</a>
+<a name="ln778">          dith = dither * tpdf(tea_state[0]);</a>
+<a name="ln779">        }</a>
+<a name="ln780">      }</a>
+<a name="ln781"> </a>
+<a name="ln782">      // Let's apply weighted effect on brightness and desaturation</a>
+<a name="ln783">      float col0 = in[0], col1 = in[1], col2 = in[2], col3 = in[3];</a>
+<a name="ln784">      if(weight &gt; 0)</a>
+<a name="ln785">      {</a>
+<a name="ln786">        // Then apply falloff vignette</a>
+<a name="ln787">        float falloff = (data-&gt;brightness &lt; 0) ? (1.0 + (weight * data-&gt;brightness))</a>
+<a name="ln788">                                               : (weight * data-&gt;brightness);</a>
+<a name="ln789">        col0 = data-&gt;brightness &lt; 0 ? col0 * falloff + dith : col0 + falloff + dith;</a>
+<a name="ln790">        col1 = data-&gt;brightness &lt; 0 ? col1 * falloff + dith : col1 + falloff + dith;</a>
+<a name="ln791">        col2 = data-&gt;brightness &lt; 0 ? col2 * falloff + dith : col2 + falloff + dith;</a>
+<a name="ln792"> </a>
+<a name="ln793">        col0 = unbound ? col0 : CLIP(col0);</a>
+<a name="ln794">        col1 = unbound ? col1 : CLIP(col1);</a>
+<a name="ln795">        col2 = unbound ? col2 : CLIP(col2);</a>
+<a name="ln796"> </a>
+<a name="ln797">        // apply saturation</a>
+<a name="ln798">        float mv = (col0 + col1 + col2) / 3.0;</a>
+<a name="ln799">        float wss = weight * data-&gt;saturation;</a>
+<a name="ln800">        col0 = col0 - ((mv - col0) * wss);</a>
+<a name="ln801">        col1 = col1 - ((mv - col1) * wss);</a>
+<a name="ln802">        col2 = col2 - ((mv - col2) * wss);</a>
+<a name="ln803"> </a>
+<a name="ln804">        col0 = unbound ? col0 : CLIP(col0);</a>
+<a name="ln805">        col1 = unbound ? col1 : CLIP(col1);</a>
+<a name="ln806">        col2 = unbound ? col2 : CLIP(col2);</a>
+<a name="ln807">      }</a>
+<a name="ln808"> </a>
+<a name="ln809">      out[0] = col0;</a>
+<a name="ln810">      out[1] = col1;</a>
+<a name="ln811">      out[2] = col2;</a>
+<a name="ln812">      out[3] = col3;</a>
+<a name="ln813">    }</a>
+<a name="ln814">  }</a>
+<a name="ln815"> </a>
+<a name="ln816">  free(tea_states);</a>
+<a name="ln817">}</a>
+<a name="ln818"> </a>
+<a name="ln819"> </a>
+<a name="ln820">#ifdef HAVE_OPENCL</a>
+<a name="ln821">int process_cl(struct dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, cl_mem dev_in, cl_mem dev_out,</a>
+<a name="ln822">               const dt_iop_roi_t *const roi_in, const dt_iop_roi_t *const roi_out)</a>
+<a name="ln823">{</a>
+<a name="ln824">  dt_iop_vignette_data_t *data = (dt_iop_vignette_data_t *)piece-&gt;data;</a>
+<a name="ln825">  dt_iop_vignette_global_data_t *gd = (dt_iop_vignette_global_data_t *)self-&gt;data;</a>
+<a name="ln826"> </a>
+<a name="ln827">  cl_int err = -999;</a>
+<a name="ln828">  const int devid = piece-&gt;pipe-&gt;devid;</a>
+<a name="ln829">  const int width = roi_out-&gt;width;</a>
+<a name="ln830">  const int height = roi_out-&gt;height;</a>
+<a name="ln831"> </a>
+<a name="ln832">  const dt_iop_roi_t *buf_in = &amp;piece-&gt;buf_in;</a>
+<a name="ln833"> </a>
+<a name="ln834">  /* Center coordinates of buf_in, these should not consider buf_in-&gt;{x,y}! */</a>
+<a name="ln835">  const dt_iop_vector_2d_t buf_center = { buf_in-&gt;width * .5f, buf_in-&gt;height * .5f };</a>
+<a name="ln836">  /* Center coordinates of vignette center */</a>
+<a name="ln837">  const dt_iop_vector_2d_t vignette_center = { buf_center.x + data-&gt;center.x * buf_in-&gt;width / 2.0,</a>
+<a name="ln838">                                               buf_center.y + data-&gt;center.y * buf_in-&gt;height / 2.0 };</a>
+<a name="ln839">  /* Coordinates of vignette_center in terms of roi_in */</a>
+<a name="ln840">  const dt_iop_vector_2d_t roi_center</a>
+<a name="ln841">      = { vignette_center.x * roi_in-&gt;scale - roi_in-&gt;x, vignette_center.y * roi_in-&gt;scale - roi_in-&gt;y };</a>
+<a name="ln842">  float xscale;</a>
+<a name="ln843">  float yscale;</a>
+<a name="ln844"> </a>
+<a name="ln845">  /* w/h ratio follows piece dimensions */</a>
+<a name="ln846">  if(data-&gt;autoratio)</a>
+<a name="ln847">  {</a>
+<a name="ln848">    xscale = 2.0 / (buf_in-&gt;width * roi_out-&gt;scale);</a>
+<a name="ln849">    yscale = 2.0 / (buf_in-&gt;height * roi_out-&gt;scale);</a>
+<a name="ln850">  }</a>
+<a name="ln851">  else /* specified w/h ratio, scale proportional to longest side */</a>
+<a name="ln852">  {</a>
+<a name="ln853">    const float basis = 2.0 / (MAX(buf_in-&gt;height, buf_in-&gt;width) * roi_out-&gt;scale);</a>
+<a name="ln854">    // w/h ratio from 0-1 use as-is</a>
+<a name="ln855">    if(data-&gt;whratio &lt;= 1.0)</a>
+<a name="ln856">    {</a>
+<a name="ln857">      yscale = basis;</a>
+<a name="ln858">      xscale = yscale / data-&gt;whratio;</a>
+<a name="ln859">    }</a>
+<a name="ln860">    // w/h ratio from 1-2 interpret as 1-inf</a>
+<a name="ln861">    // that is, the h/w ratio + 1</a>
+<a name="ln862">    else</a>
+<a name="ln863">    {</a>
+<a name="ln864">      xscale = basis;</a>
+<a name="ln865">      yscale = xscale / (2.0 - data-&gt;whratio);</a>
+<a name="ln866">    }</a>
+<a name="ln867">  }</a>
+<a name="ln868">  const float dscale = data-&gt;scale / 100.0;</a>
+<a name="ln869">  // A minimum falloff is used, based on the image size, to smooth out aliasing artifacts</a>
+<a name="ln870">  const float min_falloff = 100.0 / MIN(buf_in-&gt;width, buf_in-&gt;height);</a>
+<a name="ln871">  const float fscale = MAX(data-&gt;falloff_scale, min_falloff) / 100.0;</a>
+<a name="ln872">  const float shape = MAX(data-&gt;shape, 0.001);</a>
+<a name="ln873">  const float exp1 = 2.0 / shape;</a>
+<a name="ln874">  const float exp2 = shape / 2.0;</a>
+<a name="ln875">  // Pre-scale the center offset</a>
+<a name="ln876">  const dt_iop_vector_2d_t roi_center_scaled = { roi_center.x * xscale, roi_center.y * yscale };</a>
+<a name="ln877"> </a>
+<a name="ln878">  float dither = 0.0f;</a>
+<a name="ln879"> </a>
+<a name="ln880">  switch(data-&gt;dithering)</a>
+<a name="ln881">  {</a>
+<a name="ln882">    case DITHER_8BIT:</a>
+<a name="ln883">      dither = 1.0f / 256;</a>
+<a name="ln884">      break;</a>
+<a name="ln885">    case DITHER_16BIT:</a>
+<a name="ln886">      dither = 1.0f / 65536;</a>
+<a name="ln887">      break;</a>
+<a name="ln888">    case DITHER_OFF:</a>
+<a name="ln889">    default:</a>
+<a name="ln890">      dither = 0.0f;</a>
+<a name="ln891">  }</a>
+<a name="ln892"> </a>
+<a name="ln893">  float scale[2] = { xscale, yscale };</a>
+<a name="ln894">  float roi_center_scaled_f[2] = { roi_center_scaled.x, roi_center_scaled.y };</a>
+<a name="ln895">  float expt[2] = { exp1, exp2 };</a>
+<a name="ln896">  float brightness = data-&gt;brightness;</a>
+<a name="ln897">  float saturation = data-&gt;saturation;</a>
+<a name="ln898">  int unbound = data-&gt;unbound;</a>
+<a name="ln899"> </a>
+<a name="ln900">  size_t sizes[2] = { ROUNDUPWD(width), ROUNDUPHT(height) };</a>
+<a name="ln901"> </a>
+<a name="ln902">  dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_vignette, 0, sizeof(cl_mem), &amp;dev_in);</a>
+<a name="ln903">  dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_vignette, 1, sizeof(cl_mem), &amp;dev_out);</a>
+<a name="ln904">  dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_vignette, 2, sizeof(int), &amp;width);</a>
+<a name="ln905">  dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_vignette, 3, sizeof(int), &amp;height);</a>
+<a name="ln906">  dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_vignette, 4, 2 * sizeof(float), &amp;scale);</a>
+<a name="ln907">  dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_vignette, 5, 2 * sizeof(float), &amp;roi_center_scaled_f);</a>
+<a name="ln908">  dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_vignette, 6, 2 * sizeof(float), &amp;expt);</a>
+<a name="ln909">  dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_vignette, 7, sizeof(float), &amp;dscale);</a>
+<a name="ln910">  dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_vignette, 8, sizeof(float), &amp;fscale);</a>
+<a name="ln911">  dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_vignette, 9, sizeof(float), &amp;brightness);</a>
+<a name="ln912">  dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_vignette, 10, sizeof(float), &amp;saturation);</a>
+<a name="ln913">  dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_vignette, 11, sizeof(float), &amp;dither);</a>
+<a name="ln914">  dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_vignette, 12, sizeof(int), &amp;unbound);</a>
+<a name="ln915">  err = dt_opencl_enqueue_kernel_2d(devid, gd-&gt;kernel_vignette, sizes);</a>
+<a name="ln916">  if(err != CL_SUCCESS) goto error;</a>
+<a name="ln917"> </a>
+<a name="ln918">  return TRUE;</a>
+<a name="ln919"> </a>
+<a name="ln920">error:</a>
+<a name="ln921">  dt_print(DT_DEBUG_OPENCL, &quot;[opencl_vignette] couldn't enqueue kernel! %d\n&quot;, err);</a>
+<a name="ln922">  return FALSE;</a>
+<a name="ln923">}</a>
+<a name="ln924">#endif</a>
+<a name="ln925"> </a>
+<a name="ln926"> </a>
+<a name="ln927">void init_global(dt_iop_module_so_t *module)</a>
+<a name="ln928">{</a>
+<a name="ln929">  const int program = 8; // extended.cl from programs.conf</a>
+<a name="ln930">  dt_iop_vignette_global_data_t *gd</a>
+<a name="ln931">      = (dt_iop_vignette_global_data_t *)malloc(sizeof(dt_iop_vignette_global_data_t));</a>
+<a name="ln932">  module-&gt;data = gd;</a>
+<a name="ln933">  gd-&gt;kernel_vignette = dt_opencl_create_kernel(program, &quot;vignette&quot;);</a>
+<a name="ln934">}</a>
+<a name="ln935"> </a>
+<a name="ln936"> </a>
+<a name="ln937">void cleanup_global(dt_iop_module_so_t *module)</a>
+<a name="ln938">{</a>
+<a name="ln939">  dt_iop_vignette_global_data_t *gd = (dt_iop_vignette_global_data_t *)module-&gt;data;</a>
+<a name="ln940">  dt_opencl_free_kernel(gd-&gt;kernel_vignette);</a>
+<a name="ln941">  free(module-&gt;data);</a>
+<a name="ln942">  module-&gt;data = NULL;</a>
+<a name="ln943">}</a>
+<a name="ln944"> </a>
+<a name="ln945"> </a>
+<a name="ln946">static void scale_callback(GtkWidget *slider, gpointer user_data)</a>
+<a name="ln947">{</a>
+<a name="ln948">  dt_iop_module_t *self = (dt_iop_module_t *)user_data;</a>
+<a name="ln949">  if(self-&gt;dt-&gt;gui-&gt;reset) return;</a>
+<a name="ln950">  dt_iop_vignette_params_t *p = (dt_iop_vignette_params_t *)self-&gt;params;</a>
+<a name="ln951">  p-&gt;scale = dt_bauhaus_slider_get(slider);</a>
+<a name="ln952">  dt_dev_add_history_item(darktable.develop, self, TRUE);</a>
+<a name="ln953">}</a>
+<a name="ln954"> </a>
+<a name="ln955">static void falloff_scale_callback(GtkWidget *slider, gpointer user_data)</a>
+<a name="ln956">{</a>
+<a name="ln957">  dt_iop_module_t *self = (dt_iop_module_t *)user_data;</a>
+<a name="ln958">  if(self-&gt;dt-&gt;gui-&gt;reset) return;</a>
+<a name="ln959">  dt_iop_vignette_params_t *p = (dt_iop_vignette_params_t *)self-&gt;params;</a>
+<a name="ln960">  p-&gt;falloff_scale = dt_bauhaus_slider_get(slider);</a>
+<a name="ln961">  dt_dev_add_history_item(darktable.develop, self, TRUE);</a>
+<a name="ln962">}</a>
+<a name="ln963"> </a>
+<a name="ln964">static void brightness_callback(GtkWidget *slider, gpointer user_data)</a>
+<a name="ln965">{</a>
+<a name="ln966">  dt_iop_module_t *self = (dt_iop_module_t *)user_data;</a>
+<a name="ln967">  if(self-&gt;dt-&gt;gui-&gt;reset) return;</a>
+<a name="ln968">  dt_iop_vignette_params_t *p = (dt_iop_vignette_params_t *)self-&gt;params;</a>
+<a name="ln969">  p-&gt;brightness = dt_bauhaus_slider_get(slider);</a>
+<a name="ln970">  dt_dev_add_history_item(darktable.develop, self, TRUE);</a>
+<a name="ln971">}</a>
+<a name="ln972"> </a>
+<a name="ln973">static void saturation_callback(GtkWidget *slider, gpointer user_data)</a>
+<a name="ln974">{</a>
+<a name="ln975">  dt_iop_module_t *self = (dt_iop_module_t *)user_data;</a>
+<a name="ln976">  if(self-&gt;dt-&gt;gui-&gt;reset) return;</a>
+<a name="ln977">  dt_iop_vignette_params_t *p = (dt_iop_vignette_params_t *)self-&gt;params;</a>
+<a name="ln978">  p-&gt;saturation = dt_bauhaus_slider_get(slider);</a>
+<a name="ln979">  dt_dev_add_history_item(darktable.develop, self, TRUE);</a>
+<a name="ln980">}</a>
+<a name="ln981"> </a>
+<a name="ln982">static void centerx_callback(GtkWidget *slider, gpointer user_data)</a>
+<a name="ln983">{</a>
+<a name="ln984">  dt_iop_module_t *self = (dt_iop_module_t *)user_data;</a>
+<a name="ln985">  if(self-&gt;dt-&gt;gui-&gt;reset) return;</a>
+<a name="ln986">  dt_iop_vignette_params_t *p = (dt_iop_vignette_params_t *)self-&gt;params;</a>
+<a name="ln987">  p-&gt;center.x = dt_bauhaus_slider_get(slider);</a>
+<a name="ln988">  dt_dev_add_history_item(darktable.develop, self, TRUE);</a>
+<a name="ln989">}</a>
+<a name="ln990"> </a>
+<a name="ln991">static void centery_callback(GtkWidget *slider, gpointer user_data)</a>
+<a name="ln992">{</a>
+<a name="ln993">  dt_iop_module_t *self = (dt_iop_module_t *)user_data;</a>
+<a name="ln994">  if(self-&gt;dt-&gt;gui-&gt;reset) return;</a>
+<a name="ln995">  dt_iop_vignette_params_t *p = (dt_iop_vignette_params_t *)self-&gt;params;</a>
+<a name="ln996">  p-&gt;center.y = dt_bauhaus_slider_get(slider);</a>
+<a name="ln997">  dt_dev_add_history_item(darktable.develop, self, TRUE);</a>
+<a name="ln998">}</a>
+<a name="ln999"> </a>
+<a name="ln1000">static void shape_callback(GtkWidget *slider, gpointer user_data)</a>
+<a name="ln1001">{</a>
+<a name="ln1002">  dt_iop_module_t *self = (dt_iop_module_t *)user_data;</a>
+<a name="ln1003">  if(self-&gt;dt-&gt;gui-&gt;reset) return;</a>
+<a name="ln1004">  dt_iop_vignette_params_t *p = (dt_iop_vignette_params_t *)self-&gt;params;</a>
+<a name="ln1005">  p-&gt;shape = dt_bauhaus_slider_get(slider);</a>
+<a name="ln1006">  dt_dev_add_history_item(darktable.develop, self, TRUE);</a>
+<a name="ln1007">}</a>
+<a name="ln1008"> </a>
+<a name="ln1009">static void autoratio_callback(GtkToggleButton *button, gpointer user_data)</a>
+<a name="ln1010">{</a>
+<a name="ln1011">  dt_iop_module_t *self = (dt_iop_module_t *)user_data;</a>
+<a name="ln1012">  if(self-&gt;dt-&gt;gui-&gt;reset) return;</a>
+<a name="ln1013">  dt_iop_vignette_params_t *p = (dt_iop_vignette_params_t *)self-&gt;params;</a>
+<a name="ln1014">  p-&gt;autoratio = gtk_toggle_button_get_active(button);</a>
+<a name="ln1015">  dt_iop_vignette_gui_data_t *g = (dt_iop_vignette_gui_data_t *)self-&gt;gui_data;</a>
+<a name="ln1016">  gtk_widget_set_sensitive(GTK_WIDGET(g-&gt;whratio), !p-&gt;autoratio);</a>
+<a name="ln1017">  dt_dev_add_history_item(darktable.develop, self, TRUE);</a>
+<a name="ln1018">}</a>
+<a name="ln1019"> </a>
+<a name="ln1020">static void whratio_callback(GtkWidget *slider, gpointer user_data)</a>
+<a name="ln1021">{</a>
+<a name="ln1022">  dt_iop_module_t *self = (dt_iop_module_t *)user_data;</a>
+<a name="ln1023">  if(self-&gt;dt-&gt;gui-&gt;reset) return;</a>
+<a name="ln1024">  dt_iop_vignette_params_t *p = (dt_iop_vignette_params_t *)self-&gt;params;</a>
+<a name="ln1025">  p-&gt;whratio = dt_bauhaus_slider_get(slider);</a>
+<a name="ln1026">  dt_dev_add_history_item(darktable.develop, self, TRUE);</a>
+<a name="ln1027">}</a>
+<a name="ln1028"> </a>
+<a name="ln1029">static void dithering_callback(GtkWidget *widget, gpointer user_data)</a>
+<a name="ln1030">{</a>
+<a name="ln1031">  dt_iop_module_t *self = (dt_iop_module_t *)user_data;</a>
+<a name="ln1032">  if(self-&gt;dt-&gt;gui-&gt;reset) return;</a>
+<a name="ln1033">  dt_iop_vignette_params_t *p = (dt_iop_vignette_params_t *)self-&gt;params;</a>
+<a name="ln1034">  p-&gt;dithering = (dt_iop_dither_t)dt_bauhaus_combobox_get(widget);</a>
+<a name="ln1035">  dt_dev_add_history_item(darktable.develop, self, TRUE);</a>
+<a name="ln1036">}</a>
+<a name="ln1037"> </a>
+<a name="ln1038">void commit_params(struct dt_iop_module_t *self, dt_iop_params_t *p1, dt_dev_pixelpipe_t *pipe,</a>
+<a name="ln1039">                   dt_dev_pixelpipe_iop_t *piece)</a>
+<a name="ln1040">{</a>
+<a name="ln1041">  dt_iop_vignette_params_t *p = (dt_iop_vignette_params_t *)p1;</a>
+<a name="ln1042">  dt_iop_vignette_data_t *d = (dt_iop_vignette_data_t *)piece-&gt;data;</a>
+<a name="ln1043">  d-&gt;scale = p-&gt;scale;</a>
+<a name="ln1044">  d-&gt;falloff_scale = p-&gt;falloff_scale;</a>
+<a name="ln1045">  d-&gt;brightness = p-&gt;brightness;</a>
+<a name="ln1046">  d-&gt;saturation = p-&gt;saturation;</a>
+<a name="ln1047">  d-&gt;center = p-&gt;center;</a>
+<a name="ln1048">  d-&gt;autoratio = p-&gt;autoratio;</a>
+<a name="ln1049">  d-&gt;whratio = p-&gt;whratio;</a>
+<a name="ln1050">  d-&gt;shape = p-&gt;shape;</a>
+<a name="ln1051">  d-&gt;dithering = p-&gt;dithering;</a>
+<a name="ln1052">  d-&gt;unbound = p-&gt;unbound;</a>
+<a name="ln1053">}</a>
+<a name="ln1054"> </a>
+<a name="ln1055">void init_presets(dt_iop_module_so_t *self)</a>
+<a name="ln1056">{</a>
+<a name="ln1057">  DT_DEBUG_SQLITE3_EXEC(dt_database_get(darktable.db), &quot;BEGIN&quot;, NULL, NULL, NULL);</a>
+<a name="ln1058">  dt_iop_vignette_params_t p;</a>
+<a name="ln1059">  p.scale = 40.0f;</a>
+<a name="ln1060">  p.falloff_scale = 100.0f;</a>
+<a name="ln1061">  p.brightness = -1.0f;</a>
+<a name="ln1062">  p.saturation = 0.5f;</a>
+<a name="ln1063">  p.center.x = 0.0f;</a>
+<a name="ln1064">  p.center.y = 0.0f;</a>
+<a name="ln1065">  p.autoratio = FALSE;</a>
+<a name="ln1066">  p.whratio = 1.0f;</a>
+<a name="ln1067">  p.shape = 1.0f;</a>
+<a name="ln1068">  p.dithering = 0;</a>
+<a name="ln1069">  p.unbound = TRUE;</a>
+<a name="ln1070">  dt_gui_presets_add_generic(_(&quot;lomo&quot;), self-&gt;op, self-&gt;version(), &amp;p, sizeof(p), 1);</a>
+<a name="ln1071">  DT_DEBUG_SQLITE3_EXEC(dt_database_get(darktable.db), &quot;COMMIT&quot;, NULL, NULL, NULL);</a>
+<a name="ln1072">}</a>
+<a name="ln1073"> </a>
+<a name="ln1074">void init_pipe(struct dt_iop_module_t *self, dt_dev_pixelpipe_t *pipe, dt_dev_pixelpipe_iop_t *piece)</a>
+<a name="ln1075">{</a>
+<a name="ln1076">  piece-&gt;data = malloc(sizeof(dt_iop_vignette_data_t));</a>
+<a name="ln1077">  self-&gt;commit_params(self, self-&gt;default_params, pipe, piece);</a>
+<a name="ln1078">}</a>
+<a name="ln1079"> </a>
+<a name="ln1080">void cleanup_pipe(struct dt_iop_module_t *self, dt_dev_pixelpipe_t *pipe, dt_dev_pixelpipe_iop_t *piece)</a>
+<a name="ln1081">{</a>
+<a name="ln1082">  free(piece-&gt;data);</a>
+<a name="ln1083">  piece-&gt;data = NULL;</a>
+<a name="ln1084">}</a>
+<a name="ln1085"> </a>
+<a name="ln1086">void gui_update(struct dt_iop_module_t *self)</a>
+<a name="ln1087">{</a>
+<a name="ln1088">  dt_iop_module_t *module = (dt_iop_module_t *)self;</a>
+<a name="ln1089">  dt_iop_vignette_gui_data_t *g = (dt_iop_vignette_gui_data_t *)self-&gt;gui_data;</a>
+<a name="ln1090">  dt_iop_vignette_params_t *p = (dt_iop_vignette_params_t *)module-&gt;params;</a>
+<a name="ln1091">  dt_bauhaus_slider_set(g-&gt;scale, p-&gt;scale);</a>
+<a name="ln1092">  dt_bauhaus_slider_set(g-&gt;falloff_scale, p-&gt;falloff_scale);</a>
+<a name="ln1093">  dt_bauhaus_slider_set(g-&gt;brightness, p-&gt;brightness);</a>
+<a name="ln1094">  dt_bauhaus_slider_set(g-&gt;saturation, p-&gt;saturation);</a>
+<a name="ln1095">  dt_bauhaus_slider_set(g-&gt;center_x, p-&gt;center.x);</a>
+<a name="ln1096">  dt_bauhaus_slider_set(g-&gt;center_y, p-&gt;center.y);</a>
+<a name="ln1097">  gtk_toggle_button_set_active(g-&gt;autoratio, p-&gt;autoratio);</a>
+<a name="ln1098">  dt_bauhaus_slider_set(g-&gt;whratio, p-&gt;whratio);</a>
+<a name="ln1099">  dt_bauhaus_slider_set(g-&gt;shape, p-&gt;shape);</a>
+<a name="ln1100">  gtk_widget_set_sensitive(GTK_WIDGET(g-&gt;whratio), !p-&gt;autoratio);</a>
+<a name="ln1101">  dt_bauhaus_combobox_set(g-&gt;dithering, p-&gt;dithering);</a>
+<a name="ln1102">}</a>
+<a name="ln1103"> </a>
+<a name="ln1104">void init(dt_iop_module_t *module)</a>
+<a name="ln1105">{</a>
+<a name="ln1106">  module-&gt;params = calloc(1, sizeof(dt_iop_vignette_params_t));</a>
+<a name="ln1107">  module-&gt;default_params = calloc(1, sizeof(dt_iop_vignette_params_t));</a>
+<a name="ln1108">  module-&gt;default_enabled = 0;</a>
+<a name="ln1109">  module-&gt;params_size = sizeof(dt_iop_vignette_params_t);</a>
+<a name="ln1110">  module-&gt;gui_data = NULL;</a>
+<a name="ln1111">  dt_iop_vignette_params_t tmp</a>
+<a name="ln1112">      = (dt_iop_vignette_params_t){ 80, 50, -0.5, -0.5, { 0, 0 }, FALSE, 1.0, 1.0, DITHER_OFF, TRUE };</a>
+<a name="ln1113">  memcpy(module-&gt;params, &amp;tmp, sizeof(dt_iop_vignette_params_t));</a>
+<a name="ln1114">  memcpy(module-&gt;default_params, &amp;tmp, sizeof(dt_iop_vignette_params_t));</a>
+<a name="ln1115">}</a>
+<a name="ln1116"> </a>
+<a name="ln1117">void cleanup(dt_iop_module_t *module)</a>
+<a name="ln1118">{</a>
+<a name="ln1119">  free(module-&gt;params);</a>
+<a name="ln1120">  module-&gt;params = NULL;</a>
+<a name="ln1121">}</a>
+<a name="ln1122"> </a>
+<a name="ln1123">void gui_init(struct dt_iop_module_t *self)</a>
+<a name="ln1124">{</a>
+<a name="ln1125">  self-&gt;gui_data = malloc(sizeof(dt_iop_vignette_gui_data_t));</a>
+<a name="ln1126">  dt_iop_vignette_gui_data_t *g = (dt_iop_vignette_gui_data_t *)self-&gt;gui_data;</a>
+<a name="ln1127">  dt_iop_vignette_params_t *p = (dt_iop_vignette_params_t *)self-&gt;params;</a>
+<a name="ln1128">  GtkWidget *hbox, *label1;</a>
+<a name="ln1129"> </a>
+<a name="ln1130">  self-&gt;widget = gtk_box_new(GTK_ORIENTATION_VERTICAL, DT_BAUHAUS_SPACE);</a>
+<a name="ln1131">  dt_gui_add_help_link(self-&gt;widget, dt_get_help_url(self-&gt;op));</a>
+<a name="ln1132"> </a>
+<a name="ln1133">  label1 = dtgtk_reset_label_new(_(&quot;automatic ratio&quot;), self, &amp;p-&gt;autoratio, sizeof p-&gt;autoratio);</a>
+<a name="ln1134"> </a>
+<a name="ln1135">  g-&gt;scale = dt_bauhaus_slider_new_with_range(self, 0.0, 100.0, 0.5, p-&gt;scale, 2);</a>
+<a name="ln1136">  g-&gt;falloff_scale = dt_bauhaus_slider_new_with_range(self, 0.0, 100.0, 1.0, p-&gt;falloff_scale, 2);</a>
+<a name="ln1137">  g-&gt;brightness = dt_bauhaus_slider_new_with_range(self, -1.0, 1.0, 0.01, p-&gt;brightness, 3);</a>
+<a name="ln1138">  g-&gt;saturation = dt_bauhaus_slider_new_with_range(self, -1.0, 1.0, 0.01, p-&gt;saturation, 3);</a>
+<a name="ln1139">  g-&gt;center_x = dt_bauhaus_slider_new_with_range(self, -1.0, 1.0, 0.01, p-&gt;center.x, 3);</a>
+<a name="ln1140">  g-&gt;center_y = dt_bauhaus_slider_new_with_range(self, -1.0, 1.0, 0.01, p-&gt;center.y, 3);</a>
+<a name="ln1141">  g-&gt;shape = dt_bauhaus_slider_new_with_range(self, 0.0, 5.0, 0.1, p-&gt;shape, 2);</a>
+<a name="ln1142">  g-&gt;whratio = dt_bauhaus_slider_new_with_range(self, 0.0, 2.0, 0.01, p-&gt;shape, 3);</a>
+<a name="ln1143">  g-&gt;autoratio = GTK_TOGGLE_BUTTON(gtk_toggle_button_new_with_label(_(&quot;automatic&quot;)));</a>
+<a name="ln1144">  g-&gt;dithering = dt_bauhaus_combobox_new(self);</a>
+<a name="ln1145"> </a>
+<a name="ln1146">  dt_bauhaus_combobox_add(g-&gt;dithering, _(&quot;off&quot;));</a>
+<a name="ln1147">  dt_bauhaus_combobox_add(g-&gt;dithering, _(&quot;8-bit output&quot;));</a>
+<a name="ln1148">  dt_bauhaus_combobox_add(g-&gt;dithering, _(&quot;16-bit output&quot;));</a>
+<a name="ln1149"> </a>
+<a name="ln1150">  dt_bauhaus_slider_set_format(g-&gt;scale, &quot;%.02f%%&quot;);</a>
+<a name="ln1151">  dt_bauhaus_slider_set_format(g-&gt;falloff_scale, &quot;%.02f%%&quot;);</a>
+<a name="ln1152">  dt_bauhaus_widget_set_label(g-&gt;scale, NULL, _(&quot;scale&quot;));</a>
+<a name="ln1153">  dt_bauhaus_widget_set_label(g-&gt;falloff_scale, NULL, _(&quot;fall-off strength&quot;));</a>
+<a name="ln1154">  dt_bauhaus_widget_set_label(g-&gt;brightness, NULL, _(&quot;brightness&quot;));</a>
+<a name="ln1155">  dt_bauhaus_widget_set_label(g-&gt;saturation, NULL, _(&quot;saturation&quot;));</a>
+<a name="ln1156">  dt_bauhaus_widget_set_label(g-&gt;center_x, NULL, _(&quot;horizontal center&quot;));</a>
+<a name="ln1157">  dt_bauhaus_widget_set_label(g-&gt;center_y, NULL, _(&quot;vertical center&quot;));</a>
+<a name="ln1158">  dt_bauhaus_widget_set_label(g-&gt;shape, NULL, _(&quot;shape&quot;));</a>
+<a name="ln1159">  dt_bauhaus_widget_set_label(g-&gt;whratio, NULL, _(&quot;width/height ratio&quot;));</a>
+<a name="ln1160">  dt_bauhaus_widget_set_label(g-&gt;dithering, NULL, _(&quot;dithering&quot;));</a>
+<a name="ln1161"> </a>
+<a name="ln1162">  gtk_widget_set_sensitive(GTK_WIDGET(g-&gt;whratio), !p-&gt;autoratio);</a>
+<a name="ln1163"> </a>
+<a name="ln1164">  hbox = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);</a>
+<a name="ln1165">  gtk_box_pack_start(GTK_BOX(hbox), GTK_WIDGET(label1), TRUE, TRUE, 0);</a>
+<a name="ln1166">  gtk_box_pack_start(GTK_BOX(hbox), GTK_WIDGET(g-&gt;autoratio), TRUE, TRUE, 0);</a>
+<a name="ln1167"> </a>
+<a name="ln1168">  gtk_box_pack_start(GTK_BOX(self-&gt;widget), g-&gt;scale, TRUE, TRUE, 0);</a>
+<a name="ln1169">  gtk_box_pack_start(GTK_BOX(self-&gt;widget), g-&gt;falloff_scale, TRUE, TRUE, 0);</a>
+<a name="ln1170">  gtk_box_pack_start(GTK_BOX(self-&gt;widget), g-&gt;brightness, TRUE, TRUE, 0);</a>
+<a name="ln1171">  gtk_box_pack_start(GTK_BOX(self-&gt;widget), g-&gt;saturation, TRUE, TRUE, 0);</a>
+<a name="ln1172">  gtk_box_pack_start(GTK_BOX(self-&gt;widget), g-&gt;center_x, TRUE, TRUE, 0);</a>
+<a name="ln1173">  gtk_box_pack_start(GTK_BOX(self-&gt;widget), g-&gt;center_y, TRUE, TRUE, 0);</a>
+<a name="ln1174">  gtk_box_pack_start(GTK_BOX(self-&gt;widget), g-&gt;shape, TRUE, TRUE, 0);</a>
+<a name="ln1175">  gtk_box_pack_start(GTK_BOX(self-&gt;widget), hbox, TRUE, TRUE, 0);</a>
+<a name="ln1176">  gtk_box_pack_start(GTK_BOX(self-&gt;widget), g-&gt;whratio, TRUE, TRUE, 0);</a>
+<a name="ln1177">  gtk_box_pack_start(GTK_BOX(self-&gt;widget), g-&gt;dithering, TRUE, TRUE, 0);</a>
+<a name="ln1178"> </a>
+<a name="ln1179">  gtk_widget_set_tooltip_text(g-&gt;scale, _(&quot;the radii scale of vignette for start of fall-off&quot;));</a>
+<a name="ln1180">  gtk_widget_set_tooltip_text(g-&gt;falloff_scale, _(&quot;the radii scale of vignette for end of fall-off&quot;));</a>
+<a name="ln1181">  gtk_widget_set_tooltip_text(g-&gt;brightness, _(&quot;strength of effect on brightness&quot;));</a>
+<a name="ln1182">  gtk_widget_set_tooltip_text(g-&gt;saturation, _(&quot;strength of effect on saturation&quot;));</a>
+<a name="ln1183">  gtk_widget_set_tooltip_text(g-&gt;center_x, _(&quot;horizontal offset of center of the effect&quot;));</a>
+<a name="ln1184">  gtk_widget_set_tooltip_text(g-&gt;center_y, _(&quot;vertical offset of center of the effect&quot;));</a>
+<a name="ln1185">  gtk_widget_set_tooltip_text(g-&gt;shape, _(&quot;shape factor\n0 produces a rectangle\n1 produces a circle or ellipse\n&quot;</a>
+<a name="ln1186">                                          &quot;2 produces a diamond&quot;));</a>
+<a name="ln1187">  gtk_widget_set_tooltip_text(GTK_WIDGET(g-&gt;autoratio), _(&quot;enable to have the ratio automatically follow the image size&quot;));</a>
+<a name="ln1188">  gtk_widget_set_tooltip_text(g-&gt;whratio, _(&quot;width-to-height ratio&quot;));</a>
+<a name="ln1189">  gtk_widget_set_tooltip_text(g-&gt;dithering, _(&quot;add some level of random noise to prevent banding&quot;));</a>
+<a name="ln1190"> </a>
+<a name="ln1191">  g_signal_connect(G_OBJECT(g-&gt;scale), &quot;value-changed&quot;, G_CALLBACK(scale_callback), self);</a>
+<a name="ln1192">  g_signal_connect(G_OBJECT(g-&gt;falloff_scale), &quot;value-changed&quot;, G_CALLBACK(falloff_scale_callback), self);</a>
+<a name="ln1193">  g_signal_connect(G_OBJECT(g-&gt;brightness), &quot;value-changed&quot;, G_CALLBACK(brightness_callback), self);</a>
+<a name="ln1194">  g_signal_connect(G_OBJECT(g-&gt;saturation), &quot;value-changed&quot;, G_CALLBACK(saturation_callback), self);</a>
+<a name="ln1195">  g_signal_connect(G_OBJECT(g-&gt;center_x), &quot;value-changed&quot;, G_CALLBACK(centerx_callback), self);</a>
+<a name="ln1196">  g_signal_connect(G_OBJECT(g-&gt;center_y), &quot;value-changed&quot;, G_CALLBACK(centery_callback), self);</a>
+<a name="ln1197">  g_signal_connect(G_OBJECT(g-&gt;shape), &quot;value-changed&quot;, G_CALLBACK(shape_callback), self);</a>
+<a name="ln1198">  g_signal_connect(G_OBJECT(g-&gt;autoratio), &quot;toggled&quot;, G_CALLBACK(autoratio_callback), self);</a>
+<a name="ln1199">  g_signal_connect(G_OBJECT(g-&gt;whratio), &quot;value-changed&quot;, G_CALLBACK(whratio_callback), self);</a>
+<a name="ln1200">  g_signal_connect(G_OBJECT(g-&gt;dithering), &quot;value-changed&quot;, G_CALLBACK(dithering_callback), self);</a>
+<a name="ln1201">}</a>
+<a name="ln1202"> </a>
+<a name="ln1203">void gui_cleanup(struct dt_iop_module_t *self)</a>
+<a name="ln1204">{</a>
+<a name="ln1205">  free(self-&gt;gui_data);</a>
+<a name="ln1206">  self-&gt;gui_data = NULL;</a>
+<a name="ln1207">}</a>
+<a name="ln1208"> </a>
+<a name="ln1209">// modelines: These editor modelines have been set for all relevant files by tools/update_modelines.sh</a>
+<a name="ln1210">// vim: shiftwidth=2 expandtab tabstop=2 cindent</a>
+<a name="ln1211">// kate: tab-indents: off; indent-width 2; replace-tabs on; indent-mode cstyle; remove-trailing-spaces modified;</a>
+
+</code></pre>
+<div class="balloon" rel="754"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v769/" target="_blank">V769</a> The 'tea_states' pointer in the 'tea_states + 2 * dt_get_thread_num()' expression could be nullptr. In such case, resulting value will be senseless and it should not be used. Check lines: 754, 744.</p></div>
+<div class="balloon" rel="933"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v522/" target="_blank">V522</a> There might be dereferencing of a potential null pointer 'gd'. Check lines: 933, 931.</p></div>
+<div class="balloon" rel="1113"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v575/" target="_blank">V575</a> The potential null pointer is passed into 'memcpy' function. Inspect the first argument. Check lines: 1113, 1106.</p></div>
+<div class="balloon" rel="1114"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v575/" target="_blank">V575</a> The potential null pointer is passed into 'memcpy' function. Inspect the first argument. Check lines: 1114, 1107.</p></div>
+<div class="balloon" rel="1135"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v522/" target="_blank">V522</a> There might be dereferencing of a potential null pointer 'g'. Check lines: 1135, 1125.</p></div>
+
+<link rel="stylesheet" href="highlight.css">
+<script src="highlight.pack.js"></script>
+<script src="highlightjs-line-numbers.js"></script>
+<script>hljs.initHighlightingOnLoad();</script>
+<script>hljs.initLineNumbersOnLoad();</script>
+<script>
+  $(document).ready(function() {
+      $('.balloon').each(function () {
+          var bl = $(this);
+          var line = bl.attr('rel');
+          var text = $('a[name="ln'+line+'"]').text();
+
+          var space_count = 0;
+          for(var i = 0; i<text.length; i++){
+              var char = text[i];
+              if((char !== ' ')&&(char !== '\t'))break;
+              if(char === '\t')space_count++;
+              space_count++;
+          }
+
+          bl.css('margin-left', space_count*8);
+          $('a[name="ln'+line+'"]').after(bl);
+      });
+
+      window.location = window.location;
+  });
+</script>
+</body>
+</html>

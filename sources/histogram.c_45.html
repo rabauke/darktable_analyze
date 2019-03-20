@@ -1,0 +1,491 @@
+
+<html>
+<head>
+  <link rel="stylesheet" href="../style.css"/>
+  <script src="../jquery-3.2.1.min.js"></script>
+</head>
+<body>
+<pre><code class = "cpp">
+<a name="ln1">/*</a>
+<a name="ln2">    This file is part of darktable,</a>
+<a name="ln3">    copyright (c) 2014-2016 LebedevRI.</a>
+<a name="ln4"> </a>
+<a name="ln5">    darktable is free software: you can redistribute it and/or modify</a>
+<a name="ln6">    it under the terms of the GNU General Public License as published by</a>
+<a name="ln7">    the Free Software Foundation, either version 3 of the License, or</a>
+<a name="ln8">    (at your option) any later version.</a>
+<a name="ln9"> </a>
+<a name="ln10">    darktable is distributed in the hope that it will be useful,</a>
+<a name="ln11">    but WITHOUT ANY WARRANTY; without even the implied warranty of</a>
+<a name="ln12">    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the</a>
+<a name="ln13">    GNU General Public License for more details.</a>
+<a name="ln14"> </a>
+<a name="ln15">    You should have received a copy of the GNU General Public License</a>
+<a name="ln16">    along with darktable.  If not, see &lt;http://www.gnu.org/licenses/&gt;.</a>
+<a name="ln17">*/</a>
+<a name="ln18">#include &lt;math.h&gt;</a>
+<a name="ln19">#include &lt;stddef.h&gt;</a>
+<a name="ln20">#include &lt;stdint.h&gt;</a>
+<a name="ln21">#if defined(__SSE__)</a>
+<a name="ln22">#include &lt;xmmintrin.h&gt;</a>
+<a name="ln23">#endif</a>
+<a name="ln24">#include &lt;assert.h&gt;</a>
+<a name="ln25">#include &lt;stdlib.h&gt;</a>
+<a name="ln26"> </a>
+<a name="ln27">#include &quot;common/colorspaces_inline_conversions.h&quot;</a>
+<a name="ln28">#include &quot;common/darktable.h&quot;</a>
+<a name="ln29">#include &quot;common/histogram.h&quot;</a>
+<a name="ln30">#include &quot;develop/imageop.h&quot;</a>
+<a name="ln31"> </a>
+<a name="ln32">#define S(V, params) ((params-&gt;mul) * ((float)V))</a>
+<a name="ln33">#define P(V, params) (CLAMP((V), 0, (params-&gt;bins_count - 1)))</a>
+<a name="ln34">#define PU(V, params) (MIN((V), (params-&gt;bins_count - 1)))</a>
+<a name="ln35">#define PS(V, params) (P(S(V, params), params))</a>
+<a name="ln36"> </a>
+<a name="ln37">//------------------------------------------------------------------------------</a>
+<a name="ln38"> </a>
+<a name="ln39">inline static void histogram_helper_cs_RAW_helper_process_pixel_float(</a>
+<a name="ln40">    const dt_dev_histogram_collection_params_t *const histogram_params, const float *pixel, uint32_t *histogram)</a>
+<a name="ln41">{</a>
+<a name="ln42">  const uint32_t i = PS(*pixel, histogram_params);</a>
+<a name="ln43">  histogram[4 * i]++;</a>
+<a name="ln44">}</a>
+<a name="ln45"> </a>
+<a name="ln46">inline static void histogram_helper_cs_RAW(const dt_dev_histogram_collection_params_t *const histogram_params,</a>
+<a name="ln47">                                           const void *pixel, uint32_t *histogram, int j,</a>
+<a name="ln48">                                           const dt_iop_order_iccprofile_info_t *const profile_info)</a>
+<a name="ln49">{</a>
+<a name="ln50">  const dt_histogram_roi_t *roi = histogram_params-&gt;roi;</a>
+<a name="ln51">  const float *input = (float *)pixel + roi-&gt;width * j + roi-&gt;crop_x;</a>
+<a name="ln52">  for(int i = 0; i &lt; roi-&gt;width - roi-&gt;crop_width - roi-&gt;crop_x; i++, input++)</a>
+<a name="ln53">  {</a>
+<a name="ln54">    histogram_helper_cs_RAW_helper_process_pixel_float(histogram_params, input, histogram);</a>
+<a name="ln55">  }</a>
+<a name="ln56">}</a>
+<a name="ln57"> </a>
+<a name="ln58">//------------------------------------------------------------------------------</a>
+<a name="ln59"> </a>
+<a name="ln60">// WARNING: you must ensure that bins_count is big enough</a>
+<a name="ln61">inline static void histogram_helper_cs_RAW_helper_process_pixel_uint16(</a>
+<a name="ln62">    const dt_dev_histogram_collection_params_t *const histogram_params, const uint16_t *pixel, uint32_t *histogram)</a>
+<a name="ln63">{</a>
+<a name="ln64">  const uint16_t i = PU(*pixel, histogram_params);</a>
+<a name="ln65">  histogram[4 * i]++;</a>
+<a name="ln66">}</a>
+<a name="ln67"> </a>
+<a name="ln68">inline void dt_histogram_helper_cs_RAW_uint16(const dt_dev_histogram_collection_params_t *const histogram_params,</a>
+<a name="ln69">                                              const void *pixel, uint32_t *histogram, int j,</a>
+<a name="ln70">                                              const dt_iop_order_iccprofile_info_t *const profile_info)</a>
+<a name="ln71">{</a>
+<a name="ln72">  const dt_histogram_roi_t *roi = histogram_params-&gt;roi;</a>
+<a name="ln73">  uint16_t *in = (uint16_t *)pixel + roi-&gt;width * j + roi-&gt;crop_x;</a>
+<a name="ln74"> </a>
+<a name="ln75">  // process pixels</a>
+<a name="ln76">  for(int i = 0; i &lt; roi-&gt;width - roi-&gt;crop_width - roi-&gt;crop_x; i++, in++)</a>
+<a name="ln77">    histogram_helper_cs_RAW_helper_process_pixel_uint16(histogram_params, in, histogram);</a>
+<a name="ln78">}</a>
+<a name="ln79"> </a>
+<a name="ln80">//------------------------------------------------------------------------------</a>
+<a name="ln81"> </a>
+<a name="ln82">inline static void __attribute__((__unused__)) histogram_helper_cs_rgb_helper_process_pixel_float(</a>
+<a name="ln83">    const dt_dev_histogram_collection_params_t *const histogram_params, const float *pixel, uint32_t *histogram)</a>
+<a name="ln84">{</a>
+<a name="ln85">  const uint32_t R = PS(pixel[0], histogram_params);</a>
+<a name="ln86">  const uint32_t G = PS(pixel[1], histogram_params);</a>
+<a name="ln87">  const uint32_t B = PS(pixel[2], histogram_params);</a>
+<a name="ln88">  histogram[4 * R]++;</a>
+<a name="ln89">  histogram[4 * G + 1]++;</a>
+<a name="ln90">  histogram[4 * B + 2]++;</a>
+<a name="ln91">}</a>
+<a name="ln92"> </a>
+<a name="ln93">inline static void __attribute__((__unused__)) histogram_helper_cs_rgb_helper_process_pixel_float_compensated(</a>
+<a name="ln94">    const dt_dev_histogram_collection_params_t *const histogram_params, const float *pixel, uint32_t *histogram, </a>
+<a name="ln95">    const dt_iop_order_iccprofile_info_t *const profile_info)</a>
+<a name="ln96">{</a>
+<a name="ln97">  const float rgb[3] = { dt_ioppr_compensate_middle_grey(pixel[0], profile_info), </a>
+<a name="ln98">      dt_ioppr_compensate_middle_grey(pixel[1], profile_info), </a>
+<a name="ln99">      dt_ioppr_compensate_middle_grey(pixel[2], profile_info) };</a>
+<a name="ln100">  const uint32_t R = PS(rgb[0], histogram_params);</a>
+<a name="ln101">  const uint32_t G = PS(rgb[1], histogram_params);</a>
+<a name="ln102">  const uint32_t B = PS(rgb[2], histogram_params);</a>
+<a name="ln103">  histogram[4 * R]++;</a>
+<a name="ln104">  histogram[4 * G + 1]++;</a>
+<a name="ln105">  histogram[4 * B + 2]++;</a>
+<a name="ln106">}</a>
+<a name="ln107"> </a>
+<a name="ln108">#if defined(__SSE2__)</a>
+<a name="ln109">inline static void histogram_helper_cs_rgb_helper_process_pixel_m128(</a>
+<a name="ln110">    const dt_dev_histogram_collection_params_t *const histogram_params, const float *pixel, uint32_t *histogram)</a>
+<a name="ln111">{</a>
+<a name="ln112">  const __m128 scale = _mm_set1_ps(histogram_params-&gt;mul);</a>
+<a name="ln113">  const __m128 val_min = _mm_setzero_ps();</a>
+<a name="ln114">  const __m128 val_max = _mm_set1_ps(histogram_params-&gt;bins_count - 1);</a>
+<a name="ln115"> </a>
+<a name="ln116">  assert(dt_is_aligned(pixel, 16));</a>
+<a name="ln117">  const __m128 input = _mm_load_ps(pixel);</a>
+<a name="ln118">  const __m128 scaled = _mm_mul_ps(input, scale);</a>
+<a name="ln119">  const __m128 clamped = _mm_max_ps(_mm_min_ps(scaled, val_max), val_min);</a>
+<a name="ln120"> </a>
+<a name="ln121">  const __m128i indexes = _mm_cvtps_epi32(clamped);</a>
+<a name="ln122"> </a>
+<a name="ln123">  __m128i values __attribute__((aligned(16)));</a>
+<a name="ln124">  _mm_store_si128(&amp;values, indexes);</a>
+<a name="ln125"> </a>
+<a name="ln126">  const uint32_t *valuesi = (uint32_t *)(&amp;values);</a>
+<a name="ln127"> </a>
+<a name="ln128">  histogram[4 * valuesi[0]]++;</a>
+<a name="ln129">  histogram[4 * valuesi[1] + 1]++;</a>
+<a name="ln130">  histogram[4 * valuesi[2] + 2]++;</a>
+<a name="ln131">}</a>
+<a name="ln132"> </a>
+<a name="ln133">inline static void histogram_helper_cs_rgb_helper_process_pixel_m128_compensated(</a>
+<a name="ln134">    const dt_dev_histogram_collection_params_t *const histogram_params, const float *pixel, uint32_t *histogram, </a>
+<a name="ln135">    const dt_iop_order_iccprofile_info_t *const profile_info)</a>
+<a name="ln136">{</a>
+<a name="ln137">  const __m128 rgb = { dt_ioppr_compensate_middle_grey(pixel[0], profile_info), </a>
+<a name="ln138">      dt_ioppr_compensate_middle_grey(pixel[1], profile_info), </a>
+<a name="ln139">      dt_ioppr_compensate_middle_grey(pixel[2], profile_info), 1.f };</a>
+<a name="ln140">  const __m128 scale = _mm_set1_ps(histogram_params-&gt;mul);</a>
+<a name="ln141">  const __m128 val_min = _mm_setzero_ps();</a>
+<a name="ln142">  const __m128 val_max = _mm_set1_ps(histogram_params-&gt;bins_count - 1);</a>
+<a name="ln143"> </a>
+<a name="ln144">  assert(dt_is_aligned(pixel, 16));</a>
+<a name="ln145">  const __m128 input = rgb;</a>
+<a name="ln146">  const __m128 scaled = _mm_mul_ps(input, scale);</a>
+<a name="ln147">  const __m128 clamped = _mm_max_ps(_mm_min_ps(scaled, val_max), val_min);</a>
+<a name="ln148"> </a>
+<a name="ln149">  const __m128i indexes = _mm_cvtps_epi32(clamped);</a>
+<a name="ln150"> </a>
+<a name="ln151">  __m128i values __attribute__((aligned(16)));</a>
+<a name="ln152">  _mm_store_si128(&amp;values, indexes);</a>
+<a name="ln153"> </a>
+<a name="ln154">  const uint32_t *valuesi = (uint32_t *)(&amp;values);</a>
+<a name="ln155"> </a>
+<a name="ln156">  histogram[4 * valuesi[0]]++;</a>
+<a name="ln157">  histogram[4 * valuesi[1] + 1]++;</a>
+<a name="ln158">  histogram[4 * valuesi[2] + 2]++;</a>
+<a name="ln159">}</a>
+<a name="ln160">#endif</a>
+<a name="ln161"> </a>
+<a name="ln162">inline static void histogram_helper_cs_rgb(const dt_dev_histogram_collection_params_t *const histogram_params,</a>
+<a name="ln163">                                           const void *pixel, uint32_t *histogram, int j,</a>
+<a name="ln164">                                           const dt_iop_order_iccprofile_info_t *const profile_info)</a>
+<a name="ln165">{</a>
+<a name="ln166">  const dt_histogram_roi_t *roi = histogram_params-&gt;roi;</a>
+<a name="ln167">  float *in = (float *)pixel + 4 * (roi-&gt;width * j + roi-&gt;crop_x);</a>
+<a name="ln168"> </a>
+<a name="ln169">  // process aligned pixels with SSE</a>
+<a name="ln170">  for(int i = 0; i &lt; roi-&gt;width - roi-&gt;crop_width - roi-&gt;crop_x; i++, in += 4)</a>
+<a name="ln171">  {</a>
+<a name="ln172">    if(darktable.codepath.OPENMP_SIMD)</a>
+<a name="ln173">      histogram_helper_cs_rgb_helper_process_pixel_float(histogram_params, in, histogram);</a>
+<a name="ln174">#if defined(__SSE2__)</a>
+<a name="ln175">    else if(darktable.codepath.SSE2)</a>
+<a name="ln176">      histogram_helper_cs_rgb_helper_process_pixel_m128(histogram_params, in, histogram);</a>
+<a name="ln177">#endif</a>
+<a name="ln178">    else</a>
+<a name="ln179">      dt_unreachable_codepath();</a>
+<a name="ln180">  }</a>
+<a name="ln181">}</a>
+<a name="ln182"> </a>
+<a name="ln183">inline static void histogram_helper_cs_rgb_compensated(const dt_dev_histogram_collection_params_t *const histogram_params,</a>
+<a name="ln184">                                           const void *pixel, uint32_t *histogram, int j, </a>
+<a name="ln185">                                           const dt_iop_order_iccprofile_info_t *const profile_info)</a>
+<a name="ln186">{</a>
+<a name="ln187">  const dt_histogram_roi_t *roi = histogram_params-&gt;roi;</a>
+<a name="ln188">  float *in = (float *)pixel + 4 * (roi-&gt;width * j + roi-&gt;crop_x);</a>
+<a name="ln189"> </a>
+<a name="ln190">  // process aligned pixels with SSE</a>
+<a name="ln191">  for(int i = 0; i &lt; roi-&gt;width - roi-&gt;crop_width - roi-&gt;crop_x; i++, in += 4)</a>
+<a name="ln192">  {</a>
+<a name="ln193">    if(darktable.codepath.OPENMP_SIMD)</a>
+<a name="ln194">      histogram_helper_cs_rgb_helper_process_pixel_float_compensated(histogram_params, in, histogram, profile_info);</a>
+<a name="ln195">#if defined(__SSE2__)</a>
+<a name="ln196">    else if(darktable.codepath.SSE2)</a>
+<a name="ln197">      histogram_helper_cs_rgb_helper_process_pixel_m128_compensated(histogram_params, in, histogram, profile_info);</a>
+<a name="ln198">#endif</a>
+<a name="ln199">    else</a>
+<a name="ln200">      dt_unreachable_codepath();</a>
+<a name="ln201">  }</a>
+<a name="ln202">}</a>
+<a name="ln203"> </a>
+<a name="ln204">//------------------------------------------------------------------------------</a>
+<a name="ln205"> </a>
+<a name="ln206">inline static void __attribute__((__unused__)) histogram_helper_cs_Lab_helper_process_pixel_float(</a>
+<a name="ln207">    const dt_dev_histogram_collection_params_t *const histogram_params, const float *pixel, uint32_t *histogram)</a>
+<a name="ln208">{</a>
+<a name="ln209">  const float Lv = pixel[0];</a>
+<a name="ln210">  const float av = pixel[1];</a>
+<a name="ln211">  const float bv = pixel[2];</a>
+<a name="ln212">  const float max = histogram_params-&gt;bins_count - 1;</a>
+<a name="ln213">  const uint32_t L = CLAMP(histogram_params-&gt;mul / 100.0f * (Lv), 0, max);</a>
+<a name="ln214">  const uint32_t a = CLAMP(histogram_params-&gt;mul / 256.0f * (av + 128.0f), 0, max);</a>
+<a name="ln215">  const uint32_t b = CLAMP(histogram_params-&gt;mul / 256.0f * (bv + 128.0f), 0, max);</a>
+<a name="ln216">  histogram[4 * L]++;</a>
+<a name="ln217">  histogram[4 * a + 1]++;</a>
+<a name="ln218">  histogram[4 * b + 2]++;</a>
+<a name="ln219">}</a>
+<a name="ln220"> </a>
+<a name="ln221">#if defined(__SSE2__)</a>
+<a name="ln222">inline static void histogram_helper_cs_Lab_helper_process_pixel_m128(</a>
+<a name="ln223">    const dt_dev_histogram_collection_params_t *const histogram_params, const float *pixel, uint32_t *histogram)</a>
+<a name="ln224">{</a>
+<a name="ln225">  const float fscale = histogram_params-&gt;mul;</a>
+<a name="ln226"> </a>
+<a name="ln227">  const __m128 shift = _mm_set_ps(0.0f, 128.0f, 128.0f, 0.0f);</a>
+<a name="ln228">  const __m128 scale = _mm_set_ps(fscale / 1.0f, fscale / 256.0f, fscale / 256.0f, fscale / 100.0f);</a>
+<a name="ln229">  const __m128 val_min = _mm_setzero_ps();</a>
+<a name="ln230">  const __m128 val_max = _mm_set1_ps(histogram_params-&gt;bins_count - 1);</a>
+<a name="ln231"> </a>
+<a name="ln232">  assert(dt_is_aligned(pixel, 16));</a>
+<a name="ln233">  const __m128 input = _mm_load_ps(pixel);</a>
+<a name="ln234">  const __m128 shifted = _mm_add_ps(input, shift);</a>
+<a name="ln235">  const __m128 scaled = _mm_mul_ps(shifted, scale);</a>
+<a name="ln236">  const __m128 clamped = _mm_max_ps(_mm_min_ps(scaled, val_max), val_min);</a>
+<a name="ln237"> </a>
+<a name="ln238">  const __m128i indexes = _mm_cvtps_epi32(clamped);</a>
+<a name="ln239"> </a>
+<a name="ln240">  __m128i values __attribute__((aligned(16)));</a>
+<a name="ln241">  _mm_store_si128(&amp;values, indexes);</a>
+<a name="ln242"> </a>
+<a name="ln243">  const uint32_t *valuesi = (uint32_t *)(&amp;values);</a>
+<a name="ln244"> </a>
+<a name="ln245">  histogram[4 * valuesi[0]]++;</a>
+<a name="ln246">  histogram[4 * valuesi[1] + 1]++;</a>
+<a name="ln247">  histogram[4 * valuesi[2] + 2]++;</a>
+<a name="ln248">}</a>
+<a name="ln249">#endif</a>
+<a name="ln250"> </a>
+<a name="ln251">inline static void histogram_helper_cs_Lab(const dt_dev_histogram_collection_params_t *const histogram_params,</a>
+<a name="ln252">                                           const void *pixel, uint32_t *histogram, int j,</a>
+<a name="ln253">                                           const dt_iop_order_iccprofile_info_t *const profile_info)</a>
+<a name="ln254">{</a>
+<a name="ln255">  const dt_histogram_roi_t *roi = histogram_params-&gt;roi;</a>
+<a name="ln256">  float *in = (float *)pixel + 4 * (roi-&gt;width * j + roi-&gt;crop_x);</a>
+<a name="ln257"> </a>
+<a name="ln258">  // process aligned pixels with SSE</a>
+<a name="ln259">  for(int i = 0; i &lt; roi-&gt;width - roi-&gt;crop_width - roi-&gt;crop_x; i++, in += 4)</a>
+<a name="ln260">  {</a>
+<a name="ln261">    if(darktable.codepath.OPENMP_SIMD)</a>
+<a name="ln262">      histogram_helper_cs_Lab_helper_process_pixel_float(histogram_params, in, histogram);</a>
+<a name="ln263">#if defined(__SSE2__)</a>
+<a name="ln264">    else if(darktable.codepath.SSE2)</a>
+<a name="ln265">      histogram_helper_cs_Lab_helper_process_pixel_m128(histogram_params, in, histogram);</a>
+<a name="ln266">#endif</a>
+<a name="ln267">    else</a>
+<a name="ln268">      dt_unreachable_codepath();</a>
+<a name="ln269">  }</a>
+<a name="ln270">}</a>
+<a name="ln271"> </a>
+<a name="ln272">inline static void __attribute__((__unused__)) histogram_helper_cs_Lab_LCh_helper_process_pixel_float(</a>
+<a name="ln273">    const dt_dev_histogram_collection_params_t *const histogram_params, const float *pixel, uint32_t *histogram)</a>
+<a name="ln274">{</a>
+<a name="ln275">  float LCh[3];</a>
+<a name="ln276">  dt_Lab_2_LCH(pixel, LCh);</a>
+<a name="ln277">  const uint32_t L = PS((LCh[0] / 100.f), histogram_params);</a>
+<a name="ln278">  const uint32_t C = PS((LCh[1] / (128.0f * sqrtf(2.0f))), histogram_params);</a>
+<a name="ln279">  const uint32_t h = PS(LCh[2], histogram_params);</a>
+<a name="ln280">  histogram[4 * L]++;</a>
+<a name="ln281">  histogram[4 * C + 1]++;</a>
+<a name="ln282">  histogram[4 * h + 2]++;</a>
+<a name="ln283">}</a>
+<a name="ln284"> </a>
+<a name="ln285">inline static void histogram_helper_cs_Lab_LCh(const dt_dev_histogram_collection_params_t *const histogram_params,</a>
+<a name="ln286">                                               const void *pixel, uint32_t *histogram, int j,</a>
+<a name="ln287">                                               const dt_iop_order_iccprofile_info_t *const profile_info)</a>
+<a name="ln288">{</a>
+<a name="ln289">  const dt_histogram_roi_t *roi = histogram_params-&gt;roi;</a>
+<a name="ln290">  float *in = (float *)pixel + 4 * (roi-&gt;width * j + roi-&gt;crop_x);</a>
+<a name="ln291"> </a>
+<a name="ln292">  // TODO: process aligned pixels with SSE</a>
+<a name="ln293">  for(int i = 0; i &lt; roi-&gt;width - roi-&gt;crop_width - roi-&gt;crop_x; i++, in += 4)</a>
+<a name="ln294">  {</a>
+<a name="ln295">    //    if(darktable.codepath.OPENMP_SIMD)</a>
+<a name="ln296">    histogram_helper_cs_Lab_LCh_helper_process_pixel_float(histogram_params, in, histogram);</a>
+<a name="ln297">    //#if defined(__SSE2__)</a>
+<a name="ln298">    //    else if(darktable.codepath.SSE2)</a>
+<a name="ln299">    //      histogram_helper_cs_Lab_helper_process_pixel_m128(histogram_params, in, histogram);</a>
+<a name="ln300">    //#endif</a>
+<a name="ln301">    //    else</a>
+<a name="ln302">    //      dt_unreachable_codepath();</a>
+<a name="ln303">  }</a>
+<a name="ln304">}</a>
+<a name="ln305"> </a>
+<a name="ln306">//==============================================================================</a>
+<a name="ln307"> </a>
+<a name="ln308">void dt_histogram_worker(dt_dev_histogram_collection_params_t *const histogram_params,</a>
+<a name="ln309">                         dt_dev_histogram_stats_t *histogram_stats, const void *const pixel,</a>
+<a name="ln310">                         uint32_t **histogram, const dt_worker Worker,</a>
+<a name="ln311">                         const dt_iop_order_iccprofile_info_t *const profile_info)</a>
+<a name="ln312">{</a>
+<a name="ln313">  const int nthreads = omp_get_max_threads();</a>
+<a name="ln314"> </a>
+<a name="ln315">  const size_t bins_total = (size_t)4 * histogram_params-&gt;bins_count;</a>
+<a name="ln316">  const size_t buf_size = bins_total * sizeof(uint32_t);</a>
+<a name="ln317">  void *partial_hists = calloc(nthreads, buf_size);</a>
+<a name="ln318"> </a>
+<a name="ln319">  if(histogram_params-&gt;mul == 0) histogram_params-&gt;mul = (double)(histogram_params-&gt;bins_count - 1);</a>
+<a name="ln320"> </a>
+<a name="ln321">  const dt_histogram_roi_t *const roi = histogram_params-&gt;roi;</a>
+<a name="ln322"> </a>
+<a name="ln323">#ifdef _OPENMP</a>
+<a name="ln324">#pragma omp parallel for schedule(static) default(none) shared(partial_hists)</a>
+<a name="ln325">#endif</a>
+<a name="ln326">  for(int j = roi-&gt;crop_y; j &lt; roi-&gt;height - roi-&gt;crop_height; j++)</a>
+<a name="ln327">  {</a>
+<a name="ln328">    uint32_t *thread_hist = (uint32_t *)partial_hists + bins_total * omp_get_thread_num();</a>
+<a name="ln329">    Worker(histogram_params, pixel, thread_hist, j, profile_info);</a>
+<a name="ln330">  }</a>
+<a name="ln331"> </a>
+<a name="ln332">#ifdef _OPENMP</a>
+<a name="ln333">  *histogram = realloc(*histogram, buf_size);</a>
+<a name="ln334">  memset(*histogram, 0, buf_size);</a>
+<a name="ln335">  uint32_t *hist = *histogram;</a>
+<a name="ln336"> </a>
+<a name="ln337">#pragma omp parallel for schedule(static) default(none) shared(hist, partial_hists)</a>
+<a name="ln338">  for(size_t k = 0; k &lt; bins_total; k++)</a>
+<a name="ln339">  {</a>
+<a name="ln340">    for(size_t n = 0; n &lt; nthreads; n++)</a>
+<a name="ln341">    {</a>
+<a name="ln342">      const uint32_t *thread_hist = (uint32_t *)partial_hists + bins_total * n;</a>
+<a name="ln343">      hist[k] += thread_hist[k];</a>
+<a name="ln344">    }</a>
+<a name="ln345">  }</a>
+<a name="ln346">#else</a>
+<a name="ln347">  *histogram = realloc(*histogram, buf_size);</a>
+<a name="ln348">  memmove(*histogram, partial_hists, buf_size);</a>
+<a name="ln349">#endif</a>
+<a name="ln350">  free(partial_hists);</a>
+<a name="ln351"> </a>
+<a name="ln352">  histogram_stats-&gt;bins_count = histogram_params-&gt;bins_count;</a>
+<a name="ln353">  histogram_stats-&gt;pixels = (roi-&gt;width - roi-&gt;crop_width - roi-&gt;crop_x)</a>
+<a name="ln354">                            * (roi-&gt;height - roi-&gt;crop_height - roi-&gt;crop_y);</a>
+<a name="ln355">}</a>
+<a name="ln356"> </a>
+<a name="ln357">//------------------------------------------------------------------------------</a>
+<a name="ln358"> </a>
+<a name="ln359">void dt_histogram_helper(dt_dev_histogram_collection_params_t *histogram_params,</a>
+<a name="ln360">    dt_dev_histogram_stats_t *histogram_stats, const dt_iop_colorspace_type_t cst,</a>
+<a name="ln361">    const dt_iop_colorspace_type_t cst_to, const void *pixel, uint32_t **histogram,</a>
+<a name="ln362">    const int compensate_middle_grey, const dt_iop_order_iccprofile_info_t *const profile_info)</a>
+<a name="ln363">{</a>
+<a name="ln364">  switch(cst)</a>
+<a name="ln365">  {</a>
+<a name="ln366">    case iop_cs_RAW:</a>
+<a name="ln367">      dt_histogram_worker(histogram_params, histogram_stats, pixel, histogram, histogram_helper_cs_RAW, profile_info);</a>
+<a name="ln368">      histogram_stats-&gt;ch = 1u;</a>
+<a name="ln369">      break;</a>
+<a name="ln370"> </a>
+<a name="ln371">    case iop_cs_rgb:</a>
+<a name="ln372">      if(compensate_middle_grey &amp;&amp; profile_info)</a>
+<a name="ln373">        dt_histogram_worker(histogram_params, histogram_stats, pixel, histogram, histogram_helper_cs_rgb_compensated, profile_info);</a>
+<a name="ln374">      else</a>
+<a name="ln375">        dt_histogram_worker(histogram_params, histogram_stats, pixel, histogram, histogram_helper_cs_rgb, profile_info);</a>
+<a name="ln376">      histogram_stats-&gt;ch = 3u;</a>
+<a name="ln377">      break;</a>
+<a name="ln378"> </a>
+<a name="ln379">    case iop_cs_Lab:</a>
+<a name="ln380">    default:</a>
+<a name="ln381">      if(cst_to != iop_cs_LCh)</a>
+<a name="ln382">        dt_histogram_worker(histogram_params, histogram_stats, pixel, histogram, histogram_helper_cs_Lab, profile_info);</a>
+<a name="ln383">      else</a>
+<a name="ln384">        dt_histogram_worker(histogram_params, histogram_stats, pixel, histogram, histogram_helper_cs_Lab_LCh, profile_info);</a>
+<a name="ln385">      histogram_stats-&gt;ch = 3u;</a>
+<a name="ln386">      break;</a>
+<a name="ln387">  }</a>
+<a name="ln388">}</a>
+<a name="ln389"> </a>
+<a name="ln390">void dt_histogram_max_helper(const dt_dev_histogram_stats_t *const histogram_stats,</a>
+<a name="ln391">                             const dt_iop_colorspace_type_t cst, const dt_iop_colorspace_type_t cst_to,</a>
+<a name="ln392">                             uint32_t **histogram, uint32_t *histogram_max)</a>
+<a name="ln393">{</a>
+<a name="ln394">  if(*histogram == NULL) return;</a>
+<a name="ln395">  histogram_max[0] = histogram_max[1] = histogram_max[2] = histogram_max[3] = 0;</a>
+<a name="ln396">  uint32_t *hist = *histogram;</a>
+<a name="ln397">  switch(cst)</a>
+<a name="ln398">  {</a>
+<a name="ln399">    case iop_cs_RAW:</a>
+<a name="ln400">      for(int k = 0; k &lt; 4 * histogram_stats-&gt;bins_count; k += 4)</a>
+<a name="ln401">        histogram_max[0] = histogram_max[0] &gt; hist[k] ? histogram_max[0] : hist[k];</a>
+<a name="ln402">      break;</a>
+<a name="ln403"> </a>
+<a name="ln404">    case iop_cs_rgb:</a>
+<a name="ln405">      // don't count &lt;= 0 pixels</a>
+<a name="ln406">      for(int k = 4; k &lt; 4 * histogram_stats-&gt;bins_count; k += 4)</a>
+<a name="ln407">        histogram_max[0] = histogram_max[0] &gt; hist[k] ? histogram_max[0] : hist[k];</a>
+<a name="ln408">      for(int k = 5; k &lt; 4 * histogram_stats-&gt;bins_count; k += 4)</a>
+<a name="ln409">        histogram_max[1] = histogram_max[1] &gt; hist[k] ? histogram_max[1] : hist[k];</a>
+<a name="ln410">      for(int k = 6; k &lt; 4 * histogram_stats-&gt;bins_count; k += 4)</a>
+<a name="ln411">        histogram_max[2] = histogram_max[2] &gt; hist[k] ? histogram_max[2] : hist[k];</a>
+<a name="ln412">      for(int k = 7; k &lt; 4 * histogram_stats-&gt;bins_count; k += 4)</a>
+<a name="ln413">        histogram_max[3] = histogram_max[3] &gt; hist[k] ? histogram_max[3] : hist[k];</a>
+<a name="ln414">      break;</a>
+<a name="ln415"> </a>
+<a name="ln416">    case iop_cs_Lab:</a>
+<a name="ln417">    default:</a>
+<a name="ln418">      if(cst_to == iop_cs_LCh)</a>
+<a name="ln419">      {</a>
+<a name="ln420">        // don't count &lt;= 0 pixels</a>
+<a name="ln421">        for(int k = 4; k &lt; 4 * histogram_stats-&gt;bins_count; k += 4)</a>
+<a name="ln422">          histogram_max[0] = histogram_max[0] &gt; hist[k] ? histogram_max[0] : hist[k];</a>
+<a name="ln423">        for(int k = 5; k &lt; 4 * histogram_stats-&gt;bins_count; k += 4)</a>
+<a name="ln424">          histogram_max[1] = histogram_max[1] &gt; hist[k] ? histogram_max[1] : hist[k];</a>
+<a name="ln425">        for(int k = 6; k &lt; 4 * histogram_stats-&gt;bins_count; k += 4)</a>
+<a name="ln426">          histogram_max[2] = histogram_max[2] &gt; hist[k] ? histogram_max[2] : hist[k];</a>
+<a name="ln427">        for(int k = 7; k &lt; 4 * histogram_stats-&gt;bins_count; k += 4)</a>
+<a name="ln428">          histogram_max[3] = histogram_max[3] &gt; hist[k] ? histogram_max[3] : hist[k];</a>
+<a name="ln429">      }</a>
+<a name="ln430">      else</a>
+<a name="ln431">      {</a>
+<a name="ln432">        // don't count &lt;= 0 pixels in L</a>
+<a name="ln433">        for(int k = 4; k &lt; 4 * histogram_stats-&gt;bins_count; k += 4)</a>
+<a name="ln434">          histogram_max[0] = histogram_max[0] &gt; hist[k] ? histogram_max[0] : hist[k];</a>
+<a name="ln435"> </a>
+<a name="ln436">        // don't count &lt;= -128 and &gt;= +128 pixels in a and b</a>
+<a name="ln437">        for(int k = 5; k &lt; 4 * (histogram_stats-&gt;bins_count - 1); k += 4)</a>
+<a name="ln438">          histogram_max[1] = histogram_max[1] &gt; hist[k] ? histogram_max[1] : hist[k];</a>
+<a name="ln439">        for(int k = 6; k &lt; 4 * (histogram_stats-&gt;bins_count - 1); k += 4)</a>
+<a name="ln440">          histogram_max[2] = histogram_max[2] &gt; hist[k] ? histogram_max[2] : hist[k];</a>
+<a name="ln441">      }</a>
+<a name="ln442">      break;</a>
+<a name="ln443">  }</a>
+<a name="ln444">}</a>
+<a name="ln445"> </a>
+<a name="ln446">// modelines: These editor modelines have been set for all relevant files by tools/update_modelines.sh</a>
+<a name="ln447">// vim: shiftwidth=2 expandtab tabstop=2 cindent</a>
+<a name="ln448">// kate: tab-indents: off; indent-width 2; replace-tabs on; indent-mode cstyle; remove-trailing-spaces modified;</a>
+
+</code></pre>
+<div class="balloon" rel="328"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v769/" target="_blank">V769</a> The '(uint32_t *) partial_hists' pointer in the expression could be nullptr. In such case, resulting value of arithmetic operations on this pointer will be senseless and it should not be used. Check lines: 328, 317.</p></div>
+<div class="balloon" rel="333"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v701/" target="_blank">V701</a> realloc() possible leak: when realloc() fails in allocating memory, original pointer '* histogram' is lost. Consider assigning realloc() to a temporary pointer.</p></div>
+<div class="balloon" rel="343"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v522/" target="_blank">V522</a> There might be dereferencing of a potential null pointer 'thread_hist'. Check lines: 343, 317.</p></div>
+
+<link rel="stylesheet" href="highlight.css">
+<script src="highlight.pack.js"></script>
+<script src="highlightjs-line-numbers.js"></script>
+<script>hljs.initHighlightingOnLoad();</script>
+<script>hljs.initLineNumbersOnLoad();</script>
+<script>
+  $(document).ready(function() {
+      $('.balloon').each(function () {
+          var bl = $(this);
+          var line = bl.attr('rel');
+          var text = $('a[name="ln'+line+'"]').text();
+
+          var space_count = 0;
+          for(var i = 0; i<text.length; i++){
+              var char = text[i];
+              if((char !== ' ')&&(char !== '\t'))break;
+              if(char === '\t')space_count++;
+              space_count++;
+          }
+
+          bl.css('margin-left', space_count*8);
+          $('a[name="ln'+line+'"]').after(bl);
+      });
+
+      window.location = window.location;
+  });
+</script>
+</body>
+</html>

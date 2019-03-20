@@ -1,0 +1,464 @@
+
+<html>
+<head>
+  <link rel="stylesheet" href="../style.css"/>
+  <script src="../jquery-3.2.1.min.js"></script>
+</head>
+<body>
+<pre><code class = "cpp">
+<a name="ln1">/* -*- Mode: c; c-basic-offset: 2; -*- */</a>
+<a name="ln2">/*</a>
+<a name="ln3">    This file is part of darktable,</a>
+<a name="ln4">    copyright (c) 2009--2010 johannes hanika</a>
+<a name="ln5">    copyright (c) 2011 Sergey Astanin</a>
+<a name="ln6">    copyright (c) 2012 Henrik Andersson</a>
+<a name="ln7">    copyright (c) 2014 Ulrich Pegelow</a>
+<a name="ln8"> </a>
+<a name="ln9"> </a>
+<a name="ln10">    darktable is free software: you can redistribute it and/or modify</a>
+<a name="ln11">    it under the terms of the GNU General Public License as published by</a>
+<a name="ln12">    the Free Software Foundation, either version 3 of the License, or</a>
+<a name="ln13">    (at your option) any later version.</a>
+<a name="ln14"> </a>
+<a name="ln15">    darktable is distributed in the hope that it will be useful,</a>
+<a name="ln16">    but WITHOUT ANY WARRANTY; without even the implied warranty of</a>
+<a name="ln17">    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the</a>
+<a name="ln18">    GNU General Public License for more details.</a>
+<a name="ln19"> </a>
+<a name="ln20">    You should have received a copy of the GNU General Public License</a>
+<a name="ln21">    along with darktable.  If not, see &lt;http://www.gnu.org/licenses/&gt;.</a>
+<a name="ln22">*/</a>
+<a name="ln23">#ifdef HAVE_CONFIG_H</a>
+<a name="ln24">#include &quot;config.h&quot;</a>
+<a name="ln25">#endif</a>
+<a name="ln26">#include &quot;bauhaus/bauhaus.h&quot;</a>
+<a name="ln27">#include &quot;common/opencl.h&quot;</a>
+<a name="ln28">#include &quot;control/control.h&quot;</a>
+<a name="ln29">#include &quot;develop/imageop.h&quot;</a>
+<a name="ln30">#include &quot;gui/accelerators.h&quot;</a>
+<a name="ln31">#include &quot;gui/gtk.h&quot;</a>
+<a name="ln32">#include &quot;iop/iop_api.h&quot;</a>
+<a name="ln33"> </a>
+<a name="ln34">#include &lt;assert.h&gt;</a>
+<a name="ln35">#include &lt;gtk/gtk.h&gt;</a>
+<a name="ln36">#include &lt;stdlib.h&gt;</a>
+<a name="ln37"> </a>
+<a name="ln38">#if defined(__SSE__)</a>
+<a name="ln39">#include &lt;xmmintrin.h&gt;</a>
+<a name="ln40">#endif</a>
+<a name="ln41"> </a>
+<a name="ln42">DT_MODULE_INTROSPECTION(2, dt_iop_colorcontrast_params_t)</a>
+<a name="ln43"> </a>
+<a name="ln44">typedef struct dt_iop_colorcontrast_params1_t</a>
+<a name="ln45">{</a>
+<a name="ln46">  float a_steepness;</a>
+<a name="ln47">  float a_offset;</a>
+<a name="ln48">  float b_steepness;</a>
+<a name="ln49">  float b_offset;</a>
+<a name="ln50">} dt_iop_colorcontrast_params1_t;</a>
+<a name="ln51"> </a>
+<a name="ln52">typedef struct dt_iop_colorcontrast_params_t</a>
+<a name="ln53">{</a>
+<a name="ln54">  float a_steepness;</a>
+<a name="ln55">  float a_offset;</a>
+<a name="ln56">  float b_steepness;</a>
+<a name="ln57">  float b_offset;</a>
+<a name="ln58">  int unbound;</a>
+<a name="ln59">} dt_iop_colorcontrast_params_t;</a>
+<a name="ln60"> </a>
+<a name="ln61">typedef struct dt_iop_colorcontrast_gui_data_t</a>
+<a name="ln62">{</a>
+<a name="ln63">  // whatever you need to make your gui happy.</a>
+<a name="ln64">  // stored in self-&gt;gui_data</a>
+<a name="ln65">  GtkBox *vbox;</a>
+<a name="ln66">  GtkWidget *a_scale; // this is needed by gui_update</a>
+<a name="ln67">  GtkWidget *b_scale;</a>
+<a name="ln68">} dt_iop_colorcontrast_gui_data_t;</a>
+<a name="ln69"> </a>
+<a name="ln70">typedef struct dt_iop_colorcontrast_data_t</a>
+<a name="ln71">{</a>
+<a name="ln72">  // this is stored in the pixelpipeline after a commit (not the db),</a>
+<a name="ln73">  // you can do some precomputation and get this data in process().</a>
+<a name="ln74">  // stored in piece-&gt;data</a>
+<a name="ln75">  float a_steepness;</a>
+<a name="ln76">  float a_offset;</a>
+<a name="ln77">  float b_steepness;</a>
+<a name="ln78">  float b_offset;</a>
+<a name="ln79">  int unbound;</a>
+<a name="ln80">} dt_iop_colorcontrast_data_t;</a>
+<a name="ln81"> </a>
+<a name="ln82">typedef struct dt_iop_colorcontrast_global_data_t</a>
+<a name="ln83">{</a>
+<a name="ln84">  int kernel_colorcontrast;</a>
+<a name="ln85">} dt_iop_colorcontrast_global_data_t;</a>
+<a name="ln86"> </a>
+<a name="ln87"> </a>
+<a name="ln88">const char *name()</a>
+<a name="ln89">{</a>
+<a name="ln90">  return _(&quot;color contrast&quot;);</a>
+<a name="ln91">}</a>
+<a name="ln92"> </a>
+<a name="ln93">int flags()</a>
+<a name="ln94">{</a>
+<a name="ln95">  return IOP_FLAGS_INCLUDE_IN_STYLES | IOP_FLAGS_SUPPORTS_BLENDING | IOP_FLAGS_ALLOW_TILING;</a>
+<a name="ln96">}</a>
+<a name="ln97"> </a>
+<a name="ln98">int default_group()</a>
+<a name="ln99">{</a>
+<a name="ln100">  return IOP_GROUP_COLOR;</a>
+<a name="ln101">}</a>
+<a name="ln102"> </a>
+<a name="ln103">int default_colorspace(dt_iop_module_t *self, dt_dev_pixelpipe_t *pipe, dt_dev_pixelpipe_iop_t *piece)</a>
+<a name="ln104">{</a>
+<a name="ln105">  return iop_cs_Lab;</a>
+<a name="ln106">}</a>
+<a name="ln107"> </a>
+<a name="ln108">int legacy_params(dt_iop_module_t *self, const void *const old_params, const int old_version,</a>
+<a name="ln109">                  void *new_params, const int new_version)</a>
+<a name="ln110">{</a>
+<a name="ln111">  if(old_version == 1 &amp;&amp; new_version == 2)</a>
+<a name="ln112">  {</a>
+<a name="ln113">    const dt_iop_colorcontrast_params1_t *old = old_params;</a>
+<a name="ln114">    dt_iop_colorcontrast_params_t *new = new_params;</a>
+<a name="ln115"> </a>
+<a name="ln116">    new-&gt;a_steepness = old-&gt;a_steepness;</a>
+<a name="ln117">    new-&gt;a_offset = old-&gt;a_offset;</a>
+<a name="ln118">    new-&gt;b_steepness = old-&gt;b_steepness;</a>
+<a name="ln119">    new-&gt;b_offset = old-&gt;b_offset;</a>
+<a name="ln120">    new-&gt;unbound = 0;</a>
+<a name="ln121">    return 0;</a>
+<a name="ln122">  }</a>
+<a name="ln123">  return 1;</a>
+<a name="ln124">}</a>
+<a name="ln125"> </a>
+<a name="ln126">void init_key_accels(dt_iop_module_so_t *self)</a>
+<a name="ln127">{</a>
+<a name="ln128">  dt_accel_register_slider_iop(self, FALSE, NC_(&quot;accel&quot;, &quot;green vs magenta&quot;));</a>
+<a name="ln129">  dt_accel_register_slider_iop(self, FALSE, NC_(&quot;accel&quot;, &quot;blue vs yellow&quot;));</a>
+<a name="ln130">}</a>
+<a name="ln131"> </a>
+<a name="ln132">void connect_key_accels(dt_iop_module_t *self)</a>
+<a name="ln133">{</a>
+<a name="ln134">  dt_iop_colorcontrast_gui_data_t *g =</a>
+<a name="ln135">    (dt_iop_colorcontrast_gui_data_t*)self-&gt;gui_data;</a>
+<a name="ln136"> </a>
+<a name="ln137">  dt_accel_connect_slider_iop(self, &quot;green vs magenta&quot;,</a>
+<a name="ln138">                              GTK_WIDGET(g-&gt;a_scale));</a>
+<a name="ln139">  dt_accel_connect_slider_iop(self, &quot;blue vs yellow&quot;,</a>
+<a name="ln140">                              GTK_WIDGET(g-&gt;b_scale));</a>
+<a name="ln141">}</a>
+<a name="ln142"> </a>
+<a name="ln143">void process(struct dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, const void *const ivoid,</a>
+<a name="ln144">             void *const ovoid, const dt_iop_roi_t *const roi_in, const dt_iop_roi_t *const roi_out)</a>
+<a name="ln145">{</a>
+<a name="ln146">  // this is called for preview and full pipe separately, each with its own pixelpipe piece.</a>
+<a name="ln147"> </a>
+<a name="ln148">  // get our data struct:</a>
+<a name="ln149">  const dt_iop_colorcontrast_params_t *const d = (dt_iop_colorcontrast_params_t *)piece-&gt;data;</a>
+<a name="ln150"> </a>
+<a name="ln151">  // how many colors in our buffer?</a>
+<a name="ln152">  const int ch = piece-&gt;colors;</a>
+<a name="ln153"> </a>
+<a name="ln154">  const float *const in = (const float *const)ivoid;</a>
+<a name="ln155">  float *const out = (float *const)ovoid;</a>
+<a name="ln156"> </a>
+<a name="ln157">  if(d-&gt;unbound)</a>
+<a name="ln158">  {</a>
+<a name="ln159">#ifdef _OPENMP</a>
+<a name="ln160">#pragma omp parallel for SIMD() default(none) schedule(static)</a>
+<a name="ln161">#endif</a>
+<a name="ln162">    for(size_t k = 0; k &lt; (size_t)ch * roi_out-&gt;width * roi_out-&gt;height; k += ch)</a>
+<a name="ln163">    {</a>
+<a name="ln164">      out[k] = in[k];</a>
+<a name="ln165">      out[k + 1] = (in[k + 1] * d-&gt;a_steepness) + d-&gt;a_offset;</a>
+<a name="ln166">      out[k + 2] = (in[k + 2] * d-&gt;b_steepness) + d-&gt;b_offset;</a>
+<a name="ln167">      out[k + 4] = in[k + 4];</a>
+<a name="ln168">    }</a>
+<a name="ln169">  }</a>
+<a name="ln170">  else</a>
+<a name="ln171">  {</a>
+<a name="ln172">#ifdef _OPENMP</a>
+<a name="ln173">#pragma omp parallel for SIMD() default(none) schedule(static)</a>
+<a name="ln174">#endif</a>
+<a name="ln175">    for(size_t k = 0; k &lt; (size_t)ch * roi_out-&gt;width * roi_out-&gt;height; k += ch)</a>
+<a name="ln176">    {</a>
+<a name="ln177">      out[k] = in[k];</a>
+<a name="ln178">      out[k + 1] = CLAMP((in[k + 1] * d-&gt;a_steepness) + d-&gt;a_offset, -128.0f, 128.0f);</a>
+<a name="ln179">      out[k + 2] = CLAMP((in[k + 2] * d-&gt;b_steepness) + d-&gt;b_offset, -128.0f, 128.0f);</a>
+<a name="ln180">      out[k + 4] = in[k + 4];</a>
+<a name="ln181">    }</a>
+<a name="ln182">  }</a>
+<a name="ln183">}</a>
+<a name="ln184"> </a>
+<a name="ln185">#if defined(__SSE__)</a>
+<a name="ln186">void process_sse2(struct dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, const void *const ivoid,</a>
+<a name="ln187">                  void *const ovoid, const dt_iop_roi_t *const roi_in, const dt_iop_roi_t *const roi_out)</a>
+<a name="ln188">{</a>
+<a name="ln189">  // this is called for preview and full pipe separately, each with its own pixelpipe piece.</a>
+<a name="ln190"> </a>
+<a name="ln191">  // get our data struct:</a>
+<a name="ln192">  dt_iop_colorcontrast_params_t *d = (dt_iop_colorcontrast_params_t *)piece-&gt;data;</a>
+<a name="ln193"> </a>
+<a name="ln194">  // how many colors in our buffer?</a>
+<a name="ln195">  const int ch = piece-&gt;colors;</a>
+<a name="ln196"> </a>
+<a name="ln197">  const int unbound = d-&gt;unbound;</a>
+<a name="ln198"> </a>
+<a name="ln199">  const __m128 scale = _mm_set_ps(1.0f, d-&gt;b_steepness, d-&gt;a_steepness, 1.0f);</a>
+<a name="ln200">  const __m128 offset = _mm_set_ps(0.0f, d-&gt;b_offset, d-&gt;a_offset, 0.0f);</a>
+<a name="ln201">  const __m128 min = _mm_set_ps(-INFINITY, -128.0f, -128.0f, -INFINITY);</a>
+<a name="ln202">  const __m128 max = _mm_set_ps(INFINITY, 128.0f, 128.0f, INFINITY);</a>
+<a name="ln203"> </a>
+<a name="ln204">// iterate over all output pixels (same coordinates as input)</a>
+<a name="ln205">#ifdef _OPENMP</a>
+<a name="ln206">#pragma omp parallel for default(none) schedule(static) shared(d)</a>
+<a name="ln207">#endif</a>
+<a name="ln208">  for(int j = 0; j &lt; roi_out-&gt;height; j++)</a>
+<a name="ln209">  {</a>
+<a name="ln210"> </a>
+<a name="ln211">    float *in = ((float *)ivoid) + (size_t)ch * roi_in-&gt;width * j;</a>
+<a name="ln212">    float *out = ((float *)ovoid) + (size_t)ch * roi_out-&gt;width * j;</a>
+<a name="ln213"> </a>
+<a name="ln214">    if(unbound)</a>
+<a name="ln215">    {</a>
+<a name="ln216">      for(int i = 0; i &lt; roi_out-&gt;width; i++)</a>
+<a name="ln217">      {</a>
+<a name="ln218">        _mm_stream_ps(out, _mm_add_ps(offset, _mm_mul_ps(scale, _mm_load_ps(in))));</a>
+<a name="ln219">        in += ch;</a>
+<a name="ln220">        out += ch;</a>
+<a name="ln221">      }</a>
+<a name="ln222">    }</a>
+<a name="ln223">    else</a>
+<a name="ln224">    {</a>
+<a name="ln225">      for(int i = 0; i &lt; roi_out-&gt;width; i++)</a>
+<a name="ln226">      {</a>
+<a name="ln227">        _mm_stream_ps(</a>
+<a name="ln228">            out, _mm_min_ps(max, _mm_max_ps(min, _mm_add_ps(offset, _mm_mul_ps(scale, _mm_load_ps(in))))));</a>
+<a name="ln229">        in += ch;</a>
+<a name="ln230">        out += ch;</a>
+<a name="ln231">      }</a>
+<a name="ln232">    }</a>
+<a name="ln233">  }</a>
+<a name="ln234">  _mm_sfence();</a>
+<a name="ln235">}</a>
+<a name="ln236">#endif</a>
+<a name="ln237"> </a>
+<a name="ln238"> </a>
+<a name="ln239">#ifdef HAVE_OPENCL</a>
+<a name="ln240">int process_cl(struct dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, cl_mem dev_in, cl_mem dev_out,</a>
+<a name="ln241">               const dt_iop_roi_t *const roi_in, const dt_iop_roi_t *const roi_out)</a>
+<a name="ln242">{</a>
+<a name="ln243">  dt_iop_colorcontrast_data_t *data = (dt_iop_colorcontrast_data_t *)piece-&gt;data;</a>
+<a name="ln244">  dt_iop_colorcontrast_global_data_t *gd = (dt_iop_colorcontrast_global_data_t *)self-&gt;data;</a>
+<a name="ln245">  cl_int err = -999;</a>
+<a name="ln246"> </a>
+<a name="ln247">  const int devid = piece-&gt;pipe-&gt;devid;</a>
+<a name="ln248">  const int width = roi_in-&gt;width;</a>
+<a name="ln249">  const int height = roi_in-&gt;height;</a>
+<a name="ln250"> </a>
+<a name="ln251">  const float scale[4] = { 1.0f, data-&gt;a_steepness, data-&gt;b_steepness, 1.0f };</a>
+<a name="ln252">  const float offset[4] = { 0.0f, data-&gt;a_offset, data-&gt;b_offset, 0.0f };</a>
+<a name="ln253">  const int unbound = data-&gt;unbound;</a>
+<a name="ln254"> </a>
+<a name="ln255">  size_t sizes[] = { ROUNDUPWD(width), ROUNDUPHT(height), 1 };</a>
+<a name="ln256"> </a>
+<a name="ln257">  dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_colorcontrast, 0, sizeof(cl_mem), (void *)&amp;dev_in);</a>
+<a name="ln258">  dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_colorcontrast, 1, sizeof(cl_mem), (void *)&amp;dev_out);</a>
+<a name="ln259">  dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_colorcontrast, 2, sizeof(int), (void *)&amp;width);</a>
+<a name="ln260">  dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_colorcontrast, 3, sizeof(int), (void *)&amp;height);</a>
+<a name="ln261">  dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_colorcontrast, 4, 4 * sizeof(float), (void *)&amp;scale);</a>
+<a name="ln262">  dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_colorcontrast, 5, 4 * sizeof(float), (void *)&amp;offset);</a>
+<a name="ln263">  dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_colorcontrast, 6, sizeof(int), (void *)&amp;unbound);</a>
+<a name="ln264">  err = dt_opencl_enqueue_kernel_2d(devid, gd-&gt;kernel_colorcontrast, sizes);</a>
+<a name="ln265"> </a>
+<a name="ln266">  if(err != CL_SUCCESS) goto error;</a>
+<a name="ln267">  return TRUE;</a>
+<a name="ln268"> </a>
+<a name="ln269">error:</a>
+<a name="ln270">  dt_print(DT_DEBUG_OPENCL, &quot;[opencl_colorcontrast] couldn't enqueue kernel! %d\n&quot;, err);</a>
+<a name="ln271">  return FALSE;</a>
+<a name="ln272">}</a>
+<a name="ln273">#endif</a>
+<a name="ln274"> </a>
+<a name="ln275"> </a>
+<a name="ln276">void init_global(dt_iop_module_so_t *module)</a>
+<a name="ln277">{</a>
+<a name="ln278">  const int program = 8; // extended.cl, from programs.conf</a>
+<a name="ln279">  dt_iop_colorcontrast_global_data_t *gd</a>
+<a name="ln280">      = (dt_iop_colorcontrast_global_data_t *)malloc(sizeof(dt_iop_colorcontrast_global_data_t));</a>
+<a name="ln281">  module-&gt;data = gd;</a>
+<a name="ln282">  gd-&gt;kernel_colorcontrast = dt_opencl_create_kernel(program, &quot;colorcontrast&quot;);</a>
+<a name="ln283">}</a>
+<a name="ln284"> </a>
+<a name="ln285">void cleanup_global(dt_iop_module_so_t *module)</a>
+<a name="ln286">{</a>
+<a name="ln287">  dt_iop_colorcontrast_global_data_t *gd = (dt_iop_colorcontrast_global_data_t *)module-&gt;data;</a>
+<a name="ln288">  dt_opencl_free_kernel(gd-&gt;kernel_colorcontrast);</a>
+<a name="ln289">  free(module-&gt;data);</a>
+<a name="ln290">  module-&gt;data = NULL;</a>
+<a name="ln291">}</a>
+<a name="ln292"> </a>
+<a name="ln293"> </a>
+<a name="ln294">void reload_defaults(dt_iop_module_t *module)</a>
+<a name="ln295">{</a>
+<a name="ln296">  // change default_enabled depending on type of image, or set new default_params even.</a>
+<a name="ln297">  // if this callback exists, it has to write default_params and default_enabled.</a>
+<a name="ln298">  dt_iop_colorcontrast_params_t tmp = (dt_iop_colorcontrast_params_t){ 1.0, 0.0, 1.0, 0.0, 1 };</a>
+<a name="ln299">  memcpy(module-&gt;params, &amp;tmp, sizeof(dt_iop_colorcontrast_params_t));</a>
+<a name="ln300">  memcpy(module-&gt;default_params, &amp;tmp, sizeof(dt_iop_colorcontrast_params_t));</a>
+<a name="ln301">  module-&gt;default_enabled = 0;</a>
+<a name="ln302">}</a>
+<a name="ln303"> </a>
+<a name="ln304">/** init, cleanup, commit to pipeline */</a>
+<a name="ln305">void init(dt_iop_module_t *module)</a>
+<a name="ln306">{</a>
+<a name="ln307">  module-&gt;params = calloc(1, sizeof(dt_iop_colorcontrast_params_t));</a>
+<a name="ln308">  module-&gt;default_params = calloc(1, sizeof(dt_iop_colorcontrast_params_t));</a>
+<a name="ln309">  // our module is disabled by default</a>
+<a name="ln310">  module-&gt;default_enabled = 0;</a>
+<a name="ln311">  // we are pretty late in the pipe:</a>
+<a name="ln312">  module-&gt;params_size = sizeof(dt_iop_colorcontrast_params_t);</a>
+<a name="ln313">  module-&gt;gui_data = NULL;</a>
+<a name="ln314">  // init defaults:</a>
+<a name="ln315">  dt_iop_colorcontrast_params_t tmp = (dt_iop_colorcontrast_params_t){ 1.0, 0.0, 1.0, 0.0, 1 };</a>
+<a name="ln316">  memcpy(module-&gt;params, &amp;tmp, sizeof(dt_iop_colorcontrast_params_t));</a>
+<a name="ln317">  memcpy(module-&gt;default_params, &amp;tmp, sizeof(dt_iop_colorcontrast_params_t));</a>
+<a name="ln318">}</a>
+<a name="ln319"> </a>
+<a name="ln320">void cleanup(dt_iop_module_t *module)</a>
+<a name="ln321">{</a>
+<a name="ln322">  free(module-&gt;params);</a>
+<a name="ln323">  module-&gt;params = NULL;</a>
+<a name="ln324">}</a>
+<a name="ln325"> </a>
+<a name="ln326">/** commit is the synch point between core and gui, so it copies params to pipe data. */</a>
+<a name="ln327">void commit_params(struct dt_iop_module_t *self, dt_iop_params_t *params, dt_dev_pixelpipe_t *pipe,</a>
+<a name="ln328">                   dt_dev_pixelpipe_iop_t *piece)</a>
+<a name="ln329">{</a>
+<a name="ln330">  dt_iop_colorcontrast_params_t *p = (dt_iop_colorcontrast_params_t *)params;</a>
+<a name="ln331">  dt_iop_colorcontrast_data_t *d = (dt_iop_colorcontrast_data_t *)piece-&gt;data;</a>
+<a name="ln332">  d-&gt;a_steepness = p-&gt;a_steepness;</a>
+<a name="ln333">  d-&gt;a_offset = p-&gt;a_offset;</a>
+<a name="ln334">  d-&gt;b_steepness = p-&gt;b_steepness;</a>
+<a name="ln335">  d-&gt;b_offset = p-&gt;b_offset;</a>
+<a name="ln336">  d-&gt;unbound = p-&gt;unbound;</a>
+<a name="ln337">}</a>
+<a name="ln338"> </a>
+<a name="ln339">void init_pipe(struct dt_iop_module_t *self, dt_dev_pixelpipe_t *pipe, dt_dev_pixelpipe_iop_t *piece)</a>
+<a name="ln340">{</a>
+<a name="ln341">  piece-&gt;data = malloc(sizeof(dt_iop_colorcontrast_data_t));</a>
+<a name="ln342">  self-&gt;commit_params(self, self-&gt;default_params, pipe, piece);</a>
+<a name="ln343">}</a>
+<a name="ln344"> </a>
+<a name="ln345">void cleanup_pipe(struct dt_iop_module_t *self, dt_dev_pixelpipe_t *pipe, dt_dev_pixelpipe_iop_t *piece)</a>
+<a name="ln346">{</a>
+<a name="ln347">  free(piece-&gt;data);</a>
+<a name="ln348">  piece-&gt;data = NULL;</a>
+<a name="ln349">}</a>
+<a name="ln350"> </a>
+<a name="ln351">/** put your local callbacks here, be sure to make them static so they won't be visible outside this file! */</a>
+<a name="ln352">static void a_slider_callback(GtkRange *range, dt_iop_module_t *self)</a>
+<a name="ln353">{</a>
+<a name="ln354">  // this is important to avoid cycles!</a>
+<a name="ln355">  if(darktable.gui-&gt;reset) return;</a>
+<a name="ln356">  dt_iop_colorcontrast_gui_data_t *g = (dt_iop_colorcontrast_gui_data_t *)self-&gt;gui_data;</a>
+<a name="ln357">  dt_iop_colorcontrast_params_t *p = (dt_iop_colorcontrast_params_t *)self-&gt;params;</a>
+<a name="ln358">  p-&gt;a_steepness = dt_bauhaus_slider_get(g-&gt;a_scale);</a>
+<a name="ln359">  // let core know of the changes</a>
+<a name="ln360">  dt_dev_add_history_item(darktable.develop, self, TRUE);</a>
+<a name="ln361">}</a>
+<a name="ln362"> </a>
+<a name="ln363">static void b_slider_callback(GtkRange *range, dt_iop_module_t *self)</a>
+<a name="ln364">{</a>
+<a name="ln365">  // this is important to avoid cycles!</a>
+<a name="ln366">  if(darktable.gui-&gt;reset) return;</a>
+<a name="ln367">  dt_iop_colorcontrast_gui_data_t *g = (dt_iop_colorcontrast_gui_data_t *)self-&gt;gui_data;</a>
+<a name="ln368">  dt_iop_colorcontrast_params_t *p = (dt_iop_colorcontrast_params_t *)self-&gt;params;</a>
+<a name="ln369">  p-&gt;b_steepness = dt_bauhaus_slider_get(g-&gt;b_scale);</a>
+<a name="ln370">  // let core know of the changes</a>
+<a name="ln371">  dt_dev_add_history_item(darktable.develop, self, TRUE);</a>
+<a name="ln372">}</a>
+<a name="ln373"> </a>
+<a name="ln374">/** gui callbacks, these are needed. */</a>
+<a name="ln375">void gui_update(dt_iop_module_t *self)</a>
+<a name="ln376">{</a>
+<a name="ln377">  // let gui slider match current parameters:</a>
+<a name="ln378">  dt_iop_colorcontrast_gui_data_t *g = (dt_iop_colorcontrast_gui_data_t *)self-&gt;gui_data;</a>
+<a name="ln379">  dt_iop_colorcontrast_params_t *p = (dt_iop_colorcontrast_params_t *)self-&gt;params;</a>
+<a name="ln380">  dt_bauhaus_slider_set(g-&gt;a_scale, p-&gt;a_steepness);</a>
+<a name="ln381">  dt_bauhaus_slider_set(g-&gt;b_scale, p-&gt;b_steepness);</a>
+<a name="ln382">}</a>
+<a name="ln383"> </a>
+<a name="ln384">void gui_init(dt_iop_module_t *self)</a>
+<a name="ln385">{</a>
+<a name="ln386">  // init the slider (more sophisticated layouts are possible with gtk tables and boxes):</a>
+<a name="ln387">  self-&gt;gui_data = malloc(sizeof(dt_iop_colorcontrast_gui_data_t));</a>
+<a name="ln388">  dt_iop_colorcontrast_gui_data_t *g = (dt_iop_colorcontrast_gui_data_t *)self-&gt;gui_data;</a>
+<a name="ln389">  dt_iop_colorcontrast_params_t *p = (dt_iop_colorcontrast_params_t *)self-&gt;params;</a>
+<a name="ln390"> </a>
+<a name="ln391">  self-&gt;widget = gtk_box_new(GTK_ORIENTATION_VERTICAL, DT_BAUHAUS_SPACE);</a>
+<a name="ln392">  dt_gui_add_help_link(self-&gt;widget, dt_get_help_url(self-&gt;op));</a>
+<a name="ln393"> </a>
+<a name="ln394">  /* a scale */</a>
+<a name="ln395">  g-&gt;a_scale = dt_bauhaus_slider_new_with_range(self, 0.0, 5.0, 0.01, p-&gt;a_steepness, 2);</a>
+<a name="ln396">  dt_bauhaus_widget_set_label(g-&gt;a_scale, NULL, _(&quot;green vs magenta&quot;));</a>
+<a name="ln397">  gtk_box_pack_start(GTK_BOX(self-&gt;widget), GTK_WIDGET(g-&gt;a_scale), TRUE, TRUE, 0);</a>
+<a name="ln398">  gtk_widget_set_tooltip_text(g-&gt;a_scale, _(&quot;steepness of the a* curve in Lab&quot;));</a>
+<a name="ln399">  g_signal_connect(G_OBJECT(g-&gt;a_scale), &quot;value-changed&quot;, G_CALLBACK(a_slider_callback), self);</a>
+<a name="ln400"> </a>
+<a name="ln401"> </a>
+<a name="ln402">  /* b scale */</a>
+<a name="ln403">  g-&gt;b_scale = dt_bauhaus_slider_new_with_range(self, 0.0, 5.0, 0.01, p-&gt;b_steepness, 2);</a>
+<a name="ln404">  dt_bauhaus_widget_set_label(g-&gt;b_scale, NULL, _(&quot;blue vs yellow&quot;));</a>
+<a name="ln405">  gtk_box_pack_start(GTK_BOX(self-&gt;widget), GTK_WIDGET(g-&gt;b_scale), TRUE, TRUE, 0);</a>
+<a name="ln406">  gtk_widget_set_tooltip_text(g-&gt;b_scale, _(&quot;steepness of the b* curve in Lab&quot;));</a>
+<a name="ln407">  g_signal_connect(G_OBJECT(g-&gt;b_scale), &quot;value-changed&quot;, G_CALLBACK(b_slider_callback), self);</a>
+<a name="ln408">}</a>
+<a name="ln409"> </a>
+<a name="ln410">void gui_cleanup(dt_iop_module_t *self)</a>
+<a name="ln411">{</a>
+<a name="ln412">  // nothing else necessary, gtk will clean up the sliders.</a>
+<a name="ln413">  free(self-&gt;gui_data);</a>
+<a name="ln414">  self-&gt;gui_data = NULL;</a>
+<a name="ln415">}</a>
+<a name="ln416"> </a>
+<a name="ln417"> </a>
+<a name="ln418">// modelines: These editor modelines have been set for all relevant files by tools/update_modelines.sh</a>
+<a name="ln419">// vim: shiftwidth=2 expandtab tabstop=2 cindent</a>
+<a name="ln420">// kate: tab-indents: off; indent-width 2; replace-tabs on; indent-mode cstyle; remove-trailing-spaces modified;</a>
+
+</code></pre>
+<div class="balloon" rel="282"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v522/" target="_blank">V522</a> There might be dereferencing of a potential null pointer 'gd'. Check lines: 282, 280.</p></div>
+<div class="balloon" rel="316"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v575/" target="_blank">V575</a> The potential null pointer is passed into 'memcpy' function. Inspect the first argument. Check lines: 316, 307.</p></div>
+<div class="balloon" rel="317"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v575/" target="_blank">V575</a> The potential null pointer is passed into 'memcpy' function. Inspect the first argument. Check lines: 317, 308.</p></div>
+<div class="balloon" rel="395"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v522/" target="_blank">V522</a> There might be dereferencing of a potential null pointer 'g'. Check lines: 395, 387.</p></div>
+
+<link rel="stylesheet" href="highlight.css">
+<script src="highlight.pack.js"></script>
+<script src="highlightjs-line-numbers.js"></script>
+<script>hljs.initHighlightingOnLoad();</script>
+<script>hljs.initLineNumbersOnLoad();</script>
+<script>
+  $(document).ready(function() {
+      $('.balloon').each(function () {
+          var bl = $(this);
+          var line = bl.attr('rel');
+          var text = $('a[name="ln'+line+'"]').text();
+
+          var space_count = 0;
+          for(var i = 0; i<text.length; i++){
+              var char = text[i];
+              if((char !== ' ')&&(char !== '\t'))break;
+              if(char === '\t')space_count++;
+              space_count++;
+          }
+
+          bl.css('margin-left', space_count*8);
+          $('a[name="ln'+line+'"]').after(bl);
+      });
+
+      window.location = window.location;
+  });
+</script>
+</body>
+</html>

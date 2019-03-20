@@ -1,0 +1,915 @@
+
+<html>
+<head>
+  <link rel="stylesheet" href="../style.css"/>
+  <script src="../jquery-3.2.1.min.js"></script>
+</head>
+<body>
+<pre><code class = "cpp">
+<a name="ln1">/*</a>
+<a name="ln2">    This file is part of darktable,</a>
+<a name="ln3">    copyright (c) 2009--2011 johannes hanika.</a>
+<a name="ln4">    copyright (c) 2011 henrik andersson.</a>
+<a name="ln5"> </a>
+<a name="ln6">    darktable is free software: you can redistribute it and/or modify</a>
+<a name="ln7">    it under the terms of the GNU General Public License as published by</a>
+<a name="ln8">    the Free Software Foundation, either version 3 of the License, or</a>
+<a name="ln9">    (at your option) any later version.</a>
+<a name="ln10"> </a>
+<a name="ln11">    darktable is distributed in the hope that it will be useful,</a>
+<a name="ln12">    but WITHOUT ANY WARRANTY; without even the implied warranty of</a>
+<a name="ln13">    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the</a>
+<a name="ln14">    GNU General Public License for more details.</a>
+<a name="ln15"> </a>
+<a name="ln16">    You should have received a copy of the GNU General Public License</a>
+<a name="ln17">    along with darktable.  If not, see &lt;http://www.gnu.org/licenses/&gt;.</a>
+<a name="ln18">*/</a>
+<a name="ln19">#ifdef HAVE_CONFIG_H</a>
+<a name="ln20">#include &quot;config.h&quot;</a>
+<a name="ln21">#endif</a>
+<a name="ln22">#include &quot;bauhaus/bauhaus.h&quot;</a>
+<a name="ln23">#include &quot;common/colorspaces.h&quot;</a>
+<a name="ln24">#include &quot;common/colorspaces_inline_conversions.h&quot;</a>
+<a name="ln25">#include &quot;common/opencl.h&quot;</a>
+<a name="ln26">#include &quot;control/conf.h&quot;</a>
+<a name="ln27">#include &quot;control/control.h&quot;</a>
+<a name="ln28">#include &quot;develop/develop.h&quot;</a>
+<a name="ln29">#include &quot;develop/imageop_math.h&quot;</a>
+<a name="ln30">#include &quot;gui/accelerators.h&quot;</a>
+<a name="ln31">#include &quot;gui/gtk.h&quot;</a>
+<a name="ln32">#include &quot;iop/iop_api.h&quot;</a>
+<a name="ln33"> </a>
+<a name="ln34">#if defined(__SSE__)</a>
+<a name="ln35">#include &lt;xmmintrin.h&gt;</a>
+<a name="ln36">#endif</a>
+<a name="ln37">#include &lt;assert.h&gt;</a>
+<a name="ln38">#include &lt;gdk/gdkkeysyms.h&gt;</a>
+<a name="ln39">#include &lt;math.h&gt;</a>
+<a name="ln40">#include &lt;stdlib.h&gt;</a>
+<a name="ln41">#include &lt;string.h&gt;</a>
+<a name="ln42"> </a>
+<a name="ln43">// max iccprofile file name length</a>
+<a name="ln44">#define DT_IOP_COLOR_ICC_LEN 100</a>
+<a name="ln45">#define LUT_SAMPLES 0x10000</a>
+<a name="ln46"> </a>
+<a name="ln47">DT_MODULE_INTROSPECTION(4, dt_iop_colorout_params_t)</a>
+<a name="ln48"> </a>
+<a name="ln49">typedef struct dt_iop_colorout_data_t</a>
+<a name="ln50">{</a>
+<a name="ln51">  dt_colorspaces_color_profile_type_t type;</a>
+<a name="ln52">  dt_colorspaces_color_mode_t mode;</a>
+<a name="ln53">  float lut[3][LUT_SAMPLES];</a>
+<a name="ln54">  float cmatrix[9];</a>
+<a name="ln55">  cmsHTRANSFORM *xform;</a>
+<a name="ln56">  float unbounded_coeffs[3][3]; // for extrapolation of shaper curves</a>
+<a name="ln57">} dt_iop_colorout_data_t;</a>
+<a name="ln58"> </a>
+<a name="ln59">typedef struct dt_iop_colorout_global_data_t</a>
+<a name="ln60">{</a>
+<a name="ln61">  int kernel_colorout;</a>
+<a name="ln62">} dt_iop_colorout_global_data_t;</a>
+<a name="ln63"> </a>
+<a name="ln64">typedef struct dt_iop_colorout_params_t</a>
+<a name="ln65">{</a>
+<a name="ln66">  dt_colorspaces_color_profile_type_t type;</a>
+<a name="ln67">  char filename[DT_IOP_COLOR_ICC_LEN];</a>
+<a name="ln68">  dt_iop_color_intent_t intent;</a>
+<a name="ln69">} dt_iop_colorout_params_t;</a>
+<a name="ln70"> </a>
+<a name="ln71">typedef struct dt_iop_colorout_gui_data_t</a>
+<a name="ln72">{</a>
+<a name="ln73">  GtkWidget *output_intent, *output_profile;</a>
+<a name="ln74">} dt_iop_colorout_gui_data_t;</a>
+<a name="ln75"> </a>
+<a name="ln76"> </a>
+<a name="ln77">const char *name()</a>
+<a name="ln78">{</a>
+<a name="ln79">  return _(&quot;output color profile&quot;);</a>
+<a name="ln80">}</a>
+<a name="ln81"> </a>
+<a name="ln82">int default_group()</a>
+<a name="ln83">{</a>
+<a name="ln84">  return IOP_GROUP_COLOR;</a>
+<a name="ln85">}</a>
+<a name="ln86"> </a>
+<a name="ln87">int flags()</a>
+<a name="ln88">{</a>
+<a name="ln89">  return IOP_FLAGS_ALLOW_TILING | IOP_FLAGS_ONE_INSTANCE;</a>
+<a name="ln90">}</a>
+<a name="ln91"> </a>
+<a name="ln92">int default_colorspace(dt_iop_module_t *self, dt_dev_pixelpipe_t *pipe, dt_dev_pixelpipe_iop_t *piece)</a>
+<a name="ln93">{</a>
+<a name="ln94">  return iop_cs_Lab;</a>
+<a name="ln95">}</a>
+<a name="ln96"> </a>
+<a name="ln97">int input_colorspace(dt_iop_module_t *self, dt_dev_pixelpipe_t *pipe,</a>
+<a name="ln98">                     dt_dev_pixelpipe_iop_t *piece)</a>
+<a name="ln99">{</a>
+<a name="ln100">  return iop_cs_Lab;</a>
+<a name="ln101">}</a>
+<a name="ln102"> </a>
+<a name="ln103">int output_colorspace(dt_iop_module_t *self, dt_dev_pixelpipe_t *pipe,</a>
+<a name="ln104">                      dt_dev_pixelpipe_iop_t *piece)</a>
+<a name="ln105">{</a>
+<a name="ln106">  int cst = iop_cs_rgb;</a>
+<a name="ln107">  if(piece)</a>
+<a name="ln108">  {</a>
+<a name="ln109">    const dt_iop_colorout_data_t *const d = (dt_iop_colorout_data_t *)piece-&gt;data;</a>
+<a name="ln110">    if(d-&gt;type == DT_COLORSPACE_LAB) cst = iop_cs_Lab;</a>
+<a name="ln111">  }</a>
+<a name="ln112">  else</a>
+<a name="ln113">  {</a>
+<a name="ln114">    dt_iop_colorout_params_t *p = (dt_iop_colorout_params_t *)self-&gt;params;</a>
+<a name="ln115">    if(p-&gt;type == DT_COLORSPACE_LAB) cst = iop_cs_Lab;</a>
+<a name="ln116">  }</a>
+<a name="ln117">  return cst;</a>
+<a name="ln118">}</a>
+<a name="ln119"> </a>
+<a name="ln120">int legacy_params(dt_iop_module_t *self, const void *const old_params, const int old_version,</a>
+<a name="ln121">                  void *new_params, const int new_version)</a>
+<a name="ln122">{</a>
+<a name="ln123">  /*  if(old_version == 1 &amp;&amp; new_version == 2)</a>
+<a name="ln124">  {</a>
+<a name="ln125">    dt_iop_colorout_params_t *o = (dt_iop_colorout_params_t *)old_params;</a>
+<a name="ln126">    dt_iop_colorout_params_t *n = (dt_iop_colorout_params_t *)new_params;</a>
+<a name="ln127">    memcpy(n,o,sizeof(dt_iop_colorout_params_t));</a>
+<a name="ln128">    n-&gt;seq = 0;</a>
+<a name="ln129">    return 0;</a>
+<a name="ln130">    }*/</a>
+<a name="ln131">  if((old_version == 2 || old_version == 3) &amp;&amp; new_version == 4)</a>
+<a name="ln132">  {</a>
+<a name="ln133">    typedef struct dt_iop_colorout_params_v3_t</a>
+<a name="ln134">    {</a>
+<a name="ln135">      char iccprofile[DT_IOP_COLOR_ICC_LEN];</a>
+<a name="ln136">      char displayprofile[DT_IOP_COLOR_ICC_LEN];</a>
+<a name="ln137">      dt_iop_color_intent_t intent;</a>
+<a name="ln138">      dt_iop_color_intent_t displayintent;</a>
+<a name="ln139">      char softproof_enabled;</a>
+<a name="ln140">      char softproofprofile[DT_IOP_COLOR_ICC_LEN];</a>
+<a name="ln141">      dt_iop_color_intent_t softproofintent;</a>
+<a name="ln142">    } dt_iop_colorout_params_v3_t;</a>
+<a name="ln143"> </a>
+<a name="ln144"> </a>
+<a name="ln145">    dt_iop_colorout_params_v3_t *o = (dt_iop_colorout_params_v3_t *)old_params;</a>
+<a name="ln146">    dt_iop_colorout_params_t *n = (dt_iop_colorout_params_t *)new_params;</a>
+<a name="ln147">    memset(n, 0, sizeof(dt_iop_colorout_params_t));</a>
+<a name="ln148"> </a>
+<a name="ln149">    if(!strcmp(o-&gt;iccprofile, &quot;sRGB&quot;))</a>
+<a name="ln150">      n-&gt;type = DT_COLORSPACE_SRGB;</a>
+<a name="ln151">    else if(!strcmp(o-&gt;iccprofile, &quot;linear_rec709_rgb&quot;) || !strcmp(o-&gt;iccprofile, &quot;linear_rgb&quot;))</a>
+<a name="ln152">      n-&gt;type = DT_COLORSPACE_LIN_REC709;</a>
+<a name="ln153">    else if(!strcmp(o-&gt;iccprofile, &quot;linear_rec2020_rgb&quot;))</a>
+<a name="ln154">      n-&gt;type = DT_COLORSPACE_LIN_REC2020;</a>
+<a name="ln155">    else if(!strcmp(o-&gt;iccprofile, &quot;adobergb&quot;))</a>
+<a name="ln156">      n-&gt;type = DT_COLORSPACE_ADOBERGB;</a>
+<a name="ln157">    else if(!strcmp(o-&gt;iccprofile, &quot;X profile&quot;))</a>
+<a name="ln158">      n-&gt;type = DT_COLORSPACE_DISPLAY;</a>
+<a name="ln159">    else</a>
+<a name="ln160">    {</a>
+<a name="ln161">      n-&gt;type = DT_COLORSPACE_FILE;</a>
+<a name="ln162">      g_strlcpy(n-&gt;filename, o-&gt;iccprofile, sizeof(n-&gt;filename));</a>
+<a name="ln163">    }</a>
+<a name="ln164"> </a>
+<a name="ln165">    n-&gt;intent = o-&gt;intent;</a>
+<a name="ln166"> </a>
+<a name="ln167">    return 0;</a>
+<a name="ln168">  }</a>
+<a name="ln169"> </a>
+<a name="ln170">  return 1;</a>
+<a name="ln171">}</a>
+<a name="ln172"> </a>
+<a name="ln173">void init_global(dt_iop_module_so_t *module)</a>
+<a name="ln174">{</a>
+<a name="ln175">  const int program = 2; // basic.cl, from programs.conf</a>
+<a name="ln176">  dt_iop_colorout_global_data_t *gd</a>
+<a name="ln177">      = (dt_iop_colorout_global_data_t *)malloc(sizeof(dt_iop_colorout_global_data_t));</a>
+<a name="ln178">  module-&gt;data = gd;</a>
+<a name="ln179">  gd-&gt;kernel_colorout = dt_opencl_create_kernel(program, &quot;colorout&quot;);</a>
+<a name="ln180">}</a>
+<a name="ln181"> </a>
+<a name="ln182">void cleanup_global(dt_iop_module_so_t *module)</a>
+<a name="ln183">{</a>
+<a name="ln184">  dt_iop_colorout_global_data_t *gd = (dt_iop_colorout_global_data_t *)module-&gt;data;</a>
+<a name="ln185">  dt_opencl_free_kernel(gd-&gt;kernel_colorout);</a>
+<a name="ln186">  free(module-&gt;data);</a>
+<a name="ln187">  module-&gt;data = NULL;</a>
+<a name="ln188">}</a>
+<a name="ln189"> </a>
+<a name="ln190">static void intent_changed(GtkWidget *widget, gpointer user_data)</a>
+<a name="ln191">{</a>
+<a name="ln192">  dt_iop_module_t *self = (dt_iop_module_t *)user_data;</a>
+<a name="ln193">  if(self-&gt;dt-&gt;gui-&gt;reset) return;</a>
+<a name="ln194">  dt_iop_colorout_params_t *p = (dt_iop_colorout_params_t *)self-&gt;params;</a>
+<a name="ln195">  p-&gt;intent = (dt_iop_color_intent_t)dt_bauhaus_combobox_get(widget);</a>
+<a name="ln196">  dt_dev_add_history_item(darktable.develop, self, TRUE);</a>
+<a name="ln197">}</a>
+<a name="ln198"> </a>
+<a name="ln199">static void output_profile_changed(GtkWidget *widget, gpointer user_data)</a>
+<a name="ln200">{</a>
+<a name="ln201">  dt_iop_module_t *self = (dt_iop_module_t *)user_data;</a>
+<a name="ln202">  if(self-&gt;dt-&gt;gui-&gt;reset) return;</a>
+<a name="ln203">  dt_iop_colorout_params_t *p = (dt_iop_colorout_params_t *)self-&gt;params;</a>
+<a name="ln204">  int pos = dt_bauhaus_combobox_get(widget);</a>
+<a name="ln205"> </a>
+<a name="ln206">  for(GList *profiles = darktable.color_profiles-&gt;profiles; profiles; profiles = g_list_next(profiles))</a>
+<a name="ln207">  {</a>
+<a name="ln208">    dt_colorspaces_color_profile_t *pp = (dt_colorspaces_color_profile_t *)profiles-&gt;data;</a>
+<a name="ln209">    if(pp-&gt;out_pos == pos)</a>
+<a name="ln210">    {</a>
+<a name="ln211">      p-&gt;type = pp-&gt;type;</a>
+<a name="ln212">      g_strlcpy(p-&gt;filename, pp-&gt;filename, sizeof(p-&gt;filename));</a>
+<a name="ln213">      dt_dev_add_history_item(darktable.develop, self, TRUE);</a>
+<a name="ln214">      </a>
+<a name="ln215">      dt_control_signal_raise(darktable.signals, DT_SIGNAL_CONTROL_PROFILE_USER_CHANGED, DT_COLORSPACES_PROFILE_TYPE_EXPORT);</a>
+<a name="ln216">      return;</a>
+<a name="ln217">    }</a>
+<a name="ln218">  }</a>
+<a name="ln219"> </a>
+<a name="ln220">  fprintf(stderr, &quot;[colorout] color profile %s seems to have disappeared!\n&quot;, dt_colorspaces_get_name(p-&gt;type, p-&gt;filename));</a>
+<a name="ln221">}</a>
+<a name="ln222"> </a>
+<a name="ln223">static void _signal_profile_changed(gpointer instance, gpointer user_data)</a>
+<a name="ln224">{</a>
+<a name="ln225">  dt_develop_t *dev = (dt_develop_t *)user_data;</a>
+<a name="ln226">  if(!dev-&gt;gui_attached || dev-&gt;gui_leaving) return;</a>
+<a name="ln227">  dt_dev_reprocess_center(dev);</a>
+<a name="ln228">}</a>
+<a name="ln229"> </a>
+<a name="ln230">#if 1</a>
+<a name="ln231">static float lerp_lut(const float *const lut, const float v)</a>
+<a name="ln232">{</a>
+<a name="ln233">  // TODO: check if optimization is worthwhile!</a>
+<a name="ln234">  const float ft = CLAMPS(v * (LUT_SAMPLES - 1), 0, LUT_SAMPLES - 1);</a>
+<a name="ln235">  const int t = ft &lt; LUT_SAMPLES - 2 ? ft : LUT_SAMPLES - 2;</a>
+<a name="ln236">  const float f = ft - t;</a>
+<a name="ln237">  const float l1 = lut[t];</a>
+<a name="ln238">  const float l2 = lut[t + 1];</a>
+<a name="ln239">  return l1 * (1.0f - f) + l2 * f;</a>
+<a name="ln240">}</a>
+<a name="ln241">#endif</a>
+<a name="ln242"> </a>
+<a name="ln243">#ifdef HAVE_OPENCL</a>
+<a name="ln244">int process_cl(struct dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, cl_mem dev_in, cl_mem dev_out,</a>
+<a name="ln245">               const dt_iop_roi_t *const roi_in, const dt_iop_roi_t *const roi_out)</a>
+<a name="ln246">{</a>
+<a name="ln247">  dt_iop_colorout_data_t *d = (dt_iop_colorout_data_t *)piece-&gt;data;</a>
+<a name="ln248">  dt_iop_colorout_global_data_t *gd = (dt_iop_colorout_global_data_t *)self-&gt;data;</a>
+<a name="ln249">  cl_mem dev_m = NULL, dev_r = NULL, dev_g = NULL, dev_b = NULL, dev_coeffs = NULL;</a>
+<a name="ln250"> </a>
+<a name="ln251">  cl_int err = -999;</a>
+<a name="ln252">  const int devid = piece-&gt;pipe-&gt;devid;</a>
+<a name="ln253">  const int width = roi_in-&gt;width;</a>
+<a name="ln254">  const int height = roi_in-&gt;height;</a>
+<a name="ln255"> </a>
+<a name="ln256">  if(d-&gt;type == DT_COLORSPACE_LAB)</a>
+<a name="ln257">  {</a>
+<a name="ln258">    size_t origin[] = { 0, 0, 0 };</a>
+<a name="ln259">    size_t region[] = { roi_in-&gt;width, roi_in-&gt;height, 1 };</a>
+<a name="ln260">    err = dt_opencl_enqueue_copy_image(devid, dev_in, dev_out, origin, origin, region);</a>
+<a name="ln261">    if(err != CL_SUCCESS) goto error;</a>
+<a name="ln262">    return TRUE;</a>
+<a name="ln263">  }</a>
+<a name="ln264"> </a>
+<a name="ln265">  size_t sizes[] = { ROUNDUPWD(width), ROUNDUPHT(height), 1 };</a>
+<a name="ln266"> </a>
+<a name="ln267">  dev_m = dt_opencl_copy_host_to_device_constant(devid, sizeof(float) * 9, d-&gt;cmatrix);</a>
+<a name="ln268">  if(dev_m == NULL) goto error;</a>
+<a name="ln269">  dev_r = dt_opencl_copy_host_to_device(devid, d-&gt;lut[0], 256, 256, sizeof(float));</a>
+<a name="ln270">  if(dev_r == NULL) goto error;</a>
+<a name="ln271">  dev_g = dt_opencl_copy_host_to_device(devid, d-&gt;lut[1], 256, 256, sizeof(float));</a>
+<a name="ln272">  if(dev_g == NULL) goto error;</a>
+<a name="ln273">  dev_b = dt_opencl_copy_host_to_device(devid, d-&gt;lut[2], 256, 256, sizeof(float));</a>
+<a name="ln274">  if(dev_b == NULL) goto error;</a>
+<a name="ln275">  dev_coeffs</a>
+<a name="ln276">      = dt_opencl_copy_host_to_device_constant(devid, sizeof(float) * 3 * 3, (float *)d-&gt;unbounded_coeffs);</a>
+<a name="ln277">  if(dev_coeffs == NULL) goto error;</a>
+<a name="ln278">  dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_colorout, 0, sizeof(cl_mem), (void *)&amp;dev_in);</a>
+<a name="ln279">  dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_colorout, 1, sizeof(cl_mem), (void *)&amp;dev_out);</a>
+<a name="ln280">  dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_colorout, 2, sizeof(int), (void *)&amp;width);</a>
+<a name="ln281">  dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_colorout, 3, sizeof(int), (void *)&amp;height);</a>
+<a name="ln282">  dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_colorout, 4, sizeof(cl_mem), (void *)&amp;dev_m);</a>
+<a name="ln283">  dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_colorout, 5, sizeof(cl_mem), (void *)&amp;dev_r);</a>
+<a name="ln284">  dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_colorout, 6, sizeof(cl_mem), (void *)&amp;dev_g);</a>
+<a name="ln285">  dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_colorout, 7, sizeof(cl_mem), (void *)&amp;dev_b);</a>
+<a name="ln286">  dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_colorout, 8, sizeof(cl_mem), (void *)&amp;dev_coeffs);</a>
+<a name="ln287">  err = dt_opencl_enqueue_kernel_2d(devid, gd-&gt;kernel_colorout, sizes);</a>
+<a name="ln288">  if(err != CL_SUCCESS) goto error;</a>
+<a name="ln289">  dt_opencl_release_mem_object(dev_m);</a>
+<a name="ln290">  dt_opencl_release_mem_object(dev_r);</a>
+<a name="ln291">  dt_opencl_release_mem_object(dev_g);</a>
+<a name="ln292">  dt_opencl_release_mem_object(dev_b);</a>
+<a name="ln293">  dt_opencl_release_mem_object(dev_coeffs);</a>
+<a name="ln294"> </a>
+<a name="ln295">  // we no longer use the working profile</a>
+<a name="ln296">  piece-&gt;pipe-&gt;dsc.work_profile_info = NULL;</a>
+<a name="ln297"> </a>
+<a name="ln298">  return TRUE;</a>
+<a name="ln299"> </a>
+<a name="ln300">error:</a>
+<a name="ln301">  dt_opencl_release_mem_object(dev_m);</a>
+<a name="ln302">  dt_opencl_release_mem_object(dev_r);</a>
+<a name="ln303">  dt_opencl_release_mem_object(dev_g);</a>
+<a name="ln304">  dt_opencl_release_mem_object(dev_b);</a>
+<a name="ln305">  dt_opencl_release_mem_object(dev_coeffs);</a>
+<a name="ln306">  dt_print(DT_DEBUG_OPENCL, &quot;[opencl_colorout] couldn't enqueue kernel! %d\n&quot;, err);</a>
+<a name="ln307">  return FALSE;</a>
+<a name="ln308">}</a>
+<a name="ln309">#endif</a>
+<a name="ln310"> </a>
+<a name="ln311">static void process_fastpath_apply_tonecurves(struct dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece,</a>
+<a name="ln312">                                              const void *const ivoid, void *const ovoid,</a>
+<a name="ln313">                                              const dt_iop_roi_t *const roi_in,</a>
+<a name="ln314">                                              const dt_iop_roi_t *const roi_out)</a>
+<a name="ln315">{</a>
+<a name="ln316">  const dt_iop_colorout_data_t *const d = (dt_iop_colorout_data_t *)piece-&gt;data;</a>
+<a name="ln317">  const int ch = piece-&gt;colors;</a>
+<a name="ln318"> </a>
+<a name="ln319">  if(!isnan(d-&gt;cmatrix[0]))</a>
+<a name="ln320">  {</a>
+<a name="ln321">    // out is already converted to RGB from Lab.</a>
+<a name="ln322"> </a>
+<a name="ln323">    // do we have any lut to apply, or is this a linear profile?</a>
+<a name="ln324">    if((d-&gt;lut[0][0] &gt;= 0.0f) &amp;&amp; (d-&gt;lut[1][0] &gt;= 0.0f) &amp;&amp; (d-&gt;lut[2][0] &gt;= 0.0f))</a>
+<a name="ln325">    { // apply profile</a>
+<a name="ln326">      float *const out = (float *const)ovoid;</a>
+<a name="ln327">#ifdef _OPENMP</a>
+<a name="ln328">#pragma omp parallel for schedule(static) default(none)</a>
+<a name="ln329">#endif</a>
+<a name="ln330">      for(size_t k = 0; k &lt; (size_t)ch * roi_out-&gt;width * roi_out-&gt;height; k += ch)</a>
+<a name="ln331">      {</a>
+<a name="ln332">        for(int c = 0; c &lt; 3; c++)</a>
+<a name="ln333">        {</a>
+<a name="ln334">          out[k + c] = (out[k + c] &lt; 1.0f) ? lerp_lut(d-&gt;lut[c], out[k + c])</a>
+<a name="ln335">                                           : dt_iop_eval_exp(d-&gt;unbounded_coeffs[c], out[k + c]);</a>
+<a name="ln336">        }</a>
+<a name="ln337">      }</a>
+<a name="ln338">    }</a>
+<a name="ln339">    else if((d-&gt;lut[0][0] &gt;= 0.0f) || (d-&gt;lut[1][0] &gt;= 0.0f) || (d-&gt;lut[2][0] &gt;= 0.0f))</a>
+<a name="ln340">    { // apply profile</a>
+<a name="ln341">      float *const out = (float *const)ovoid;</a>
+<a name="ln342">#ifdef _OPENMP</a>
+<a name="ln343">#pragma omp parallel for schedule(static) default(none)</a>
+<a name="ln344">#endif</a>
+<a name="ln345">      for(size_t k = 0; k &lt; (size_t)ch * roi_out-&gt;width * roi_out-&gt;height; k += ch)</a>
+<a name="ln346">      {</a>
+<a name="ln347">        for(int c = 0; c &lt; 3; c++)</a>
+<a name="ln348">        {</a>
+<a name="ln349">          if(d-&gt;lut[c][0] &gt;= 0.0f)</a>
+<a name="ln350">          {</a>
+<a name="ln351">            out[k + c] = (out[k + c] &lt; 1.0f) ? lerp_lut(d-&gt;lut[c], out[k + c])</a>
+<a name="ln352">                                             : dt_iop_eval_exp(d-&gt;unbounded_coeffs[c], out[k + c]);</a>
+<a name="ln353">          }</a>
+<a name="ln354">        }</a>
+<a name="ln355">      }</a>
+<a name="ln356">    }</a>
+<a name="ln357">  }</a>
+<a name="ln358">}</a>
+<a name="ln359"> </a>
+<a name="ln360">void process(struct dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, const void *const ivoid,</a>
+<a name="ln361">             void *const ovoid, const dt_iop_roi_t *const roi_in, const dt_iop_roi_t *const roi_out)</a>
+<a name="ln362">{</a>
+<a name="ln363">  const dt_iop_colorout_data_t *const d = (dt_iop_colorout_data_t *)piece-&gt;data;</a>
+<a name="ln364">  const int ch = piece-&gt;colors;</a>
+<a name="ln365">  const int gamutcheck = (d-&gt;mode == DT_PROFILE_GAMUTCHECK);</a>
+<a name="ln366"> </a>
+<a name="ln367">  if(d-&gt;type == DT_COLORSPACE_LAB)</a>
+<a name="ln368">  {</a>
+<a name="ln369">    memcpy(ovoid, ivoid, sizeof(float)*4*roi_out-&gt;width*roi_out-&gt;height);</a>
+<a name="ln370">  }</a>
+<a name="ln371">  else if(!isnan(d-&gt;cmatrix[0]))</a>
+<a name="ln372">  {</a>
+<a name="ln373">// fprintf(stderr,&quot;Using cmatrix codepath\n&quot;);</a>
+<a name="ln374">// convert to rgb using matrix</a>
+<a name="ln375">#ifdef _OPENMP</a>
+<a name="ln376">#pragma omp parallel for schedule(static) default(none)</a>
+<a name="ln377">#endif</a>
+<a name="ln378">    for(size_t k = 0; k &lt; (size_t)ch * roi_out-&gt;width * roi_out-&gt;height; k += ch)</a>
+<a name="ln379">    {</a>
+<a name="ln380">      const float *const in = (const float *const)ivoid + (size_t)k;</a>
+<a name="ln381">      float *out = (float *)ovoid + (size_t)k;</a>
+<a name="ln382"> </a>
+<a name="ln383">      float xyz[3];</a>
+<a name="ln384">      dt_Lab_to_XYZ(in, xyz);</a>
+<a name="ln385"> </a>
+<a name="ln386">      for(int c = 0; c &lt; 3; c++)</a>
+<a name="ln387">      {</a>
+<a name="ln388">        out[c] = 0.0f;</a>
+<a name="ln389">        for(int i = 0; i &lt; 3; i++)</a>
+<a name="ln390">        {</a>
+<a name="ln391">          out[c] += d-&gt;cmatrix[3 * c + i] * xyz[i];</a>
+<a name="ln392">        }</a>
+<a name="ln393">      }</a>
+<a name="ln394">    }</a>
+<a name="ln395"> </a>
+<a name="ln396">    process_fastpath_apply_tonecurves(self, piece, ivoid, ovoid, roi_in, roi_out);</a>
+<a name="ln397">  }</a>
+<a name="ln398">  else</a>
+<a name="ln399">  {</a>
+<a name="ln400">// fprintf(stderr,&quot;Using xform codepath\n&quot;);</a>
+<a name="ln401">#ifdef _OPENMP</a>
+<a name="ln402">#pragma omp parallel for schedule(static) default(none)</a>
+<a name="ln403">#endif</a>
+<a name="ln404">    for(int k = 0; k &lt; roi_out-&gt;height; k++)</a>
+<a name="ln405">    {</a>
+<a name="ln406">      const float *in = ((float *)ivoid) + (size_t)ch * k * roi_out-&gt;width;</a>
+<a name="ln407">      float *out = ((float *)ovoid) + (size_t)ch * k * roi_out-&gt;width;</a>
+<a name="ln408"> </a>
+<a name="ln409">      cmsDoTransform(d-&gt;xform, in, out, roi_out-&gt;width);</a>
+<a name="ln410"> </a>
+<a name="ln411">      if(gamutcheck)</a>
+<a name="ln412">      {</a>
+<a name="ln413">        for(int j = 0; j &lt; roi_out-&gt;width; j++, out += 4)</a>
+<a name="ln414">        {</a>
+<a name="ln415">          if(out[0] &lt; 0.0f || out[1] &lt; 0.0f || out[2] &lt; 0.0f)</a>
+<a name="ln416">          {</a>
+<a name="ln417">            out[0] = 0.0f;</a>
+<a name="ln418">            out[1] = 1.0f;</a>
+<a name="ln419">            out[2] = 1.0f;</a>
+<a name="ln420">          }</a>
+<a name="ln421">        }</a>
+<a name="ln422">      }</a>
+<a name="ln423">    }</a>
+<a name="ln424">  }</a>
+<a name="ln425"> </a>
+<a name="ln426">  // we no longer use the working profile</a>
+<a name="ln427">  piece-&gt;pipe-&gt;dsc.work_profile_info = NULL;</a>
+<a name="ln428"> </a>
+<a name="ln429">  if(piece-&gt;pipe-&gt;mask_display &amp; DT_DEV_PIXELPIPE_DISPLAY_MASK) dt_iop_alpha_copy(ivoid, ovoid, roi_out-&gt;width, roi_out-&gt;height);</a>
+<a name="ln430">}</a>
+<a name="ln431"> </a>
+<a name="ln432">#if defined(__SSE__)</a>
+<a name="ln433">void process_sse2(struct dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, const void *const ivoid,</a>
+<a name="ln434">                  void *const ovoid, const dt_iop_roi_t *const roi_in, const dt_iop_roi_t *const roi_out)</a>
+<a name="ln435">{</a>
+<a name="ln436">  const dt_iop_colorout_data_t *const d = (dt_iop_colorout_data_t *)piece-&gt;data;</a>
+<a name="ln437">  const int ch = piece-&gt;colors;</a>
+<a name="ln438">  const int gamutcheck = (d-&gt;mode == DT_PROFILE_GAMUTCHECK);</a>
+<a name="ln439"> </a>
+<a name="ln440">  if(d-&gt;type == DT_COLORSPACE_LAB)</a>
+<a name="ln441">  {</a>
+<a name="ln442">    memcpy(ovoid, ivoid, sizeof(float)*4*roi_out-&gt;width*roi_out-&gt;height);</a>
+<a name="ln443">  }</a>
+<a name="ln444">  else if(!isnan(d-&gt;cmatrix[0]))</a>
+<a name="ln445">  {</a>
+<a name="ln446">// fprintf(stderr,&quot;Using cmatrix codepath\n&quot;);</a>
+<a name="ln447">// convert to rgb using matrix</a>
+<a name="ln448">#ifdef _OPENMP</a>
+<a name="ln449">#pragma omp parallel for schedule(static) default(none)</a>
+<a name="ln450">#endif</a>
+<a name="ln451">    for(int j = 0; j &lt; roi_out-&gt;height; j++)</a>
+<a name="ln452">    {</a>
+<a name="ln453"> </a>
+<a name="ln454">      float *in = (float *)ivoid + (size_t)ch * roi_in-&gt;width * j;</a>
+<a name="ln455">      float *out = (float *)ovoid + (size_t)ch * roi_out-&gt;width * j;</a>
+<a name="ln456">      const __m128 m0 = _mm_set_ps(0.0f, d-&gt;cmatrix[6], d-&gt;cmatrix[3], d-&gt;cmatrix[0]);</a>
+<a name="ln457">      const __m128 m1 = _mm_set_ps(0.0f, d-&gt;cmatrix[7], d-&gt;cmatrix[4], d-&gt;cmatrix[1]);</a>
+<a name="ln458">      const __m128 m2 = _mm_set_ps(0.0f, d-&gt;cmatrix[8], d-&gt;cmatrix[5], d-&gt;cmatrix[2]);</a>
+<a name="ln459"> </a>
+<a name="ln460">      for(int i = 0; i &lt; roi_out-&gt;width; i++, in += ch, out += ch)</a>
+<a name="ln461">      {</a>
+<a name="ln462">        const __m128 xyz = dt_Lab_to_XYZ_sse2(_mm_load_ps(in));</a>
+<a name="ln463">        const __m128 t</a>
+<a name="ln464">            = _mm_add_ps(_mm_mul_ps(m0, _mm_shuffle_ps(xyz, xyz, _MM_SHUFFLE(0, 0, 0, 0))),</a>
+<a name="ln465">                         _mm_add_ps(_mm_mul_ps(m1, _mm_shuffle_ps(xyz, xyz, _MM_SHUFFLE(1, 1, 1, 1))),</a>
+<a name="ln466">                                    _mm_mul_ps(m2, _mm_shuffle_ps(xyz, xyz, _MM_SHUFFLE(2, 2, 2, 2)))));</a>
+<a name="ln467"> </a>
+<a name="ln468">        _mm_stream_ps(out, t);</a>
+<a name="ln469">      }</a>
+<a name="ln470">    }</a>
+<a name="ln471">    _mm_sfence();</a>
+<a name="ln472"> </a>
+<a name="ln473">    process_fastpath_apply_tonecurves(self, piece, ivoid, ovoid, roi_in, roi_out);</a>
+<a name="ln474">  }</a>
+<a name="ln475">  else</a>
+<a name="ln476">  {</a>
+<a name="ln477">    // fprintf(stderr,&quot;Using xform codepath\n&quot;);</a>
+<a name="ln478">    const __m128 outofgamutpixel = _mm_set_ps(0.0f, 1.0f, 1.0f, 0.0f);</a>
+<a name="ln479">#ifdef _OPENMP</a>
+<a name="ln480">#pragma omp parallel for schedule(static) default(none)</a>
+<a name="ln481">#endif</a>
+<a name="ln482">    for(int k = 0; k &lt; roi_out-&gt;height; k++)</a>
+<a name="ln483">    {</a>
+<a name="ln484">      const float *in = ((float *)ivoid) + (size_t)ch * k * roi_out-&gt;width;</a>
+<a name="ln485">      float *out = ((float *)ovoid) + (size_t)ch * k * roi_out-&gt;width;</a>
+<a name="ln486"> </a>
+<a name="ln487">      cmsDoTransform(d-&gt;xform, in, out, roi_out-&gt;width);</a>
+<a name="ln488"> </a>
+<a name="ln489">      if(gamutcheck)</a>
+<a name="ln490">      {</a>
+<a name="ln491">        for(int j = 0; j &lt; roi_out-&gt;width; j++, out += 4)</a>
+<a name="ln492">        {</a>
+<a name="ln493">          const __m128 pixel = _mm_load_ps(out);</a>
+<a name="ln494">          __m128 ingamut = _mm_cmplt_ps(pixel, _mm_set_ps(-FLT_MAX, 0.0f, 0.0f, 0.0f));</a>
+<a name="ln495"> </a>
+<a name="ln496">          ingamut = _mm_or_ps(_mm_unpacklo_ps(ingamut, ingamut), _mm_unpackhi_ps(ingamut, ingamut));</a>
+<a name="ln497">          ingamut = _mm_or_ps(_mm_unpacklo_ps(ingamut, ingamut), _mm_unpackhi_ps(ingamut, ingamut));</a>
+<a name="ln498"> </a>
+<a name="ln499">          const __m128 result</a>
+<a name="ln500">              = _mm_or_ps(_mm_and_ps(ingamut, outofgamutpixel), _mm_andnot_ps(ingamut, pixel));</a>
+<a name="ln501">          _mm_stream_ps(out, result);</a>
+<a name="ln502">        }</a>
+<a name="ln503">      }</a>
+<a name="ln504">    }</a>
+<a name="ln505">    _mm_sfence();</a>
+<a name="ln506">  }</a>
+<a name="ln507"> </a>
+<a name="ln508">  // we no longer use the working profile</a>
+<a name="ln509">  piece-&gt;pipe-&gt;dsc.work_profile_info = NULL;</a>
+<a name="ln510"> </a>
+<a name="ln511">  if(piece-&gt;pipe-&gt;mask_display &amp; DT_DEV_PIXELPIPE_DISPLAY_MASK) dt_iop_alpha_copy(ivoid, ovoid, roi_out-&gt;width, roi_out-&gt;height);</a>
+<a name="ln512">}</a>
+<a name="ln513">#endif</a>
+<a name="ln514"> </a>
+<a name="ln515">static cmsHPROFILE _make_clipping_profile(cmsHPROFILE profile)</a>
+<a name="ln516">{</a>
+<a name="ln517">  cmsUInt32Number size;</a>
+<a name="ln518">  cmsHPROFILE old_profile = profile;</a>
+<a name="ln519">  profile = NULL;</a>
+<a name="ln520"> </a>
+<a name="ln521">  if(old_profile &amp;&amp; cmsSaveProfileToMem(old_profile, NULL, &amp;size))</a>
+<a name="ln522">  {</a>
+<a name="ln523">    char *data = malloc(size);</a>
+<a name="ln524"> </a>
+<a name="ln525">    if(cmsSaveProfileToMem(old_profile, data, &amp;size))</a>
+<a name="ln526">      profile = cmsOpenProfileFromMem(data, size);</a>
+<a name="ln527"> </a>
+<a name="ln528">    free(data);</a>
+<a name="ln529">  }</a>
+<a name="ln530"> </a>
+<a name="ln531">  return profile;</a>
+<a name="ln532">}</a>
+<a name="ln533"> </a>
+<a name="ln534">void commit_params(struct dt_iop_module_t *self, dt_iop_params_t *p1, dt_dev_pixelpipe_t *pipe,</a>
+<a name="ln535">                   dt_dev_pixelpipe_iop_t *piece)</a>
+<a name="ln536">{</a>
+<a name="ln537">  dt_iop_colorout_params_t *p = (dt_iop_colorout_params_t *)p1;</a>
+<a name="ln538">  dt_iop_colorout_data_t *d = (dt_iop_colorout_data_t *)piece-&gt;data;</a>
+<a name="ln539"> </a>
+<a name="ln540">  d-&gt;type = p-&gt;type;</a>
+<a name="ln541"> </a>
+<a name="ln542">  const int force_lcms2 = dt_conf_get_bool(&quot;plugins/lighttable/export/force_lcms2&quot;);</a>
+<a name="ln543"> </a>
+<a name="ln544">  dt_colorspaces_color_profile_type_t out_type = DT_COLORSPACE_SRGB;</a>
+<a name="ln545">  gchar *out_filename = NULL;</a>
+<a name="ln546">  dt_iop_color_intent_t out_intent = DT_INTENT_PERCEPTUAL;</a>
+<a name="ln547"> </a>
+<a name="ln548">  const cmsHPROFILE Lab = dt_colorspaces_get_profile(DT_COLORSPACE_LAB, &quot;&quot;, DT_PROFILE_DIRECTION_ANY)-&gt;profile;</a>
+<a name="ln549"> </a>
+<a name="ln550">  cmsHPROFILE output = NULL;</a>
+<a name="ln551">  cmsHPROFILE softproof = NULL;</a>
+<a name="ln552">  cmsUInt32Number output_format = TYPE_RGBA_FLT;</a>
+<a name="ln553"> </a>
+<a name="ln554">  d-&gt;mode = pipe-&gt;type == DT_DEV_PIXELPIPE_FULL ? darktable.color_profiles-&gt;mode : DT_PROFILE_NORMAL;</a>
+<a name="ln555"> </a>
+<a name="ln556">  if(d-&gt;xform)</a>
+<a name="ln557">  {</a>
+<a name="ln558">    cmsDeleteTransform(d-&gt;xform);</a>
+<a name="ln559">    d-&gt;xform = NULL;</a>
+<a name="ln560">  }</a>
+<a name="ln561">  d-&gt;cmatrix[0] = NAN;</a>
+<a name="ln562">  d-&gt;lut[0][0] = -1.0f;</a>
+<a name="ln563">  d-&gt;lut[1][0] = -1.0f;</a>
+<a name="ln564">  d-&gt;lut[2][0] = -1.0f;</a>
+<a name="ln565">  piece-&gt;process_cl_ready = 1;</a>
+<a name="ln566"> </a>
+<a name="ln567">  /* if we are exporting then check and set usage of override profile */</a>
+<a name="ln568">  if(pipe-&gt;type == DT_DEV_PIXELPIPE_EXPORT)</a>
+<a name="ln569">  {</a>
+<a name="ln570">    if(pipe-&gt;icc_type != DT_COLORSPACE_NONE)</a>
+<a name="ln571">    {</a>
+<a name="ln572">      p-&gt;type = pipe-&gt;icc_type;</a>
+<a name="ln573">      g_strlcpy(p-&gt;filename, pipe-&gt;icc_filename, sizeof(p-&gt;filename));</a>
+<a name="ln574">    }</a>
+<a name="ln575">    if((unsigned int)pipe-&gt;icc_intent &lt; DT_INTENT_LAST) p-&gt;intent = pipe-&gt;icc_intent;</a>
+<a name="ln576"> </a>
+<a name="ln577">    out_type = p-&gt;type;</a>
+<a name="ln578">    out_filename = p-&gt;filename;</a>
+<a name="ln579">    out_intent = p-&gt;intent;</a>
+<a name="ln580">  }</a>
+<a name="ln581">  else if(pipe-&gt;type == DT_DEV_PIXELPIPE_THUMBNAIL)</a>
+<a name="ln582">  {</a>
+<a name="ln583">    out_type = dt_mipmap_cache_get_colorspace();</a>
+<a name="ln584">    out_filename = (out_type == DT_COLORSPACE_DISPLAY ? darktable.color_profiles-&gt;display_filename : &quot;&quot;);</a>
+<a name="ln585">    out_intent = darktable.color_profiles-&gt;display_intent;</a>
+<a name="ln586">  }</a>
+<a name="ln587">  else</a>
+<a name="ln588">  {</a>
+<a name="ln589">    /* we are not exporting, using display profile as output */</a>
+<a name="ln590">    out_type = darktable.color_profiles-&gt;display_type;</a>
+<a name="ln591">    out_filename = darktable.color_profiles-&gt;display_filename;</a>
+<a name="ln592">    out_intent = darktable.color_profiles-&gt;display_intent;</a>
+<a name="ln593">  }</a>
+<a name="ln594"> </a>
+<a name="ln595">  // when the output type is Lab then process is a nop, so we can avoid creating a transform</a>
+<a name="ln596">  // and the subsequent error messages</a>
+<a name="ln597">  d-&gt;type = out_type;</a>
+<a name="ln598">  if(out_type == DT_COLORSPACE_LAB)</a>
+<a name="ln599">    return;</a>
+<a name="ln600"> </a>
+<a name="ln601">  /*</a>
+<a name="ln602">   * Setup transform flags</a>
+<a name="ln603">   */</a>
+<a name="ln604">  uint32_t transformFlags = 0;</a>
+<a name="ln605"> </a>
+<a name="ln606">  /* creating output profile */</a>
+<a name="ln607">  if(out_type == DT_COLORSPACE_DISPLAY) pthread_rwlock_rdlock(&amp;darktable.color_profiles-&gt;xprofile_lock);</a>
+<a name="ln608"> </a>
+<a name="ln609">  const dt_colorspaces_color_profile_t *out_profile</a>
+<a name="ln610">        = dt_colorspaces_get_profile(out_type, out_filename, DT_PROFILE_DIRECTION_OUT | DT_PROFILE_DIRECTION_DISPLAY);</a>
+<a name="ln611">  if(out_profile)</a>
+<a name="ln612">  {</a>
+<a name="ln613">    output = out_profile-&gt;profile;</a>
+<a name="ln614">    if(out_type == DT_COLORSPACE_XYZ) output_format = TYPE_XYZA_FLT;</a>
+<a name="ln615">  }</a>
+<a name="ln616">  else</a>
+<a name="ln617">  {</a>
+<a name="ln618">    output = dt_colorspaces_get_profile(DT_COLORSPACE_SRGB, &quot;&quot;,</a>
+<a name="ln619">                                        DT_PROFILE_DIRECTION_OUT | DT_PROFILE_DIRECTION_DISPLAY)-&gt;profile;</a>
+<a name="ln620">    dt_control_log(_(&quot;missing output profile has been replaced by sRGB!&quot;));</a>
+<a name="ln621">    fprintf(stderr, &quot;missing output profile `%s' has been replaced by sRGB!\n&quot;,</a>
+<a name="ln622">            dt_colorspaces_get_name(out_type, out_filename));</a>
+<a name="ln623">  }</a>
+<a name="ln624"> </a>
+<a name="ln625">  /* creating softproof profile if softproof is enabled */</a>
+<a name="ln626">  if(d-&gt;mode != DT_PROFILE_NORMAL &amp;&amp; pipe-&gt;type == DT_DEV_PIXELPIPE_FULL)</a>
+<a name="ln627">  {</a>
+<a name="ln628">    const dt_colorspaces_color_profile_t *prof = dt_colorspaces_get_profile(</a>
+<a name="ln629">        darktable.color_profiles-&gt;softproof_type, darktable.color_profiles-&gt;softproof_filename,</a>
+<a name="ln630">        DT_PROFILE_DIRECTION_OUT | DT_PROFILE_DIRECTION_DISPLAY);</a>
+<a name="ln631">    if(prof)</a>
+<a name="ln632">      softproof = prof-&gt;profile;</a>
+<a name="ln633">    else</a>
+<a name="ln634">    {</a>
+<a name="ln635">      softproof = dt_colorspaces_get_profile(DT_COLORSPACE_SRGB, &quot;&quot;,</a>
+<a name="ln636">                                             DT_PROFILE_DIRECTION_OUT | DT_PROFILE_DIRECTION_DISPLAY)-&gt;profile;</a>
+<a name="ln637">      dt_control_log(_(&quot;missing softproof profile has been replaced by sRGB!&quot;));</a>
+<a name="ln638">      fprintf(stderr, &quot;missing softproof profile `%s' has been replaced by sRGB!\n&quot;,</a>
+<a name="ln639">              dt_colorspaces_get_name(darktable.color_profiles-&gt;softproof_type,</a>
+<a name="ln640">                                      darktable.color_profiles-&gt;softproof_filename));</a>
+<a name="ln641">    }</a>
+<a name="ln642"> </a>
+<a name="ln643">    // some of our internal profiles are what lcms considers ideal profiles as they have a parametric TRC so</a>
+<a name="ln644">    // taking a roundtrip through those profiles during softproofing has no effect. as a workaround we have to</a>
+<a name="ln645">    // make lcms quantisize those gamma tables to get the desired effect.</a>
+<a name="ln646">    // in case that fails we don't enable softproofing.</a>
+<a name="ln647">    softproof = _make_clipping_profile(softproof);</a>
+<a name="ln648">    if(softproof)</a>
+<a name="ln649">    {</a>
+<a name="ln650">      /* TODO: the use of bpc should be userconfigurable either from module or preference pane */</a>
+<a name="ln651">      /* softproof flag and black point compensation */</a>
+<a name="ln652">      transformFlags |= cmsFLAGS_SOFTPROOFING | cmsFLAGS_NOCACHE | cmsFLAGS_BLACKPOINTCOMPENSATION;</a>
+<a name="ln653"> </a>
+<a name="ln654">      if(d-&gt;mode == DT_PROFILE_GAMUTCHECK) transformFlags |= cmsFLAGS_GAMUTCHECK;</a>
+<a name="ln655">    }</a>
+<a name="ln656">  }</a>
+<a name="ln657"> </a>
+<a name="ln658">  /*</a>
+<a name="ln659">   * NOTE: theoretically, we should be passing</a>
+<a name="ln660">   * UsedDirection = LCMS_USED_AS_PROOF  into</a>
+<a name="ln661">   * dt_colorspaces_get_matrix_from_output_profile() so that</a>
+<a name="ln662">   * dt_colorspaces_get_matrix_from_profile() knows it, but since we do not try</a>
+<a name="ln663">   * to use our matrix codepath when softproof is enabled, this seemed redundant.</a>
+<a name="ln664">   */</a>
+<a name="ln665"> </a>
+<a name="ln666">  /* get matrix from profile, if softproofing or high quality exporting always go xform codepath */</a>
+<a name="ln667">  if(d-&gt;mode != DT_PROFILE_NORMAL || force_lcms2</a>
+<a name="ln668">     || dt_colorspaces_get_matrix_from_output_profile(output, d-&gt;cmatrix, d-&gt;lut[0], d-&gt;lut[1], d-&gt;lut[2],</a>
+<a name="ln669">                                                      LUT_SAMPLES, out_intent))</a>
+<a name="ln670">  {</a>
+<a name="ln671">    d-&gt;cmatrix[0] = NAN;</a>
+<a name="ln672">    piece-&gt;process_cl_ready = 0;</a>
+<a name="ln673">    d-&gt;xform = cmsCreateProofingTransform(Lab, TYPE_LabA_FLT, output, output_format, softproof,</a>
+<a name="ln674">                                          out_intent, INTENT_RELATIVE_COLORIMETRIC, transformFlags);</a>
+<a name="ln675">  }</a>
+<a name="ln676"> </a>
+<a name="ln677">  // user selected a non-supported output profile, check that:</a>
+<a name="ln678">  if(!d-&gt;xform &amp;&amp; isnan(d-&gt;cmatrix[0]))</a>
+<a name="ln679">  {</a>
+<a name="ln680">    dt_control_log(_(&quot;unsupported output profile has been replaced by sRGB!&quot;));</a>
+<a name="ln681">    fprintf(stderr, &quot;unsupported output profile `%s' has been replaced by sRGB!\n&quot;, out_profile-&gt;name);</a>
+<a name="ln682">    output = dt_colorspaces_get_profile(DT_COLORSPACE_SRGB, &quot;&quot;, DT_PROFILE_DIRECTION_OUT)-&gt;profile;</a>
+<a name="ln683">    if(d-&gt;mode != DT_PROFILE_NORMAL</a>
+<a name="ln684">       || dt_colorspaces_get_matrix_from_output_profile(output, d-&gt;cmatrix, d-&gt;lut[0], d-&gt;lut[1],</a>
+<a name="ln685">                                                        d-&gt;lut[2], LUT_SAMPLES, out_intent))</a>
+<a name="ln686">    {</a>
+<a name="ln687">      d-&gt;cmatrix[0] = NAN;</a>
+<a name="ln688">      piece-&gt;process_cl_ready = 0;</a>
+<a name="ln689"> </a>
+<a name="ln690">      d-&gt;xform = cmsCreateProofingTransform(Lab, TYPE_LabA_FLT, output, output_format, softproof,</a>
+<a name="ln691">                                            out_intent, INTENT_RELATIVE_COLORIMETRIC, transformFlags);</a>
+<a name="ln692">    }</a>
+<a name="ln693">  }</a>
+<a name="ln694"> </a>
+<a name="ln695">  if(out_type == DT_COLORSPACE_DISPLAY) pthread_rwlock_unlock(&amp;darktable.color_profiles-&gt;xprofile_lock);</a>
+<a name="ln696"> </a>
+<a name="ln697">  // now try to initialize unbounded mode:</a>
+<a name="ln698">  // we do extrapolation for input values above 1.0f.</a>
+<a name="ln699">  // unfortunately we can only do this if we got the computation</a>
+<a name="ln700">  // in our hands, i.e. for the fast builtin-dt-matrix-profile path.</a>
+<a name="ln701">  for(int k = 0; k &lt; 3; k++)</a>
+<a name="ln702">  {</a>
+<a name="ln703">    // omit luts marked as linear (negative as marker)</a>
+<a name="ln704">    if(d-&gt;lut[k][0] &gt;= 0.0f)</a>
+<a name="ln705">    {</a>
+<a name="ln706">      const float x[4] = { 0.7f, 0.8f, 0.9f, 1.0f };</a>
+<a name="ln707">      const float y[4] = { lerp_lut(d-&gt;lut[k], x[0]), lerp_lut(d-&gt;lut[k], x[1]), lerp_lut(d-&gt;lut[k], x[2]),</a>
+<a name="ln708">                           lerp_lut(d-&gt;lut[k], x[3]) };</a>
+<a name="ln709">      dt_iop_estimate_exp(x, y, 4, d-&gt;unbounded_coeffs[k]);</a>
+<a name="ln710">    }</a>
+<a name="ln711">    else</a>
+<a name="ln712">      d-&gt;unbounded_coeffs[k][0] = -1.0f;</a>
+<a name="ln713">  }</a>
+<a name="ln714"> </a>
+<a name="ln715">  // softproof is never the original but always a copy that went through _make_clipping_profile()</a>
+<a name="ln716">  dt_colorspaces_cleanup_profile(softproof);</a>
+<a name="ln717"> </a>
+<a name="ln718">}</a>
+<a name="ln719"> </a>
+<a name="ln720">void init_pipe(struct dt_iop_module_t *self, dt_dev_pixelpipe_t *pipe, dt_dev_pixelpipe_iop_t *piece)</a>
+<a name="ln721">{</a>
+<a name="ln722">  piece-&gt;data = calloc(1, sizeof(dt_iop_colorout_data_t));</a>
+<a name="ln723">  dt_iop_colorout_data_t *d = (dt_iop_colorout_data_t *)piece-&gt;data;</a>
+<a name="ln724">  d-&gt;xform = NULL;</a>
+<a name="ln725">  self-&gt;commit_params(self, self-&gt;default_params, pipe, piece);</a>
+<a name="ln726">}</a>
+<a name="ln727"> </a>
+<a name="ln728">void cleanup_pipe(struct dt_iop_module_t *self, dt_dev_pixelpipe_t *pipe, dt_dev_pixelpipe_iop_t *piece)</a>
+<a name="ln729">{</a>
+<a name="ln730">  dt_iop_colorout_data_t *d = (dt_iop_colorout_data_t *)piece-&gt;data;</a>
+<a name="ln731">  if(d-&gt;xform)</a>
+<a name="ln732">  {</a>
+<a name="ln733">    cmsDeleteTransform(d-&gt;xform);</a>
+<a name="ln734">    d-&gt;xform = NULL;</a>
+<a name="ln735">  }</a>
+<a name="ln736"> </a>
+<a name="ln737">  free(piece-&gt;data);</a>
+<a name="ln738">  piece-&gt;data = NULL;</a>
+<a name="ln739">}</a>
+<a name="ln740"> </a>
+<a name="ln741">void gui_update(struct dt_iop_module_t *self)</a>
+<a name="ln742">{</a>
+<a name="ln743">  dt_iop_module_t *module = (dt_iop_module_t *)self;</a>
+<a name="ln744">  dt_iop_colorout_gui_data_t *g = (dt_iop_colorout_gui_data_t *)self-&gt;gui_data;</a>
+<a name="ln745">  dt_iop_colorout_params_t *p = (dt_iop_colorout_params_t *)module-&gt;params;</a>
+<a name="ln746">  dt_bauhaus_combobox_set(g-&gt;output_intent, (int)p-&gt;intent);</a>
+<a name="ln747"> </a>
+<a name="ln748">  for(GList *iter = darktable.color_profiles-&gt;profiles; iter; iter = g_list_next(iter))</a>
+<a name="ln749">  {</a>
+<a name="ln750">    dt_colorspaces_color_profile_t *pp = (dt_colorspaces_color_profile_t *)iter-&gt;data;</a>
+<a name="ln751">    if(pp-&gt;out_pos &gt; -1 &amp;&amp;</a>
+<a name="ln752">       p-&gt;type == pp-&gt;type &amp;&amp; (p-&gt;type != DT_COLORSPACE_FILE || !strcmp(p-&gt;filename, pp-&gt;filename)))</a>
+<a name="ln753">    {</a>
+<a name="ln754">      dt_bauhaus_combobox_set(g-&gt;output_profile, pp-&gt;out_pos);</a>
+<a name="ln755">      return;</a>
+<a name="ln756">    }</a>
+<a name="ln757">  }</a>
+<a name="ln758"> </a>
+<a name="ln759">  dt_bauhaus_combobox_set(g-&gt;output_profile, 0);</a>
+<a name="ln760">  fprintf(stderr, &quot;[colorout] could not find requested profile `%s'!\n&quot;, dt_colorspaces_get_name(p-&gt;type, p-&gt;filename));</a>
+<a name="ln761">}</a>
+<a name="ln762"> </a>
+<a name="ln763">void init(dt_iop_module_t *module)</a>
+<a name="ln764">{</a>
+<a name="ln765">  module-&gt;params = calloc(1, sizeof(dt_iop_colorout_params_t));</a>
+<a name="ln766">  module-&gt;default_params = calloc(1, sizeof(dt_iop_colorout_params_t));</a>
+<a name="ln767">  module-&gt;params_size = sizeof(dt_iop_colorout_params_t);</a>
+<a name="ln768">  module-&gt;gui_data = NULL;</a>
+<a name="ln769">  module-&gt;hide_enable_button = 1;</a>
+<a name="ln770">  module-&gt;default_enabled = 1;</a>
+<a name="ln771">  dt_iop_colorout_params_t tmp = (dt_iop_colorout_params_t){ DT_COLORSPACE_SRGB, &quot;&quot;, DT_INTENT_PERCEPTUAL};</a>
+<a name="ln772">  memcpy(module-&gt;params, &amp;tmp, sizeof(dt_iop_colorout_params_t));</a>
+<a name="ln773">  memcpy(module-&gt;default_params, &amp;tmp, sizeof(dt_iop_colorout_params_t));</a>
+<a name="ln774">}</a>
+<a name="ln775"> </a>
+<a name="ln776">void cleanup(dt_iop_module_t *module)</a>
+<a name="ln777">{</a>
+<a name="ln778">  free(module-&gt;params);</a>
+<a name="ln779">  module-&gt;params = NULL;</a>
+<a name="ln780">}</a>
+<a name="ln781"> </a>
+<a name="ln782">static void _preference_changed(gpointer instance, gpointer user_data)</a>
+<a name="ln783">{</a>
+<a name="ln784">  dt_iop_module_t *self = (dt_iop_module_t *)user_data;</a>
+<a name="ln785">  dt_iop_colorout_gui_data_t *g = (dt_iop_colorout_gui_data_t *)self-&gt;gui_data;</a>
+<a name="ln786"> </a>
+<a name="ln787">  const int force_lcms2 = dt_conf_get_bool(&quot;plugins/lighttable/export/force_lcms2&quot;);</a>
+<a name="ln788">  if(force_lcms2)</a>
+<a name="ln789">  {</a>
+<a name="ln790">    gtk_widget_set_no_show_all(g-&gt;output_intent, FALSE);</a>
+<a name="ln791">    gtk_widget_set_visible(g-&gt;output_intent, TRUE);</a>
+<a name="ln792">  }</a>
+<a name="ln793">  else</a>
+<a name="ln794">  {</a>
+<a name="ln795">    gtk_widget_set_no_show_all(g-&gt;output_intent, TRUE);</a>
+<a name="ln796">    gtk_widget_set_visible(g-&gt;output_intent, FALSE);</a>
+<a name="ln797">  }</a>
+<a name="ln798">}</a>
+<a name="ln799"> </a>
+<a name="ln800">void gui_init(struct dt_iop_module_t *self)</a>
+<a name="ln801">{</a>
+<a name="ln802">  const int force_lcms2 = dt_conf_get_bool(&quot;plugins/lighttable/export/force_lcms2&quot;);</a>
+<a name="ln803"> </a>
+<a name="ln804">  self-&gt;gui_data = calloc(1, sizeof(dt_iop_colorout_gui_data_t));</a>
+<a name="ln805">  dt_iop_colorout_gui_data_t *g = (dt_iop_colorout_gui_data_t *)self-&gt;gui_data;</a>
+<a name="ln806"> </a>
+<a name="ln807">  char datadir[PATH_MAX] = { 0 };</a>
+<a name="ln808">  char confdir[PATH_MAX] = { 0 };</a>
+<a name="ln809">  dt_loc_get_datadir(datadir, sizeof(datadir));</a>
+<a name="ln810">  dt_loc_get_user_config_dir(confdir, sizeof(confdir));</a>
+<a name="ln811"> </a>
+<a name="ln812">  self-&gt;widget = gtk_box_new(GTK_ORIENTATION_VERTICAL, DT_BAUHAUS_SPACE);</a>
+<a name="ln813">  dt_gui_add_help_link(self-&gt;widget, dt_get_help_url(self-&gt;op));</a>
+<a name="ln814"> </a>
+<a name="ln815">  // TODO:</a>
+<a name="ln816">  g-&gt;output_intent = dt_bauhaus_combobox_new(self);</a>
+<a name="ln817">  gtk_box_pack_start(GTK_BOX(self-&gt;widget), g-&gt;output_intent, TRUE, TRUE, 0);</a>
+<a name="ln818">  dt_bauhaus_widget_set_label(g-&gt;output_intent, NULL, _(&quot;output intent&quot;));</a>
+<a name="ln819">  dt_bauhaus_combobox_add(g-&gt;output_intent, _(&quot;perceptual&quot;));</a>
+<a name="ln820">  dt_bauhaus_combobox_add(g-&gt;output_intent, _(&quot;relative colorimetric&quot;));</a>
+<a name="ln821">  dt_bauhaus_combobox_add(g-&gt;output_intent, C_(&quot;rendering intent&quot;, &quot;saturation&quot;));</a>
+<a name="ln822">  dt_bauhaus_combobox_add(g-&gt;output_intent, _(&quot;absolute colorimetric&quot;));</a>
+<a name="ln823"> </a>
+<a name="ln824">  if(!force_lcms2)</a>
+<a name="ln825">  {</a>
+<a name="ln826">    gtk_widget_set_no_show_all(g-&gt;output_intent, TRUE);</a>
+<a name="ln827">    gtk_widget_set_visible(g-&gt;output_intent, FALSE);</a>
+<a name="ln828">  }</a>
+<a name="ln829"> </a>
+<a name="ln830">  g-&gt;output_profile = dt_bauhaus_combobox_new(self);</a>
+<a name="ln831">  dt_bauhaus_widget_set_label(g-&gt;output_profile, NULL, _(&quot;export profile&quot;));</a>
+<a name="ln832">  gtk_box_pack_start(GTK_BOX(self-&gt;widget), g-&gt;output_profile, TRUE, TRUE, 0);</a>
+<a name="ln833">  for(GList *l = darktable.color_profiles-&gt;profiles; l; l = g_list_next(l))</a>
+<a name="ln834">  {</a>
+<a name="ln835">    dt_colorspaces_color_profile_t *prof = (dt_colorspaces_color_profile_t *)l-&gt;data;</a>
+<a name="ln836">    if(prof-&gt;out_pos &gt; -1) dt_bauhaus_combobox_add(g-&gt;output_profile, prof-&gt;name);</a>
+<a name="ln837">  }</a>
+<a name="ln838"> </a>
+<a name="ln839">  gtk_widget_set_tooltip_text(g-&gt;output_intent, _(&quot;rendering intent&quot;));</a>
+<a name="ln840">  char *system_profile_dir = g_build_filename(datadir, &quot;color&quot;, &quot;out&quot;, NULL);</a>
+<a name="ln841">  char *user_profile_dir = g_build_filename(confdir, &quot;color&quot;, &quot;out&quot;, NULL);</a>
+<a name="ln842">  char *tooltip = g_strdup_printf(_(&quot;ICC profiles in %s or %s&quot;), user_profile_dir, system_profile_dir);</a>
+<a name="ln843">  gtk_widget_set_tooltip_text(g-&gt;output_profile, tooltip);</a>
+<a name="ln844">  g_free(system_profile_dir);</a>
+<a name="ln845">  g_free(user_profile_dir);</a>
+<a name="ln846">  g_free(tooltip);</a>
+<a name="ln847"> </a>
+<a name="ln848">  g_signal_connect(G_OBJECT(g-&gt;output_intent), &quot;value-changed&quot;, G_CALLBACK(intent_changed), (gpointer)self);</a>
+<a name="ln849">  g_signal_connect(G_OBJECT(g-&gt;output_profile), &quot;value-changed&quot;, G_CALLBACK(output_profile_changed), (gpointer)self);</a>
+<a name="ln850"> </a>
+<a name="ln851">  // reload the profiles when the display or softproof profile changed!</a>
+<a name="ln852">  dt_control_signal_connect(darktable.signals, DT_SIGNAL_CONTROL_PROFILE_CHANGED,</a>
+<a name="ln853">                            G_CALLBACK(_signal_profile_changed), self-&gt;dev);</a>
+<a name="ln854">  // update the gui when the preferences changed (i.e. show intent when using lcms2)</a>
+<a name="ln855">  dt_control_signal_connect(darktable.signals, DT_SIGNAL_PREFERENCES_CHANGE,</a>
+<a name="ln856">                            G_CALLBACK(_preference_changed), (gpointer)self);</a>
+<a name="ln857">}</a>
+<a name="ln858"> </a>
+<a name="ln859">void gui_cleanup(struct dt_iop_module_t *self)</a>
+<a name="ln860">{</a>
+<a name="ln861">  dt_control_signal_disconnect(darktable.signals, G_CALLBACK(_signal_profile_changed), self-&gt;dev);</a>
+<a name="ln862">  dt_control_signal_disconnect(darktable.signals, G_CALLBACK(_preference_changed), self);</a>
+<a name="ln863"> </a>
+<a name="ln864">  free(self-&gt;gui_data);</a>
+<a name="ln865">  self-&gt;gui_data = NULL;</a>
+<a name="ln866">}</a>
+<a name="ln867"> </a>
+<a name="ln868">// modelines: These editor modelines have been set for all relevant files by tools/update_modelines.sh</a>
+<a name="ln869">// vim: shiftwidth=2 expandtab tabstop=2 cindent</a>
+<a name="ln870">// kate: tab-indents: off; indent-width 2; replace-tabs on; indent-mode cstyle; remove-trailing-spaces modified;</a>
+
+</code></pre>
+<div class="balloon" rel="179"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v522/" target="_blank">V522</a> There might be dereferencing of a potential null pointer 'gd'. Check lines: 179, 177.</p></div>
+<div class="balloon" rel="724"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v522/" target="_blank">V522</a> There might be dereferencing of a potential null pointer 'd'. Check lines: 724, 722.</p></div>
+<div class="balloon" rel="772"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v575/" target="_blank">V575</a> The potential null pointer is passed into 'memcpy' function. Inspect the first argument. Check lines: 772, 765.</p></div>
+<div class="balloon" rel="773"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v575/" target="_blank">V575</a> The potential null pointer is passed into 'memcpy' function. Inspect the first argument. Check lines: 773, 766.</p></div>
+<div class="balloon" rel="816"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v522/" target="_blank">V522</a> There might be dereferencing of a potential null pointer 'g'. Check lines: 816, 804.</p></div>
+
+<link rel="stylesheet" href="highlight.css">
+<script src="highlight.pack.js"></script>
+<script src="highlightjs-line-numbers.js"></script>
+<script>hljs.initHighlightingOnLoad();</script>
+<script>hljs.initLineNumbersOnLoad();</script>
+<script>
+  $(document).ready(function() {
+      $('.balloon').each(function () {
+          var bl = $(this);
+          var line = bl.attr('rel');
+          var text = $('a[name="ln'+line+'"]').text();
+
+          var space_count = 0;
+          for(var i = 0; i<text.length; i++){
+              var char = text[i];
+              if((char !== ' ')&&(char !== '\t'))break;
+              if(char === '\t')space_count++;
+              space_count++;
+          }
+
+          bl.css('margin-left', space_count*8);
+          $('a[name="ln'+line+'"]').after(bl);
+      });
+
+      window.location = window.location;
+  });
+</script>
+</body>
+</html>

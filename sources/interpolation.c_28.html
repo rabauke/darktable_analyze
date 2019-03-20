@@ -1,0 +1,2275 @@
+
+<html>
+<head>
+  <link rel="stylesheet" href="../style.css"/>
+  <script src="../jquery-3.2.1.min.js"></script>
+</head>
+<body>
+<pre><code class = "cpp">
+<a name="ln1">/* --------------------------------------------------------------------------</a>
+<a name="ln2">    This file is part of darktable,</a>
+<a name="ln3">    copyright (c) 2012 Edouard Gomez &lt;ed.gomez@free.fr&gt;</a>
+<a name="ln4"> </a>
+<a name="ln5">    darktable is free software: you can redistribute it and/or modify</a>
+<a name="ln6">    it under the terms of the GNU General Public License as published by</a>
+<a name="ln7">    the Free Software Foundation, either version 3 of the License, or</a>
+<a name="ln8">    (at your option) any later version.</a>
+<a name="ln9"> </a>
+<a name="ln10">    darktable is distributed in the hope that it will be useful,</a>
+<a name="ln11">    but WITHOUT ANY WARRANTY; without even the implied warranty of</a>
+<a name="ln12">    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the</a>
+<a name="ln13">    GNU General Public License for more details.</a>
+<a name="ln14"> </a>
+<a name="ln15">    You should have received a copy of the GNU General Public License</a>
+<a name="ln16">    along with darktable.  If not, see &lt;http://www.gnu.org/licenses/&gt;.</a>
+<a name="ln17">* ------------------------------------------------------------------------*/</a>
+<a name="ln18"> </a>
+<a name="ln19">#include &quot;common/interpolation.h&quot;</a>
+<a name="ln20">#include &quot;common/darktable.h&quot;</a>
+<a name="ln21">#include &quot;control/conf.h&quot;</a>
+<a name="ln22"> </a>
+<a name="ln23">#include &lt;assert.h&gt;</a>
+<a name="ln24">#include &lt;glib.h&gt;</a>
+<a name="ln25">#include &lt;inttypes.h&gt;</a>
+<a name="ln26">#include &lt;math.h&gt;</a>
+<a name="ln27">#include &lt;stddef.h&gt;</a>
+<a name="ln28">#include &lt;stdint.h&gt;</a>
+<a name="ln29"> </a>
+<a name="ln30">/** Border extrapolation modes */</a>
+<a name="ln31">enum border_mode</a>
+<a name="ln32">{</a>
+<a name="ln33">  BORDER_REPLICATE, // aaaa|abcdefg|gggg</a>
+<a name="ln34">  BORDER_WRAP,      // defg|abcdefg|abcd</a>
+<a name="ln35">  BORDER_MIRROR,    // edcb|abcdefg|fedc</a>
+<a name="ln36">  BORDER_CLAMP      // ....|abcdefg|....</a>
+<a name="ln37">};</a>
+<a name="ln38"> </a>
+<a name="ln39">/* Supporting them all might be overkill, let the compiler trim all</a>
+<a name="ln40"> * unnecessary modes in clip for resampling codepath*/</a>
+<a name="ln41">#define RESAMPLING_BORDER_MODE BORDER_REPLICATE</a>
+<a name="ln42"> </a>
+<a name="ln43">/* Supporting them all might be overkill, let the compiler trim all</a>
+<a name="ln44"> * unnecessary modes in interpolation codepath */</a>
+<a name="ln45">#define INTERPOLATION_BORDER_MODE BORDER_MIRROR</a>
+<a name="ln46"> </a>
+<a name="ln47">// Defines minimum alignment requirement for critical SIMD code</a>
+<a name="ln48">#define SSE_ALIGNMENT 64</a>
+<a name="ln49"> </a>
+<a name="ln50">// Defines the maximum kernel half length</a>
+<a name="ln51">// !! Make sure to sync this with the filter array !!</a>
+<a name="ln52">#define MAX_HALF_FILTER_WIDTH 3</a>
+<a name="ln53"> </a>
+<a name="ln54">// Add code for timing resampling function</a>
+<a name="ln55">#define DEBUG_RESAMPLING_TIMING 0</a>
+<a name="ln56"> </a>
+<a name="ln57">// Add debug info messages to stderr</a>
+<a name="ln58">#define DEBUG_PRINT_INFO 0</a>
+<a name="ln59"> </a>
+<a name="ln60">// Add *verbose* (like one msg per pixel out) debug message to stderr</a>
+<a name="ln61">#define DEBUG_PRINT_VERBOSE 0</a>
+<a name="ln62"> </a>
+<a name="ln63">/* --------------------------------------------------------------------------</a>
+<a name="ln64"> * Debug helpers</a>
+<a name="ln65"> * ------------------------------------------------------------------------*/</a>
+<a name="ln66"> </a>
+<a name="ln67">#if DEBUG_RESAMPLING_TIMING</a>
+<a name="ln68">#include &lt;sys/time.h&gt;</a>
+<a name="ln69">#endif</a>
+<a name="ln70"> </a>
+<a name="ln71">#if DEBUG_PRINT_INFO</a>
+<a name="ln72">#define debug_info(...)                                                                                      \</a>
+<a name="ln73">  do                                                                                                         \</a>
+<a name="ln74">  {                                                                                                          \</a>
+<a name="ln75">    fprintf(stderr, __VA_ARGS__);                                                                            \</a>
+<a name="ln76">  } while(0)</a>
+<a name="ln77">#else</a>
+<a name="ln78">#define debug_info(...)</a>
+<a name="ln79">#endif</a>
+<a name="ln80"> </a>
+<a name="ln81">#if DEBUG_PRINT_VERBOSE</a>
+<a name="ln82">#define debug_extra(...)                                                                                     \</a>
+<a name="ln83">  do                                                                                                         \</a>
+<a name="ln84">  {                                                                                                          \</a>
+<a name="ln85">    fprintf(stderr, __VA_ARGS__);                                                                            \</a>
+<a name="ln86">  } while(0)</a>
+<a name="ln87">#else</a>
+<a name="ln88">#define debug_extra(...)</a>
+<a name="ln89">#endif</a>
+<a name="ln90"> </a>
+<a name="ln91">#if DEBUG_RESAMPLING_TIMING</a>
+<a name="ln92">static inline int64_t getts()</a>
+<a name="ln93">{</a>
+<a name="ln94">  struct timeval t;</a>
+<a name="ln95">  gettimeofday(&amp;t, NULL);</a>
+<a name="ln96">  return t.tv_sec * INT64_C(1000000) + t.tv_usec;</a>
+<a name="ln97">}</a>
+<a name="ln98">#endif</a>
+<a name="ln99"> </a>
+<a name="ln100">/* --------------------------------------------------------------------------</a>
+<a name="ln101"> * Generic helpers</a>
+<a name="ln102"> * ------------------------------------------------------------------------*/</a>
+<a name="ln103"> </a>
+<a name="ln104">/** Compute ceil value of a float</a>
+<a name="ln105"> * @remark Avoid libc ceil for now. Maybe we'll revert to libc later.</a>
+<a name="ln106"> * @param x Value to ceil</a>
+<a name="ln107"> * @return ceil value</a>
+<a name="ln108"> */</a>
+<a name="ln109">static inline float ceil_fast(float x)</a>
+<a name="ln110">{</a>
+<a name="ln111">  if(x &lt;= 0.f)</a>
+<a name="ln112">  {</a>
+<a name="ln113">    return (float)(int)x;</a>
+<a name="ln114">  }</a>
+<a name="ln115">  else</a>
+<a name="ln116">  {</a>
+<a name="ln117">    return -((float)(int)-x) + 1.f;</a>
+<a name="ln118">  }</a>
+<a name="ln119">}</a>
+<a name="ln120"> </a>
+<a name="ln121">#if defined(__SSE2__)</a>
+<a name="ln122">/** Compute absolute value</a>
+<a name="ln123"> * @param t Vector of 4 floats</a>
+<a name="ln124"> * @return Vector of their absolute values</a>
+<a name="ln125"> */ static inline __m128 _mm_abs_ps(__m128 t)</a>
+<a name="ln126">{</a>
+<a name="ln127">  static const uint32_t signmask[4] __attribute__((aligned(SSE_ALIGNMENT)))</a>
+<a name="ln128">  = { 0x7fffffff, 0x7fffffff, 0x7fffffff, 0x7fffffff };</a>
+<a name="ln129">  return _mm_and_ps(*(__m128 *)signmask, t);</a>
+<a name="ln130">}</a>
+<a name="ln131">#endif</a>
+<a name="ln132"> </a>
+<a name="ln133">/** Clip into specified range</a>
+<a name="ln134"> * @param idx index to filter</a>
+<a name="ln135"> * @param length length of line</a>
+<a name="ln136"> */</a>
+<a name="ln137">static inline int clip(int i, int min, int max, enum border_mode mode)</a>
+<a name="ln138">{</a>
+<a name="ln139">  switch(mode)</a>
+<a name="ln140">  {</a>
+<a name="ln141">    case BORDER_REPLICATE:</a>
+<a name="ln142">      if(i &lt; min)</a>
+<a name="ln143">      {</a>
+<a name="ln144">        i = min;</a>
+<a name="ln145">      }</a>
+<a name="ln146">      else if(i &gt; max)</a>
+<a name="ln147">      {</a>
+<a name="ln148">        i = max;</a>
+<a name="ln149">      }</a>
+<a name="ln150">      break;</a>
+<a name="ln151">    case BORDER_MIRROR:</a>
+<a name="ln152">      if(i &lt; min)</a>
+<a name="ln153">      {</a>
+<a name="ln154">        i = min - i;</a>
+<a name="ln155">      }</a>
+<a name="ln156">      else if(i &gt; max)</a>
+<a name="ln157">      {</a>
+<a name="ln158">        i = 2 * max - i;</a>
+<a name="ln159">      }</a>
+<a name="ln160">      break;</a>
+<a name="ln161">    case BORDER_WRAP:</a>
+<a name="ln162">      if(i &lt; min)</a>
+<a name="ln163">      {</a>
+<a name="ln164">        i = max - (min - i);</a>
+<a name="ln165">      }</a>
+<a name="ln166">      else if(i &gt; max)</a>
+<a name="ln167">      {</a>
+<a name="ln168">        i = min + (i - max);</a>
+<a name="ln169">      }</a>
+<a name="ln170">      break;</a>
+<a name="ln171">    case BORDER_CLAMP:</a>
+<a name="ln172">      if(i &lt; min || i &gt; max)</a>
+<a name="ln173">      {</a>
+<a name="ln174">        /* Should not be used as is, we prevent -1 usage, filtering the taps</a>
+<a name="ln175">         * we clip the sample indexes for. So understand this function is</a>
+<a name="ln176">         * specific to its caller. */</a>
+<a name="ln177">        i = -1;</a>
+<a name="ln178">      }</a>
+<a name="ln179">      break;</a>
+<a name="ln180">  }</a>
+<a name="ln181"> </a>
+<a name="ln182">  return i;</a>
+<a name="ln183">}</a>
+<a name="ln184"> </a>
+<a name="ln185">static inline void prepare_tap_boundaries(int *tap_first, int *tap_last, const enum border_mode mode,</a>
+<a name="ln186">                                          const int filterwidth, const int t, const int max)</a>
+<a name="ln187">{</a>
+<a name="ln188">  /* Check lower bound pixel index and skip as many pixels as necessary to</a>
+<a name="ln189">   * fall into range */</a>
+<a name="ln190">  *tap_first = 0;</a>
+<a name="ln191">  if(mode == BORDER_CLAMP &amp;&amp; t &lt; 0)</a>
+<a name="ln192">  {</a>
+<a name="ln193">    *tap_first = -t;</a>
+<a name="ln194">  }</a>
+<a name="ln195"> </a>
+<a name="ln196">  // Same for upper bound pixel</a>
+<a name="ln197">  *tap_last = filterwidth;</a>
+<a name="ln198">  if(mode == BORDER_CLAMP &amp;&amp; t + filterwidth &gt;= max)</a>
+<a name="ln199">  {</a>
+<a name="ln200">    *tap_last = max - t;</a>
+<a name="ln201">  }</a>
+<a name="ln202">}</a>
+<a name="ln203"> </a>
+<a name="ln204">/** Make sure an aligned chunk will not misalign its following chunk</a>
+<a name="ln205"> * proposing an adapted length</a>
+<a name="ln206"> *</a>
+<a name="ln207"> * @param l Length required for current chunk</a>
+<a name="ln208"> * @param align Required alignment for next chunk</a>
+<a name="ln209"> *</a>
+<a name="ln210"> * @return Required length for keeping alignment ok if chaining data chunks</a>
+<a name="ln211"> */</a>
+<a name="ln212">static inline size_t increase_for_alignment(size_t l, size_t align)</a>
+<a name="ln213">{</a>
+<a name="ln214">  align -= 1;</a>
+<a name="ln215">  return (l + align) &amp; (~align);</a>
+<a name="ln216">}</a>
+<a name="ln217"> </a>
+<a name="ln218">/** Compute an approximate sine.</a>
+<a name="ln219"> * This function behaves correctly for the range [-pi pi] only.</a>
+<a name="ln220"> * It has the following properties:</a>
+<a name="ln221"> * &lt;ul&gt;</a>
+<a name="ln222"> *   &lt;li&gt;It has exact values for 0, pi/2, pi, -pi/2, -pi&lt;/li&gt;</a>
+<a name="ln223"> *   &lt;li&gt;It has matching derivatives to sine for these same points&lt;/li&gt;</a>
+<a name="ln224"> *   &lt;li&gt;Its relative error margin is &lt;= 1% iirc&lt;/li&gt;</a>
+<a name="ln225"> *   &lt;li&gt;It computational cost is 5 mults + 3 adds + 2 abs&lt;/li&gt;</a>
+<a name="ln226"> * &lt;/ul&gt;</a>
+<a name="ln227"> * @param t Radian parameter</a>
+<a name="ln228"> * @return guess what</a>
+<a name="ln229"> */</a>
+<a name="ln230">static inline float sinf_fast(float t)</a>
+<a name="ln231">{</a>
+<a name="ln232">  static const float a = 4 / (M_PI * M_PI);</a>
+<a name="ln233">  static const float p = 0.225f;</a>
+<a name="ln234"> </a>
+<a name="ln235">  t = a * t * (M_PI - fabsf(t));</a>
+<a name="ln236"> </a>
+<a name="ln237">  return t * (p * (fabsf(t) - 1) + 1);</a>
+<a name="ln238">}</a>
+<a name="ln239"> </a>
+<a name="ln240">#if defined(__SSE2__)</a>
+<a name="ln241">/** Compute an approximate sine (SSE version, four sines a call).</a>
+<a name="ln242"> * This function behaves correctly for the range [-pi pi] only.</a>
+<a name="ln243"> * It has the following properties:</a>
+<a name="ln244"> * &lt;ul&gt;</a>
+<a name="ln245"> *   &lt;li&gt;It has exact values for 0, pi/2, pi, -pi/2, -pi&lt;/li&gt;</a>
+<a name="ln246"> *   &lt;li&gt;It has matching derivatives to sine for these same points&lt;/li&gt;</a>
+<a name="ln247"> *   &lt;li&gt;Its relative error margin is &lt;= 1% iirc&lt;/li&gt;</a>
+<a name="ln248"> *   &lt;li&gt;It computational cost is 5 mults + 3 adds + 2 abs&lt;/li&gt;</a>
+<a name="ln249"> * &lt;/ul&gt;</a>
+<a name="ln250"> * @param t Radian parameter</a>
+<a name="ln251"> * @return guess what</a>
+<a name="ln252"> */</a>
+<a name="ln253">static inline __m128 sinf_fast_sse(__m128 t)</a>
+<a name="ln254">{</a>
+<a name="ln255">  static const __m128 a</a>
+<a name="ln256">      = { 4.f / (M_PI * M_PI), 4.f / (M_PI * M_PI), 4.f / (M_PI * M_PI), 4.f / (M_PI * M_PI) };</a>
+<a name="ln257">  static const __m128 p = { 0.225f, 0.225f, 0.225f, 0.225f };</a>
+<a name="ln258">  static const __m128 pi = { M_PI, M_PI, M_PI, M_PI };</a>
+<a name="ln259"> </a>
+<a name="ln260">  // m4 = a*t*(M_PI - fabsf(t));</a>
+<a name="ln261">  __m128 m1 = _mm_abs_ps(t);</a>
+<a name="ln262">  __m128 m2 = _mm_sub_ps(pi, m1);</a>
+<a name="ln263">  __m128 m3 = _mm_mul_ps(t, m2);</a>
+<a name="ln264">  __m128 m4 = _mm_mul_ps(a, m3);</a>
+<a name="ln265"> </a>
+<a name="ln266">  // p*(m4*fabsf(m4) - m4) + m4;</a>
+<a name="ln267">  __m128 n1 = _mm_abs_ps(m4);</a>
+<a name="ln268">  __m128 n2 = _mm_mul_ps(m4, n1);</a>
+<a name="ln269">  __m128 n3 = _mm_sub_ps(n2, m4);</a>
+<a name="ln270">  __m128 n4 = _mm_mul_ps(p, n3);</a>
+<a name="ln271"> </a>
+<a name="ln272">  return _mm_add_ps(n4, m4);</a>
+<a name="ln273">}</a>
+<a name="ln274">#endif</a>
+<a name="ln275"> </a>
+<a name="ln276">/* --------------------------------------------------------------------------</a>
+<a name="ln277"> * Interpolation kernels</a>
+<a name="ln278"> * ------------------------------------------------------------------------*/</a>
+<a name="ln279"> </a>
+<a name="ln280">/* --------------------------------------------------------------------------</a>
+<a name="ln281"> * Bilinear interpolation</a>
+<a name="ln282"> * ------------------------------------------------------------------------*/</a>
+<a name="ln283"> </a>
+<a name="ln284">static inline float bilinear(float width, float t)</a>
+<a name="ln285">{</a>
+<a name="ln286">  float r;</a>
+<a name="ln287">  t = fabsf(t);</a>
+<a name="ln288">  if(t &gt; 1.f)</a>
+<a name="ln289">  {</a>
+<a name="ln290">    r = 0.f;</a>
+<a name="ln291">  }</a>
+<a name="ln292">  else</a>
+<a name="ln293">  {</a>
+<a name="ln294">    r = 1.f - t;</a>
+<a name="ln295">  }</a>
+<a name="ln296">  return r;</a>
+<a name="ln297">}</a>
+<a name="ln298"> </a>
+<a name="ln299">#if defined(__SSE2__)</a>
+<a name="ln300">static inline __m128 bilinear_sse(__m128 width, __m128 t)</a>
+<a name="ln301">{</a>
+<a name="ln302">  static const __m128 one = { 1.f, 1.f, 1.f, 1.f };</a>
+<a name="ln303">  return _mm_sub_ps(one, _mm_abs_ps(t));</a>
+<a name="ln304">}</a>
+<a name="ln305">#endif</a>
+<a name="ln306"> </a>
+<a name="ln307">/* --------------------------------------------------------------------------</a>
+<a name="ln308"> * Bicubic interpolation</a>
+<a name="ln309"> * ------------------------------------------------------------------------*/</a>
+<a name="ln310"> </a>
+<a name="ln311">static inline float bicubic(float width, float t)</a>
+<a name="ln312">{</a>
+<a name="ln313">  float r;</a>
+<a name="ln314">  t = fabsf(t);</a>
+<a name="ln315">  if(t &gt;= 2.f)</a>
+<a name="ln316">  {</a>
+<a name="ln317">    r = 0.f;</a>
+<a name="ln318">  }</a>
+<a name="ln319">  else if(t &gt; 1.f &amp;&amp; t &lt; 2.f)</a>
+<a name="ln320">  {</a>
+<a name="ln321">    float t2 = t * t;</a>
+<a name="ln322">    r = 0.5f * (t * (-t2 + 5.f * t - 8.f) + 4.f);</a>
+<a name="ln323">  }</a>
+<a name="ln324">  else</a>
+<a name="ln325">  {</a>
+<a name="ln326">    float t2 = t * t;</a>
+<a name="ln327">    r = 0.5f * (t * (3.f * t2 - 5.f * t) + 2.f);</a>
+<a name="ln328">  }</a>
+<a name="ln329">  return r;</a>
+<a name="ln330">}</a>
+<a name="ln331"> </a>
+<a name="ln332">#if defined(__SSE2__)</a>
+<a name="ln333">static inline __m128 bicubic_sse(__m128 width, __m128 t)</a>
+<a name="ln334">{</a>
+<a name="ln335">  static const __m128 half = { .5f, .5f, .5f, .5f };</a>
+<a name="ln336">  static const __m128 one = { 1.f, 1.f, 1.f, 1.f };</a>
+<a name="ln337">  static const __m128 two = { 2.f, 2.f, 2.f, 2.f };</a>
+<a name="ln338">  static const __m128 three = { 3.f, 3.f, 3.f, 3.f };</a>
+<a name="ln339">  static const __m128 four = { 4.f, 4.f, 4.f, 4.f };</a>
+<a name="ln340">  static const __m128 five = { 5.f, 5.f, 5.f, 5.f };</a>
+<a name="ln341">  static const __m128 eight = { 8.f, 8.f, 8.f, 8.f };</a>
+<a name="ln342"> </a>
+<a name="ln343">  t = _mm_abs_ps(t);</a>
+<a name="ln344">  __m128 t2 = _mm_mul_ps(t, t);</a>
+<a name="ln345"> </a>
+<a name="ln346">  /* Compute 1 &lt; t &lt; 2 case:</a>
+<a name="ln347">   * 0.5f*(t*(-t2 + 5.f*t - 8.f) + 4.f)</a>
+<a name="ln348">   * half*(t*(mt2 + t5 - eight) + four)</a>
+<a name="ln349">   * half*(t*(mt2 + t5_sub_8) + four)</a>
+<a name="ln350">   * half*(t*(mt2_add_t5_sub_8) + four) */</a>
+<a name="ln351">  __m128 t5 = _mm_mul_ps(five, t);</a>
+<a name="ln352">  __m128 t5_sub_8 = _mm_sub_ps(t5, eight);</a>
+<a name="ln353">  __m128 zero = _mm_setzero_ps();</a>
+<a name="ln354">  __m128 mt2 = _mm_sub_ps(zero, t2);</a>
+<a name="ln355">  __m128 mt2_add_t5_sub_8 = _mm_add_ps(mt2, t5_sub_8);</a>
+<a name="ln356">  __m128 a = _mm_mul_ps(t, mt2_add_t5_sub_8);</a>
+<a name="ln357">  __m128 b = _mm_add_ps(a, four);</a>
+<a name="ln358">  __m128 r12 = _mm_mul_ps(b, half);</a>
+<a name="ln359"> </a>
+<a name="ln360">  /* Compute case &lt; 1</a>
+<a name="ln361">   * 0.5f*(t*(3.f*t2 - 5.f*t) + 2.f) */</a>
+<a name="ln362">  __m128 t23 = _mm_mul_ps(three, t2);</a>
+<a name="ln363">  __m128 c = _mm_sub_ps(t23, t5);</a>
+<a name="ln364">  __m128 d = _mm_mul_ps(t, c);</a>
+<a name="ln365">  __m128 e = _mm_add_ps(d, two);</a>
+<a name="ln366">  __m128 r01 = _mm_mul_ps(half, e);</a>
+<a name="ln367"> </a>
+<a name="ln368">  // Compute masks fr keeping correct components</a>
+<a name="ln369">  __m128 mask01 = _mm_cmple_ps(t, one);</a>
+<a name="ln370">  __m128 mask12 = _mm_cmpgt_ps(t, one);</a>
+<a name="ln371">  r01 = _mm_and_ps(mask01, r01);</a>
+<a name="ln372">  r12 = _mm_and_ps(mask12, r12);</a>
+<a name="ln373"> </a>
+<a name="ln374"> </a>
+<a name="ln375">  return _mm_or_ps(r01, r12);</a>
+<a name="ln376">}</a>
+<a name="ln377">#endif</a>
+<a name="ln378"> </a>
+<a name="ln379">/* --------------------------------------------------------------------------</a>
+<a name="ln380"> * Lanczos interpolation</a>
+<a name="ln381"> * ------------------------------------------------------------------------*/</a>
+<a name="ln382"> </a>
+<a name="ln383">#define DT_LANCZOS_EPSILON (1e-9f)</a>
+<a name="ln384"> </a>
+<a name="ln385">#if 0</a>
+<a name="ln386">// Reference version left here for ... documentation</a>
+<a name="ln387">static inline float</a>
+<a name="ln388">lanczos(float width, float t)</a>
+<a name="ln389">{</a>
+<a name="ln390">  float r;</a>
+<a name="ln391"> </a>
+<a name="ln392">  if (t&lt;-width || t&gt;width)</a>
+<a name="ln393">  {</a>
+<a name="ln394">    r = 0.f;</a>
+<a name="ln395">  }</a>
+<a name="ln396">  else if (t&gt;-DT_LANCZOS_EPSILON &amp;&amp; t&lt;DT_LANCZOS_EPSILON)</a>
+<a name="ln397">  {</a>
+<a name="ln398">    r = 1.f;</a>
+<a name="ln399">  }</a>
+<a name="ln400">  else</a>
+<a name="ln401">  {</a>
+<a name="ln402">    r = width*sinf(M_PI*t)*sinf(M_PI*t/width)/(M_PI*M_PI*t*t);</a>
+<a name="ln403">  }</a>
+<a name="ln404">  return r;</a>
+<a name="ln405">}</a>
+<a name="ln406">#endif</a>
+<a name="ln407"> </a>
+<a name="ln408">/* Fast lanczos version, no calls to math.h functions, too accurate, too slow</a>
+<a name="ln409"> *</a>
+<a name="ln410"> * Based on a forum entry at</a>
+<a name="ln411"> * http://devmaster.net/forums/topic/4648-fast-and-accurate-sinecosine/</a>
+<a name="ln412"> *</a>
+<a name="ln413"> * Apart the fast sine function approximation, the only trick is to compute:</a>
+<a name="ln414"> * sin(pi.t) = sin(a.pi + r.pi) where t = a + r = trunc(t) + r</a>
+<a name="ln415"> *           = sin(a.pi).cos(r.pi) + sin(r.pi).cos(a.pi)</a>
+<a name="ln416"> *           =         0*cos(r.pi) + sin(r.pi).cos(a.pi)</a>
+<a name="ln417"> *           = sign.sin(r.pi) where sign =  1 if the a is even</a>
+<a name="ln418"> *                                       = -1 if the a is odd</a>
+<a name="ln419"> *</a>
+<a name="ln420"> * Of course we know that lanczos func will only be called for</a>
+<a name="ln421"> * the range -width &lt; t &lt; width so we can additionally avoid the</a>
+<a name="ln422"> * range check.  */</a>
+<a name="ln423"> </a>
+<a name="ln424">static inline float lanczos(float width, float t)</a>
+<a name="ln425">{</a>
+<a name="ln426">  /* Compute a value for sinf(pi.t) in [-pi pi] for which the value will be</a>
+<a name="ln427">   * correct */</a>
+<a name="ln428">  int a = (int)t;</a>
+<a name="ln429">  float r = t - (float)a;</a>
+<a name="ln430"> </a>
+<a name="ln431">  // Compute the correct sign for sinf(pi.r)</a>
+<a name="ln432">  union</a>
+<a name="ln433">  {</a>
+<a name="ln434">    float f;</a>
+<a name="ln435">    uint32_t i;</a>
+<a name="ln436">  } sign;</a>
+<a name="ln437">  sign.i = ((a &amp; 1) &lt;&lt; 31) | 0x3f800000;</a>
+<a name="ln438"> </a>
+<a name="ln439">  return (DT_LANCZOS_EPSILON + width * sign.f * sinf_fast(M_PI * r) * sinf_fast(M_PI * t / width))</a>
+<a name="ln440">         / (DT_LANCZOS_EPSILON + M_PI * M_PI * t * t);</a>
+<a name="ln441">}</a>
+<a name="ln442"> </a>
+<a name="ln443">#if defined(__SSE2__)</a>
+<a name="ln444">static inline __m128 lanczos_sse2(__m128 width, __m128 t)</a>
+<a name="ln445">{</a>
+<a name="ln446">  /* Compute a value for sinf(pi.t) in [-pi pi] for which the value will be</a>
+<a name="ln447">   * correct */</a>
+<a name="ln448">  __m128i a = _mm_cvtps_epi32(t);</a>
+<a name="ln449">  __m128 r = _mm_sub_ps(t, _mm_cvtepi32_ps(a));</a>
+<a name="ln450"> </a>
+<a name="ln451">  // Compute the correct sign for sinf(pi.r)</a>
+<a name="ln452">  static const uint32_t fone[] __attribute__((aligned(SSE_ALIGNMENT)))</a>
+<a name="ln453">  = { 0x3f800000, 0x3f800000, 0x3f800000, 0x3f800000 };</a>
+<a name="ln454">  static const uint32_t ione[] __attribute__((aligned(SSE_ALIGNMENT))) = { 1, 1, 1, 1 };</a>
+<a name="ln455">  static const __m128 eps</a>
+<a name="ln456">      = { DT_LANCZOS_EPSILON, DT_LANCZOS_EPSILON, DT_LANCZOS_EPSILON, DT_LANCZOS_EPSILON };</a>
+<a name="ln457">  static const __m128 pi = { M_PI, M_PI, M_PI, M_PI };</a>
+<a name="ln458">  static const __m128 pi2 = { M_PI * M_PI, M_PI * M_PI, M_PI * M_PI, M_PI * M_PI };</a>
+<a name="ln459"> </a>
+<a name="ln460">  __m128i isign = _mm_and_si128(*(__m128i *)ione, a);</a>
+<a name="ln461">  isign = _mm_slli_epi64(isign, 31);</a>
+<a name="ln462">  isign = _mm_or_si128(*(__m128i *)fone, isign);</a>
+<a name="ln463">  __m128 fsign = _mm_castsi128_ps(isign);</a>
+<a name="ln464"> </a>
+<a name="ln465">  __m128 num = _mm_mul_ps(width, fsign);</a>
+<a name="ln466">  num = _mm_mul_ps(num, sinf_fast_sse(_mm_mul_ps(pi, r)));</a>
+<a name="ln467">  num = _mm_mul_ps(num, sinf_fast_sse(_mm_div_ps(_mm_mul_ps(pi, t), width)));</a>
+<a name="ln468">  num = _mm_add_ps(eps, num);</a>
+<a name="ln469"> </a>
+<a name="ln470">  __m128 den = _mm_mul_ps(pi2, _mm_mul_ps(t, t));</a>
+<a name="ln471">  den = _mm_add_ps(eps, den);</a>
+<a name="ln472"> </a>
+<a name="ln473">  return _mm_div_ps(num, den);</a>
+<a name="ln474">}</a>
+<a name="ln475">#endif</a>
+<a name="ln476"> </a>
+<a name="ln477">#undef DT_LANCZOS_EPSILON</a>
+<a name="ln478"> </a>
+<a name="ln479">/* --------------------------------------------------------------------------</a>
+<a name="ln480"> * All our known interpolators</a>
+<a name="ln481"> * ------------------------------------------------------------------------*/</a>
+<a name="ln482"> </a>
+<a name="ln483">/* !!! !!! !!!</a>
+<a name="ln484"> * Make sure MAX_HALF_FILTER_WIDTH is at least equal to the maximum width</a>
+<a name="ln485"> * of this filter list. Otherwise bad things will happen</a>
+<a name="ln486"> * !!! !!! !!!</a>
+<a name="ln487"> */</a>
+<a name="ln488">static const struct dt_interpolation dt_interpolator[] = {</a>
+<a name="ln489">  {.id = DT_INTERPOLATION_BILINEAR,</a>
+<a name="ln490">   .name = &quot;bilinear&quot;,</a>
+<a name="ln491">   .width = 1,</a>
+<a name="ln492">   .func = &amp;bilinear,</a>
+<a name="ln493">#if defined(__SSE2__)</a>
+<a name="ln494">   .funcsse = &amp;bilinear_sse</a>
+<a name="ln495">#endif</a>
+<a name="ln496">  },</a>
+<a name="ln497">  {.id = DT_INTERPOLATION_BICUBIC,</a>
+<a name="ln498">   .name = &quot;bicubic&quot;,</a>
+<a name="ln499">   .width = 2,</a>
+<a name="ln500">   .func = &amp;bicubic,</a>
+<a name="ln501">#if defined(__SSE2__)</a>
+<a name="ln502">   .funcsse = &amp;bicubic_sse</a>
+<a name="ln503">#endif</a>
+<a name="ln504">  },</a>
+<a name="ln505">  {.id = DT_INTERPOLATION_LANCZOS2,</a>
+<a name="ln506">   .name = &quot;lanczos2&quot;,</a>
+<a name="ln507">   .width = 2,</a>
+<a name="ln508">   .func = &amp;lanczos,</a>
+<a name="ln509">#if defined(__SSE2__)</a>
+<a name="ln510">   .funcsse = &amp;lanczos_sse2</a>
+<a name="ln511">#endif</a>
+<a name="ln512">  },</a>
+<a name="ln513">  {.id = DT_INTERPOLATION_LANCZOS3,</a>
+<a name="ln514">   .name = &quot;lanczos3&quot;,</a>
+<a name="ln515">   .width = 3,</a>
+<a name="ln516">   .func = &amp;lanczos,</a>
+<a name="ln517">#if defined(__SSE2__)</a>
+<a name="ln518">   .funcsse = &amp;lanczos_sse2</a>
+<a name="ln519">#endif</a>
+<a name="ln520">  },</a>
+<a name="ln521">};</a>
+<a name="ln522"> </a>
+<a name="ln523">/* --------------------------------------------------------------------------</a>
+<a name="ln524"> * Kernel utility methods</a>
+<a name="ln525"> * ------------------------------------------------------------------------*/</a>
+<a name="ln526"> </a>
+<a name="ln527">/** Computes an upsampling filtering kernel</a>
+<a name="ln528"> *</a>
+<a name="ln529"> * @param itor [in] Interpolator used</a>
+<a name="ln530"> * @param kernel [out] resulting itor-&gt;width*2 filter taps</a>
+<a name="ln531"> * @param norm [out] Kernel norm</a>
+<a name="ln532"> * @param first [out] first input sample index used</a>
+<a name="ln533"> * @param t [in] Interpolated coordinate */</a>
+<a name="ln534">static inline void compute_upsampling_kernel_plain(const struct dt_interpolation *itor, float *kernel,</a>
+<a name="ln535">                                                   float *norm, int *first, float t)</a>
+<a name="ln536">{</a>
+<a name="ln537">  int f = (int)t - itor-&gt;width + 1;</a>
+<a name="ln538">  if(first)</a>
+<a name="ln539">  {</a>
+<a name="ln540">    *first = f;</a>
+<a name="ln541">  }</a>
+<a name="ln542"> </a>
+<a name="ln543">  /* Find closest integer position and then offset that to match first</a>
+<a name="ln544">   * filtered sample position */</a>
+<a name="ln545">  t = t - (float)f;</a>
+<a name="ln546"> </a>
+<a name="ln547">  // Will hold kernel norm</a>
+<a name="ln548">  float n = 0.f;</a>
+<a name="ln549"> </a>
+<a name="ln550">  // Compute the raw kernel</a>
+<a name="ln551">  for(int i = 0; i &lt; 2 * itor-&gt;width; i++)</a>
+<a name="ln552">  {</a>
+<a name="ln553">    float tap = itor-&gt;func((float)itor-&gt;width, t);</a>
+<a name="ln554">    n += tap;</a>
+<a name="ln555">    kernel[i] = tap;</a>
+<a name="ln556">    t -= 1.f;</a>
+<a name="ln557">  }</a>
+<a name="ln558">  if(norm)</a>
+<a name="ln559">  {</a>
+<a name="ln560">    *norm = n;</a>
+<a name="ln561">  }</a>
+<a name="ln562">}</a>
+<a name="ln563"> </a>
+<a name="ln564">#if defined(__SSE2__)</a>
+<a name="ln565">/** Computes an upsampling filtering kernel (SSE version, four taps per inner loop)</a>
+<a name="ln566"> *</a>
+<a name="ln567"> * @param itor [in] Interpolator used</a>
+<a name="ln568"> * @param kernel [out] resulting itor-&gt;width*2 filter taps (array must be at least (itor-&gt;width*2+3)/4*4</a>
+<a name="ln569"> *floats long)</a>
+<a name="ln570"> * @param norm [out] Kernel norm</a>
+<a name="ln571"> * @param first [out] first input sample index used</a>
+<a name="ln572"> * @param t [in] Interpolated coordinate</a>
+<a name="ln573"> *</a>
+<a name="ln574"> * @return kernel norm</a>
+<a name="ln575"> */</a>
+<a name="ln576">static inline void compute_upsampling_kernel_sse(const struct dt_interpolation *itor, float *kernel,</a>
+<a name="ln577">                                                 float *norm, int *first, float t)</a>
+<a name="ln578">{</a>
+<a name="ln579">  int f = (int)t - itor-&gt;width + 1;</a>
+<a name="ln580">  if(first)</a>
+<a name="ln581">  {</a>
+<a name="ln582">    *first = f;</a>
+<a name="ln583">  }</a>
+<a name="ln584"> </a>
+<a name="ln585">  /* Find closest integer position and then offset that to match first</a>
+<a name="ln586">   * filtered sample position */</a>
+<a name="ln587">  t = t - (float)f;</a>
+<a name="ln588"> </a>
+<a name="ln589">  // Prepare t vector to compute four values a loop</a>
+<a name="ln590">  static const __m128 bootstrap = { 0.f, -1.f, -2.f, -3.f };</a>
+<a name="ln591">  static const __m128 iter = { -4.f, -4.f, -4.f, -4.f };</a>
+<a name="ln592">  __m128 vt = _mm_add_ps(_mm_set_ps1(t), bootstrap);</a>
+<a name="ln593">  __m128 vw = _mm_set_ps1((float)itor-&gt;width);</a>
+<a name="ln594"> </a>
+<a name="ln595">  // Prepare counters (math kept stupid for understanding)</a>
+<a name="ln596">  int i = 0;</a>
+<a name="ln597">  int runs = (2 * itor-&gt;width + 3) / 4;</a>
+<a name="ln598"> </a>
+<a name="ln599">  while(i &lt; runs)</a>
+<a name="ln600">  {</a>
+<a name="ln601">    // Compute the values</a>
+<a name="ln602">    __m128 vr = itor-&gt;funcsse(vw, vt);</a>
+<a name="ln603"> </a>
+<a name="ln604">    // Save result</a>
+<a name="ln605">    *(__m128 *)kernel = vr;</a>
+<a name="ln606"> </a>
+<a name="ln607">    // Prepare next iteration</a>
+<a name="ln608">    vt = _mm_add_ps(vt, iter);</a>
+<a name="ln609">    kernel += 4;</a>
+<a name="ln610">    i++;</a>
+<a name="ln611">  }</a>
+<a name="ln612"> </a>
+<a name="ln613">  // compute norm now</a>
+<a name="ln614">  if(norm)</a>
+<a name="ln615">  {</a>
+<a name="ln616">    float n = 0.f;</a>
+<a name="ln617">    i = 0;</a>
+<a name="ln618">    kernel -= 4 * runs;</a>
+<a name="ln619">    while(i &lt; 2 * itor-&gt;width)</a>
+<a name="ln620">    {</a>
+<a name="ln621">      n += *kernel;</a>
+<a name="ln622">      kernel++;</a>
+<a name="ln623">      i++;</a>
+<a name="ln624">    }</a>
+<a name="ln625">    *norm = n;</a>
+<a name="ln626">  }</a>
+<a name="ln627">}</a>
+<a name="ln628">#endif</a>
+<a name="ln629"> </a>
+<a name="ln630">static inline void compute_upsampling_kernel(const struct dt_interpolation *itor, float *kernel, float *norm,</a>
+<a name="ln631">                                             int *first, float t)</a>
+<a name="ln632">{</a>
+<a name="ln633">  if(darktable.codepath.OPENMP_SIMD) return compute_upsampling_kernel_plain(itor, kernel, norm, first, t);</a>
+<a name="ln634">#if defined(__SSE2__)</a>
+<a name="ln635">  else if(darktable.codepath.SSE2)</a>
+<a name="ln636">    return compute_upsampling_kernel_sse(itor, kernel, norm, first, t);</a>
+<a name="ln637">#endif</a>
+<a name="ln638">  else</a>
+<a name="ln639">    dt_unreachable_codepath();</a>
+<a name="ln640">}</a>
+<a name="ln641"> </a>
+<a name="ln642">/** Computes a downsampling filtering kernel</a>
+<a name="ln643"> *</a>
+<a name="ln644"> * @param itor [in] Interpolator used</a>
+<a name="ln645"> * @param kernelsize [out] Number of taps</a>
+<a name="ln646"> * @param kernel [out] resulting taps (at least itor-&gt;width/inoout elements for no overflow)</a>
+<a name="ln647"> * @param norm [out] Kernel norm</a>
+<a name="ln648"> * @param first [out] index of the first sample for which the kernel is to be applied</a>
+<a name="ln649"> * @param outoinratio [in] &quot;out samples&quot; over &quot;in samples&quot; ratio</a>
+<a name="ln650"> * @param xout [in] Output coordinate */</a>
+<a name="ln651">static inline void compute_downsampling_kernel_plain(const struct dt_interpolation *itor, int *taps,</a>
+<a name="ln652">                                                     int *first, float *kernel, float *norm,</a>
+<a name="ln653">                                                     float outoinratio, int xout)</a>
+<a name="ln654">{</a>
+<a name="ln655">  // Keep this at hand</a>
+<a name="ln656">  float w = (float)itor-&gt;width;</a>
+<a name="ln657"> </a>
+<a name="ln658">  /* Compute the phase difference between output pixel and its</a>
+<a name="ln659">   * input corresponding input pixel */</a>
+<a name="ln660">  float xin = ceil_fast(((float)xout - w) / outoinratio);</a>
+<a name="ln661">  if(first)</a>
+<a name="ln662">  {</a>
+<a name="ln663">    *first = (int)xin;</a>
+<a name="ln664">  }</a>
+<a name="ln665"> </a>
+<a name="ln666">  // Compute first interpolator parameter</a>
+<a name="ln667">  float t = xin * outoinratio - (float)xout;</a>
+<a name="ln668"> </a>
+<a name="ln669">  // Will hold kernel norm</a>
+<a name="ln670">  float n = 0.f;</a>
+<a name="ln671"> </a>
+<a name="ln672">  // Compute all filter taps</a>
+<a name="ln673">  *taps = (int)((w - t) / outoinratio);</a>
+<a name="ln674">  for(int i = 0; i &lt; *taps; i++)</a>
+<a name="ln675">  {</a>
+<a name="ln676">    *kernel = itor-&gt;func(w, t);</a>
+<a name="ln677">    n += *kernel;</a>
+<a name="ln678">    t += outoinratio;</a>
+<a name="ln679">    kernel++;</a>
+<a name="ln680">  }</a>
+<a name="ln681"> </a>
+<a name="ln682">  if(norm)</a>
+<a name="ln683">  {</a>
+<a name="ln684">    *norm = n;</a>
+<a name="ln685">  }</a>
+<a name="ln686">}</a>
+<a name="ln687"> </a>
+<a name="ln688"> </a>
+<a name="ln689">#if defined(__SSE2__)</a>
+<a name="ln690">/** Computes a downsampling filtering kernel (SSE version, four taps per inner loop iteration)</a>
+<a name="ln691"> *</a>
+<a name="ln692"> * @param itor [in] Interpolator used</a>
+<a name="ln693"> * @param kernelsize [out] Number of taps</a>
+<a name="ln694"> * @param kernel [out] resulting taps (at least itor-&gt;width/inoout + 4 elements for no overflow)</a>
+<a name="ln695"> * @param norm [out] Kernel norm</a>
+<a name="ln696"> * @param first [out] index of the first sample for which the kernel is to be applied</a>
+<a name="ln697"> * @param outoinratio [in] &quot;out samples&quot; over &quot;in samples&quot; ratio</a>
+<a name="ln698"> * @param xout [in] Output coordinate */</a>
+<a name="ln699">static inline void compute_downsampling_kernel_sse(const struct dt_interpolation *itor, int *taps, int *first,</a>
+<a name="ln700">                                                   float *kernel, float *norm, float outoinratio, int xout)</a>
+<a name="ln701">{</a>
+<a name="ln702">  // Keep this at hand</a>
+<a name="ln703">  float w = (float)itor-&gt;width;</a>
+<a name="ln704"> </a>
+<a name="ln705">  /* Compute the phase difference between output pixel and its</a>
+<a name="ln706">   * input corresponding input pixel */</a>
+<a name="ln707">  float xin = ceil_fast(((float)xout - w) / outoinratio);</a>
+<a name="ln708">  if(first)</a>
+<a name="ln709">  {</a>
+<a name="ln710">    *first = (int)xin;</a>
+<a name="ln711">  }</a>
+<a name="ln712"> </a>
+<a name="ln713">  // Compute first interpolator parameter</a>
+<a name="ln714">  float t = xin * outoinratio - (float)xout;</a>
+<a name="ln715"> </a>
+<a name="ln716">  // Compute all filter taps</a>
+<a name="ln717">  *taps = (int)((w - t) / outoinratio);</a>
+<a name="ln718"> </a>
+<a name="ln719">  // Bootstrap vector t</a>
+<a name="ln720">  static const __m128 bootstrap = { 0.f, 1.f, 2.f, 3.f };</a>
+<a name="ln721">  const __m128 iter = _mm_set_ps1(4.f * outoinratio);</a>
+<a name="ln722">  const __m128 vw = _mm_set_ps1(w);</a>
+<a name="ln723">  __m128 vt = _mm_add_ps(_mm_set_ps1(t), _mm_mul_ps(_mm_set_ps1(outoinratio), bootstrap));</a>
+<a name="ln724"> </a>
+<a name="ln725">  // Prepare counters (math kept stupid for understanding)</a>
+<a name="ln726">  int i = 0;</a>
+<a name="ln727">  int runs = (*taps + 3) / 4;</a>
+<a name="ln728"> </a>
+<a name="ln729">  while(i &lt; runs)</a>
+<a name="ln730">  {</a>
+<a name="ln731">    // Compute the values</a>
+<a name="ln732">    __m128 vr = itor-&gt;funcsse(vw, vt);</a>
+<a name="ln733"> </a>
+<a name="ln734">    // Save result</a>
+<a name="ln735">    *(__m128 *)kernel = vr;</a>
+<a name="ln736"> </a>
+<a name="ln737">    // Prepare next iteration</a>
+<a name="ln738">    vt = _mm_add_ps(vt, iter);</a>
+<a name="ln739">    kernel += 4;</a>
+<a name="ln740">    i++;</a>
+<a name="ln741">  }</a>
+<a name="ln742"> </a>
+<a name="ln743">  // compute norm now</a>
+<a name="ln744">  if(norm)</a>
+<a name="ln745">  {</a>
+<a name="ln746">    float n = 0.f;</a>
+<a name="ln747">    i = 0;</a>
+<a name="ln748">    kernel -= 4 * runs;</a>
+<a name="ln749">    while(i &lt; *taps)</a>
+<a name="ln750">    {</a>
+<a name="ln751">      n += *kernel;</a>
+<a name="ln752">      kernel++;</a>
+<a name="ln753">      i++;</a>
+<a name="ln754">    }</a>
+<a name="ln755">    *norm = n;</a>
+<a name="ln756">  }</a>
+<a name="ln757">}</a>
+<a name="ln758">#endif</a>
+<a name="ln759"> </a>
+<a name="ln760">static inline void compute_downsampling_kernel(const struct dt_interpolation *itor, int *taps, int *first,</a>
+<a name="ln761">                                               float *kernel, float *norm, float outoinratio, int xout)</a>
+<a name="ln762">{</a>
+<a name="ln763">  if(darktable.codepath.OPENMP_SIMD)</a>
+<a name="ln764">    return compute_downsampling_kernel_plain(itor, taps, first, kernel, norm, outoinratio, xout);</a>
+<a name="ln765">#if defined(__SSE2__)</a>
+<a name="ln766">  else if(darktable.codepath.SSE2)</a>
+<a name="ln767">    return compute_downsampling_kernel_sse(itor, taps, first, kernel, norm, outoinratio, xout);</a>
+<a name="ln768">#endif</a>
+<a name="ln769">  else</a>
+<a name="ln770">    dt_unreachable_codepath();</a>
+<a name="ln771">}</a>
+<a name="ln772"> </a>
+<a name="ln773">/* --------------------------------------------------------------------------</a>
+<a name="ln774"> * Sample interpolation function (see usage in iop/lens.c and iop/clipping.c)</a>
+<a name="ln775"> * ------------------------------------------------------------------------*/</a>
+<a name="ln776"> </a>
+<a name="ln777">#define MAX_KERNEL_REQ ((2 * (MAX_HALF_FILTER_WIDTH) + 3) &amp; (~3))</a>
+<a name="ln778"> </a>
+<a name="ln779">float dt_interpolation_compute_sample(const struct dt_interpolation *itor, const float *in, const float x,</a>
+<a name="ln780">                                      const float y, const int width, const int height,</a>
+<a name="ln781">                                      const int samplestride, const int linestride)</a>
+<a name="ln782">{</a>
+<a name="ln783">  assert(itor-&gt;width &lt; (MAX_HALF_FILTER_WIDTH + 1));</a>
+<a name="ln784"> </a>
+<a name="ln785">  float kernelh[MAX_KERNEL_REQ] __attribute__((aligned(SSE_ALIGNMENT)));</a>
+<a name="ln786">  float kernelv[MAX_KERNEL_REQ] __attribute__((aligned(SSE_ALIGNMENT)));</a>
+<a name="ln787"> </a>
+<a name="ln788">  // Compute both horizontal and vertical kernels</a>
+<a name="ln789">  float normh;</a>
+<a name="ln790">  float normv;</a>
+<a name="ln791">  compute_upsampling_kernel(itor, kernelh, &amp;normh, NULL, x);</a>
+<a name="ln792">  compute_upsampling_kernel(itor, kernelv, &amp;normv, NULL, y);</a>
+<a name="ln793"> </a>
+<a name="ln794">  int ix = (int)x;</a>
+<a name="ln795">  int iy = (int)y;</a>
+<a name="ln796"> </a>
+<a name="ln797">  /* Now 2 cases, the pixel + filter width goes outside the image</a>
+<a name="ln798">   * in that case we have to use index clipping to keep all reads</a>
+<a name="ln799">   * in the input image (slow path) or we are sure it won't fall</a>
+<a name="ln800">   * outside and can do more simple code */</a>
+<a name="ln801">  float r;</a>
+<a name="ln802">  if(ix &gt;= (itor-&gt;width - 1) &amp;&amp; iy &gt;= (itor-&gt;width - 1) &amp;&amp; ix &lt; (width - itor-&gt;width)</a>
+<a name="ln803">     &amp;&amp; iy &lt; (height - itor-&gt;width))</a>
+<a name="ln804">  {</a>
+<a name="ln805">    // Inside image boundary case</a>
+<a name="ln806"> </a>
+<a name="ln807">    // Go to top left pixel</a>
+<a name="ln808">    in = (float *)in + linestride * iy + ix * samplestride;</a>
+<a name="ln809">    in = in - (itor-&gt;width - 1) * (samplestride + linestride);</a>
+<a name="ln810"> </a>
+<a name="ln811">    // Apply the kernel</a>
+<a name="ln812">    float s = 0.f;</a>
+<a name="ln813">    for(int i = 0; i &lt; 2 * itor-&gt;width; i++)</a>
+<a name="ln814">    {</a>
+<a name="ln815">      float h = 0.0f;</a>
+<a name="ln816">      for(int j = 0; j &lt; 2 * itor-&gt;width; j++)</a>
+<a name="ln817">      {</a>
+<a name="ln818">        h += kernelh[j] * in[j * samplestride];</a>
+<a name="ln819">      }</a>
+<a name="ln820">      s += kernelv[i] * h;</a>
+<a name="ln821">      in += linestride;</a>
+<a name="ln822">    }</a>
+<a name="ln823">    r = s / (normh * normv);</a>
+<a name="ln824">  }</a>
+<a name="ln825">  else if(ix &gt;= 0 &amp;&amp; iy &gt;= 0 &amp;&amp; ix &lt; width &amp;&amp; iy &lt; height)</a>
+<a name="ln826">  {</a>
+<a name="ln827">    // At least a valid coordinate</a>
+<a name="ln828"> </a>
+<a name="ln829"> </a>
+<a name="ln830">    // Point to the upper left pixel index wise</a>
+<a name="ln831">    iy -= itor-&gt;width - 1;</a>
+<a name="ln832">    ix -= itor-&gt;width - 1;</a>
+<a name="ln833"> </a>
+<a name="ln834">    static const enum border_mode bordermode = INTERPOLATION_BORDER_MODE;</a>
+<a name="ln835">    assert(bordermode != BORDER_CLAMP); // XXX in clamp mode, norms would be wrong</a>
+<a name="ln836"> </a>
+<a name="ln837">    int xtap_first;</a>
+<a name="ln838">    int xtap_last;</a>
+<a name="ln839">    prepare_tap_boundaries(&amp;xtap_first, &amp;xtap_last, bordermode, 2 * itor-&gt;width, ix, width);</a>
+<a name="ln840"> </a>
+<a name="ln841">    int ytap_first;</a>
+<a name="ln842">    int ytap_last;</a>
+<a name="ln843">    prepare_tap_boundaries(&amp;ytap_first, &amp;ytap_last, bordermode, 2 * itor-&gt;width, iy, height);</a>
+<a name="ln844"> </a>
+<a name="ln845">    // Apply the kernel</a>
+<a name="ln846">    float s = 0.f;</a>
+<a name="ln847">    for(int i = ytap_first; i &lt; ytap_last; i++)</a>
+<a name="ln848">    {</a>
+<a name="ln849">      int clip_y = clip(iy + i, 0, height - 1, bordermode);</a>
+<a name="ln850">      float h = 0.0f;</a>
+<a name="ln851">      for(int j = xtap_first; j &lt; xtap_last; j++)</a>
+<a name="ln852">      {</a>
+<a name="ln853">        int clip_x = clip(ix + j, 0, width - 1, bordermode);</a>
+<a name="ln854">        const float *ipixel = in + clip_y * linestride + clip_x * samplestride;</a>
+<a name="ln855">        h += kernelh[j] * ipixel[0];</a>
+<a name="ln856">      }</a>
+<a name="ln857">      s += kernelv[i] * h;</a>
+<a name="ln858">    }</a>
+<a name="ln859"> </a>
+<a name="ln860">    r = s / (normh * normv);</a>
+<a name="ln861">  }</a>
+<a name="ln862">  else</a>
+<a name="ln863">  {</a>
+<a name="ln864">    // invalid coordinate</a>
+<a name="ln865">    r = 0.0f;</a>
+<a name="ln866">  }</a>
+<a name="ln867">  return r;</a>
+<a name="ln868">}</a>
+<a name="ln869"> </a>
+<a name="ln870">/* --------------------------------------------------------------------------</a>
+<a name="ln871"> * Pixel interpolation function (see usage in iop/lens.c and iop/clipping.c)</a>
+<a name="ln872"> * ------------------------------------------------------------------------*/</a>
+<a name="ln873"> </a>
+<a name="ln874">static void dt_interpolation_compute_pixel4c_plain(const struct dt_interpolation *itor, const float *in,</a>
+<a name="ln875">                                                   float *out, const float x, const float y, const int width,</a>
+<a name="ln876">                                                   const int height, const int linestride)</a>
+<a name="ln877">{</a>
+<a name="ln878">  assert(itor-&gt;width &lt; (MAX_HALF_FILTER_WIDTH + 1));</a>
+<a name="ln879"> </a>
+<a name="ln880">  // Quite a bit of space for kernels</a>
+<a name="ln881">  float kernelh[MAX_KERNEL_REQ] __attribute__((aligned(SSE_ALIGNMENT)));</a>
+<a name="ln882">  float kernelv[MAX_KERNEL_REQ] __attribute__((aligned(SSE_ALIGNMENT)));</a>
+<a name="ln883"> </a>
+<a name="ln884">  // Compute both horizontal and vertical kernels</a>
+<a name="ln885">  float normh;</a>
+<a name="ln886">  float normv;</a>
+<a name="ln887">  compute_upsampling_kernel(itor, kernelh, &amp;normh, NULL, x);</a>
+<a name="ln888">  compute_upsampling_kernel(itor, kernelv, &amp;normv, NULL, y);</a>
+<a name="ln889"> </a>
+<a name="ln890">  // Precompute the inverse of the filter norm for later use</a>
+<a name="ln891">  const float oonorm = (1.f / (normh * normv));</a>
+<a name="ln892"> </a>
+<a name="ln893">  /* Now 2 cases, the pixel + filter width goes outside the image</a>
+<a name="ln894">   * in that case we have to use index clipping to keep all reads</a>
+<a name="ln895">   * in the input image (slow path) or we are sure it won't fall</a>
+<a name="ln896">   * outside and can do more simple code */</a>
+<a name="ln897">  int ix = (int)x;</a>
+<a name="ln898">  int iy = (int)y;</a>
+<a name="ln899"> </a>
+<a name="ln900">  if(ix &gt;= (itor-&gt;width - 1) &amp;&amp; iy &gt;= (itor-&gt;width - 1) &amp;&amp; ix &lt; (width - itor-&gt;width)</a>
+<a name="ln901">     &amp;&amp; iy &lt; (height - itor-&gt;width))</a>
+<a name="ln902">  {</a>
+<a name="ln903">    // Inside image boundary case</a>
+<a name="ln904"> </a>
+<a name="ln905">    // Go to top left pixel</a>
+<a name="ln906">    in = (float *)in + linestride * iy + ix * 4;</a>
+<a name="ln907">    in = in - (itor-&gt;width - 1) * (4 + linestride);</a>
+<a name="ln908"> </a>
+<a name="ln909">    // Apply the kernel</a>
+<a name="ln910">    float pixel[4] = { 0.0f, 0.0f, 0.0f, 0.0f };</a>
+<a name="ln911">    for(int i = 0; i &lt; 2 * itor-&gt;width; i++)</a>
+<a name="ln912">    {</a>
+<a name="ln913">      float h[4] = { 0.0f, 0.0f, 0.0f, 0.0f };</a>
+<a name="ln914">      for(int j = 0; j &lt; 2 * itor-&gt;width; j++)</a>
+<a name="ln915">      {</a>
+<a name="ln916">        for(int c = 0; c &lt; 3; c++) h[c] += kernelh[j] * in[j * 4 + c];</a>
+<a name="ln917">      }</a>
+<a name="ln918">      for(int c = 0; c &lt; 3; c++) pixel[c] += kernelv[i] * h[c];</a>
+<a name="ln919">      in += linestride;</a>
+<a name="ln920">    }</a>
+<a name="ln921"> </a>
+<a name="ln922">    for(int c = 0; c &lt; 3; c++) out[c] = oonorm * pixel[c];</a>
+<a name="ln923">  }</a>
+<a name="ln924">  else if(ix &gt;= 0 &amp;&amp; iy &gt;= 0 &amp;&amp; ix &lt; width &amp;&amp; iy &lt; height)</a>
+<a name="ln925">  {</a>
+<a name="ln926">    // At least a valid coordinate</a>
+<a name="ln927"> </a>
+<a name="ln928">    // Point to the upper left pixel index wise</a>
+<a name="ln929">    iy -= itor-&gt;width - 1;</a>
+<a name="ln930">    ix -= itor-&gt;width - 1;</a>
+<a name="ln931"> </a>
+<a name="ln932">    static const enum border_mode bordermode = INTERPOLATION_BORDER_MODE;</a>
+<a name="ln933">    assert(bordermode != BORDER_CLAMP); // XXX in clamp mode, norms would be wrong</a>
+<a name="ln934"> </a>
+<a name="ln935">    int xtap_first;</a>
+<a name="ln936">    int xtap_last;</a>
+<a name="ln937">    prepare_tap_boundaries(&amp;xtap_first, &amp;xtap_last, bordermode, 2 * itor-&gt;width, ix, width);</a>
+<a name="ln938"> </a>
+<a name="ln939">    int ytap_first;</a>
+<a name="ln940">    int ytap_last;</a>
+<a name="ln941">    prepare_tap_boundaries(&amp;ytap_first, &amp;ytap_last, bordermode, 2 * itor-&gt;width, iy, height);</a>
+<a name="ln942"> </a>
+<a name="ln943">    // Apply the kernel</a>
+<a name="ln944">    float pixel[4] = { 0.0f, 0.0f, 0.0f, 0.0f };</a>
+<a name="ln945">    for(int i = ytap_first; i &lt; ytap_last; i++)</a>
+<a name="ln946">    {</a>
+<a name="ln947">      int clip_y = clip(iy + i, 0, height - 1, bordermode);</a>
+<a name="ln948">      float h[4] = { 0.0f, 0.0f, 0.0f, 0.0f };</a>
+<a name="ln949">      for(int j = xtap_first; j &lt; xtap_last; j++)</a>
+<a name="ln950">      {</a>
+<a name="ln951">        int clip_x = clip(ix + j, 0, width - 1, bordermode);</a>
+<a name="ln952">        const float *ipixel = in + clip_y * linestride + clip_x * 4;</a>
+<a name="ln953">        for(int c = 0; c &lt; 3; c++) h[c] += kernelh[j] * ipixel[c];</a>
+<a name="ln954">      }</a>
+<a name="ln955">      for(int c = 0; c &lt; 3; c++) pixel[c] += kernelv[i] * h[c];</a>
+<a name="ln956">    }</a>
+<a name="ln957"> </a>
+<a name="ln958">    for(int c = 0; c &lt; 3; c++) out[c] = oonorm * pixel[c];</a>
+<a name="ln959">  }</a>
+<a name="ln960">  else</a>
+<a name="ln961">  {</a>
+<a name="ln962">    for(int c = 0; c &lt; 3; c++) out[c] = 0.0f;</a>
+<a name="ln963">  }</a>
+<a name="ln964">}</a>
+<a name="ln965"> </a>
+<a name="ln966">#if defined(__SSE2__)</a>
+<a name="ln967">static void dt_interpolation_compute_pixel4c_sse(const struct dt_interpolation *itor, const float *in,</a>
+<a name="ln968">                                                 float *out, const float x, const float y, const int width,</a>
+<a name="ln969">                                                 const int height, const int linestride)</a>
+<a name="ln970">{</a>
+<a name="ln971">  assert(itor-&gt;width &lt; (MAX_HALF_FILTER_WIDTH + 1));</a>
+<a name="ln972"> </a>
+<a name="ln973">  // Quite a bit of space for kernels</a>
+<a name="ln974">  float kernelh[MAX_KERNEL_REQ] __attribute__((aligned(SSE_ALIGNMENT)));</a>
+<a name="ln975">  float kernelv[MAX_KERNEL_REQ] __attribute__((aligned(SSE_ALIGNMENT)));</a>
+<a name="ln976">  __m128 vkernelh[2 * MAX_HALF_FILTER_WIDTH];</a>
+<a name="ln977">  __m128 vkernelv[2 * MAX_HALF_FILTER_WIDTH];</a>
+<a name="ln978"> </a>
+<a name="ln979">  // Compute both horizontal and vertical kernels</a>
+<a name="ln980">  float normh;</a>
+<a name="ln981">  float normv;</a>
+<a name="ln982">  compute_upsampling_kernel(itor, kernelh, &amp;normh, NULL, x);</a>
+<a name="ln983">  compute_upsampling_kernel(itor, kernelv, &amp;normv, NULL, y);</a>
+<a name="ln984"> </a>
+<a name="ln985">  // We will process four components a time, duplicate the information</a>
+<a name="ln986">  for(int i = 0; i &lt; 2 * itor-&gt;width; i++)</a>
+<a name="ln987">  {</a>
+<a name="ln988">    vkernelh[i] = _mm_set_ps1(kernelh[i]);</a>
+<a name="ln989">    vkernelv[i] = _mm_set_ps1(kernelv[i]);</a>
+<a name="ln990">  }</a>
+<a name="ln991"> </a>
+<a name="ln992">  // Precompute the inverse of the filter norm for later use</a>
+<a name="ln993">  __m128 oonorm = _mm_set_ps1(1.f / (normh * normv));</a>
+<a name="ln994"> </a>
+<a name="ln995">  /* Now 2 cases, the pixel + filter width goes outside the image</a>
+<a name="ln996">   * in that case we have to use index clipping to keep all reads</a>
+<a name="ln997">   * in the input image (slow path) or we are sure it won't fall</a>
+<a name="ln998">   * outside and can do more simple code */</a>
+<a name="ln999">  int ix = (int)x;</a>
+<a name="ln1000">  int iy = (int)y;</a>
+<a name="ln1001"> </a>
+<a name="ln1002">  if(ix &gt;= (itor-&gt;width - 1) &amp;&amp; iy &gt;= (itor-&gt;width - 1) &amp;&amp; ix &lt; (width - itor-&gt;width)</a>
+<a name="ln1003">     &amp;&amp; iy &lt; (height - itor-&gt;width))</a>
+<a name="ln1004">  {</a>
+<a name="ln1005">    // Inside image boundary case</a>
+<a name="ln1006"> </a>
+<a name="ln1007">    // Go to top left pixel</a>
+<a name="ln1008">    in = (float *)in + linestride * iy + ix * 4;</a>
+<a name="ln1009">    in = in - (itor-&gt;width - 1) * (4 + linestride);</a>
+<a name="ln1010"> </a>
+<a name="ln1011">    // Apply the kernel</a>
+<a name="ln1012">    __m128 pixel = _mm_setzero_ps();</a>
+<a name="ln1013">    for(int i = 0; i &lt; 2 * itor-&gt;width; i++)</a>
+<a name="ln1014">    {</a>
+<a name="ln1015">      __m128 h = _mm_setzero_ps();</a>
+<a name="ln1016">      for(int j = 0; j &lt; 2 * itor-&gt;width; j++)</a>
+<a name="ln1017">      {</a>
+<a name="ln1018">        h = _mm_add_ps(h, _mm_mul_ps(vkernelh[j], *(__m128 *)&amp;in[j * 4]));</a>
+<a name="ln1019">      }</a>
+<a name="ln1020">      pixel = _mm_add_ps(pixel, _mm_mul_ps(vkernelv[i], h));</a>
+<a name="ln1021">      in += linestride;</a>
+<a name="ln1022">    }</a>
+<a name="ln1023"> </a>
+<a name="ln1024">    *(__m128 *)out = _mm_mul_ps(pixel, oonorm);</a>
+<a name="ln1025">  }</a>
+<a name="ln1026">  else if(ix &gt;= 0 &amp;&amp; iy &gt;= 0 &amp;&amp; ix &lt; width &amp;&amp; iy &lt; height)</a>
+<a name="ln1027">  {</a>
+<a name="ln1028">    // At least a valid coordinate</a>
+<a name="ln1029"> </a>
+<a name="ln1030">    // Point to the upper left pixel index wise</a>
+<a name="ln1031">    iy -= itor-&gt;width - 1;</a>
+<a name="ln1032">    ix -= itor-&gt;width - 1;</a>
+<a name="ln1033"> </a>
+<a name="ln1034">    static const enum border_mode bordermode = INTERPOLATION_BORDER_MODE;</a>
+<a name="ln1035">    assert(bordermode != BORDER_CLAMP); // XXX in clamp mode, norms would be wrong</a>
+<a name="ln1036"> </a>
+<a name="ln1037">    int xtap_first;</a>
+<a name="ln1038">    int xtap_last;</a>
+<a name="ln1039">    prepare_tap_boundaries(&amp;xtap_first, &amp;xtap_last, bordermode, 2 * itor-&gt;width, ix, width);</a>
+<a name="ln1040"> </a>
+<a name="ln1041">    int ytap_first;</a>
+<a name="ln1042">    int ytap_last;</a>
+<a name="ln1043">    prepare_tap_boundaries(&amp;ytap_first, &amp;ytap_last, bordermode, 2 * itor-&gt;width, iy, height);</a>
+<a name="ln1044"> </a>
+<a name="ln1045">    // Apply the kernel</a>
+<a name="ln1046">    __m128 pixel = _mm_setzero_ps();</a>
+<a name="ln1047">    for(int i = ytap_first; i &lt; ytap_last; i++)</a>
+<a name="ln1048">    {</a>
+<a name="ln1049">      int clip_y = clip(iy + i, 0, height - 1, bordermode);</a>
+<a name="ln1050">      __m128 h = _mm_setzero_ps();</a>
+<a name="ln1051">      for(int j = xtap_first; j &lt; xtap_last; j++)</a>
+<a name="ln1052">      {</a>
+<a name="ln1053">        int clip_x = clip(ix + j, 0, width - 1, bordermode);</a>
+<a name="ln1054">        const float *ipixel = in + clip_y * linestride + clip_x * 4;</a>
+<a name="ln1055">        h = _mm_add_ps(h, _mm_mul_ps(vkernelh[j], *(__m128 *)ipixel));</a>
+<a name="ln1056">      }</a>
+<a name="ln1057">      pixel = _mm_add_ps(pixel, _mm_mul_ps(vkernelv[i], h));</a>
+<a name="ln1058">    }</a>
+<a name="ln1059"> </a>
+<a name="ln1060">    *(__m128 *)out = _mm_mul_ps(pixel, oonorm);</a>
+<a name="ln1061">  }</a>
+<a name="ln1062">  else</a>
+<a name="ln1063">  {</a>
+<a name="ln1064">    *(__m128 *)out = _mm_set_ps1(0.0f);</a>
+<a name="ln1065">  }</a>
+<a name="ln1066">}</a>
+<a name="ln1067">#endif</a>
+<a name="ln1068"> </a>
+<a name="ln1069">void dt_interpolation_compute_pixel4c(const struct dt_interpolation *itor, const float *in, float *out,</a>
+<a name="ln1070">                                      const float x, const float y, const int width, const int height,</a>
+<a name="ln1071">                                      const int linestride)</a>
+<a name="ln1072">{</a>
+<a name="ln1073">  if(darktable.codepath.OPENMP_SIMD)</a>
+<a name="ln1074">    return dt_interpolation_compute_pixel4c_plain(itor, in, out, x, y, width, height, linestride);</a>
+<a name="ln1075">#if defined(__SSE2__)</a>
+<a name="ln1076">  else if(darktable.codepath.SSE2)</a>
+<a name="ln1077">    return dt_interpolation_compute_pixel4c_sse(itor, in, out, x, y, width, height, linestride);</a>
+<a name="ln1078">#endif</a>
+<a name="ln1079">  else</a>
+<a name="ln1080">    dt_unreachable_codepath();</a>
+<a name="ln1081">}</a>
+<a name="ln1082"> </a>
+<a name="ln1083">static void dt_interpolation_compute_pixel1c_plain(const struct dt_interpolation *itor, const float *in,</a>
+<a name="ln1084">                                                   float *out, const float x, const float y, const int width,</a>
+<a name="ln1085">                                                   const int height, const int linestride)</a>
+<a name="ln1086">{</a>
+<a name="ln1087">  assert(itor-&gt;width &lt; (MAX_HALF_FILTER_WIDTH + 1));</a>
+<a name="ln1088"> </a>
+<a name="ln1089">  // Quite a bit of space for kernels</a>
+<a name="ln1090">  float kernelh[MAX_KERNEL_REQ] __attribute__((aligned(SSE_ALIGNMENT)));</a>
+<a name="ln1091">  float kernelv[MAX_KERNEL_REQ] __attribute__((aligned(SSE_ALIGNMENT)));</a>
+<a name="ln1092"> </a>
+<a name="ln1093">  // Compute both horizontal and vertical kernels</a>
+<a name="ln1094">  float normh;</a>
+<a name="ln1095">  float normv;</a>
+<a name="ln1096">  compute_upsampling_kernel(itor, kernelh, &amp;normh, NULL, x);</a>
+<a name="ln1097">  compute_upsampling_kernel(itor, kernelv, &amp;normv, NULL, y);</a>
+<a name="ln1098"> </a>
+<a name="ln1099">  // Precompute the inverse of the filter norm for later use</a>
+<a name="ln1100">  const float oonorm = (1.f / (normh * normv));</a>
+<a name="ln1101"> </a>
+<a name="ln1102">  /* Now 2 cases, the pixel + filter width goes outside the image</a>
+<a name="ln1103">   * in that case we have to use index clipping to keep all reads</a>
+<a name="ln1104">   * in the input image (slow path) or we are sure it won't fall</a>
+<a name="ln1105">   * outside and can do more simple code */</a>
+<a name="ln1106">  int ix = (int)x;</a>
+<a name="ln1107">  int iy = (int)y;</a>
+<a name="ln1108"> </a>
+<a name="ln1109">  if(ix &gt;= (itor-&gt;width - 1) &amp;&amp; iy &gt;= (itor-&gt;width - 1) &amp;&amp; ix &lt; (width - itor-&gt;width)</a>
+<a name="ln1110">    &amp;&amp; iy &lt; (height - itor-&gt;width))</a>
+<a name="ln1111">  {</a>
+<a name="ln1112">    // Inside image boundary case</a>
+<a name="ln1113"> </a>
+<a name="ln1114">    // Go to top left pixel</a>
+<a name="ln1115">    in = (float *)in + linestride * iy + ix;</a>
+<a name="ln1116">    in = in - (itor-&gt;width - 1) * (1 + linestride);</a>
+<a name="ln1117"> </a>
+<a name="ln1118">    // Apply the kernel</a>
+<a name="ln1119">    float pixel = 0.0f;</a>
+<a name="ln1120">    for(int i = 0; i &lt; 2 * itor-&gt;width; i++)</a>
+<a name="ln1121">    {</a>
+<a name="ln1122">      float h = 0.0f;</a>
+<a name="ln1123">      for(int j = 0; j &lt; 2 * itor-&gt;width; j++)</a>
+<a name="ln1124">      {</a>
+<a name="ln1125">        h += kernelh[j] * in[j];</a>
+<a name="ln1126">      }</a>
+<a name="ln1127">      pixel += kernelv[i] * h;</a>
+<a name="ln1128">      in += linestride;</a>
+<a name="ln1129">    }</a>
+<a name="ln1130"> </a>
+<a name="ln1131">    *out = oonorm * pixel;</a>
+<a name="ln1132">  }</a>
+<a name="ln1133">  else if(ix &gt;= 0 &amp;&amp; iy &gt;= 0 &amp;&amp; ix &lt; width &amp;&amp; iy &lt; height)</a>
+<a name="ln1134">  {</a>
+<a name="ln1135">    // At least a valid coordinate</a>
+<a name="ln1136"> </a>
+<a name="ln1137">    // Point to the upper left pixel index wise</a>
+<a name="ln1138">    iy -= itor-&gt;width - 1;</a>
+<a name="ln1139">    ix -= itor-&gt;width - 1;</a>
+<a name="ln1140"> </a>
+<a name="ln1141">    static const enum border_mode bordermode = INTERPOLATION_BORDER_MODE;</a>
+<a name="ln1142">    assert(bordermode != BORDER_CLAMP); // XXX in clamp mode, norms would be wrong</a>
+<a name="ln1143"> </a>
+<a name="ln1144">    int xtap_first;</a>
+<a name="ln1145">    int xtap_last;</a>
+<a name="ln1146">    prepare_tap_boundaries(&amp;xtap_first, &amp;xtap_last, bordermode, 2 * itor-&gt;width, ix, width);</a>
+<a name="ln1147"> </a>
+<a name="ln1148">    int ytap_first;</a>
+<a name="ln1149">    int ytap_last;</a>
+<a name="ln1150">    prepare_tap_boundaries(&amp;ytap_first, &amp;ytap_last, bordermode, 2 * itor-&gt;width, iy, height);</a>
+<a name="ln1151"> </a>
+<a name="ln1152">    // Apply the kernel</a>
+<a name="ln1153">    float pixel = 0.0f;</a>
+<a name="ln1154">    for(int i = ytap_first; i &lt; ytap_last; i++)</a>
+<a name="ln1155">    {</a>
+<a name="ln1156">      int clip_y = clip(iy + i, 0, height - 1, bordermode);</a>
+<a name="ln1157">      float h = 0.0f;</a>
+<a name="ln1158">      for(int j = xtap_first; j &lt; xtap_last; j++)</a>
+<a name="ln1159">      {</a>
+<a name="ln1160">        int clip_x = clip(ix + j, 0, width - 1, bordermode);</a>
+<a name="ln1161">        const float *ipixel = in + clip_y * linestride + clip_x;</a>
+<a name="ln1162">        h += kernelh[j] * *ipixel;</a>
+<a name="ln1163">      }</a>
+<a name="ln1164">      pixel += kernelv[i] * h;</a>
+<a name="ln1165">    }</a>
+<a name="ln1166"> </a>
+<a name="ln1167">    *out = oonorm * pixel;</a>
+<a name="ln1168">  }</a>
+<a name="ln1169">  else</a>
+<a name="ln1170">  {</a>
+<a name="ln1171">    *out = 0.0f;</a>
+<a name="ln1172">  }</a>
+<a name="ln1173">}</a>
+<a name="ln1174"> </a>
+<a name="ln1175">void dt_interpolation_compute_pixel1c(const struct dt_interpolation *itor, const float *in, float *out,</a>
+<a name="ln1176">                                      const float x, const float y, const int width, const int height,</a>
+<a name="ln1177">                                      const int linestride)</a>
+<a name="ln1178">{</a>
+<a name="ln1179">  return dt_interpolation_compute_pixel1c_plain(itor, in, out, x, y, width, height, linestride);</a>
+<a name="ln1180">}</a>
+<a name="ln1181"> </a>
+<a name="ln1182">/* --------------------------------------------------------------------------</a>
+<a name="ln1183"> * Interpolation factory</a>
+<a name="ln1184"> * ------------------------------------------------------------------------*/</a>
+<a name="ln1185"> </a>
+<a name="ln1186">const struct dt_interpolation *dt_interpolation_new(enum dt_interpolation_type type)</a>
+<a name="ln1187">{</a>
+<a name="ln1188">  const struct dt_interpolation *itor = NULL;</a>
+<a name="ln1189"> </a>
+<a name="ln1190">  if(type == DT_INTERPOLATION_USERPREF)</a>
+<a name="ln1191">  {</a>
+<a name="ln1192">    // Find user preferred interpolation method</a>
+<a name="ln1193">    gchar *uipref = dt_conf_get_string(&quot;plugins/lighttable/export/pixel_interpolator&quot;);</a>
+<a name="ln1194">    for(int i = DT_INTERPOLATION_FIRST; uipref &amp;&amp; i &lt; DT_INTERPOLATION_LAST; i++)</a>
+<a name="ln1195">    {</a>
+<a name="ln1196">      if(!strcmp(uipref, dt_interpolator[i].name))</a>
+<a name="ln1197">      {</a>
+<a name="ln1198">        // Found the one</a>
+<a name="ln1199">        itor = &amp;dt_interpolator[i];</a>
+<a name="ln1200">        break;</a>
+<a name="ln1201">      }</a>
+<a name="ln1202">    }</a>
+<a name="ln1203">    g_free(uipref);</a>
+<a name="ln1204"> </a>
+<a name="ln1205">    /* In the case the search failed (!uipref or name not found),</a>
+<a name="ln1206">     * prepare later search pass with default fallback */</a>
+<a name="ln1207">    type = DT_INTERPOLATION_DEFAULT;</a>
+<a name="ln1208">  }</a>
+<a name="ln1209">  if(!itor)</a>
+<a name="ln1210">  {</a>
+<a name="ln1211">    // Did not find the userpref one or we've been asked for a specific one</a>
+<a name="ln1212">    for(int i = DT_INTERPOLATION_FIRST; i &lt; DT_INTERPOLATION_LAST; i++)</a>
+<a name="ln1213">    {</a>
+<a name="ln1214">      if(dt_interpolator[i].id == type)</a>
+<a name="ln1215">      {</a>
+<a name="ln1216">        itor = &amp;dt_interpolator[i];</a>
+<a name="ln1217">        break;</a>
+<a name="ln1218">      }</a>
+<a name="ln1219">      if(dt_interpolator[i].id == DT_INTERPOLATION_DEFAULT)</a>
+<a name="ln1220">      {</a>
+<a name="ln1221">        itor = &amp;dt_interpolator[i];</a>
+<a name="ln1222">      }</a>
+<a name="ln1223">    }</a>
+<a name="ln1224">  }</a>
+<a name="ln1225"> </a>
+<a name="ln1226">  return itor;</a>
+<a name="ln1227">}</a>
+<a name="ln1228"> </a>
+<a name="ln1229">/* --------------------------------------------------------------------------</a>
+<a name="ln1230"> * Image resampling</a>
+<a name="ln1231"> * ------------------------------------------------------------------------*/</a>
+<a name="ln1232"> </a>
+<a name="ln1233">/** Prepares a 1D resampling plan</a>
+<a name="ln1234"> *</a>
+<a name="ln1235"> * This consists of the following information</a>
+<a name="ln1236"> * &lt;ul&gt;</a>
+<a name="ln1237"> * &lt;li&gt;A list of lengths that tell how many pixels are relevant for the</a>
+<a name="ln1238"> *    next output&lt;/li&gt;</a>
+<a name="ln1239"> * &lt;li&gt;A list of required filter kernels&lt;/li&gt;</a>
+<a name="ln1240"> * &lt;li&gt;A list of sample indexes&lt;/li&gt;</a>
+<a name="ln1241"> * &lt;/ul&gt;</a>
+<a name="ln1242"> *</a>
+<a name="ln1243"> * How to apply the resampling plan:</a>
+<a name="ln1244"> * &lt;ol&gt;</a>
+<a name="ln1245"> * &lt;li&gt;Pick a length from the length array&lt;/li&gt;</a>
+<a name="ln1246"> * &lt;li&gt;until length is reached</a>
+<a name="ln1247"> *     &lt;ol&gt;</a>
+<a name="ln1248"> *     &lt;li&gt;pick a kernel tap&gt;&lt;/li&gt;</a>
+<a name="ln1249"> *     &lt;li&gt;pick the relevant sample according to the picked index&lt;/li&gt;</a>
+<a name="ln1250"> *     &lt;li&gt;multiply them and accumulate&lt;/li&gt;</a>
+<a name="ln1251"> *     &lt;/ol&gt;</a>
+<a name="ln1252"> * &lt;/li&gt;</a>
+<a name="ln1253"> * &lt;li&gt;here goes a single output sample&lt;/li&gt;</a>
+<a name="ln1254"> * &lt;/ol&gt;</a>
+<a name="ln1255"> *</a>
+<a name="ln1256"> * This until you reach the number of output pixels</a>
+<a name="ln1257"> *</a>
+<a name="ln1258"> * @param itor interpolator used to resample</a>
+<a name="ln1259"> * @param in [in] Number of input samples</a>
+<a name="ln1260"> * @param out [in] Number of output samples</a>
+<a name="ln1261"> * @param plength [out] Array of lengths for each pixel filtering (number</a>
+<a name="ln1262"> * of taps/indexes to use). This array mus be freed with dt_free_align() when you're</a>
+<a name="ln1263"> * done with the plan.</a>
+<a name="ln1264"> * @param pkernel [out] Array of filter kernel taps</a>
+<a name="ln1265"> * @param pindex [out] Array of sample indexes to be used for applying each kernel tap</a>
+<a name="ln1266"> * arrays of information</a>
+<a name="ln1267"> * @param pmeta [out] Array of int triplets (length, kernel, index) telling where to start for an arbitrary</a>
+<a name="ln1268"> * out position meta[3*out]</a>
+<a name="ln1269"> * @return 0 for success, !0 for failure</a>
+<a name="ln1270"> */</a>
+<a name="ln1271">static int prepare_resampling_plan(const struct dt_interpolation *itor, int in, const int in_x0, int out,</a>
+<a name="ln1272">                                   const int out_x0, float scale, int **plength, float **pkernel,</a>
+<a name="ln1273">                                   int **pindex, int **pmeta)</a>
+<a name="ln1274">{</a>
+<a name="ln1275">  // Safe return values</a>
+<a name="ln1276">  *plength = NULL;</a>
+<a name="ln1277">  *pkernel = NULL;</a>
+<a name="ln1278">  *pindex = NULL;</a>
+<a name="ln1279">  if(pmeta)</a>
+<a name="ln1280">  {</a>
+<a name="ln1281">    *pmeta = NULL;</a>
+<a name="ln1282">  }</a>
+<a name="ln1283"> </a>
+<a name="ln1284">  if(scale == 1.f)</a>
+<a name="ln1285">  {</a>
+<a name="ln1286">    // No resampling required</a>
+<a name="ln1287">    return 0;</a>
+<a name="ln1288">  }</a>
+<a name="ln1289"> </a>
+<a name="ln1290">  // Compute common upsampling/downsampling memory requirements</a>
+<a name="ln1291">  int maxtapsapixel;</a>
+<a name="ln1292">  if(scale &gt; 1.f)</a>
+<a name="ln1293">  {</a>
+<a name="ln1294">    // Upscale... the easy one. The values are exact</a>
+<a name="ln1295">    maxtapsapixel = 2 * itor-&gt;width;</a>
+<a name="ln1296">  }</a>
+<a name="ln1297">  else</a>
+<a name="ln1298">  {</a>
+<a name="ln1299">    // Downscale... going for worst case values memory wise</a>
+<a name="ln1300">    maxtapsapixel = ceil_fast((float)2 * (float)itor-&gt;width / scale);</a>
+<a name="ln1301">  }</a>
+<a name="ln1302"> </a>
+<a name="ln1303">  int nlengths = out;</a>
+<a name="ln1304">  int nindex = maxtapsapixel * out;</a>
+<a name="ln1305">  int nkernel = maxtapsapixel * out;</a>
+<a name="ln1306">  size_t lengthreq = increase_for_alignment(nlengths * sizeof(int), SSE_ALIGNMENT);</a>
+<a name="ln1307">  size_t indexreq = increase_for_alignment(nindex * sizeof(int), SSE_ALIGNMENT);</a>
+<a name="ln1308">  size_t kernelreq = increase_for_alignment(nkernel * sizeof(float), SSE_ALIGNMENT);</a>
+<a name="ln1309">  size_t scratchreq = maxtapsapixel * sizeof(float) + 4 * sizeof(float);</a>
+<a name="ln1310">  // NB: because sse versions compute four taps a time</a>
+<a name="ln1311">  size_t metareq = pmeta ? 3 * sizeof(int) * out : 0;</a>
+<a name="ln1312"> </a>
+<a name="ln1313">  void *blob = NULL;</a>
+<a name="ln1314">  size_t totalreq = kernelreq + lengthreq + indexreq + scratchreq + metareq;</a>
+<a name="ln1315">  blob = dt_alloc_align(SSE_ALIGNMENT, totalreq);</a>
+<a name="ln1316">  if(!blob)</a>
+<a name="ln1317">  {</a>
+<a name="ln1318">    return 1;</a>
+<a name="ln1319">  }</a>
+<a name="ln1320"> </a>
+<a name="ln1321">  int *lengths = (int *)blob;</a>
+<a name="ln1322">  blob = (char *)blob + lengthreq;</a>
+<a name="ln1323">  int *index = (int *)blob;</a>
+<a name="ln1324">  blob = (char *)blob + indexreq;</a>
+<a name="ln1325">  float *kernel = (float *)blob;</a>
+<a name="ln1326">  blob = (char *)blob + kernelreq;</a>
+<a name="ln1327">  float *scratchpad = scratchreq ? (float *)blob : NULL;</a>
+<a name="ln1328">  blob = (char *)blob + scratchreq;</a>
+<a name="ln1329">  int *meta = metareq ? (int *)blob : NULL;</a>
+<a name="ln1330">//   blob = (char *)blob + metareq;</a>
+<a name="ln1331"> </a>
+<a name="ln1332">  /* setting this as a const should help the compilers trim all unnecessary</a>
+<a name="ln1333">   * codepaths */</a>
+<a name="ln1334">  const enum border_mode bordermode = RESAMPLING_BORDER_MODE;</a>
+<a name="ln1335"> </a>
+<a name="ln1336">  /* Upscale and downscale differ in subtle points, getting rid of code</a>
+<a name="ln1337">   * duplication might have been tricky and i prefer keeping the code</a>
+<a name="ln1338">   * as straight as possible */</a>
+<a name="ln1339">  if(scale &gt; 1.f)</a>
+<a name="ln1340">  {</a>
+<a name="ln1341">    int kidx = 0;</a>
+<a name="ln1342">    int iidx = 0;</a>
+<a name="ln1343">    int lidx = 0;</a>
+<a name="ln1344">    int midx = 0;</a>
+<a name="ln1345">    for(int x = 0; x &lt; out; x++)</a>
+<a name="ln1346">    {</a>
+<a name="ln1347">      if(meta)</a>
+<a name="ln1348">      {</a>
+<a name="ln1349">        meta[midx++] = lidx;</a>
+<a name="ln1350">        meta[midx++] = kidx;</a>
+<a name="ln1351">        meta[midx++] = iidx;</a>
+<a name="ln1352">      }</a>
+<a name="ln1353"> </a>
+<a name="ln1354">      // Projected position in input samples</a>
+<a name="ln1355">      float fx = (float)(out_x0 + x) / scale;</a>
+<a name="ln1356"> </a>
+<a name="ln1357">      // Compute the filter kernel at that position</a>
+<a name="ln1358">      int first;</a>
+<a name="ln1359">      compute_upsampling_kernel(itor, scratchpad, NULL, &amp;first, fx);</a>
+<a name="ln1360"> </a>
+<a name="ln1361">      /* Check lower and higher bound pixel index and skip as many pixels as</a>
+<a name="ln1362">       * necessary to fall into range */</a>
+<a name="ln1363">      int tap_first;</a>
+<a name="ln1364">      int tap_last;</a>
+<a name="ln1365">      prepare_tap_boundaries(&amp;tap_first, &amp;tap_last, bordermode, 2 * itor-&gt;width, first, in);</a>
+<a name="ln1366"> </a>
+<a name="ln1367">      // Track number of taps that will be used</a>
+<a name="ln1368">      lengths[lidx++] = tap_last - tap_first;</a>
+<a name="ln1369"> </a>
+<a name="ln1370">      // Precompute the inverse of the norm</a>
+<a name="ln1371">      float norm = 0.f;</a>
+<a name="ln1372">      for(int tap = tap_first; tap &lt; tap_last; tap++)</a>
+<a name="ln1373">      {</a>
+<a name="ln1374">        norm += scratchpad[tap];</a>
+<a name="ln1375">      }</a>
+<a name="ln1376">      norm = 1.f / norm;</a>
+<a name="ln1377"> </a>
+<a name="ln1378">      /* Unlike single pixel or single sample code, here it's interesting to</a>
+<a name="ln1379">       * precompute the normalized filter kernel as this will avoid dividing</a>
+<a name="ln1380">       * by the norm for all processed samples/pixels</a>
+<a name="ln1381">       * NB: use the same loop to put in place the index list */</a>
+<a name="ln1382">      first += tap_first;</a>
+<a name="ln1383">      for(int tap = tap_first; tap &lt; tap_last; tap++)</a>
+<a name="ln1384">      {</a>
+<a name="ln1385">        kernel[kidx++] = scratchpad[tap] * norm;</a>
+<a name="ln1386">        index[iidx++] = clip(first++, 0, in - 1, bordermode);</a>
+<a name="ln1387">      }</a>
+<a name="ln1388">    }</a>
+<a name="ln1389">  }</a>
+<a name="ln1390">  else</a>
+<a name="ln1391">  {</a>
+<a name="ln1392">    int kidx = 0;</a>
+<a name="ln1393">    int iidx = 0;</a>
+<a name="ln1394">    int lidx = 0;</a>
+<a name="ln1395">    int midx = 0;</a>
+<a name="ln1396">    for(int x = 0; x &lt; out; x++)</a>
+<a name="ln1397">    {</a>
+<a name="ln1398">      if(meta)</a>
+<a name="ln1399">      {</a>
+<a name="ln1400">        meta[midx++] = lidx;</a>
+<a name="ln1401">        meta[midx++] = kidx;</a>
+<a name="ln1402">        meta[midx++] = iidx;</a>
+<a name="ln1403">      }</a>
+<a name="ln1404"> </a>
+<a name="ln1405">      // Compute downsampling kernel centered on output position</a>
+<a name="ln1406">      int taps;</a>
+<a name="ln1407">      int first;</a>
+<a name="ln1408">      compute_downsampling_kernel(itor, &amp;taps, &amp;first, scratchpad, NULL, scale, out_x0 + x);</a>
+<a name="ln1409"> </a>
+<a name="ln1410">      /* Check lower and higher bound pixel index and skip as many pixels as</a>
+<a name="ln1411">       * necessary to fall into range */</a>
+<a name="ln1412">      int tap_first;</a>
+<a name="ln1413">      int tap_last;</a>
+<a name="ln1414">      prepare_tap_boundaries(&amp;tap_first, &amp;tap_last, bordermode, taps, first, in);</a>
+<a name="ln1415"> </a>
+<a name="ln1416">      // Track number of taps that will be used</a>
+<a name="ln1417">      lengths[lidx++] = tap_last - tap_first;</a>
+<a name="ln1418"> </a>
+<a name="ln1419">      // Precompute the inverse of the norm</a>
+<a name="ln1420">      float norm = 0.f;</a>
+<a name="ln1421">      for(int tap = tap_first; tap &lt; tap_last; tap++)</a>
+<a name="ln1422">      {</a>
+<a name="ln1423">        norm += scratchpad[tap];</a>
+<a name="ln1424">      }</a>
+<a name="ln1425">      norm = 1.f / norm;</a>
+<a name="ln1426"> </a>
+<a name="ln1427">      /* Unlike single pixel or single sample code, here it's interesting to</a>
+<a name="ln1428">       * precompute the normalized filter kernel as this will avoid dividing</a>
+<a name="ln1429">       * by the norm for all processed samples/pixels</a>
+<a name="ln1430">       * NB: use the same loop to put in place the index list */</a>
+<a name="ln1431">      first += tap_first;</a>
+<a name="ln1432">      for(int tap = tap_first; tap &lt; tap_last; tap++)</a>
+<a name="ln1433">      {</a>
+<a name="ln1434">        kernel[kidx++] = scratchpad[tap] * norm;</a>
+<a name="ln1435">        index[iidx++] = clip(first++, 0, in - 1, bordermode);</a>
+<a name="ln1436">      }</a>
+<a name="ln1437">    }</a>
+<a name="ln1438">  }</a>
+<a name="ln1439"> </a>
+<a name="ln1440">  // Validate plan wrt caller</a>
+<a name="ln1441">  *plength = lengths;</a>
+<a name="ln1442">  *pindex = index;</a>
+<a name="ln1443">  *pkernel = kernel;</a>
+<a name="ln1444">  if(pmeta)</a>
+<a name="ln1445">  {</a>
+<a name="ln1446">    *pmeta = meta;</a>
+<a name="ln1447">  }</a>
+<a name="ln1448"> </a>
+<a name="ln1449">  return 0;</a>
+<a name="ln1450">}</a>
+<a name="ln1451"> </a>
+<a name="ln1452">static void dt_interpolation_resample_plain(const struct dt_interpolation *itor, float *out,</a>
+<a name="ln1453">                                            const dt_iop_roi_t *const roi_out, const int32_t out_stride,</a>
+<a name="ln1454">                                            const float *const in, const dt_iop_roi_t *const roi_in,</a>
+<a name="ln1455">                                            const int32_t in_stride)</a>
+<a name="ln1456">{</a>
+<a name="ln1457">  int *hindex = NULL;</a>
+<a name="ln1458">  int *hlength = NULL;</a>
+<a name="ln1459">  float *hkernel = NULL;</a>
+<a name="ln1460">  int *vindex = NULL;</a>
+<a name="ln1461">  int *vlength = NULL;</a>
+<a name="ln1462">  float *vkernel = NULL;</a>
+<a name="ln1463">  int *vmeta = NULL;</a>
+<a name="ln1464"> </a>
+<a name="ln1465">  int r;</a>
+<a name="ln1466"> </a>
+<a name="ln1467">  debug_info(&quot;resampling %p (%dx%d@%dx%d scale %f) -&gt; %p (%dx%d@%dx%d scale %f)\n&quot;, in, roi_in-&gt;width,</a>
+<a name="ln1468">             roi_in-&gt;height, roi_in-&gt;x, roi_in-&gt;y, roi_in-&gt;scale, out, roi_out-&gt;width, roi_out-&gt;height,</a>
+<a name="ln1469">             roi_out-&gt;x, roi_out-&gt;y, roi_out-&gt;scale);</a>
+<a name="ln1470"> </a>
+<a name="ln1471">  // Fast code path for 1:1 copy, only cropping area can change</a>
+<a name="ln1472">  if(roi_out-&gt;scale == 1.f)</a>
+<a name="ln1473">  {</a>
+<a name="ln1474">    const int x0 = roi_out-&gt;x * 4 * sizeof(float);</a>
+<a name="ln1475">#if DEBUG_RESAMPLING_TIMING</a>
+<a name="ln1476">    int64_t ts_resampling = getts();</a>
+<a name="ln1477">#endif</a>
+<a name="ln1478">#ifdef _OPENMP</a>
+<a name="ln1479">#pragma omp parallel for default(none) shared(out)</a>
+<a name="ln1480">#endif</a>
+<a name="ln1481">    for(int y = 0; y &lt; roi_out-&gt;height; y++)</a>
+<a name="ln1482">    {</a>
+<a name="ln1483">      memcpy((char *)out + (size_t)out_stride * y,</a>
+<a name="ln1484">             (char *)in + (size_t)in_stride * (y + roi_out-&gt;y) + x0,</a>
+<a name="ln1485">             out_stride);</a>
+<a name="ln1486">    }</a>
+<a name="ln1487">#if DEBUG_RESAMPLING_TIMING</a>
+<a name="ln1488">    ts_resampling = getts() - ts_resampling;</a>
+<a name="ln1489">    fprintf(stderr, &quot;resampling %p plan:0us resampling:%&quot; PRId64 &quot;us\n&quot;, in, ts_resampling);</a>
+<a name="ln1490">#endif</a>
+<a name="ln1491">    // All done, so easy case</a>
+<a name="ln1492">    return;</a>
+<a name="ln1493">  }</a>
+<a name="ln1494"> </a>
+<a name="ln1495">// Generic non 1:1 case... much more complicated :D</a>
+<a name="ln1496">#if DEBUG_RESAMPLING_TIMING</a>
+<a name="ln1497">  int64_t ts_plan = getts();</a>
+<a name="ln1498">#endif</a>
+<a name="ln1499"> </a>
+<a name="ln1500">  // Prepare resampling plans once and for all</a>
+<a name="ln1501">  r = prepare_resampling_plan(itor, roi_in-&gt;width, roi_in-&gt;x, roi_out-&gt;width, roi_out-&gt;x, roi_out-&gt;scale,</a>
+<a name="ln1502">                              &amp;hlength, &amp;hkernel, &amp;hindex, NULL);</a>
+<a name="ln1503">  if(r)</a>
+<a name="ln1504">  {</a>
+<a name="ln1505">    goto exit;</a>
+<a name="ln1506">  }</a>
+<a name="ln1507"> </a>
+<a name="ln1508">  r = prepare_resampling_plan(itor, roi_in-&gt;height, roi_in-&gt;y, roi_out-&gt;height, roi_out-&gt;y, roi_out-&gt;scale,</a>
+<a name="ln1509">                              &amp;vlength, &amp;vkernel, &amp;vindex, &amp;vmeta);</a>
+<a name="ln1510">  if(r)</a>
+<a name="ln1511">  {</a>
+<a name="ln1512">    goto exit;</a>
+<a name="ln1513">  }</a>
+<a name="ln1514"> </a>
+<a name="ln1515">#if DEBUG_RESAMPLING_TIMING</a>
+<a name="ln1516">  ts_plan = getts() - ts_plan;</a>
+<a name="ln1517">#endif</a>
+<a name="ln1518"> </a>
+<a name="ln1519">#if DEBUG_RESAMPLING_TIMING</a>
+<a name="ln1520">  int64_t ts_resampling = getts();</a>
+<a name="ln1521">#endif</a>
+<a name="ln1522"> </a>
+<a name="ln1523">// Process each output line</a>
+<a name="ln1524">#ifdef _OPENMP</a>
+<a name="ln1525">#pragma omp parallel for default(none) shared(out, hindex, hlength, hkernel, vindex, vlength, vkernel, vmeta)</a>
+<a name="ln1526">#endif</a>
+<a name="ln1527">  for(int oy = 0; oy &lt; roi_out-&gt;height; oy++)</a>
+<a name="ln1528">  {</a>
+<a name="ln1529">    // Initialize column resampling indexes</a>
+<a name="ln1530">    int vlidx = vmeta[3 * oy + 0]; // V(ertical) L(ength) I(n)d(e)x</a>
+<a name="ln1531">    int vkidx = vmeta[3 * oy + 1]; // V(ertical) K(ernel) I(n)d(e)x</a>
+<a name="ln1532">    int viidx = vmeta[3 * oy + 2]; // V(ertical) I(ndex) I(n)d(e)x</a>
+<a name="ln1533"> </a>
+<a name="ln1534">    // Initialize row resampling indexes</a>
+<a name="ln1535">    int hlidx = 0; // H(orizontal) L(ength) I(n)d(e)x</a>
+<a name="ln1536">    int hkidx = 0; // H(orizontal) K(ernel) I(n)d(e)x</a>
+<a name="ln1537">    int hiidx = 0; // H(orizontal) I(ndex) I(n)d(e)x</a>
+<a name="ln1538"> </a>
+<a name="ln1539">    // Number of lines contributing to the output line</a>
+<a name="ln1540">    int vl = vlength[vlidx++]; // V(ertical) L(ength)</a>
+<a name="ln1541"> </a>
+<a name="ln1542">    // Process each output column</a>
+<a name="ln1543">    for(int ox = 0; ox &lt; roi_out-&gt;width; ox++)</a>
+<a name="ln1544">    {</a>
+<a name="ln1545">      debug_extra(&quot;output %p [% 4d % 4d]\n&quot;, out, ox, oy);</a>
+<a name="ln1546"> </a>
+<a name="ln1547">      // This will hold the resulting pixel</a>
+<a name="ln1548">      float vs[4] = { 0.0f, 0.0f, 0.0f, 0.0f };</a>
+<a name="ln1549"> </a>
+<a name="ln1550">      // Number of horizontal samples contributing to the output</a>
+<a name="ln1551">      int hl = hlength[hlidx++]; // H(orizontal) L(ength)</a>
+<a name="ln1552"> </a>
+<a name="ln1553">      for(int iy = 0; iy &lt; vl; iy++)</a>
+<a name="ln1554">      {</a>
+<a name="ln1555">        // This is our input line</a>
+<a name="ln1556">        const float *i = (float *)((char *)in + (size_t)in_stride * vindex[viidx++]);</a>
+<a name="ln1557"> </a>
+<a name="ln1558">        float vhs[4] = { 0.0f, 0.0f, 0.0f, 0.0f };</a>
+<a name="ln1559"> </a>
+<a name="ln1560">        for(int ix = 0; ix &lt; hl; ix++)</a>
+<a name="ln1561">        {</a>
+<a name="ln1562">          // Apply the precomputed filter kernel</a>
+<a name="ln1563">          size_t baseidx = (size_t)hindex[hiidx++] * 4;</a>
+<a name="ln1564">          const float htap = hkernel[hkidx++];</a>
+<a name="ln1565">          for(int c = 0; c &lt; 3; c++) vhs[c] += i[baseidx + c] * htap;</a>
+<a name="ln1566">        }</a>
+<a name="ln1567"> </a>
+<a name="ln1568">        // Accumulate contribution from this line</a>
+<a name="ln1569">        const float vtap = vkernel[vkidx++];</a>
+<a name="ln1570">        for(int c = 0; c &lt; 3; c++) vs[c] += vhs[c] * vtap;</a>
+<a name="ln1571"> </a>
+<a name="ln1572">        // Reset horizontal resampling context</a>
+<a name="ln1573">        hkidx -= hl;</a>
+<a name="ln1574">        hiidx -= hl;</a>
+<a name="ln1575">      }</a>
+<a name="ln1576"> </a>
+<a name="ln1577">      // Output pixel is ready</a>
+<a name="ln1578">      float *o = (float *)((char *)out + (size_t)oy * out_stride + (size_t)ox * 4 * sizeof(float));</a>
+<a name="ln1579">      for(int c = 0; c &lt; 3; c++) o[c] = vs[c];</a>
+<a name="ln1580"> </a>
+<a name="ln1581">      // Reset vertical resampling context</a>
+<a name="ln1582">      viidx -= vl;</a>
+<a name="ln1583">      vkidx -= vl;</a>
+<a name="ln1584"> </a>
+<a name="ln1585">      // Progress in horizontal context</a>
+<a name="ln1586">      hiidx += hl;</a>
+<a name="ln1587">      hkidx += hl;</a>
+<a name="ln1588">    }</a>
+<a name="ln1589">  }</a>
+<a name="ln1590"> </a>
+<a name="ln1591">#if DEBUG_RESAMPLING_TIMING</a>
+<a name="ln1592">  ts_resampling = getts() - ts_resampling;</a>
+<a name="ln1593">  fprintf(stderr, &quot;resampling %p plan:%&quot; PRId64 &quot;us resampling:%&quot; PRId64 &quot;us\n&quot;, in, ts_plan, ts_resampling);</a>
+<a name="ln1594">#endif</a>
+<a name="ln1595"> </a>
+<a name="ln1596">exit:</a>
+<a name="ln1597">  /* Free the resampling plans. It's nasty to optimize allocs like that, but</a>
+<a name="ln1598">   * it simplifies the code :-D. The length array is in fact the only memory</a>
+<a name="ln1599">   * allocated. */</a>
+<a name="ln1600">  dt_free_align(hlength);</a>
+<a name="ln1601">  dt_free_align(vlength);</a>
+<a name="ln1602">}</a>
+<a name="ln1603"> </a>
+<a name="ln1604">#if defined(__SSE2__)</a>
+<a name="ln1605">static void dt_interpolation_resample_sse(const struct dt_interpolation *itor, float *out,</a>
+<a name="ln1606">                                          const dt_iop_roi_t *const roi_out, const int32_t out_stride,</a>
+<a name="ln1607">                                          const float *const in, const dt_iop_roi_t *const roi_in,</a>
+<a name="ln1608">                                          const int32_t in_stride)</a>
+<a name="ln1609">{</a>
+<a name="ln1610">  int *hindex = NULL;</a>
+<a name="ln1611">  int *hlength = NULL;</a>
+<a name="ln1612">  float *hkernel = NULL;</a>
+<a name="ln1613">  int *vindex = NULL;</a>
+<a name="ln1614">  int *vlength = NULL;</a>
+<a name="ln1615">  float *vkernel = NULL;</a>
+<a name="ln1616">  int *vmeta = NULL;</a>
+<a name="ln1617"> </a>
+<a name="ln1618">  int r;</a>
+<a name="ln1619"> </a>
+<a name="ln1620">  debug_info(&quot;resampling %p (%dx%d@%dx%d scale %f) -&gt; %p (%dx%d@%dx%d scale %f)\n&quot;, in, roi_in-&gt;width,</a>
+<a name="ln1621">             roi_in-&gt;height, roi_in-&gt;x, roi_in-&gt;y, roi_in-&gt;scale, out, roi_out-&gt;width, roi_out-&gt;height,</a>
+<a name="ln1622">             roi_out-&gt;x, roi_out-&gt;y, roi_out-&gt;scale);</a>
+<a name="ln1623"> </a>
+<a name="ln1624">  // Fast code path for 1:1 copy, only cropping area can change</a>
+<a name="ln1625">  if(roi_out-&gt;scale == 1.f)</a>
+<a name="ln1626">  {</a>
+<a name="ln1627">    const int x0 = roi_out-&gt;x * 4 * sizeof(float);</a>
+<a name="ln1628">#if DEBUG_RESAMPLING_TIMING</a>
+<a name="ln1629">    int64_t ts_resampling = getts();</a>
+<a name="ln1630">#endif</a>
+<a name="ln1631">#ifdef _OPENMP</a>
+<a name="ln1632">#pragma omp parallel for default(none) shared(out)</a>
+<a name="ln1633">#endif</a>
+<a name="ln1634">    for(int y = 0; y &lt; roi_out-&gt;height; y++)</a>
+<a name="ln1635">    {</a>
+<a name="ln1636">      float *i = (float *)((char *)in + (size_t)in_stride * (y + roi_out-&gt;y) + x0);</a>
+<a name="ln1637">      float *o = (float *)((char *)out + (size_t)out_stride * y);</a>
+<a name="ln1638">      memcpy(o, i, out_stride);</a>
+<a name="ln1639">    }</a>
+<a name="ln1640">#if DEBUG_RESAMPLING_TIMING</a>
+<a name="ln1641">    ts_resampling = getts() - ts_resampling;</a>
+<a name="ln1642">    fprintf(stderr, &quot;resampling %p plan:0us resampling:%&quot; PRId64 &quot;us\n&quot;, in, ts_resampling);</a>
+<a name="ln1643">#endif</a>
+<a name="ln1644">    // All done, so easy case</a>
+<a name="ln1645">    return;</a>
+<a name="ln1646">  }</a>
+<a name="ln1647"> </a>
+<a name="ln1648">// Generic non 1:1 case... much more complicated :D</a>
+<a name="ln1649">#if DEBUG_RESAMPLING_TIMING</a>
+<a name="ln1650">  int64_t ts_plan = getts();</a>
+<a name="ln1651">#endif</a>
+<a name="ln1652"> </a>
+<a name="ln1653">  // Prepare resampling plans once and for all</a>
+<a name="ln1654">  r = prepare_resampling_plan(itor, roi_in-&gt;width, roi_in-&gt;x, roi_out-&gt;width, roi_out-&gt;x, roi_out-&gt;scale,</a>
+<a name="ln1655">                              &amp;hlength, &amp;hkernel, &amp;hindex, NULL);</a>
+<a name="ln1656">  if(r)</a>
+<a name="ln1657">  {</a>
+<a name="ln1658">    goto exit;</a>
+<a name="ln1659">  }</a>
+<a name="ln1660"> </a>
+<a name="ln1661">  r = prepare_resampling_plan(itor, roi_in-&gt;height, roi_in-&gt;y, roi_out-&gt;height, roi_out-&gt;y, roi_out-&gt;scale,</a>
+<a name="ln1662">                              &amp;vlength, &amp;vkernel, &amp;vindex, &amp;vmeta);</a>
+<a name="ln1663">  if(r)</a>
+<a name="ln1664">  {</a>
+<a name="ln1665">    goto exit;</a>
+<a name="ln1666">  }</a>
+<a name="ln1667"> </a>
+<a name="ln1668">#if DEBUG_RESAMPLING_TIMING</a>
+<a name="ln1669">  ts_plan = getts() - ts_plan;</a>
+<a name="ln1670">#endif</a>
+<a name="ln1671"> </a>
+<a name="ln1672">#if DEBUG_RESAMPLING_TIMING</a>
+<a name="ln1673">  int64_t ts_resampling = getts();</a>
+<a name="ln1674">#endif</a>
+<a name="ln1675"> </a>
+<a name="ln1676">// Process each output line</a>
+<a name="ln1677">#ifdef _OPENMP</a>
+<a name="ln1678">#pragma omp parallel for default(none) shared(out, hindex, hlength, hkernel, vindex, vlength, vkernel, vmeta)</a>
+<a name="ln1679">#endif</a>
+<a name="ln1680">  for(int oy = 0; oy &lt; roi_out-&gt;height; oy++)</a>
+<a name="ln1681">  {</a>
+<a name="ln1682">    // Initialize column resampling indexes</a>
+<a name="ln1683">    int vlidx = vmeta[3 * oy + 0]; // V(ertical) L(ength) I(n)d(e)x</a>
+<a name="ln1684">    int vkidx = vmeta[3 * oy + 1]; // V(ertical) K(ernel) I(n)d(e)x</a>
+<a name="ln1685">    int viidx = vmeta[3 * oy + 2]; // V(ertical) I(ndex) I(n)d(e)x</a>
+<a name="ln1686"> </a>
+<a name="ln1687">    // Initialize row resampling indexes</a>
+<a name="ln1688">    int hlidx = 0; // H(orizontal) L(ength) I(n)d(e)x</a>
+<a name="ln1689">    int hkidx = 0; // H(orizontal) K(ernel) I(n)d(e)x</a>
+<a name="ln1690">    int hiidx = 0; // H(orizontal) I(ndex) I(n)d(e)x</a>
+<a name="ln1691"> </a>
+<a name="ln1692">    // Number of lines contributing to the output line</a>
+<a name="ln1693">    int vl = vlength[vlidx++]; // V(ertical) L(ength)</a>
+<a name="ln1694"> </a>
+<a name="ln1695">    // Process each output column</a>
+<a name="ln1696">    for(int ox = 0; ox &lt; roi_out-&gt;width; ox++)</a>
+<a name="ln1697">    {</a>
+<a name="ln1698">      debug_extra(&quot;output %p [% 4d % 4d]\n&quot;, out, ox, oy);</a>
+<a name="ln1699"> </a>
+<a name="ln1700">      // This will hold the resulting pixel</a>
+<a name="ln1701">      __m128 vs = _mm_setzero_ps();</a>
+<a name="ln1702"> </a>
+<a name="ln1703">      // Number of horizontal samples contributing to the output</a>
+<a name="ln1704">      int hl = hlength[hlidx++]; // H(orizontal) L(ength)</a>
+<a name="ln1705"> </a>
+<a name="ln1706">      for(int iy = 0; iy &lt; vl; iy++)</a>
+<a name="ln1707">      {</a>
+<a name="ln1708">        // This is our input line</a>
+<a name="ln1709">        const float *i = (float *)((char *)in + (size_t)in_stride * vindex[viidx++]);</a>
+<a name="ln1710"> </a>
+<a name="ln1711">        __m128 vhs = _mm_setzero_ps();</a>
+<a name="ln1712"> </a>
+<a name="ln1713">        for(int ix = 0; ix &lt; hl; ix++)</a>
+<a name="ln1714">        {</a>
+<a name="ln1715">          // Apply the precomputed filter kernel</a>
+<a name="ln1716">          size_t baseidx = (size_t)hindex[hiidx++] * 4;</a>
+<a name="ln1717">          float htap = hkernel[hkidx++];</a>
+<a name="ln1718">          __m128 vhtap = _mm_set_ps1(htap);</a>
+<a name="ln1719">          vhs = _mm_add_ps(vhs, _mm_mul_ps(*(__m128 *)&amp;i[baseidx], vhtap));</a>
+<a name="ln1720">        }</a>
+<a name="ln1721"> </a>
+<a name="ln1722">        // Accumulate contribution from this line</a>
+<a name="ln1723">        float vtap = vkernel[vkidx++];</a>
+<a name="ln1724">        __m128 vvtap = _mm_set_ps1(vtap);</a>
+<a name="ln1725">        vs = _mm_add_ps(vs, _mm_mul_ps(vhs, vvtap));</a>
+<a name="ln1726"> </a>
+<a name="ln1727">        // Reset horizontal resampling context</a>
+<a name="ln1728">        hkidx -= hl;</a>
+<a name="ln1729">        hiidx -= hl;</a>
+<a name="ln1730">      }</a>
+<a name="ln1731"> </a>
+<a name="ln1732">      // Output pixel is ready</a>
+<a name="ln1733">      float *o = (float *)((char *)out + (size_t)oy * out_stride + (size_t)ox * 4 * sizeof(float));</a>
+<a name="ln1734">      _mm_stream_ps(o, vs);</a>
+<a name="ln1735"> </a>
+<a name="ln1736">      // Reset vertical resampling context</a>
+<a name="ln1737">      viidx -= vl;</a>
+<a name="ln1738">      vkidx -= vl;</a>
+<a name="ln1739"> </a>
+<a name="ln1740">      // Progress in horizontal context</a>
+<a name="ln1741">      hiidx += hl;</a>
+<a name="ln1742">      hkidx += hl;</a>
+<a name="ln1743">    }</a>
+<a name="ln1744">  }</a>
+<a name="ln1745"> </a>
+<a name="ln1746">  _mm_sfence();</a>
+<a name="ln1747"> </a>
+<a name="ln1748">#if DEBUG_RESAMPLING_TIMING</a>
+<a name="ln1749">  ts_resampling = getts() - ts_resampling;</a>
+<a name="ln1750">  fprintf(stderr, &quot;resampling %p plan:%&quot; PRId64 &quot;us resampling:%&quot; PRId64 &quot;us\n&quot;, in, ts_plan, ts_resampling);</a>
+<a name="ln1751">#endif</a>
+<a name="ln1752"> </a>
+<a name="ln1753">exit:</a>
+<a name="ln1754">  /* Free the resampling plans. It's nasty to optimize allocs like that, but</a>
+<a name="ln1755">   * it simplifies the code :-D. The length array is in fact the only memory</a>
+<a name="ln1756">   * allocated. */</a>
+<a name="ln1757">  dt_free_align(hlength);</a>
+<a name="ln1758">  dt_free_align(vlength);</a>
+<a name="ln1759">}</a>
+<a name="ln1760">#endif</a>
+<a name="ln1761"> </a>
+<a name="ln1762">/** Applies resampling (re-scaling) on *full* input and output buffers.</a>
+<a name="ln1763"> *  roi_in and roi_out define the part of the buffers that is affected.</a>
+<a name="ln1764"> */</a>
+<a name="ln1765">void dt_interpolation_resample(const struct dt_interpolation *itor, float *out,</a>
+<a name="ln1766">                               const dt_iop_roi_t *const roi_out, const int32_t out_stride,</a>
+<a name="ln1767">                               const float *const in, const dt_iop_roi_t *const roi_in,</a>
+<a name="ln1768">                               const int32_t in_stride)</a>
+<a name="ln1769">{</a>
+<a name="ln1770">  if(darktable.codepath.OPENMP_SIMD)</a>
+<a name="ln1771">    return dt_interpolation_resample_plain(itor, out, roi_out, out_stride, in, roi_in, in_stride);</a>
+<a name="ln1772">#if defined(__SSE2__)</a>
+<a name="ln1773">  else if(darktable.codepath.SSE2)</a>
+<a name="ln1774">    return dt_interpolation_resample_sse(itor, out, roi_out, out_stride, in, roi_in, in_stride);</a>
+<a name="ln1775">#endif</a>
+<a name="ln1776">  else</a>
+<a name="ln1777">    dt_unreachable_codepath();</a>
+<a name="ln1778">}</a>
+<a name="ln1779"> </a>
+<a name="ln1780">/** Applies resampling (re-scaling) on a specific region-of-interest of an image. The input</a>
+<a name="ln1781"> *  and output buffers hold exactly those roi's. roi_in and roi_out define the relative</a>
+<a name="ln1782"> *  positions of the roi's within the full input and output image, respectively.</a>
+<a name="ln1783"> */</a>
+<a name="ln1784">void dt_interpolation_resample_roi(const struct dt_interpolation *itor, float *out,</a>
+<a name="ln1785">                                   const dt_iop_roi_t *const roi_out, const int32_t out_stride,</a>
+<a name="ln1786">                                   const float *const in, const dt_iop_roi_t *const roi_in,</a>
+<a name="ln1787">                                   const int32_t in_stride)</a>
+<a name="ln1788">{</a>
+<a name="ln1789">  dt_iop_roi_t oroi = *roi_out;</a>
+<a name="ln1790">  oroi.x = oroi.y = 0;</a>
+<a name="ln1791"> </a>
+<a name="ln1792">  dt_iop_roi_t iroi = *roi_in;</a>
+<a name="ln1793">  iroi.x = iroi.y = 0;</a>
+<a name="ln1794"> </a>
+<a name="ln1795">  dt_interpolation_resample(itor, out, &amp;oroi, out_stride, in, &amp;iroi, in_stride);</a>
+<a name="ln1796">}</a>
+<a name="ln1797"> </a>
+<a name="ln1798">#ifdef HAVE_OPENCL</a>
+<a name="ln1799">dt_interpolation_cl_global_t *dt_interpolation_init_cl_global()</a>
+<a name="ln1800">{</a>
+<a name="ln1801">  dt_interpolation_cl_global_t *g</a>
+<a name="ln1802">      = (dt_interpolation_cl_global_t *)malloc(sizeof(dt_interpolation_cl_global_t));</a>
+<a name="ln1803"> </a>
+<a name="ln1804">  const int program = 2; // basic.cl, from programs.conf</a>
+<a name="ln1805">  g-&gt;kernel_interpolation_resample = dt_opencl_create_kernel(program, &quot;interpolation_resample&quot;);</a>
+<a name="ln1806">  return g;</a>
+<a name="ln1807">}</a>
+<a name="ln1808"> </a>
+<a name="ln1809">void dt_interpolation_free_cl_global(dt_interpolation_cl_global_t *g)</a>
+<a name="ln1810">{</a>
+<a name="ln1811">  if(!g) return;</a>
+<a name="ln1812">  // destroy kernels</a>
+<a name="ln1813">  dt_opencl_free_kernel(g-&gt;kernel_interpolation_resample);</a>
+<a name="ln1814">  free(g);</a>
+<a name="ln1815">}</a>
+<a name="ln1816"> </a>
+<a name="ln1817">static uint32_t roundToNextPowerOfTwo(uint32_t x)</a>
+<a name="ln1818">{</a>
+<a name="ln1819">  x--;</a>
+<a name="ln1820">  x |= x &gt;&gt; 1;</a>
+<a name="ln1821">  x |= x &gt;&gt; 2;</a>
+<a name="ln1822">  x |= x &gt;&gt; 4;</a>
+<a name="ln1823">  x |= x &gt;&gt; 8;</a>
+<a name="ln1824">  x |= x &gt;&gt; 16;</a>
+<a name="ln1825">  x++;</a>
+<a name="ln1826">  return x;</a>
+<a name="ln1827">}</a>
+<a name="ln1828"> </a>
+<a name="ln1829">/** Applies resampling (re-scaling) on *full* input and output buffers.</a>
+<a name="ln1830"> *  roi_in and roi_out define the part of the buffers that is affected.</a>
+<a name="ln1831"> */</a>
+<a name="ln1832">int dt_interpolation_resample_cl(const struct dt_interpolation *itor, int devid, cl_mem dev_out,</a>
+<a name="ln1833">                                 const dt_iop_roi_t *const roi_out, cl_mem dev_in,</a>
+<a name="ln1834">                                 const dt_iop_roi_t *const roi_in)</a>
+<a name="ln1835">{</a>
+<a name="ln1836">  int *hindex = NULL;</a>
+<a name="ln1837">  int *hlength = NULL;</a>
+<a name="ln1838">  float *hkernel = NULL;</a>
+<a name="ln1839">  int *hmeta = NULL;</a>
+<a name="ln1840">  int *vindex = NULL;</a>
+<a name="ln1841">  int *vlength = NULL;</a>
+<a name="ln1842">  float *vkernel = NULL;</a>
+<a name="ln1843">  int *vmeta = NULL;</a>
+<a name="ln1844"> </a>
+<a name="ln1845">  int r;</a>
+<a name="ln1846">  cl_int err = -999;</a>
+<a name="ln1847"> </a>
+<a name="ln1848">  cl_mem dev_hindex = NULL;</a>
+<a name="ln1849">  cl_mem dev_hlength = NULL;</a>
+<a name="ln1850">  cl_mem dev_hkernel = NULL;</a>
+<a name="ln1851">  cl_mem dev_hmeta = NULL;</a>
+<a name="ln1852">  cl_mem dev_vindex = NULL;</a>
+<a name="ln1853">  cl_mem dev_vlength = NULL;</a>
+<a name="ln1854">  cl_mem dev_vkernel = NULL;</a>
+<a name="ln1855">  cl_mem dev_vmeta = NULL;</a>
+<a name="ln1856"> </a>
+<a name="ln1857">  debug_info(&quot;resampling_cl %p (%dx%d@%dx%d scale %f) -&gt; %p (%dx%d@%dx%d scale %f)\n&quot;, (void *)dev_in,</a>
+<a name="ln1858">             roi_in-&gt;width, roi_in-&gt;height, roi_in-&gt;x, roi_in-&gt;y, roi_in-&gt;scale, (void *)dev_out,</a>
+<a name="ln1859">             roi_out-&gt;width, roi_out-&gt;height, roi_out-&gt;x, roi_out-&gt;y, roi_out-&gt;scale);</a>
+<a name="ln1860"> </a>
+<a name="ln1861">  // Fast code path for 1:1 copy, only cropping area can change</a>
+<a name="ln1862">  if(roi_out-&gt;scale == 1.f)</a>
+<a name="ln1863">  {</a>
+<a name="ln1864">#if DEBUG_RESAMPLING_TIMING</a>
+<a name="ln1865">    int64_t ts_resampling = getts();</a>
+<a name="ln1866">#endif</a>
+<a name="ln1867">    size_t iorigin[] = { roi_out-&gt;x, roi_out-&gt;y, 0 };</a>
+<a name="ln1868">    size_t oorigin[] = { 0, 0, 0 };</a>
+<a name="ln1869">    size_t region[] = { roi_out-&gt;width, roi_out-&gt;height, 1 };</a>
+<a name="ln1870"> </a>
+<a name="ln1871">    // copy original input from dev_in -&gt; dev_out as starting point</a>
+<a name="ln1872">    err = dt_opencl_enqueue_copy_image(devid, dev_in, dev_out, iorigin, oorigin, region);</a>
+<a name="ln1873">    if(err != CL_SUCCESS) goto error;</a>
+<a name="ln1874"> </a>
+<a name="ln1875">#if DEBUG_RESAMPLING_TIMING</a>
+<a name="ln1876">    ts_resampling = getts() - ts_resampling;</a>
+<a name="ln1877">    fprintf(stderr, &quot;resampling_cl %p plan:0us resampling:%&quot; PRId64 &quot;us\n&quot;, (void *)dev_in, ts_resampling);</a>
+<a name="ln1878">#endif</a>
+<a name="ln1879">    // All done, so easy case</a>
+<a name="ln1880">    return CL_SUCCESS;</a>
+<a name="ln1881">  }</a>
+<a name="ln1882"> </a>
+<a name="ln1883">// Generic non 1:1 case... much more complicated :D</a>
+<a name="ln1884">#if DEBUG_RESAMPLING_TIMING</a>
+<a name="ln1885">  int64_t ts_plan = getts();</a>
+<a name="ln1886">#endif</a>
+<a name="ln1887"> </a>
+<a name="ln1888">  // Prepare resampling plans once and for all</a>
+<a name="ln1889">  r = prepare_resampling_plan(itor, roi_in-&gt;width, roi_in-&gt;x, roi_out-&gt;width, roi_out-&gt;x, roi_out-&gt;scale,</a>
+<a name="ln1890">                              &amp;hlength, &amp;hkernel, &amp;hindex, &amp;hmeta);</a>
+<a name="ln1891">  if(r)</a>
+<a name="ln1892">  {</a>
+<a name="ln1893">    goto error;</a>
+<a name="ln1894">  }</a>
+<a name="ln1895"> </a>
+<a name="ln1896">  r = prepare_resampling_plan(itor, roi_in-&gt;height, roi_in-&gt;y, roi_out-&gt;height, roi_out-&gt;y, roi_out-&gt;scale,</a>
+<a name="ln1897">                              &amp;vlength, &amp;vkernel, &amp;vindex, &amp;vmeta);</a>
+<a name="ln1898">  if(r)</a>
+<a name="ln1899">  {</a>
+<a name="ln1900">    goto error;</a>
+<a name="ln1901">  }</a>
+<a name="ln1902"> </a>
+<a name="ln1903">  int hmaxtaps = -1, vmaxtaps = -1;</a>
+<a name="ln1904">  for(int k = 0; k &lt; roi_out-&gt;width; k++) hmaxtaps = MAX(hmaxtaps, hlength[k]);</a>
+<a name="ln1905">  for(int k = 0; k &lt; roi_out-&gt;height; k++) vmaxtaps = MAX(vmaxtaps, vlength[k]);</a>
+<a name="ln1906"> </a>
+<a name="ln1907">#if DEBUG_RESAMPLING_TIMING</a>
+<a name="ln1908">  ts_plan = getts() - ts_plan;</a>
+<a name="ln1909">#endif</a>
+<a name="ln1910"> </a>
+<a name="ln1911">#if DEBUG_RESAMPLING_TIMING</a>
+<a name="ln1912">  int64_t ts_resampling = getts();</a>
+<a name="ln1913">#endif</a>
+<a name="ln1914"> </a>
+<a name="ln1915">  // strategy: process image column-wise (local[0] = 1). For each row generate</a>
+<a name="ln1916">  // a number of parallel work items each taking care of one horizontal convolution,</a>
+<a name="ln1917">  // then sum over work items to do the vertical convolution</a>
+<a name="ln1918"> </a>
+<a name="ln1919">  const int kernel = darktable.opencl-&gt;interpolation-&gt;kernel_interpolation_resample;</a>
+<a name="ln1920">  const int width = roi_out-&gt;width;</a>
+<a name="ln1921">  const int height = roi_out-&gt;height;</a>
+<a name="ln1922"> </a>
+<a name="ln1923">  // make sure blocksize is not too large</a>
+<a name="ln1924">  const int taps = roundToNextPowerOfTwo(vmaxtaps); // the number of work items per row rounded up to a power of 2</a>
+<a name="ln1925">                                                    // (for quick recursive reduction)</a>
+<a name="ln1926">  int vblocksize;</a>
+<a name="ln1927"> </a>
+<a name="ln1928">  dt_opencl_local_buffer_t locopt</a>
+<a name="ln1929">    = (dt_opencl_local_buffer_t){ .xoffset = 0, .xfactor = 1, .yoffset = 0, .yfactor = 1,</a>
+<a name="ln1930">                                  .cellsize = 4 * sizeof(float), .overhead = hmaxtaps * sizeof(float) + hmaxtaps * sizeof(int),</a>
+<a name="ln1931">                                  .sizex = 1, .sizey = (1 &lt;&lt; 16) * taps };</a>
+<a name="ln1932"> </a>
+<a name="ln1933">  if(dt_opencl_local_buffer_opt(devid, kernel, &amp;locopt))</a>
+<a name="ln1934">    vblocksize = locopt.sizey;</a>
+<a name="ln1935">  else</a>
+<a name="ln1936">    vblocksize = 1;</a>
+<a name="ln1937"> </a>
+<a name="ln1938">  if(vblocksize &lt; taps)</a>
+<a name="ln1939">  {</a>
+<a name="ln1940">    // our strategy does not work: the vertical number of taps exceeds the vertical workgroupsize;</a>
+<a name="ln1941">    // there is no point in continuing on the GPU - that would be way too slow; let's delegate the stuff to</a>
+<a name="ln1942">    // the CPU then.</a>
+<a name="ln1943">    dt_print(</a>
+<a name="ln1944">        DT_DEBUG_OPENCL,</a>
+<a name="ln1945">        &quot;[opencl_resampling] resampling plan cannot efficiently be run on the GPU - fall back to CPU.\n&quot;);</a>
+<a name="ln1946">    goto error;</a>
+<a name="ln1947">  }</a>
+<a name="ln1948"> </a>
+<a name="ln1949">  size_t sizes[3] = { ROUNDUPWD(width), ROUNDUP(height * taps, vblocksize), 1 };</a>
+<a name="ln1950">  size_t local[3] = { 1, vblocksize, 1 };</a>
+<a name="ln1951"> </a>
+<a name="ln1952">  // store resampling plan to device memory</a>
+<a name="ln1953">  // hindex, vindex, hkernel, vkernel: (v|h)maxtaps might be too small, so store a bit more than needed</a>
+<a name="ln1954">  dev_hindex = dt_opencl_copy_host_to_device_constant(devid, sizeof(int) * width * (hmaxtaps + 1), hindex);</a>
+<a name="ln1955">  if(dev_hindex == NULL) goto error;</a>
+<a name="ln1956"> </a>
+<a name="ln1957">  dev_hlength = dt_opencl_copy_host_to_device_constant(devid, sizeof(int) * width, hlength);</a>
+<a name="ln1958">  if(dev_hlength == NULL) goto error;</a>
+<a name="ln1959"> </a>
+<a name="ln1960">  dev_hkernel</a>
+<a name="ln1961">      = dt_opencl_copy_host_to_device_constant(devid, sizeof(float) * width * (hmaxtaps + 1), hkernel);</a>
+<a name="ln1962">  if(dev_hkernel == NULL) goto error;</a>
+<a name="ln1963"> </a>
+<a name="ln1964">  dev_hmeta = dt_opencl_copy_host_to_device_constant(devid, sizeof(int) * width * 3, hmeta);</a>
+<a name="ln1965">  if(dev_hmeta == NULL) goto error;</a>
+<a name="ln1966"> </a>
+<a name="ln1967">  dev_vindex = dt_opencl_copy_host_to_device_constant(devid, sizeof(int) * height * (vmaxtaps + 1), vindex);</a>
+<a name="ln1968">  if(dev_vindex == NULL) goto error;</a>
+<a name="ln1969"> </a>
+<a name="ln1970">  dev_vlength = dt_opencl_copy_host_to_device_constant(devid, sizeof(int) * height, vlength);</a>
+<a name="ln1971">  if(dev_vlength == NULL) goto error;</a>
+<a name="ln1972"> </a>
+<a name="ln1973">  dev_vkernel</a>
+<a name="ln1974">      = dt_opencl_copy_host_to_device_constant(devid, sizeof(float) * height * (vmaxtaps + 1), vkernel);</a>
+<a name="ln1975">  if(dev_vkernel == NULL) goto error;</a>
+<a name="ln1976"> </a>
+<a name="ln1977">  dev_vmeta = dt_opencl_copy_host_to_device_constant(devid, sizeof(int) * height * 3, vmeta);</a>
+<a name="ln1978">  if(dev_vmeta == NULL) goto error;</a>
+<a name="ln1979"> </a>
+<a name="ln1980">  dt_opencl_set_kernel_arg(devid, kernel, 0, sizeof(cl_mem), (void *)&amp;dev_in);</a>
+<a name="ln1981">  dt_opencl_set_kernel_arg(devid, kernel, 1, sizeof(cl_mem), (void *)&amp;dev_out);</a>
+<a name="ln1982">  dt_opencl_set_kernel_arg(devid, kernel, 2, sizeof(int), (void *)&amp;width);</a>
+<a name="ln1983">  dt_opencl_set_kernel_arg(devid, kernel, 3, sizeof(int), (void *)&amp;height);</a>
+<a name="ln1984">  dt_opencl_set_kernel_arg(devid, kernel, 4, sizeof(cl_mem), (void *)&amp;dev_hmeta);</a>
+<a name="ln1985">  dt_opencl_set_kernel_arg(devid, kernel, 5, sizeof(cl_mem), (void *)&amp;dev_vmeta);</a>
+<a name="ln1986">  dt_opencl_set_kernel_arg(devid, kernel, 6, sizeof(cl_mem), (void *)&amp;dev_hlength);</a>
+<a name="ln1987">  dt_opencl_set_kernel_arg(devid, kernel, 7, sizeof(cl_mem), (void *)&amp;dev_vlength);</a>
+<a name="ln1988">  dt_opencl_set_kernel_arg(devid, kernel, 8, sizeof(cl_mem), (void *)&amp;dev_hindex);</a>
+<a name="ln1989">  dt_opencl_set_kernel_arg(devid, kernel, 9, sizeof(cl_mem), (void *)&amp;dev_vindex);</a>
+<a name="ln1990">  dt_opencl_set_kernel_arg(devid, kernel, 10, sizeof(cl_mem), (void *)&amp;dev_hkernel);</a>
+<a name="ln1991">  dt_opencl_set_kernel_arg(devid, kernel, 11, sizeof(cl_mem), (void *)&amp;dev_vkernel);</a>
+<a name="ln1992">  dt_opencl_set_kernel_arg(devid, kernel, 12, sizeof(int), (void *)&amp;hmaxtaps);</a>
+<a name="ln1993">  dt_opencl_set_kernel_arg(devid, kernel, 13, sizeof(int), (void *)&amp;taps);</a>
+<a name="ln1994">  dt_opencl_set_kernel_arg(devid, kernel, 14, hmaxtaps * sizeof(float), NULL);</a>
+<a name="ln1995">  dt_opencl_set_kernel_arg(devid, kernel, 15, hmaxtaps * sizeof(int), NULL);</a>
+<a name="ln1996">  dt_opencl_set_kernel_arg(devid, kernel, 16, vblocksize * 4 * sizeof(float), NULL);</a>
+<a name="ln1997">  err = dt_opencl_enqueue_kernel_2d_with_local(devid, kernel, sizes, local);</a>
+<a name="ln1998">  if(err != CL_SUCCESS) goto error;</a>
+<a name="ln1999"> </a>
+<a name="ln2000">#if DEBUG_RESAMPLING_TIMING</a>
+<a name="ln2001">  ts_resampling = getts() - ts_resampling;</a>
+<a name="ln2002">  fprintf(stderr, &quot;resampling_cl %p plan:%&quot; PRId64 &quot;us resampling:%&quot; PRId64 &quot;us\n&quot;, (void *)dev_in, ts_plan,</a>
+<a name="ln2003">          ts_resampling);</a>
+<a name="ln2004">#endif</a>
+<a name="ln2005"> </a>
+<a name="ln2006">  dt_opencl_release_mem_object(dev_hindex);</a>
+<a name="ln2007">  dt_opencl_release_mem_object(dev_hlength);</a>
+<a name="ln2008">  dt_opencl_release_mem_object(dev_hkernel);</a>
+<a name="ln2009">  dt_opencl_release_mem_object(dev_hmeta);</a>
+<a name="ln2010">  dt_opencl_release_mem_object(dev_vindex);</a>
+<a name="ln2011">  dt_opencl_release_mem_object(dev_vlength);</a>
+<a name="ln2012">  dt_opencl_release_mem_object(dev_vkernel);</a>
+<a name="ln2013">  dt_opencl_release_mem_object(dev_vmeta);</a>
+<a name="ln2014">  dt_free_align(hlength);</a>
+<a name="ln2015">  dt_free_align(vlength);</a>
+<a name="ln2016">  return CL_SUCCESS;</a>
+<a name="ln2017"> </a>
+<a name="ln2018">error:</a>
+<a name="ln2019">  dt_opencl_release_mem_object(dev_hindex);</a>
+<a name="ln2020">  dt_opencl_release_mem_object(dev_hlength);</a>
+<a name="ln2021">  dt_opencl_release_mem_object(dev_hkernel);</a>
+<a name="ln2022">  dt_opencl_release_mem_object(dev_hmeta);</a>
+<a name="ln2023">  dt_opencl_release_mem_object(dev_vindex);</a>
+<a name="ln2024">  dt_opencl_release_mem_object(dev_vlength);</a>
+<a name="ln2025">  dt_opencl_release_mem_object(dev_vkernel);</a>
+<a name="ln2026">  dt_opencl_release_mem_object(dev_vmeta);</a>
+<a name="ln2027">  dt_free_align(hlength);</a>
+<a name="ln2028">  dt_free_align(vlength);</a>
+<a name="ln2029">  dt_print(DT_DEBUG_OPENCL, &quot;[opencl_resampling] couldn't enqueue kernel! %d\n&quot;, err);</a>
+<a name="ln2030">  return err;</a>
+<a name="ln2031">}</a>
+<a name="ln2032"> </a>
+<a name="ln2033">/** Applies resampling (re-scaling) on a specific region-of-interest of an image. The input</a>
+<a name="ln2034"> *  and output buffers hold exactly those roi's. roi_in and roi_out define the relative</a>
+<a name="ln2035"> *  positions of the roi's within the full input and output image, respectively.</a>
+<a name="ln2036"> */</a>
+<a name="ln2037">int dt_interpolation_resample_roi_cl(const struct dt_interpolation *itor, int devid, cl_mem dev_out,</a>
+<a name="ln2038">                                     const dt_iop_roi_t *const roi_out, cl_mem dev_in,</a>
+<a name="ln2039">                                     const dt_iop_roi_t *const roi_in)</a>
+<a name="ln2040">{</a>
+<a name="ln2041">  dt_iop_roi_t oroi = *roi_out;</a>
+<a name="ln2042">  oroi.x = oroi.y = 0;</a>
+<a name="ln2043"> </a>
+<a name="ln2044">  dt_iop_roi_t iroi = *roi_in;</a>
+<a name="ln2045">  iroi.x = iroi.y = 0;</a>
+<a name="ln2046"> </a>
+<a name="ln2047">  return dt_interpolation_resample_cl(itor, devid, dev_out, &amp;oroi, dev_in, &amp;iroi);</a>
+<a name="ln2048">}</a>
+<a name="ln2049">#endif</a>
+<a name="ln2050"> </a>
+<a name="ln2051">static void dt_interpolation_resample_1c_plain(const struct dt_interpolation *itor, float *out,</a>
+<a name="ln2052">                                               const dt_iop_roi_t *const roi_out, const int32_t out_stride,</a>
+<a name="ln2053">                                               const float *const in, const dt_iop_roi_t *const roi_in,</a>
+<a name="ln2054">                                               const int32_t in_stride)</a>
+<a name="ln2055">{</a>
+<a name="ln2056">  int *hindex = NULL;</a>
+<a name="ln2057">  int *hlength = NULL;</a>
+<a name="ln2058">  float *hkernel = NULL;</a>
+<a name="ln2059">  int *vindex = NULL;</a>
+<a name="ln2060">  int *vlength = NULL;</a>
+<a name="ln2061">  float *vkernel = NULL;</a>
+<a name="ln2062">  int *vmeta = NULL;</a>
+<a name="ln2063"> </a>
+<a name="ln2064">  int r;</a>
+<a name="ln2065"> </a>
+<a name="ln2066">  debug_info(&quot;resampling %p (%dx%d@%dx%d scale %f) -&gt; %p (%dx%d@%dx%d scale %f)\n&quot;, in, roi_in-&gt;width,</a>
+<a name="ln2067">             roi_in-&gt;height, roi_in-&gt;x, roi_in-&gt;y, roi_in-&gt;scale, out, roi_out-&gt;width, roi_out-&gt;height,</a>
+<a name="ln2068">             roi_out-&gt;x, roi_out-&gt;y, roi_out-&gt;scale);</a>
+<a name="ln2069"> </a>
+<a name="ln2070">  // Fast code path for 1:1 copy, only cropping area can change</a>
+<a name="ln2071">  if(roi_out-&gt;scale == 1.f)</a>
+<a name="ln2072">  {</a>
+<a name="ln2073">    const int x0 = roi_out-&gt;x * sizeof(float);</a>
+<a name="ln2074">#if DEBUG_RESAMPLING_TIMING</a>
+<a name="ln2075">    int64_t ts_resampling = getts();</a>
+<a name="ln2076">#endif</a>
+<a name="ln2077">#ifdef _OPENMP</a>
+<a name="ln2078">#pragma omp parallel for default(none) shared(out)</a>
+<a name="ln2079">#endif</a>
+<a name="ln2080">    for(int y = 0; y &lt; roi_out-&gt;height; y++)</a>
+<a name="ln2081">    {</a>
+<a name="ln2082">      float *i = (float *)((char *)in + (size_t)in_stride * (y + roi_out-&gt;y) + x0);</a>
+<a name="ln2083">      float *o = (float *)((char *)out + (size_t)out_stride * y);</a>
+<a name="ln2084">      memcpy(o, i, out_stride);</a>
+<a name="ln2085">    }</a>
+<a name="ln2086">#if DEBUG_RESAMPLING_TIMING</a>
+<a name="ln2087">    ts_resampling = getts() - ts_resampling;</a>
+<a name="ln2088">    fprintf(stderr, &quot;resampling %p plan:0us resampling:%&quot; PRId64 &quot;us\n&quot;, in, ts_resampling);</a>
+<a name="ln2089">#endif</a>
+<a name="ln2090">    // All done, so easy case</a>
+<a name="ln2091">    return;</a>
+<a name="ln2092">  }</a>
+<a name="ln2093"> </a>
+<a name="ln2094">  // Generic non 1:1 case... much more complicated :D</a>
+<a name="ln2095">#if DEBUG_RESAMPLING_TIMING</a>
+<a name="ln2096">  int64_t ts_plan = getts();</a>
+<a name="ln2097">#endif</a>
+<a name="ln2098"> </a>
+<a name="ln2099">  // Prepare resampling plans once and for all</a>
+<a name="ln2100">  r = prepare_resampling_plan(itor, roi_in-&gt;width, roi_in-&gt;x, roi_out-&gt;width, roi_out-&gt;x, roi_out-&gt;scale,</a>
+<a name="ln2101">                              &amp;hlength, &amp;hkernel, &amp;hindex, NULL);</a>
+<a name="ln2102">  if(r)</a>
+<a name="ln2103">  {</a>
+<a name="ln2104">    goto exit;</a>
+<a name="ln2105">  }</a>
+<a name="ln2106"> </a>
+<a name="ln2107">  r = prepare_resampling_plan(itor, roi_in-&gt;height, roi_in-&gt;y, roi_out-&gt;height, roi_out-&gt;y, roi_out-&gt;scale,</a>
+<a name="ln2108">                              &amp;vlength, &amp;vkernel, &amp;vindex, &amp;vmeta);</a>
+<a name="ln2109">  if(r)</a>
+<a name="ln2110">  {</a>
+<a name="ln2111">    goto exit;</a>
+<a name="ln2112">  }</a>
+<a name="ln2113"> </a>
+<a name="ln2114">#if DEBUG_RESAMPLING_TIMING</a>
+<a name="ln2115">  ts_plan = getts() - ts_plan;</a>
+<a name="ln2116">#endif</a>
+<a name="ln2117"> </a>
+<a name="ln2118">#if DEBUG_RESAMPLING_TIMING</a>
+<a name="ln2119">  int64_t ts_resampling = getts();</a>
+<a name="ln2120">#endif</a>
+<a name="ln2121"> </a>
+<a name="ln2122">  // Process each output line</a>
+<a name="ln2123">#ifdef _OPENMP</a>
+<a name="ln2124">#pragma omp parallel for default(none) shared(out, hindex, hlength, hkernel, vindex, vlength, vkernel, vmeta)</a>
+<a name="ln2125">#endif</a>
+<a name="ln2126">  for(int oy = 0; oy &lt; roi_out-&gt;height; oy++)</a>
+<a name="ln2127">  {</a>
+<a name="ln2128">    // Initialize column resampling indexes</a>
+<a name="ln2129">    int vlidx = vmeta[3 * oy + 0]; // V(ertical) L(ength) I(n)d(e)x</a>
+<a name="ln2130">    int vkidx = vmeta[3 * oy + 1]; // V(ertical) K(ernel) I(n)d(e)x</a>
+<a name="ln2131">    int viidx = vmeta[3 * oy + 2]; // V(ertical) I(ndex) I(n)d(e)x</a>
+<a name="ln2132"> </a>
+<a name="ln2133">    // Initialize row resampling indexes</a>
+<a name="ln2134">    int hlidx = 0; // H(orizontal) L(ength) I(n)d(e)x</a>
+<a name="ln2135">    int hkidx = 0; // H(orizontal) K(ernel) I(n)d(e)x</a>
+<a name="ln2136">    int hiidx = 0; // H(orizontal) I(ndex) I(n)d(e)x</a>
+<a name="ln2137"> </a>
+<a name="ln2138">    // Number of lines contributing to the output line</a>
+<a name="ln2139">    int vl = vlength[vlidx++]; // V(ertical) L(ength)</a>
+<a name="ln2140"> </a>
+<a name="ln2141">    // Process each output column</a>
+<a name="ln2142">    for(int ox = 0; ox &lt; roi_out-&gt;width; ox++)</a>
+<a name="ln2143">    {</a>
+<a name="ln2144">      debug_extra(&quot;output %p [% 4d % 4d]\n&quot;, out, ox, oy);</a>
+<a name="ln2145"> </a>
+<a name="ln2146">      // This will hold the resulting pixel</a>
+<a name="ln2147">      float vs = 0.0f;</a>
+<a name="ln2148"> </a>
+<a name="ln2149">      // Number of horizontal samples contributing to the output</a>
+<a name="ln2150">      int hl = hlength[hlidx++]; // H(orizontal) L(ength)</a>
+<a name="ln2151"> </a>
+<a name="ln2152">      for(int iy = 0; iy &lt; vl; iy++)</a>
+<a name="ln2153">      {</a>
+<a name="ln2154">        // This is our input line</a>
+<a name="ln2155">        const float *i = (float *)((char *)in + (size_t)in_stride * vindex[viidx++]);</a>
+<a name="ln2156"> </a>
+<a name="ln2157">        float vhs = 0.0f;</a>
+<a name="ln2158"> </a>
+<a name="ln2159">        for(int ix = 0; ix &lt; hl; ix++)</a>
+<a name="ln2160">        {</a>
+<a name="ln2161">          // Apply the precomputed filter kernel</a>
+<a name="ln2162">          size_t baseidx = (size_t)hindex[hiidx++];</a>
+<a name="ln2163">          const float htap = hkernel[hkidx++];</a>
+<a name="ln2164">          vhs += i[baseidx] * htap;</a>
+<a name="ln2165">        }</a>
+<a name="ln2166"> </a>
+<a name="ln2167">        // Accumulate contribution from this line</a>
+<a name="ln2168">        const float vtap = vkernel[vkidx++];</a>
+<a name="ln2169">        vs += vhs * vtap;</a>
+<a name="ln2170"> </a>
+<a name="ln2171">        // Reset horizontal resampling context</a>
+<a name="ln2172">        hkidx -= hl;</a>
+<a name="ln2173">        hiidx -= hl;</a>
+<a name="ln2174">      }</a>
+<a name="ln2175"> </a>
+<a name="ln2176">      // Output pixel is ready</a>
+<a name="ln2177">      float *o = (float *)((char *)out + (size_t)oy * out_stride + (size_t)ox * sizeof(float));</a>
+<a name="ln2178">      *o = vs;</a>
+<a name="ln2179"> </a>
+<a name="ln2180">      // Reset vertical resampling context</a>
+<a name="ln2181">      viidx -= vl;</a>
+<a name="ln2182">      vkidx -= vl;</a>
+<a name="ln2183"> </a>
+<a name="ln2184">      // Progress in horizontal context</a>
+<a name="ln2185">      hiidx += hl;</a>
+<a name="ln2186">      hkidx += hl;</a>
+<a name="ln2187">    }</a>
+<a name="ln2188">  }</a>
+<a name="ln2189"> </a>
+<a name="ln2190">#if DEBUG_RESAMPLING_TIMING</a>
+<a name="ln2191">  ts_resampling = getts() - ts_resampling;</a>
+<a name="ln2192">  fprintf(stderr, &quot;resampling %p plan:%&quot; PRId64 &quot;us resampling:%&quot; PRId64 &quot;us\n&quot;, in, ts_plan, ts_resampling);</a>
+<a name="ln2193">#endif</a>
+<a name="ln2194"> </a>
+<a name="ln2195">  exit:</a>
+<a name="ln2196">  /* Free the resampling plans. It's nasty to optimize allocs like that, but</a>
+<a name="ln2197">   * it simplifies the code :-D. The length array is in fact the only memory</a>
+<a name="ln2198">   * allocated. */</a>
+<a name="ln2199">  dt_free_align(hlength);</a>
+<a name="ln2200">  dt_free_align(vlength);</a>
+<a name="ln2201">}</a>
+<a name="ln2202"> </a>
+<a name="ln2203">/** Applies resampling (re-scaling) on *full* input and output buffers.</a>
+<a name="ln2204"> *  roi_in and roi_out define the part of the buffers that is affected.</a>
+<a name="ln2205"> */</a>
+<a name="ln2206">void dt_interpolation_resample_1c(const struct dt_interpolation *itor, float *out,</a>
+<a name="ln2207">                                  const dt_iop_roi_t *const roi_out, const int32_t out_stride,</a>
+<a name="ln2208">                                  const float *const in, const dt_iop_roi_t *const roi_in,</a>
+<a name="ln2209">                                  const int32_t in_stride)</a>
+<a name="ln2210">{</a>
+<a name="ln2211">  return dt_interpolation_resample_1c_plain(itor, out, roi_out, out_stride, in, roi_in, in_stride);</a>
+<a name="ln2212">}</a>
+<a name="ln2213"> </a>
+<a name="ln2214">/** Applies resampling (re-scaling) on a specific region-of-interest of an image. The input</a>
+<a name="ln2215"> *  and output buffers hold exactly those roi's. roi_in and roi_out define the relative</a>
+<a name="ln2216"> *  positions of the roi's within the full input and output image, respectively.</a>
+<a name="ln2217"> */</a>
+<a name="ln2218">void dt_interpolation_resample_roi_1c(const struct dt_interpolation *itor, float *out,</a>
+<a name="ln2219">                                      const dt_iop_roi_t *const roi_out, const int32_t out_stride,</a>
+<a name="ln2220">                                      const float *const in, const dt_iop_roi_t *const roi_in,</a>
+<a name="ln2221">                                      const int32_t in_stride)</a>
+<a name="ln2222">{</a>
+<a name="ln2223">  dt_iop_roi_t oroi = *roi_out;</a>
+<a name="ln2224">  oroi.x = oroi.y = 0;</a>
+<a name="ln2225"> </a>
+<a name="ln2226">  dt_iop_roi_t iroi = *roi_in;</a>
+<a name="ln2227">  iroi.x = iroi.y = 0;</a>
+<a name="ln2228"> </a>
+<a name="ln2229">  dt_interpolation_resample_1c(itor, out, &amp;oroi, out_stride, in, &amp;iroi, in_stride);</a>
+<a name="ln2230">}</a>
+<a name="ln2231"> </a>
+<a name="ln2232">// modelines: These editor modelines have been set for all relevant files by tools/update_modelines.sh</a>
+<a name="ln2233">// vim: shiftwidth=2 expandtab tabstop=2 cindent</a>
+<a name="ln2234">// kate: tab-indents: off; indent-width 2; replace-tabs on; indent-mode cstyle; remove-trailing-spaces modified;</a>
+
+</code></pre>
+<div class="balloon" rel="1805"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v522/" target="_blank">V522</a> There might be dereferencing of a potential null pointer 'g'. Check lines: 1805, 1802.</p></div>
+
+<link rel="stylesheet" href="highlight.css">
+<script src="highlight.pack.js"></script>
+<script src="highlightjs-line-numbers.js"></script>
+<script>hljs.initHighlightingOnLoad();</script>
+<script>hljs.initLineNumbersOnLoad();</script>
+<script>
+  $(document).ready(function() {
+      $('.balloon').each(function () {
+          var bl = $(this);
+          var line = bl.attr('rel');
+          var text = $('a[name="ln'+line+'"]').text();
+
+          var space_count = 0;
+          for(var i = 0; i<text.length; i++){
+              var char = text[i];
+              if((char !== ' ')&&(char !== '\t'))break;
+              if(char === '\t')space_count++;
+              space_count++;
+          }
+
+          bl.css('margin-left', space_count*8);
+          $('a[name="ln'+line+'"]').after(bl);
+      });
+
+      window.location = window.location;
+  });
+</script>
+</body>
+</html>
