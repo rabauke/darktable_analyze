@@ -1,0 +1,603 @@
+
+<html>
+<head>
+  <link rel="stylesheet" href="../style.css"/>
+  <script src="../jquery-3.2.1.min.js"></script>
+</head>
+<body>
+<pre><code class = "cpp">
+<a name="ln1">/*</a>
+<a name="ln2">    This file is part of darktable,</a>
+<a name="ln3">    copyright (c) 2009--2011 johannes hanika.</a>
+<a name="ln4"> </a>
+<a name="ln5">    darktable is free software: you can redistribute it and/or modify</a>
+<a name="ln6">    it under the terms of the GNU General Public License as published by</a>
+<a name="ln7">    the Free Software Foundation, either version 3 of the License, or</a>
+<a name="ln8">    (at your option) any later version.</a>
+<a name="ln9"> </a>
+<a name="ln10">    darktable is distributed in the hope that it will be useful,</a>
+<a name="ln11">    but WITHOUT ANY WARRANTY; without even the implied warranty of</a>
+<a name="ln12">    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the</a>
+<a name="ln13">    GNU General Public License for more details.</a>
+<a name="ln14"> </a>
+<a name="ln15">    You should have received a copy of the GNU General Public License</a>
+<a name="ln16">    along with darktable.  If not, see &lt;http://www.gnu.org/licenses/&gt;.</a>
+<a name="ln17">*/</a>
+<a name="ln18">#ifdef HAVE_CONFIG_H</a>
+<a name="ln19">#include &quot;config.h&quot;</a>
+<a name="ln20">#endif</a>
+<a name="ln21">#include &lt;assert.h&gt;</a>
+<a name="ln22">#include &lt;gdk/gdkkeysyms.h&gt;</a>
+<a name="ln23">#include &lt;gtk/gtk.h&gt;</a>
+<a name="ln24">#include &lt;inttypes.h&gt;</a>
+<a name="ln25">#include &lt;math.h&gt;</a>
+<a name="ln26">#include &lt;stdlib.h&gt;</a>
+<a name="ln27">#include &lt;string.h&gt;</a>
+<a name="ln28"> </a>
+<a name="ln29">#include &quot;common/debug.h&quot;</a>
+<a name="ln30">#include &quot;common/imageio.h&quot;</a>
+<a name="ln31">#include &quot;common/opencl.h&quot;</a>
+<a name="ln32">#include &quot;control/conf.h&quot;</a>
+<a name="ln33">#include &quot;control/control.h&quot;</a>
+<a name="ln34">#include &quot;develop/develop.h&quot;</a>
+<a name="ln35">#include &quot;develop/imageop.h&quot;</a>
+<a name="ln36">#include &quot;dtgtk/button.h&quot;</a>
+<a name="ln37">#include &quot;dtgtk/resetlabel.h&quot;</a>
+<a name="ln38">#include &quot;gui/accelerators.h&quot;</a>
+<a name="ln39">#include &quot;gui/draw.h&quot;</a>
+<a name="ln40">#include &quot;gui/gtk.h&quot;</a>
+<a name="ln41">#include &quot;gui/presets.h&quot;</a>
+<a name="ln42">#include &quot;iop/iop_api.h&quot;</a>
+<a name="ln43"> </a>
+<a name="ln44">DT_MODULE_INTROSPECTION(2, dt_iop_flip_params_t)</a>
+<a name="ln45"> </a>
+<a name="ln46">typedef struct dt_iop_flip_params_t</a>
+<a name="ln47">{</a>
+<a name="ln48">  dt_image_orientation_t orientation;</a>
+<a name="ln49">} dt_iop_flip_params_t;</a>
+<a name="ln50"> </a>
+<a name="ln51">typedef struct dt_iop_flip_params_t dt_iop_flip_data_t;</a>
+<a name="ln52"> </a>
+<a name="ln53">typedef struct dt_iop_flip_global_data_t</a>
+<a name="ln54">{</a>
+<a name="ln55">  int kernel_flip;</a>
+<a name="ln56">} dt_iop_flip_global_data_t;</a>
+<a name="ln57"> </a>
+<a name="ln58">// helper to count corners in for loops:</a>
+<a name="ln59">static void get_corner(const int32_t *aabb, const int i, int32_t *p)</a>
+<a name="ln60">{</a>
+<a name="ln61">  for(int k = 0; k &lt; 2; k++) p[k] = aabb[2 * ((i &gt;&gt; k) &amp; 1) + k];</a>
+<a name="ln62">}</a>
+<a name="ln63"> </a>
+<a name="ln64">static void adjust_aabb(const int32_t *p, int32_t *aabb)</a>
+<a name="ln65">{</a>
+<a name="ln66">  aabb[0] = MIN(aabb[0], p[0]);</a>
+<a name="ln67">  aabb[1] = MIN(aabb[1], p[1]);</a>
+<a name="ln68">  aabb[2] = MAX(aabb[2], p[0]);</a>
+<a name="ln69">  aabb[3] = MAX(aabb[3], p[1]);</a>
+<a name="ln70">}</a>
+<a name="ln71"> </a>
+<a name="ln72"> </a>
+<a name="ln73">const char *name()</a>
+<a name="ln74">{</a>
+<a name="ln75">  return _(&quot;orientation&quot;);</a>
+<a name="ln76">}</a>
+<a name="ln77"> </a>
+<a name="ln78">int default_group()</a>
+<a name="ln79">{</a>
+<a name="ln80">  return IOP_GROUP_BASIC;</a>
+<a name="ln81">}</a>
+<a name="ln82"> </a>
+<a name="ln83">int operation_tags()</a>
+<a name="ln84">{</a>
+<a name="ln85">  return IOP_TAG_DISTORT;</a>
+<a name="ln86">}</a>
+<a name="ln87"> </a>
+<a name="ln88">int flags()</a>
+<a name="ln89">{</a>
+<a name="ln90">  return IOP_FLAGS_ALLOW_TILING | IOP_FLAGS_TILING_FULL_ROI | IOP_FLAGS_ONE_INSTANCE;</a>
+<a name="ln91">}</a>
+<a name="ln92"> </a>
+<a name="ln93">int default_colorspace(dt_iop_module_t *self, dt_dev_pixelpipe_t *pipe, dt_dev_pixelpipe_iop_t *piece)</a>
+<a name="ln94">{</a>
+<a name="ln95">  return iop_cs_rgb;</a>
+<a name="ln96">}</a>
+<a name="ln97"> </a>
+<a name="ln98">static dt_image_orientation_t merge_two_orientations(dt_image_orientation_t raw_orientation,</a>
+<a name="ln99">                                                     dt_image_orientation_t user_orientation)</a>
+<a name="ln100">{</a>
+<a name="ln101">  dt_image_orientation_t raw_orientation_corrected = raw_orientation;</a>
+<a name="ln102">  /*</a>
+<a name="ln103">   * if user-specified orientation has ORIENTATION_SWAP_XY set, then we need</a>
+<a name="ln104">   * to swap ORIENTATION_FLIP_Y and ORIENTATION_FLIP_X bits</a>
+<a name="ln105">   * in raw orientation</a>
+<a name="ln106">   */</a>
+<a name="ln107">  if((user_orientation &amp; ORIENTATION_SWAP_XY) == ORIENTATION_SWAP_XY)</a>
+<a name="ln108">  {</a>
+<a name="ln109">    if((raw_orientation &amp; ORIENTATION_FLIP_Y) == ORIENTATION_FLIP_Y)</a>
+<a name="ln110">      raw_orientation_corrected |= ORIENTATION_FLIP_X;</a>
+<a name="ln111">    else</a>
+<a name="ln112">      raw_orientation_corrected &amp;= ~ORIENTATION_FLIP_X;</a>
+<a name="ln113"> </a>
+<a name="ln114">    if((raw_orientation &amp; ORIENTATION_FLIP_X) == ORIENTATION_FLIP_X)</a>
+<a name="ln115">      raw_orientation_corrected |= ORIENTATION_FLIP_Y;</a>
+<a name="ln116">    else</a>
+<a name="ln117">      raw_orientation_corrected &amp;= ~ORIENTATION_FLIP_Y;</a>
+<a name="ln118"> </a>
+<a name="ln119">    if((raw_orientation &amp; ORIENTATION_SWAP_XY) == ORIENTATION_SWAP_XY)</a>
+<a name="ln120">      raw_orientation_corrected |= ORIENTATION_SWAP_XY;</a>
+<a name="ln121">  }</a>
+<a name="ln122"> </a>
+<a name="ln123">  // and now we can automagically compute new new flip</a>
+<a name="ln124">  return raw_orientation_corrected ^ user_orientation;</a>
+<a name="ln125">}</a>
+<a name="ln126"> </a>
+<a name="ln127">int legacy_params(dt_iop_module_t *self, const void *const old_params, const int old_version,</a>
+<a name="ln128">                  void *new_params, const int new_version)</a>
+<a name="ln129">{</a>
+<a name="ln130">  if(old_version == 1 &amp;&amp; new_version == 2)</a>
+<a name="ln131">  {</a>
+<a name="ln132">    typedef struct dt_iop_flip_params_v1_t</a>
+<a name="ln133">    {</a>
+<a name="ln134">      int32_t orientation;</a>
+<a name="ln135">    } dt_iop_flip_params_v1_t;</a>
+<a name="ln136"> </a>
+<a name="ln137">    const dt_iop_flip_params_v1_t *old = (dt_iop_flip_params_v1_t *)old_params;</a>
+<a name="ln138">    dt_iop_flip_params_t *n = (dt_iop_flip_params_t *)new_params;</a>
+<a name="ln139">    const dt_iop_flip_params_t *d = (dt_iop_flip_params_t *)self-&gt;default_params;</a>
+<a name="ln140"> </a>
+<a name="ln141">    *n = *d; // start with a fresh copy of default parameters</a>
+<a name="ln142"> </a>
+<a name="ln143">    // we might be called from presets update infrastructure =&gt; there is no image</a>
+<a name="ln144">    dt_image_orientation_t image_orientation = ORIENTATION_NONE;</a>
+<a name="ln145"> </a>
+<a name="ln146">    if(self-&gt;dev)</a>
+<a name="ln147">      image_orientation = dt_image_orientation(&amp;self-&gt;dev-&gt;image_storage);</a>
+<a name="ln148"> </a>
+<a name="ln149">    n-&gt;orientation = merge_two_orientations(image_orientation,</a>
+<a name="ln150">                                            (dt_image_orientation_t)(old-&gt;orientation));</a>
+<a name="ln151"> </a>
+<a name="ln152">    return 0;</a>
+<a name="ln153">  }</a>
+<a name="ln154">  return 1;</a>
+<a name="ln155">}</a>
+<a name="ln156"> </a>
+<a name="ln157">static void backtransform(const int32_t *x, int32_t *o, const dt_image_orientation_t orientation, int32_t iw,</a>
+<a name="ln158">                          int32_t ih)</a>
+<a name="ln159">{</a>
+<a name="ln160">  if(orientation &amp; ORIENTATION_SWAP_XY)</a>
+<a name="ln161">  {</a>
+<a name="ln162">    o[1] = x[0];</a>
+<a name="ln163">    o[0] = x[1];</a>
+<a name="ln164">    const int32_t tmp = iw;</a>
+<a name="ln165">    iw = ih;</a>
+<a name="ln166">    ih = tmp;</a>
+<a name="ln167">  }</a>
+<a name="ln168">  else</a>
+<a name="ln169">  {</a>
+<a name="ln170">    o[0] = x[0];</a>
+<a name="ln171">    o[1] = x[1];</a>
+<a name="ln172">  }</a>
+<a name="ln173">  if(orientation &amp; ORIENTATION_FLIP_X)</a>
+<a name="ln174">  {</a>
+<a name="ln175">    o[0] = iw - o[0] - 1;</a>
+<a name="ln176">  }</a>
+<a name="ln177">  if(orientation &amp; ORIENTATION_FLIP_Y)</a>
+<a name="ln178">  {</a>
+<a name="ln179">    o[1] = ih - o[1] - 1;</a>
+<a name="ln180">  }</a>
+<a name="ln181">}</a>
+<a name="ln182"> </a>
+<a name="ln183">int distort_transform(dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, float *points, size_t points_count)</a>
+<a name="ln184">{</a>
+<a name="ln185">  // if (!self-&gt;enabled) return 2;</a>
+<a name="ln186">  const dt_iop_flip_data_t *d = (dt_iop_flip_data_t *)piece-&gt;data;</a>
+<a name="ln187"> </a>
+<a name="ln188">  float x, y;</a>
+<a name="ln189"> </a>
+<a name="ln190">  for(size_t i = 0; i &lt; points_count * 2; i += 2)</a>
+<a name="ln191">  {</a>
+<a name="ln192">    x = points[i];</a>
+<a name="ln193">    y = points[i + 1];</a>
+<a name="ln194">    if(d-&gt;orientation &amp; ORIENTATION_FLIP_X) x = piece-&gt;buf_in.width - points[i];</a>
+<a name="ln195">    if(d-&gt;orientation &amp; ORIENTATION_FLIP_Y) y = piece-&gt;buf_in.height - points[i + 1];</a>
+<a name="ln196">    if(d-&gt;orientation &amp; ORIENTATION_SWAP_XY)</a>
+<a name="ln197">    {</a>
+<a name="ln198">      const float yy = y;</a>
+<a name="ln199">      y = x;</a>
+<a name="ln200">      x = yy;</a>
+<a name="ln201">    }</a>
+<a name="ln202">    points[i] = x;</a>
+<a name="ln203">    points[i + 1] = y;</a>
+<a name="ln204">  }</a>
+<a name="ln205"> </a>
+<a name="ln206">  return 1;</a>
+<a name="ln207">}</a>
+<a name="ln208">int distort_backtransform(dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, float *points,</a>
+<a name="ln209">                          size_t points_count)</a>
+<a name="ln210">{</a>
+<a name="ln211">  // if (!self-&gt;enabled) return 2;</a>
+<a name="ln212">  const dt_iop_flip_data_t *d = (dt_iop_flip_data_t *)piece-&gt;data;</a>
+<a name="ln213"> </a>
+<a name="ln214">  float x, y;</a>
+<a name="ln215"> </a>
+<a name="ln216">  for(size_t i = 0; i &lt; points_count * 2; i += 2)</a>
+<a name="ln217">  {</a>
+<a name="ln218">    if(d-&gt;orientation &amp; ORIENTATION_SWAP_XY)</a>
+<a name="ln219">    {</a>
+<a name="ln220">      y = points[i];</a>
+<a name="ln221">      x = points[i + 1];</a>
+<a name="ln222">    }</a>
+<a name="ln223">    else</a>
+<a name="ln224">    {</a>
+<a name="ln225">      x = points[i];</a>
+<a name="ln226">      y = points[i + 1];</a>
+<a name="ln227">    }</a>
+<a name="ln228">    if(d-&gt;orientation &amp; ORIENTATION_FLIP_X) x = piece-&gt;buf_in.width - x;</a>
+<a name="ln229">    if(d-&gt;orientation &amp; ORIENTATION_FLIP_Y) y = piece-&gt;buf_in.height - y;</a>
+<a name="ln230"> </a>
+<a name="ln231">    points[i] = x;</a>
+<a name="ln232">    points[i + 1] = y;</a>
+<a name="ln233">  }</a>
+<a name="ln234"> </a>
+<a name="ln235">  return 1;</a>
+<a name="ln236">}</a>
+<a name="ln237"> </a>
+<a name="ln238">void distort_mask(struct dt_iop_module_t *self, struct dt_dev_pixelpipe_iop_t *piece, const float *const in,</a>
+<a name="ln239">                  float *const out, const dt_iop_roi_t *const roi_in, const dt_iop_roi_t *const roi_out)</a>
+<a name="ln240">{</a>
+<a name="ln241">  const dt_iop_flip_data_t *d = (dt_iop_flip_data_t *)piece-&gt;data;</a>
+<a name="ln242"> </a>
+<a name="ln243">  const int bpp = sizeof(float);</a>
+<a name="ln244">  const int stride = bpp * roi_in-&gt;width;</a>
+<a name="ln245"> </a>
+<a name="ln246">  dt_imageio_flip_buffers((char *)out, (const char *)in, bpp, roi_in-&gt;width, roi_in-&gt;height,</a>
+<a name="ln247">                          roi_in-&gt;width, roi_in-&gt;height, stride, d-&gt;orientation);</a>
+<a name="ln248">}</a>
+<a name="ln249"> </a>
+<a name="ln250">// 1st pass: how large would the output be, given this input roi?</a>
+<a name="ln251">// this is always called with the full buffer before processing.</a>
+<a name="ln252">void modify_roi_out(struct dt_iop_module_t *self, struct dt_dev_pixelpipe_iop_t *piece, dt_iop_roi_t *roi_out,</a>
+<a name="ln253">                    const dt_iop_roi_t *roi_in)</a>
+<a name="ln254">{</a>
+<a name="ln255">  const dt_iop_flip_data_t *d = (dt_iop_flip_data_t *)piece-&gt;data;</a>
+<a name="ln256">  *roi_out = *roi_in;</a>
+<a name="ln257"> </a>
+<a name="ln258">  // transform whole buffer roi</a>
+<a name="ln259">  if(d-&gt;orientation &amp; ORIENTATION_SWAP_XY)</a>
+<a name="ln260">  {</a>
+<a name="ln261">    roi_out-&gt;width = roi_in-&gt;height;</a>
+<a name="ln262">    roi_out-&gt;height = roi_in-&gt;width;</a>
+<a name="ln263">  }</a>
+<a name="ln264">}</a>
+<a name="ln265"> </a>
+<a name="ln266">// 2nd pass: which roi would this operation need as input to fill the given output region?</a>
+<a name="ln267">void modify_roi_in(struct dt_iop_module_t *self, struct dt_dev_pixelpipe_iop_t *piece,</a>
+<a name="ln268">                   const dt_iop_roi_t *roi_out, dt_iop_roi_t *roi_in)</a>
+<a name="ln269">{</a>
+<a name="ln270">  const dt_iop_flip_data_t *d = (dt_iop_flip_data_t *)piece-&gt;data;</a>
+<a name="ln271">  *roi_in = *roi_out;</a>
+<a name="ln272">  // transform aabb back to roi_in</a>
+<a name="ln273"> </a>
+<a name="ln274">  // this aabb contains all valid points (thus the -1)</a>
+<a name="ln275">  int32_t p[2], o[2],</a>
+<a name="ln276">      aabb[4] = { roi_out-&gt;x, roi_out-&gt;y, roi_out-&gt;x + roi_out-&gt;width - 1, roi_out-&gt;y + roi_out-&gt;height - 1 };</a>
+<a name="ln277">  int32_t aabb_in[4] = { INT_MAX, INT_MAX, INT_MIN, INT_MIN };</a>
+<a name="ln278">  for(int c = 0; c &lt; 4; c++)</a>
+<a name="ln279">  {</a>
+<a name="ln280">    // get corner points of roi_out</a>
+<a name="ln281">    get_corner(aabb, c, p);</a>
+<a name="ln282">    // backtransform aabb</a>
+<a name="ln283">    backtransform(p, o, d-&gt;orientation, piece-&gt;buf_out.width * roi_out-&gt;scale,</a>
+<a name="ln284">                  piece-&gt;buf_out.height * roi_out-&gt;scale);</a>
+<a name="ln285">    // transform to roi_in space, get aabb.</a>
+<a name="ln286">    adjust_aabb(o, aabb_in);</a>
+<a name="ln287">  }</a>
+<a name="ln288"> </a>
+<a name="ln289">  // adjust roi_in to minimally needed region</a>
+<a name="ln290">  roi_in-&gt;x = aabb_in[0];</a>
+<a name="ln291">  roi_in-&gt;y = aabb_in[1];</a>
+<a name="ln292">  // to convert valid points to widths, we need to add one</a>
+<a name="ln293">  roi_in-&gt;width = aabb_in[2] - aabb_in[0] + 1;</a>
+<a name="ln294">  roi_in-&gt;height = aabb_in[3] - aabb_in[1] + 1;</a>
+<a name="ln295"> </a>
+<a name="ln296">  // sanity check.</a>
+<a name="ln297">  float w = piece-&gt;buf_in.width * roi_out-&gt;scale, h = piece-&gt;buf_in.height * roi_out-&gt;scale;</a>
+<a name="ln298">  roi_in-&gt;x = CLAMP(roi_in-&gt;x, 0, (int)floorf(w));</a>
+<a name="ln299">  roi_in-&gt;y = CLAMP(roi_in-&gt;y, 0, (int)floorf(h));</a>
+<a name="ln300">  roi_in-&gt;width = CLAMP(roi_in-&gt;width, 1, (int)ceilf(w) - roi_in-&gt;x);</a>
+<a name="ln301">  roi_in-&gt;height = CLAMP(roi_in-&gt;height, 1, (int)ceilf(h) - roi_in-&gt;y);</a>
+<a name="ln302">}</a>
+<a name="ln303"> </a>
+<a name="ln304">// 3rd (final) pass: you get this input region (may be different from what was requested above),</a>
+<a name="ln305">// do your best to fill the output region!</a>
+<a name="ln306">void process(struct dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, const void *const ivoid,</a>
+<a name="ln307">             void *const ovoid, const dt_iop_roi_t *const roi_in, const dt_iop_roi_t *const roi_out)</a>
+<a name="ln308">{</a>
+<a name="ln309">  const dt_iop_flip_data_t *d = (dt_iop_flip_data_t *)piece-&gt;data;</a>
+<a name="ln310"> </a>
+<a name="ln311">  const int bpp = sizeof(float) * piece-&gt;colors;</a>
+<a name="ln312">  const int stride = bpp * roi_in-&gt;width;</a>
+<a name="ln313"> </a>
+<a name="ln314">  dt_imageio_flip_buffers((char *)ovoid, (const char *)ivoid, bpp, roi_in-&gt;width, roi_in-&gt;height,</a>
+<a name="ln315">                          roi_in-&gt;width, roi_in-&gt;height, stride, d-&gt;orientation);</a>
+<a name="ln316">}</a>
+<a name="ln317"> </a>
+<a name="ln318">#ifdef HAVE_OPENCL</a>
+<a name="ln319">int process_cl(struct dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, cl_mem dev_in, cl_mem dev_out,</a>
+<a name="ln320">               const dt_iop_roi_t *const roi_in, const dt_iop_roi_t *const roi_out)</a>
+<a name="ln321">{</a>
+<a name="ln322">  const dt_iop_flip_data_t *data = (dt_iop_flip_data_t *)piece-&gt;data;</a>
+<a name="ln323">  const dt_iop_flip_global_data_t *gd = (dt_iop_flip_global_data_t *)self-&gt;data;</a>
+<a name="ln324">  cl_int err = -999;</a>
+<a name="ln325"> </a>
+<a name="ln326">  const int devid = piece-&gt;pipe-&gt;devid;</a>
+<a name="ln327">  const int width = roi_in-&gt;width;</a>
+<a name="ln328">  const int height = roi_in-&gt;height;</a>
+<a name="ln329">  const int orientation = data-&gt;orientation;</a>
+<a name="ln330"> </a>
+<a name="ln331">  size_t sizes[] = { ROUNDUPWD(width), ROUNDUPWD(height), 1 };</a>
+<a name="ln332"> </a>
+<a name="ln333">  dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_flip, 0, sizeof(cl_mem), (void *)&amp;dev_in);</a>
+<a name="ln334">  dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_flip, 1, sizeof(cl_mem), (void *)&amp;dev_out);</a>
+<a name="ln335">  dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_flip, 2, sizeof(int), (void *)&amp;width);</a>
+<a name="ln336">  dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_flip, 3, sizeof(int), (void *)&amp;height);</a>
+<a name="ln337">  dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_flip, 4, sizeof(int), (void *)&amp;orientation);</a>
+<a name="ln338">  err = dt_opencl_enqueue_kernel_2d(devid, gd-&gt;kernel_flip, sizes);</a>
+<a name="ln339"> </a>
+<a name="ln340">  if(err != CL_SUCCESS) goto error;</a>
+<a name="ln341">  return TRUE;</a>
+<a name="ln342"> </a>
+<a name="ln343">error:</a>
+<a name="ln344">  dt_print(DT_DEBUG_OPENCL, &quot;[opencl_flip] couldn't enqueue kernel! %d\n&quot;, err);</a>
+<a name="ln345">  return FALSE;</a>
+<a name="ln346">}</a>
+<a name="ln347">#endif</a>
+<a name="ln348"> </a>
+<a name="ln349">void init_global(dt_iop_module_so_t *self)</a>
+<a name="ln350">{</a>
+<a name="ln351">  const int program = 2; // basic.cl, from programs.conf</a>
+<a name="ln352">  dt_iop_flip_global_data_t *gd = (dt_iop_flip_global_data_t *)malloc(sizeof(dt_iop_flip_global_data_t));</a>
+<a name="ln353">  self-&gt;data = gd;</a>
+<a name="ln354">  gd-&gt;kernel_flip = dt_opencl_create_kernel(program, &quot;flip&quot;);</a>
+<a name="ln355">}</a>
+<a name="ln356"> </a>
+<a name="ln357">void cleanup_global(dt_iop_module_so_t *self)</a>
+<a name="ln358">{</a>
+<a name="ln359">  const dt_iop_flip_global_data_t *gd = (dt_iop_flip_global_data_t *)self-&gt;data;</a>
+<a name="ln360">  dt_opencl_free_kernel(gd-&gt;kernel_flip);</a>
+<a name="ln361">  free(self-&gt;data);</a>
+<a name="ln362">  self-&gt;data = NULL;</a>
+<a name="ln363">}</a>
+<a name="ln364"> </a>
+<a name="ln365">void commit_params(struct dt_iop_module_t *self, dt_iop_params_t *p1, dt_dev_pixelpipe_t *pipe,</a>
+<a name="ln366">                   dt_dev_pixelpipe_iop_t *piece)</a>
+<a name="ln367">{</a>
+<a name="ln368">  const dt_iop_flip_params_t *p = (dt_iop_flip_params_t *)p1;</a>
+<a name="ln369">  dt_iop_flip_data_t *d = (dt_iop_flip_data_t *)piece-&gt;data;</a>
+<a name="ln370"> </a>
+<a name="ln371">  if(p-&gt;orientation == ORIENTATION_NULL)</a>
+<a name="ln372">    d-&gt;orientation = dt_image_orientation(&amp;self-&gt;dev-&gt;image_storage);</a>
+<a name="ln373">  else</a>
+<a name="ln374">    d-&gt;orientation = p-&gt;orientation;</a>
+<a name="ln375"> </a>
+<a name="ln376">  if(d-&gt;orientation == ORIENTATION_NONE) piece-&gt;enabled = 0;</a>
+<a name="ln377">}</a>
+<a name="ln378"> </a>
+<a name="ln379">void init_pipe(struct dt_iop_module_t *self, dt_dev_pixelpipe_t *pipe, dt_dev_pixelpipe_iop_t *piece)</a>
+<a name="ln380">{</a>
+<a name="ln381">  piece-&gt;data = malloc(sizeof(dt_iop_flip_data_t));</a>
+<a name="ln382">  self-&gt;commit_params(self, self-&gt;default_params, pipe, piece);</a>
+<a name="ln383">}</a>
+<a name="ln384"> </a>
+<a name="ln385">void cleanup_pipe(struct dt_iop_module_t *self, dt_dev_pixelpipe_t *pipe, dt_dev_pixelpipe_iop_t *piece)</a>
+<a name="ln386">{</a>
+<a name="ln387">  free(piece-&gt;data);</a>
+<a name="ln388">  piece-&gt;data = NULL;</a>
+<a name="ln389">}</a>
+<a name="ln390"> </a>
+<a name="ln391">void init_presets(dt_iop_module_so_t *self)</a>
+<a name="ln392">{</a>
+<a name="ln393">  dt_iop_flip_params_t p = (dt_iop_flip_params_t){ ORIENTATION_NONE };</a>
+<a name="ln394">  DT_DEBUG_SQLITE3_EXEC(dt_database_get(darktable.db), &quot;BEGIN&quot;, NULL, NULL, NULL);</a>
+<a name="ln395"> </a>
+<a name="ln396">  p.orientation = ORIENTATION_NULL;</a>
+<a name="ln397">  dt_gui_presets_add_generic(_(&quot;autodetect&quot;), self-&gt;op, self-&gt;version(), &amp;p, sizeof(p), 1);</a>
+<a name="ln398">  dt_gui_presets_update_autoapply(_(&quot;autodetect&quot;), self-&gt;op, self-&gt;version(), 1);</a>
+<a name="ln399"> </a>
+<a name="ln400">  p.orientation = ORIENTATION_NONE;</a>
+<a name="ln401">  dt_gui_presets_add_generic(_(&quot;no rotation&quot;), self-&gt;op, self-&gt;version(), &amp;p, sizeof(p), 1);</a>
+<a name="ln402"> </a>
+<a name="ln403">  p.orientation = ORIENTATION_FLIP_HORIZONTALLY;</a>
+<a name="ln404">  dt_gui_presets_add_generic(_(&quot;flip horizontally&quot;), self-&gt;op, self-&gt;version(), &amp;p, sizeof(p), 1);</a>
+<a name="ln405">  p.orientation = ORIENTATION_FLIP_VERTICALLY;</a>
+<a name="ln406">  dt_gui_presets_add_generic(_(&quot;flip vertically&quot;), self-&gt;op, self-&gt;version(), &amp;p, sizeof(p), 1);</a>
+<a name="ln407">  p.orientation = ORIENTATION_ROTATE_CW_90_DEG;</a>
+<a name="ln408">  dt_gui_presets_add_generic(_(&quot;rotate by -90 degrees&quot;), self-&gt;op, self-&gt;version(), &amp;p, sizeof(p), 1);</a>
+<a name="ln409">  p.orientation = ORIENTATION_ROTATE_CCW_90_DEG;</a>
+<a name="ln410">  dt_gui_presets_add_generic(_(&quot;rotate by  90 degrees&quot;), self-&gt;op, self-&gt;version(), &amp;p, sizeof(p), 1);</a>
+<a name="ln411">  p.orientation = ORIENTATION_ROTATE_180_DEG;</a>
+<a name="ln412">  dt_gui_presets_add_generic(_(&quot;rotate by 180 degrees&quot;), self-&gt;op, self-&gt;version(), &amp;p, sizeof(p), 1);</a>
+<a name="ln413"> </a>
+<a name="ln414">  DT_DEBUG_SQLITE3_EXEC(dt_database_get(darktable.db), &quot;COMMIT&quot;, NULL, NULL, NULL);</a>
+<a name="ln415">}</a>
+<a name="ln416"> </a>
+<a name="ln417">void reload_defaults(dt_iop_module_t *self)</a>
+<a name="ln418">{</a>
+<a name="ln419">  dt_iop_flip_params_t tmp = (dt_iop_flip_params_t){ .orientation = ORIENTATION_NULL };</a>
+<a name="ln420"> </a>
+<a name="ln421">  // we might be called from presets update infrastructure =&gt; there is no image</a>
+<a name="ln422">  if(!self-&gt;dev) goto end;</a>
+<a name="ln423"> </a>
+<a name="ln424">  self-&gt;default_enabled = 1;</a>
+<a name="ln425"> </a>
+<a name="ln426">  if(self-&gt;dev-&gt;image_storage.legacy_flip.user_flip != 0</a>
+<a name="ln427">     &amp;&amp; self-&gt;dev-&gt;image_storage.legacy_flip.user_flip != 0xff)</a>
+<a name="ln428">  {</a>
+<a name="ln429">    sqlite3_stmt *stmt;</a>
+<a name="ln430">    DT_DEBUG_SQLITE3_PREPARE_V2(dt_database_get(darktable.db),</a>
+<a name="ln431">                                &quot;SELECT * FROM main.history WHERE imgid = ?1 AND operation = 'flip'&quot;, -1, &amp;stmt,</a>
+<a name="ln432">                                NULL);</a>
+<a name="ln433">    DT_DEBUG_SQLITE3_BIND_INT(stmt, 1, self-&gt;dev-&gt;image_storage.id);</a>
+<a name="ln434">    if(sqlite3_step(stmt) != SQLITE_ROW)</a>
+<a name="ln435">    {</a>
+<a name="ln436">      // convert the old legacy flip bits to a proper parameter set:</a>
+<a name="ln437">      self-&gt;default_enabled = 1;</a>
+<a name="ln438">      tmp.orientation</a>
+<a name="ln439">          = merge_two_orientations(dt_image_orientation(&amp;self-&gt;dev-&gt;image_storage),</a>
+<a name="ln440">                                   (dt_image_orientation_t)(self-&gt;dev-&gt;image_storage.legacy_flip.user_flip));</a>
+<a name="ln441">    }</a>
+<a name="ln442">    sqlite3_finalize(stmt);</a>
+<a name="ln443">  }</a>
+<a name="ln444"> </a>
+<a name="ln445">end:</a>
+<a name="ln446">  memcpy(self-&gt;params, &amp;tmp, sizeof(dt_iop_flip_params_t));</a>
+<a name="ln447">  memcpy(self-&gt;default_params, &amp;tmp, sizeof(dt_iop_flip_params_t));</a>
+<a name="ln448">}</a>
+<a name="ln449"> </a>
+<a name="ln450">void gui_update(struct dt_iop_module_t *self)</a>
+<a name="ln451">{</a>
+<a name="ln452">  // nothing to do</a>
+<a name="ln453">}</a>
+<a name="ln454"> </a>
+<a name="ln455">void init(dt_iop_module_t *module)</a>
+<a name="ln456">{</a>
+<a name="ln457">  // module-&gt;data = malloc(sizeof(dt_iop_flip_data_t));</a>
+<a name="ln458">  module-&gt;params = calloc(1, sizeof(dt_iop_flip_params_t));</a>
+<a name="ln459">  module-&gt;default_params = calloc(1, sizeof(dt_iop_flip_params_t));</a>
+<a name="ln460">  module-&gt;default_enabled = 1;</a>
+<a name="ln461">  module-&gt;params_size = sizeof(dt_iop_flip_params_t);</a>
+<a name="ln462">  module-&gt;gui_data = NULL;</a>
+<a name="ln463">}</a>
+<a name="ln464"> </a>
+<a name="ln465">void cleanup(dt_iop_module_t *module)</a>
+<a name="ln466">{</a>
+<a name="ln467">  free(module-&gt;params);</a>
+<a name="ln468">  module-&gt;params = NULL;</a>
+<a name="ln469">}</a>
+<a name="ln470"> </a>
+<a name="ln471">static void do_rotate(dt_iop_module_t *self, uint32_t cw)</a>
+<a name="ln472">{</a>
+<a name="ln473">  dt_iop_flip_params_t *p = (dt_iop_flip_params_t *)self-&gt;params;</a>
+<a name="ln474">  dt_image_orientation_t orientation = p-&gt;orientation;</a>
+<a name="ln475"> </a>
+<a name="ln476">  if(orientation == ORIENTATION_NULL) orientation = dt_image_orientation(&amp;self-&gt;dev-&gt;image_storage);</a>
+<a name="ln477"> </a>
+<a name="ln478">  if(cw == 0)</a>
+<a name="ln479">  {</a>
+<a name="ln480">    if(orientation &amp; ORIENTATION_SWAP_XY)</a>
+<a name="ln481">      orientation ^= ORIENTATION_FLIP_Y;</a>
+<a name="ln482">    else</a>
+<a name="ln483">      orientation ^= ORIENTATION_FLIP_X;</a>
+<a name="ln484">  }</a>
+<a name="ln485">  else</a>
+<a name="ln486">  {</a>
+<a name="ln487">    if(orientation &amp; ORIENTATION_SWAP_XY)</a>
+<a name="ln488">      orientation ^= ORIENTATION_FLIP_X;</a>
+<a name="ln489">    else</a>
+<a name="ln490">      orientation ^= ORIENTATION_FLIP_Y;</a>
+<a name="ln491">  }</a>
+<a name="ln492">  orientation ^= ORIENTATION_SWAP_XY;</a>
+<a name="ln493"> </a>
+<a name="ln494">  p-&gt;orientation = orientation;</a>
+<a name="ln495">  dt_dev_add_history_item(darktable.develop, self, TRUE);</a>
+<a name="ln496">}</a>
+<a name="ln497">static void rotate_cw(GtkWidget *widget, dt_iop_module_t *self)</a>
+<a name="ln498">{</a>
+<a name="ln499">  do_rotate(self, 1);</a>
+<a name="ln500">}</a>
+<a name="ln501">static void rotate_ccw(GtkWidget *widget, dt_iop_module_t *self)</a>
+<a name="ln502">{</a>
+<a name="ln503">  do_rotate(self, 0);</a>
+<a name="ln504">}</a>
+<a name="ln505">static gboolean rotate_cw_key(GtkAccelGroup *accel_group, GObject *acceleratable, guint keyval,</a>
+<a name="ln506">                              GdkModifierType modifier, dt_iop_module_t *self)</a>
+<a name="ln507">{</a>
+<a name="ln508">  do_rotate(self, 1);</a>
+<a name="ln509">  return TRUE;</a>
+<a name="ln510">}</a>
+<a name="ln511">static gboolean rotate_ccw_key(GtkAccelGroup *accel_group, GObject *acceleratable, guint keyval,</a>
+<a name="ln512">                               GdkModifierType modifier, dt_iop_module_t *self)</a>
+<a name="ln513">{</a>
+<a name="ln514">  do_rotate(self, 0);</a>
+<a name="ln515">  return TRUE;</a>
+<a name="ln516">}</a>
+<a name="ln517"> </a>
+<a name="ln518">void gui_init(struct dt_iop_module_t *self)</a>
+<a name="ln519">{</a>
+<a name="ln520">  self-&gt;gui_data = NULL;</a>
+<a name="ln521">  dt_iop_flip_params_t *p = (dt_iop_flip_params_t *)self-&gt;params;</a>
+<a name="ln522"> </a>
+<a name="ln523">  self-&gt;widget = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);</a>
+<a name="ln524">  dt_gui_add_help_link(self-&gt;widget, dt_get_help_url(self-&gt;op));</a>
+<a name="ln525"> </a>
+<a name="ln526">  GtkWidget *label = dtgtk_reset_label_new(_(&quot;rotate&quot;), self, &amp;p-&gt;orientation, sizeof(int32_t));</a>
+<a name="ln527">  gtk_box_pack_start(GTK_BOX(self-&gt;widget), label, TRUE, TRUE, 0);</a>
+<a name="ln528"> </a>
+<a name="ln529">  GtkWidget *button = dtgtk_button_new(dtgtk_cairo_paint_refresh, CPF_STYLE_FLAT | CPF_DO_NOT_USE_BORDER, NULL);</a>
+<a name="ln530">  gtk_widget_set_tooltip_text(button, _(&quot;rotate 90 degrees CCW&quot;));</a>
+<a name="ln531">  gtk_box_pack_start(GTK_BOX(self-&gt;widget), button, TRUE, TRUE, 0);</a>
+<a name="ln532">  g_signal_connect(G_OBJECT(button), &quot;clicked&quot;, G_CALLBACK(rotate_ccw), (gpointer)self);</a>
+<a name="ln533"> </a>
+<a name="ln534">  button = dtgtk_button_new(dtgtk_cairo_paint_refresh, CPF_STYLE_FLAT | CPF_DO_NOT_USE_BORDER | 1, NULL);</a>
+<a name="ln535">  gtk_widget_set_tooltip_text(button, _(&quot;rotate 90 degrees CW&quot;));</a>
+<a name="ln536">  gtk_box_pack_start(GTK_BOX(self-&gt;widget), button, TRUE, TRUE, 0);</a>
+<a name="ln537">  g_signal_connect(G_OBJECT(button), &quot;clicked&quot;, G_CALLBACK(rotate_cw), (gpointer)self);</a>
+<a name="ln538">}</a>
+<a name="ln539"> </a>
+<a name="ln540">void gui_cleanup(struct dt_iop_module_t *self)</a>
+<a name="ln541">{</a>
+<a name="ln542">  self-&gt;gui_data = NULL;</a>
+<a name="ln543">}</a>
+<a name="ln544"> </a>
+<a name="ln545">void init_key_accels(dt_iop_module_so_t *self)</a>
+<a name="ln546">{</a>
+<a name="ln547">  dt_accel_register_iop(self, TRUE, NC_(&quot;accel&quot;, &quot;rotate 90 degrees CCW&quot;), GDK_KEY_bracketleft, 0);</a>
+<a name="ln548">  dt_accel_register_iop(self, TRUE, NC_(&quot;accel&quot;, &quot;rotate 90 degrees CW&quot;), GDK_KEY_bracketright, 0);</a>
+<a name="ln549">}</a>
+<a name="ln550"> </a>
+<a name="ln551">void connect_key_accels(dt_iop_module_t *self)</a>
+<a name="ln552">{</a>
+<a name="ln553">  GClosure *closure;</a>
+<a name="ln554">  closure = g_cclosure_new(G_CALLBACK(rotate_cw_key), (gpointer)self, NULL);</a>
+<a name="ln555">  dt_accel_connect_iop(self, &quot;rotate 90 degrees CW&quot;, closure);</a>
+<a name="ln556">  closure = g_cclosure_new(G_CALLBACK(rotate_ccw_key), (gpointer)self, NULL);</a>
+<a name="ln557">  dt_accel_connect_iop(self, &quot;rotate 90 degrees CCW&quot;, closure);</a>
+<a name="ln558">}</a>
+<a name="ln559"> </a>
+<a name="ln560">// modelines: These editor modelines have been set for all relevant files by tools/update_modelines.sh</a>
+<a name="ln561">// vim: shiftwidth=2 expandtab tabstop=2 cindent</a>
+<a name="ln562">// kate: tab-indents: off; indent-width 2; replace-tabs on; indent-mode cstyle; remove-trailing-spaces modified;</a>
+
+</code></pre>
+<div class="balloon" rel="354"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v522/" target="_blank">V522</a> There might be dereferencing of a potential null pointer 'gd'. Check lines: 354, 352.</p></div>
+
+<link rel="stylesheet" href="highlight.css">
+<script src="highlight.pack.js"></script>
+<script src="highlightjs-line-numbers.js"></script>
+<script>hljs.initHighlightingOnLoad();</script>
+<script>hljs.initLineNumbersOnLoad();</script>
+<script>
+  $(document).ready(function() {
+      $('.balloon').each(function () {
+          var bl = $(this);
+          var line = bl.attr('rel');
+          var text = $('a[name="ln'+line+'"]').text();
+
+          var space_count = 0;
+          for(var i = 0; i<text.length; i++){
+              var char = text[i];
+              if((char !== ' ')&&(char !== '\t'))break;
+              if(char === '\t')space_count++;
+              space_count++;
+          }
+
+          bl.css('margin-left', space_count*8);
+          $('a[name="ln'+line+'"]').after(bl);
+      });
+
+      window.location = window.location;
+  });
+</script>
+</body>
+</html>

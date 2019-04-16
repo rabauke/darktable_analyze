@@ -1,0 +1,2903 @@
+
+<html>
+<head>
+  <link rel="stylesheet" href="../style.css"/>
+  <script src="../jquery-3.2.1.min.js"></script>
+</head>
+<body>
+<pre><code class = "cpp">
+<a name="ln1">/*</a>
+<a name="ln2">    This file is part of darktable,</a>
+<a name="ln3">    copyright (c) 2009--2010 johannes hanika.</a>
+<a name="ln4">    copyright (c) 2011 henrik andersson.</a>
+<a name="ln5">    copyright (c) 2016 Roman Lebedev.</a>
+<a name="ln6"> </a>
+<a name="ln7">    darktable is free software: you can redistribute it and/or modify</a>
+<a name="ln8">    it under the terms of the GNU General Public License as published by</a>
+<a name="ln9">    the Free Software Foundation, either version 3 of the License, or</a>
+<a name="ln10">    (at your option) any later version.</a>
+<a name="ln11"> </a>
+<a name="ln12">    darktable is distributed in the hope that it will be useful,</a>
+<a name="ln13">    but WITHOUT ANY WARRANTY; without even the implied warranty of</a>
+<a name="ln14">    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the</a>
+<a name="ln15">    GNU General Public License for more details.</a>
+<a name="ln16"> </a>
+<a name="ln17">    You should have received a copy of the GNU General Public License</a>
+<a name="ln18">    along with darktable.  If not, see &lt;http://www.gnu.org/licenses/&gt;.</a>
+<a name="ln19">*/</a>
+<a name="ln20">#include &quot;common/color_picker.h&quot;</a>
+<a name="ln21">#include &quot;common/colorspaces.h&quot;</a>
+<a name="ln22">#include &quot;common/histogram.h&quot;</a>
+<a name="ln23">#include &quot;common/imageio.h&quot;</a>
+<a name="ln24">#include &quot;common/opencl.h&quot;</a>
+<a name="ln25">#include &quot;common/iop_order.h&quot;</a>
+<a name="ln26">#include &quot;control/control.h&quot;</a>
+<a name="ln27">#include &quot;control/signal.h&quot;</a>
+<a name="ln28">#include &quot;develop/blend.h&quot;</a>
+<a name="ln29">#include &quot;develop/format.h&quot;</a>
+<a name="ln30">#include &quot;develop/imageop_math.h&quot;</a>
+<a name="ln31">#include &quot;develop/pixelpipe.h&quot;</a>
+<a name="ln32">#include &quot;develop/tiling.h&quot;</a>
+<a name="ln33">#include &quot;develop/masks.h&quot;</a>
+<a name="ln34">#include &quot;gui/gtk.h&quot;</a>
+<a name="ln35">#include &quot;libs/colorpicker.h&quot;</a>
+<a name="ln36">#include &quot;libs/lib.h&quot;</a>
+<a name="ln37">#include &quot;gui/color_picker_proxy.h&quot;</a>
+<a name="ln38"> </a>
+<a name="ln39">#include &lt;assert.h&gt;</a>
+<a name="ln40">#include &lt;math.h&gt;</a>
+<a name="ln41">#include &lt;stdint.h&gt;</a>
+<a name="ln42">#include &lt;stdlib.h&gt;</a>
+<a name="ln43">#include &lt;string.h&gt;</a>
+<a name="ln44">#include &lt;strings.h&gt;</a>
+<a name="ln45">#include &lt;unistd.h&gt;</a>
+<a name="ln46"> </a>
+<a name="ln47">typedef enum dt_pixelpipe_flow_t</a>
+<a name="ln48">{</a>
+<a name="ln49">  PIXELPIPE_FLOW_NONE = 0,</a>
+<a name="ln50">  PIXELPIPE_FLOW_HISTOGRAM_NONE = 1 &lt;&lt; 0,</a>
+<a name="ln51">  PIXELPIPE_FLOW_HISTOGRAM_ON_CPU = 1 &lt;&lt; 1,</a>
+<a name="ln52">  PIXELPIPE_FLOW_HISTOGRAM_ON_GPU = 1 &lt;&lt; 2,</a>
+<a name="ln53">  PIXELPIPE_FLOW_PROCESSED_ON_CPU = 1 &lt;&lt; 3,</a>
+<a name="ln54">  PIXELPIPE_FLOW_PROCESSED_ON_GPU = 1 &lt;&lt; 4,</a>
+<a name="ln55">  PIXELPIPE_FLOW_PROCESSED_WITH_TILING = 1 &lt;&lt; 5,</a>
+<a name="ln56">  PIXELPIPE_FLOW_BLENDED_ON_CPU = 1 &lt;&lt; 6,</a>
+<a name="ln57">  PIXELPIPE_FLOW_BLENDED_ON_GPU = 1 &lt;&lt; 7</a>
+<a name="ln58">} dt_pixelpipe_flow_t;</a>
+<a name="ln59"> </a>
+<a name="ln60">typedef enum dt_pixelpipe_picker_source_t</a>
+<a name="ln61">{</a>
+<a name="ln62">  PIXELPIPE_PICKER_INPUT = 0,</a>
+<a name="ln63">  PIXELPIPE_PICKER_OUTPUT = 1</a>
+<a name="ln64">} dt_pixelpipe_picker_source_t;</a>
+<a name="ln65"> </a>
+<a name="ln66">#include &quot;develop/pixelpipe_cache.c&quot;</a>
+<a name="ln67"> </a>
+<a name="ln68">static void get_output_format(dt_iop_module_t *module, dt_dev_pixelpipe_t *pipe, dt_dev_pixelpipe_iop_t *piece,</a>
+<a name="ln69">                              dt_develop_t *dev, dt_iop_buffer_dsc_t *dsc);</a>
+<a name="ln70"> </a>
+<a name="ln71">static char *_pipe_type_to_str(int pipe_type)</a>
+<a name="ln72">{</a>
+<a name="ln73">  char *r;</a>
+<a name="ln74"> </a>
+<a name="ln75">  switch(pipe_type)</a>
+<a name="ln76">  {</a>
+<a name="ln77">    case DT_DEV_PIXELPIPE_PREVIEW:</a>
+<a name="ln78">      r = &quot;preview&quot;;</a>
+<a name="ln79">      break;</a>
+<a name="ln80">    case DT_DEV_PIXELPIPE_PREVIEW2:</a>
+<a name="ln81">      r = &quot;preview2&quot;;</a>
+<a name="ln82">      break;</a>
+<a name="ln83">    case DT_DEV_PIXELPIPE_FULL:</a>
+<a name="ln84">      r = &quot;full&quot;;</a>
+<a name="ln85">      break;</a>
+<a name="ln86">    case DT_DEV_PIXELPIPE_THUMBNAIL:</a>
+<a name="ln87">      r = &quot;thumbnail&quot;;</a>
+<a name="ln88">      break;</a>
+<a name="ln89">    case DT_DEV_PIXELPIPE_EXPORT:</a>
+<a name="ln90">      r = &quot;export&quot;;</a>
+<a name="ln91">      break;</a>
+<a name="ln92">    default:</a>
+<a name="ln93">      r = &quot;unknown&quot;;</a>
+<a name="ln94">  }</a>
+<a name="ln95">  return r;</a>
+<a name="ln96">}</a>
+<a name="ln97"> </a>
+<a name="ln98">int dt_dev_pixelpipe_init_export(dt_dev_pixelpipe_t *pipe, int32_t width, int32_t height, int levels,</a>
+<a name="ln99">                                 gboolean store_masks)</a>
+<a name="ln100">{</a>
+<a name="ln101">  int res = dt_dev_pixelpipe_init_cached(pipe, 4 * sizeof(float) * width * height, 2);</a>
+<a name="ln102">  pipe-&gt;type = DT_DEV_PIXELPIPE_EXPORT;</a>
+<a name="ln103">  pipe-&gt;levels = levels;</a>
+<a name="ln104">  pipe-&gt;store_all_raster_masks = store_masks;</a>
+<a name="ln105">  return res;</a>
+<a name="ln106">}</a>
+<a name="ln107"> </a>
+<a name="ln108">int dt_dev_pixelpipe_init_thumbnail(dt_dev_pixelpipe_t *pipe, int32_t width, int32_t height)</a>
+<a name="ln109">{</a>
+<a name="ln110">  int res = dt_dev_pixelpipe_init_cached(pipe, 4 * sizeof(float) * width * height, 2);</a>
+<a name="ln111">  pipe-&gt;type = DT_DEV_PIXELPIPE_THUMBNAIL;</a>
+<a name="ln112">  return res;</a>
+<a name="ln113">}</a>
+<a name="ln114"> </a>
+<a name="ln115">int dt_dev_pixelpipe_init_dummy(dt_dev_pixelpipe_t *pipe, int32_t width, int32_t height)</a>
+<a name="ln116">{</a>
+<a name="ln117">  int res = dt_dev_pixelpipe_init_cached(pipe, 4 * sizeof(float) * width * height, 0);</a>
+<a name="ln118">  pipe-&gt;type = DT_DEV_PIXELPIPE_THUMBNAIL;</a>
+<a name="ln119">  return res;</a>
+<a name="ln120">}</a>
+<a name="ln121"> </a>
+<a name="ln122">int dt_dev_pixelpipe_init_preview(dt_dev_pixelpipe_t *pipe)</a>
+<a name="ln123">{</a>
+<a name="ln124">  // don't know which buffer size we're going to need, set to 0 (will be alloced on demand)</a>
+<a name="ln125">  int res = dt_dev_pixelpipe_init_cached(</a>
+<a name="ln126">      pipe, 0, 5);</a>
+<a name="ln127">  pipe-&gt;type = DT_DEV_PIXELPIPE_PREVIEW;</a>
+<a name="ln128">  return res;</a>
+<a name="ln129">}</a>
+<a name="ln130"> </a>
+<a name="ln131">int dt_dev_pixelpipe_init_preview2(dt_dev_pixelpipe_t *pipe)</a>
+<a name="ln132">{</a>
+<a name="ln133">  // don't know which buffer size we're going to need, set to 0 (will be alloced on demand)</a>
+<a name="ln134">  int res = dt_dev_pixelpipe_init_cached(pipe, 0, 5);</a>
+<a name="ln135">  pipe-&gt;type = DT_DEV_PIXELPIPE_PREVIEW2;</a>
+<a name="ln136">  return res;</a>
+<a name="ln137">}</a>
+<a name="ln138"> </a>
+<a name="ln139">int dt_dev_pixelpipe_init(dt_dev_pixelpipe_t *pipe)</a>
+<a name="ln140">{</a>
+<a name="ln141">  // don't know which buffer size we're going to need, set to 0 (will be alloced on demand)</a>
+<a name="ln142">  int res = dt_dev_pixelpipe_init_cached(</a>
+<a name="ln143">      pipe, 0, 5);</a>
+<a name="ln144">  pipe-&gt;type = DT_DEV_PIXELPIPE_FULL;</a>
+<a name="ln145">  return res;</a>
+<a name="ln146">}</a>
+<a name="ln147"> </a>
+<a name="ln148">int dt_dev_pixelpipe_init_cached(dt_dev_pixelpipe_t *pipe, size_t size, int32_t entries)</a>
+<a name="ln149">{</a>
+<a name="ln150">  pipe-&gt;devid = -1;</a>
+<a name="ln151">  pipe-&gt;changed = DT_DEV_PIPE_UNCHANGED;</a>
+<a name="ln152">  pipe-&gt;processed_width = pipe-&gt;backbuf_width = pipe-&gt;iwidth = 0;</a>
+<a name="ln153">  pipe-&gt;processed_height = pipe-&gt;backbuf_height = pipe-&gt;iheight = 0;</a>
+<a name="ln154">  pipe-&gt;nodes = NULL;</a>
+<a name="ln155">  pipe-&gt;backbuf_size = size;</a>
+<a name="ln156">  if(!dt_dev_pixelpipe_cache_init(&amp;(pipe-&gt;cache), entries, pipe-&gt;backbuf_size)) return 0;</a>
+<a name="ln157">  pipe-&gt;cache_obsolete = 0;</a>
+<a name="ln158">  pipe-&gt;backbuf = NULL;</a>
+<a name="ln159">  pipe-&gt;processing = 0;</a>
+<a name="ln160">  pipe-&gt;shutdown = 0;</a>
+<a name="ln161">  pipe-&gt;opencl_error = 0;</a>
+<a name="ln162">  pipe-&gt;tiling = 0;</a>
+<a name="ln163">  pipe-&gt;mask_display = DT_DEV_PIXELPIPE_DISPLAY_NONE;</a>
+<a name="ln164">  pipe-&gt;input_timestamp = 0;</a>
+<a name="ln165">  pipe-&gt;levels = IMAGEIO_RGB | IMAGEIO_INT8;</a>
+<a name="ln166">  dt_pthread_mutex_init(&amp;(pipe-&gt;backbuf_mutex), NULL);</a>
+<a name="ln167">  dt_pthread_mutex_init(&amp;(pipe-&gt;busy_mutex), NULL);</a>
+<a name="ln168">  pipe-&gt;icc_type = DT_COLORSPACE_NONE;</a>
+<a name="ln169">  pipe-&gt;icc_filename = NULL;</a>
+<a name="ln170">  pipe-&gt;icc_intent = DT_INTENT_LAST;</a>
+<a name="ln171">  pipe-&gt;iop = NULL;</a>
+<a name="ln172">  pipe-&gt;iop_order_list = NULL;</a>
+<a name="ln173">  pipe-&gt;forms = NULL;</a>
+<a name="ln174">  pipe-&gt;store_all_raster_masks = FALSE;</a>
+<a name="ln175"> </a>
+<a name="ln176">  return 1;</a>
+<a name="ln177">}</a>
+<a name="ln178"> </a>
+<a name="ln179">void dt_dev_pixelpipe_set_input(dt_dev_pixelpipe_t *pipe, dt_develop_t *dev, float *input, int width, int height,</a>
+<a name="ln180">                                float iscale)</a>
+<a name="ln181">{</a>
+<a name="ln182">  pipe-&gt;iwidth = width;</a>
+<a name="ln183">  pipe-&gt;iheight = height;</a>
+<a name="ln184">  pipe-&gt;iscale = iscale;</a>
+<a name="ln185">  pipe-&gt;input = input;</a>
+<a name="ln186">  pipe-&gt;image = dev-&gt;image_storage;</a>
+<a name="ln187">  get_output_format(NULL, pipe, NULL, dev, &amp;pipe-&gt;dsc);</a>
+<a name="ln188">}</a>
+<a name="ln189"> </a>
+<a name="ln190">void dt_dev_pixelpipe_set_icc(dt_dev_pixelpipe_t *pipe, dt_colorspaces_color_profile_type_t icc_type,</a>
+<a name="ln191">                              const gchar *icc_filename, dt_iop_color_intent_t icc_intent)</a>
+<a name="ln192">{</a>
+<a name="ln193">  pipe-&gt;icc_type = icc_type;</a>
+<a name="ln194">  g_free(pipe-&gt;icc_filename);</a>
+<a name="ln195">  pipe-&gt;icc_filename = g_strdup(icc_filename ? icc_filename : &quot;&quot;);</a>
+<a name="ln196">  pipe-&gt;icc_intent = icc_intent;</a>
+<a name="ln197">}</a>
+<a name="ln198"> </a>
+<a name="ln199">void dt_dev_pixelpipe_cleanup(dt_dev_pixelpipe_t *pipe)</a>
+<a name="ln200">{</a>
+<a name="ln201">  dt_pthread_mutex_lock(&amp;pipe-&gt;backbuf_mutex);</a>
+<a name="ln202">  pipe-&gt;backbuf = NULL;</a>
+<a name="ln203">  // blocks while busy and sets shutdown bit:</a>
+<a name="ln204">  dt_dev_pixelpipe_cleanup_nodes(pipe);</a>
+<a name="ln205">  // so now it's safe to clean up cache:</a>
+<a name="ln206">  dt_dev_pixelpipe_cache_cleanup(&amp;(pipe-&gt;cache));</a>
+<a name="ln207">  dt_pthread_mutex_unlock(&amp;pipe-&gt;backbuf_mutex);</a>
+<a name="ln208">  dt_pthread_mutex_destroy(&amp;(pipe-&gt;backbuf_mutex));</a>
+<a name="ln209">  dt_pthread_mutex_destroy(&amp;(pipe-&gt;busy_mutex));</a>
+<a name="ln210">  pipe-&gt;icc_type = DT_COLORSPACE_NONE;</a>
+<a name="ln211">  g_free(pipe-&gt;icc_filename);</a>
+<a name="ln212">  pipe-&gt;icc_filename = NULL;</a>
+<a name="ln213"> </a>
+<a name="ln214">  if(pipe-&gt;forms)</a>
+<a name="ln215">  {</a>
+<a name="ln216">    g_list_free_full(pipe-&gt;forms, (void (*)(void *))dt_masks_free_form);</a>
+<a name="ln217">    pipe-&gt;forms = NULL;</a>
+<a name="ln218">  }</a>
+<a name="ln219">}</a>
+<a name="ln220"> </a>
+<a name="ln221">void dt_dev_pixelpipe_cleanup_nodes(dt_dev_pixelpipe_t *pipe)</a>
+<a name="ln222">{</a>
+<a name="ln223">  // FIXME: either this or all process() -&gt; gdk mutices have to be changed!</a>
+<a name="ln224">  //        (this is a circular dependency on busy_mutex and the gdk mutex)</a>
+<a name="ln225">  dt_pthread_mutex_lock(&amp;pipe-&gt;busy_mutex);</a>
+<a name="ln226">  pipe-&gt;shutdown = 1;</a>
+<a name="ln227">  // destroy all nodes</a>
+<a name="ln228">  GList *nodes = pipe-&gt;nodes;</a>
+<a name="ln229">  while(nodes)</a>
+<a name="ln230">  {</a>
+<a name="ln231">    dt_dev_pixelpipe_iop_t *piece = (dt_dev_pixelpipe_iop_t *)nodes-&gt;data;</a>
+<a name="ln232">    // printf(&quot;cleanup module `%s'\n&quot;, piece-&gt;module-&gt;name());</a>
+<a name="ln233">    piece-&gt;module-&gt;cleanup_pipe(piece-&gt;module, pipe, piece);</a>
+<a name="ln234">    free(piece-&gt;blendop_data);</a>
+<a name="ln235">    piece-&gt;blendop_data = NULL;</a>
+<a name="ln236">    free(piece-&gt;histogram);</a>
+<a name="ln237">    piece-&gt;histogram = NULL;</a>
+<a name="ln238">    g_hash_table_destroy(piece-&gt;raster_masks);</a>
+<a name="ln239">    piece-&gt;raster_masks = NULL;</a>
+<a name="ln240">    free(piece);</a>
+<a name="ln241">    nodes = g_list_next(nodes);</a>
+<a name="ln242">  }</a>
+<a name="ln243">  g_list_free(pipe-&gt;nodes);</a>
+<a name="ln244">  pipe-&gt;nodes = NULL;</a>
+<a name="ln245">  // also cleanup iop here</a>
+<a name="ln246">  if(pipe-&gt;iop)</a>
+<a name="ln247">  {</a>
+<a name="ln248">    g_list_free(pipe-&gt;iop);</a>
+<a name="ln249">    pipe-&gt;iop = NULL;</a>
+<a name="ln250">  }</a>
+<a name="ln251">  // and iop order</a>
+<a name="ln252">  g_list_free_full(pipe-&gt;iop_order_list, free);</a>
+<a name="ln253">  pipe-&gt;iop_order_list = NULL;</a>
+<a name="ln254">  dt_pthread_mutex_unlock(&amp;pipe-&gt;busy_mutex);</a>
+<a name="ln255">}</a>
+<a name="ln256"> </a>
+<a name="ln257">void dt_dev_pixelpipe_create_nodes(dt_dev_pixelpipe_t *pipe, dt_develop_t *dev)</a>
+<a name="ln258">{</a>
+<a name="ln259">  dt_pthread_mutex_lock(&amp;pipe-&gt;busy_mutex);</a>
+<a name="ln260">  pipe-&gt;shutdown = 0;</a>
+<a name="ln261">  g_assert(pipe-&gt;nodes == NULL);</a>
+<a name="ln262">  g_assert(pipe-&gt;iop == NULL);</a>
+<a name="ln263">  g_assert(pipe-&gt;iop_order_list == NULL);</a>
+<a name="ln264">  pipe-&gt;iop_order_list = dt_ioppr_iop_order_copy_deep(dev-&gt;iop_order_list);</a>
+<a name="ln265">  // for all modules in dev:</a>
+<a name="ln266">  pipe-&gt;iop = g_list_copy(dev-&gt;iop);</a>
+<a name="ln267">  GList *modules = pipe-&gt;iop;</a>
+<a name="ln268">  while(modules)</a>
+<a name="ln269">  {</a>
+<a name="ln270">    dt_iop_module_t *module = (dt_iop_module_t *)modules-&gt;data;</a>
+<a name="ln271">    dt_dev_pixelpipe_iop_t *piece = (dt_dev_pixelpipe_iop_t *)calloc(1, sizeof(dt_dev_pixelpipe_iop_t));</a>
+<a name="ln272">    piece-&gt;enabled = module-&gt;enabled;</a>
+<a name="ln273">    piece-&gt;request_histogram = DT_REQUEST_ONLY_IN_GUI;</a>
+<a name="ln274">    piece-&gt;histogram_params.roi = NULL;</a>
+<a name="ln275">    piece-&gt;histogram_params.bins_count = 256;</a>
+<a name="ln276">    piece-&gt;histogram_stats.bins_count = 0;</a>
+<a name="ln277">    piece-&gt;histogram_stats.pixels = 0;</a>
+<a name="ln278">    piece-&gt;colors = ((module-&gt;default_colorspace(module, pipe, NULL) == iop_cs_RAW) &amp;&amp; </a>
+<a name="ln279">          (pipe-&gt;image.flags &amp; DT_IMAGE_RAW)) ? 1 : 4;</a>
+<a name="ln280">    piece-&gt;iscale = pipe-&gt;iscale;</a>
+<a name="ln281">    piece-&gt;iwidth = pipe-&gt;iwidth;</a>
+<a name="ln282">    piece-&gt;iheight = pipe-&gt;iheight;</a>
+<a name="ln283">    piece-&gt;module = module;</a>
+<a name="ln284">    piece-&gt;pipe = pipe;</a>
+<a name="ln285">    piece-&gt;data = NULL;</a>
+<a name="ln286">    piece-&gt;hash = 0;</a>
+<a name="ln287">    piece-&gt;process_cl_ready = 0;</a>
+<a name="ln288">    piece-&gt;process_tiling_ready = 0;</a>
+<a name="ln289">    piece-&gt;raster_masks = g_hash_table_new_full(g_direct_hash, g_direct_equal, NULL, dt_free_align_ptr);</a>
+<a name="ln290">    memset(&amp;piece-&gt;processed_roi_in, 0, sizeof(piece-&gt;processed_roi_in));</a>
+<a name="ln291">    memset(&amp;piece-&gt;processed_roi_out, 0, sizeof(piece-&gt;processed_roi_out));</a>
+<a name="ln292">    dt_iop_init_pipe(piece-&gt;module, pipe, piece);</a>
+<a name="ln293">    pipe-&gt;nodes = g_list_append(pipe-&gt;nodes, piece);</a>
+<a name="ln294">    modules = g_list_next(modules);</a>
+<a name="ln295">  }</a>
+<a name="ln296">  dt_pthread_mutex_unlock(&amp;pipe-&gt;busy_mutex);</a>
+<a name="ln297">}</a>
+<a name="ln298"> </a>
+<a name="ln299">// helper</a>
+<a name="ln300">void dt_dev_pixelpipe_synch(dt_dev_pixelpipe_t *pipe, dt_develop_t *dev, GList *history)</a>
+<a name="ln301">{</a>
+<a name="ln302">  dt_dev_history_item_t *hist = (dt_dev_history_item_t *)history-&gt;data;</a>
+<a name="ln303">  // find piece in nodes list</a>
+<a name="ln304">  GList *nodes = pipe-&gt;nodes;</a>
+<a name="ln305">  dt_dev_pixelpipe_iop_t *piece = NULL;</a>
+<a name="ln306">  while(nodes)</a>
+<a name="ln307">  {</a>
+<a name="ln308">    piece = (dt_dev_pixelpipe_iop_t *)nodes-&gt;data;</a>
+<a name="ln309">    if(piece-&gt;module == hist-&gt;module)</a>
+<a name="ln310">    {</a>
+<a name="ln311">      piece-&gt;enabled = hist-&gt;enabled;</a>
+<a name="ln312">      dt_iop_commit_params(hist-&gt;module, hist-&gt;params, hist-&gt;blend_params, pipe, piece);</a>
+<a name="ln313">    }</a>
+<a name="ln314">    nodes = g_list_next(nodes);</a>
+<a name="ln315">  }</a>
+<a name="ln316">}</a>
+<a name="ln317"> </a>
+<a name="ln318">void dt_dev_pixelpipe_synch_all(dt_dev_pixelpipe_t *pipe, dt_develop_t *dev)</a>
+<a name="ln319">{</a>
+<a name="ln320">  dt_pthread_mutex_lock(&amp;pipe-&gt;busy_mutex);</a>
+<a name="ln321">  // call reset_params on all pieces first.</a>
+<a name="ln322">  GList *nodes = pipe-&gt;nodes;</a>
+<a name="ln323">  while(nodes)</a>
+<a name="ln324">  {</a>
+<a name="ln325">    dt_dev_pixelpipe_iop_t *piece = (dt_dev_pixelpipe_iop_t *)nodes-&gt;data;</a>
+<a name="ln326">    piece-&gt;hash = 0;</a>
+<a name="ln327">    piece-&gt;enabled = piece-&gt;module-&gt;default_enabled;</a>
+<a name="ln328">    dt_iop_commit_params(piece-&gt;module, piece-&gt;module-&gt;default_params, piece-&gt;module-&gt;default_blendop_params,</a>
+<a name="ln329">                         pipe, piece);</a>
+<a name="ln330">    nodes = g_list_next(nodes);</a>
+<a name="ln331">  }</a>
+<a name="ln332">  // go through all history items and adjust params</a>
+<a name="ln333">  GList *history = dev-&gt;history;</a>
+<a name="ln334">  for(int k = 0; k &lt; dev-&gt;history_end &amp;&amp; history; k++)</a>
+<a name="ln335">  {</a>
+<a name="ln336">    dt_dev_pixelpipe_synch(pipe, dev, history);</a>
+<a name="ln337">    history = g_list_next(history);</a>
+<a name="ln338">  }</a>
+<a name="ln339">  dt_pthread_mutex_unlock(&amp;pipe-&gt;busy_mutex);</a>
+<a name="ln340">}</a>
+<a name="ln341"> </a>
+<a name="ln342">void dt_dev_pixelpipe_synch_top(dt_dev_pixelpipe_t *pipe, dt_develop_t *dev)</a>
+<a name="ln343">{</a>
+<a name="ln344">  dt_pthread_mutex_lock(&amp;pipe-&gt;busy_mutex);</a>
+<a name="ln345">  GList *history = g_list_nth(dev-&gt;history, dev-&gt;history_end - 1);</a>
+<a name="ln346">  if(history) dt_dev_pixelpipe_synch(pipe, dev, history);</a>
+<a name="ln347">  dt_pthread_mutex_unlock(&amp;pipe-&gt;busy_mutex);</a>
+<a name="ln348">}</a>
+<a name="ln349"> </a>
+<a name="ln350">void dt_dev_pixelpipe_change(dt_dev_pixelpipe_t *pipe, struct dt_develop_t *dev)</a>
+<a name="ln351">{</a>
+<a name="ln352">  dt_pthread_mutex_lock(&amp;dev-&gt;history_mutex);</a>
+<a name="ln353">  // case DT_DEV_PIPE_UNCHANGED: case DT_DEV_PIPE_ZOOMED:</a>
+<a name="ln354">  if(pipe-&gt;changed &amp; DT_DEV_PIPE_TOP_CHANGED)</a>
+<a name="ln355">  {</a>
+<a name="ln356">    // only top history item changed.</a>
+<a name="ln357">    dt_dev_pixelpipe_synch_top(pipe, dev);</a>
+<a name="ln358">  }</a>
+<a name="ln359">  if(pipe-&gt;changed &amp; DT_DEV_PIPE_SYNCH)</a>
+<a name="ln360">  {</a>
+<a name="ln361">    // pipeline topology remains intact, only change all params.</a>
+<a name="ln362">    dt_dev_pixelpipe_synch_all(pipe, dev);</a>
+<a name="ln363">  }</a>
+<a name="ln364">  if(pipe-&gt;changed &amp; DT_DEV_PIPE_REMOVE)</a>
+<a name="ln365">  {</a>
+<a name="ln366">    // modules have been added in between or removed. need to rebuild the whole pipeline.</a>
+<a name="ln367">    dt_dev_pixelpipe_cleanup_nodes(pipe);</a>
+<a name="ln368">    dt_dev_pixelpipe_create_nodes(pipe, dev);</a>
+<a name="ln369">    dt_dev_pixelpipe_synch_all(pipe, dev);</a>
+<a name="ln370">  }</a>
+<a name="ln371">  pipe-&gt;changed = DT_DEV_PIPE_UNCHANGED;</a>
+<a name="ln372">  dt_pthread_mutex_unlock(&amp;dev-&gt;history_mutex);</a>
+<a name="ln373">  dt_dev_pixelpipe_get_dimensions(pipe, dev, pipe-&gt;iwidth, pipe-&gt;iheight, &amp;pipe-&gt;processed_width,</a>
+<a name="ln374">                                  &amp;pipe-&gt;processed_height);</a>
+<a name="ln375">}</a>
+<a name="ln376"> </a>
+<a name="ln377">// TODO:</a>
+<a name="ln378">void dt_dev_pixelpipe_add_node(dt_dev_pixelpipe_t *pipe, dt_develop_t *dev, int n)</a>
+<a name="ln379">{</a>
+<a name="ln380">}</a>
+<a name="ln381">// TODO:</a>
+<a name="ln382">void dt_dev_pixelpipe_remove_node(dt_dev_pixelpipe_t *pipe, dt_develop_t *dev, int n)</a>
+<a name="ln383">{</a>
+<a name="ln384">}</a>
+<a name="ln385"> </a>
+<a name="ln386">static void get_output_format(dt_iop_module_t *module, dt_dev_pixelpipe_t *pipe, dt_dev_pixelpipe_iop_t *piece,</a>
+<a name="ln387">                              dt_develop_t *dev, dt_iop_buffer_dsc_t *dsc)</a>
+<a name="ln388">{</a>
+<a name="ln389">  if(module) return module-&gt;output_format(module, pipe, piece, dsc);</a>
+<a name="ln390"> </a>
+<a name="ln391">  // first input.</a>
+<a name="ln392">  *dsc = pipe-&gt;image.buf_dsc;</a>
+<a name="ln393"> </a>
+<a name="ln394">  if(!(pipe-&gt;image.flags &amp; DT_IMAGE_RAW))</a>
+<a name="ln395">  {</a>
+<a name="ln396">    // image max is normalized before</a>
+<a name="ln397">    for(int k = 0; k &lt; 4; k++) dsc-&gt;processed_maximum[k] = 1.0f;</a>
+<a name="ln398">  }</a>
+<a name="ln399">}</a>
+<a name="ln400"> </a>
+<a name="ln401"> </a>
+<a name="ln402">// helper to get per module histogram</a>
+<a name="ln403">static void histogram_collect(dt_dev_pixelpipe_iop_t *piece, const void *pixel, const dt_iop_roi_t *roi,</a>
+<a name="ln404">                              uint32_t **histogram, uint32_t *histogram_max)</a>
+<a name="ln405">{</a>
+<a name="ln406">  dt_dev_histogram_collection_params_t histogram_params = piece-&gt;histogram_params;</a>
+<a name="ln407"> </a>
+<a name="ln408">  dt_histogram_roi_t histogram_roi;</a>
+<a name="ln409"> </a>
+<a name="ln410">  // if the current module does did not specified its own ROI, use the full ROI</a>
+<a name="ln411">  if(histogram_params.roi == NULL)</a>
+<a name="ln412">  {</a>
+<a name="ln413">    histogram_roi = (dt_histogram_roi_t){</a>
+<a name="ln414">      .width = roi-&gt;width, .height = roi-&gt;height, .crop_x = 0, .crop_y = 0, .crop_width = 0, .crop_height = 0</a>
+<a name="ln415">    };</a>
+<a name="ln416"> </a>
+<a name="ln417">    histogram_params.roi = &amp;histogram_roi;</a>
+<a name="ln418">  }</a>
+<a name="ln419"> </a>
+<a name="ln420">  const dt_iop_colorspace_type_t cst = piece-&gt;module-&gt;input_colorspace(piece-&gt;module, piece-&gt;pipe, piece);</a>
+<a name="ln421"> </a>
+<a name="ln422">  dt_histogram_helper(&amp;histogram_params, &amp;piece-&gt;histogram_stats, cst, piece-&gt;module-&gt;histogram_cst, pixel, histogram,</a>
+<a name="ln423">      piece-&gt;module-&gt;histogram_middle_grey, dt_ioppr_get_pipe_work_profile_info(piece-&gt;pipe));</a>
+<a name="ln424">  dt_histogram_max_helper(&amp;piece-&gt;histogram_stats, cst, piece-&gt;module-&gt;histogram_cst, histogram, histogram_max);</a>
+<a name="ln425">}</a>
+<a name="ln426"> </a>
+<a name="ln427">#ifdef HAVE_OPENCL</a>
+<a name="ln428">// helper to get per module histogram for OpenCL</a>
+<a name="ln429">//</a>
+<a name="ln430">// this algorithm is inefficient as hell when it comes to larger images. it's only acceptable</a>
+<a name="ln431">// as long as we work on small image sizes like in image preview</a>
+<a name="ln432">static void histogram_collect_cl(int devid, dt_dev_pixelpipe_iop_t *piece, cl_mem img,</a>
+<a name="ln433">                                 const dt_iop_roi_t *roi, uint32_t **histogram, uint32_t *histogram_max,</a>
+<a name="ln434">                                 float *buffer, size_t bufsize)</a>
+<a name="ln435">{</a>
+<a name="ln436">  float *tmpbuf = NULL;</a>
+<a name="ln437">  float *pixel;</a>
+<a name="ln438"> </a>
+<a name="ln439">  // if buffer is supplied and if size fits let's use it</a>
+<a name="ln440">  if(buffer &amp;&amp; bufsize &gt;= (size_t)roi-&gt;width * roi-&gt;height * 4 * sizeof(float))</a>
+<a name="ln441">    pixel = buffer;</a>
+<a name="ln442">  else</a>
+<a name="ln443">    pixel = tmpbuf = dt_alloc_align(64, (size_t)roi-&gt;width * roi-&gt;height * 4 * sizeof(float));</a>
+<a name="ln444"> </a>
+<a name="ln445">  if(!pixel) return;</a>
+<a name="ln446"> </a>
+<a name="ln447">  cl_int err = dt_opencl_copy_device_to_host(devid, pixel, img, roi-&gt;width, roi-&gt;height, 4 * sizeof(float));</a>
+<a name="ln448">  if(err != CL_SUCCESS)</a>
+<a name="ln449">  {</a>
+<a name="ln450">    if(tmpbuf) dt_free_align(tmpbuf);</a>
+<a name="ln451">    return;</a>
+<a name="ln452">  }</a>
+<a name="ln453"> </a>
+<a name="ln454">  dt_dev_histogram_collection_params_t histogram_params = piece-&gt;histogram_params;</a>
+<a name="ln455"> </a>
+<a name="ln456">  dt_histogram_roi_t histogram_roi;</a>
+<a name="ln457"> </a>
+<a name="ln458">  // if the current module does did not specified its own ROI, use the full ROI</a>
+<a name="ln459">  if(histogram_params.roi == NULL)</a>
+<a name="ln460">  {</a>
+<a name="ln461">    histogram_roi = (dt_histogram_roi_t){</a>
+<a name="ln462">      .width = roi-&gt;width, .height = roi-&gt;height, .crop_x = 0, .crop_y = 0, .crop_width = 0, .crop_height = 0</a>
+<a name="ln463">    };</a>
+<a name="ln464"> </a>
+<a name="ln465">    histogram_params.roi = &amp;histogram_roi;</a>
+<a name="ln466">  }</a>
+<a name="ln467"> </a>
+<a name="ln468">  const dt_iop_colorspace_type_t cst = piece-&gt;module-&gt;input_colorspace(piece-&gt;module, piece-&gt;pipe, piece);</a>
+<a name="ln469"> </a>
+<a name="ln470">  dt_histogram_helper(&amp;histogram_params, &amp;piece-&gt;histogram_stats, cst, piece-&gt;module-&gt;histogram_cst, pixel, histogram,</a>
+<a name="ln471">      piece-&gt;module-&gt;histogram_middle_grey, dt_ioppr_get_pipe_work_profile_info(piece-&gt;pipe));</a>
+<a name="ln472">  dt_histogram_max_helper(&amp;piece-&gt;histogram_stats, cst, piece-&gt;module-&gt;histogram_cst, histogram, histogram_max);</a>
+<a name="ln473"> </a>
+<a name="ln474">  if(tmpbuf) dt_free_align(tmpbuf);</a>
+<a name="ln475">}</a>
+<a name="ln476">#endif</a>
+<a name="ln477"> </a>
+<a name="ln478">// helper for color picking</a>
+<a name="ln479">static int pixelpipe_picker_helper(dt_iop_module_t *module, const dt_iop_roi_t *roi, float *picked_color,</a>
+<a name="ln480">                                   float *picked_color_min, float *picked_color_max,</a>
+<a name="ln481">                                   dt_pixelpipe_picker_source_t picker_source, int *box)</a>
+<a name="ln482">{</a>
+<a name="ln483">  const float wd = darktable.develop-&gt;preview_pipe-&gt;backbuf_width;</a>
+<a name="ln484">  const float ht = darktable.develop-&gt;preview_pipe-&gt;backbuf_height;</a>
+<a name="ln485">  const int width = roi-&gt;width;</a>
+<a name="ln486">  const int height = roi-&gt;height;</a>
+<a name="ln487"> </a>
+<a name="ln488">  // do not continue if one of the point coordinates is set to a negative value indicating a not yet defined</a>
+<a name="ln489">  // position</a>
+<a name="ln490">  if(module-&gt;color_picker_point[0] &lt; 0 || module-&gt;color_picker_point[1] &lt; 0) return 1;</a>
+<a name="ln491"> </a>
+<a name="ln492">  float fbox[4];</a>
+<a name="ln493"> </a>
+<a name="ln494">  // get absolute pixel coordinates in final preview image</a>
+<a name="ln495">  if(darktable.lib-&gt;proxy.colorpicker.size)</a>
+<a name="ln496">  {</a>
+<a name="ln497">    for(int k = 0; k &lt; 4; k += 2) fbox[k] = module-&gt;color_picker_box[k] * wd;</a>
+<a name="ln498">    for(int k = 1; k &lt; 4; k += 2) fbox[k] = module-&gt;color_picker_box[k] * ht;</a>
+<a name="ln499">  }</a>
+<a name="ln500">  else</a>
+<a name="ln501">  {</a>
+<a name="ln502">    fbox[0] = fbox[2] = module-&gt;color_picker_point[0] * wd;</a>
+<a name="ln503">    fbox[1] = fbox[3] = module-&gt;color_picker_point[1] * ht;</a>
+<a name="ln504">  }</a>
+<a name="ln505"> </a>
+<a name="ln506">  // transform back to current module coordinates</a>
+<a name="ln507">  dt_dev_distort_backtransform_plus(darktable.develop, darktable.develop-&gt;preview_pipe,</a>
+<a name="ln508">                                    module-&gt;iop_order, ((picker_source == PIXELPIPE_PICKER_INPUT) ? DT_DEV_TRANSFORM_DIR_FORW_INCL</a>
+<a name="ln509">                                     : DT_DEV_TRANSFORM_DIR_FORW_EXCL),</a>
+<a name="ln510">                                    fbox, 2);</a>
+<a name="ln511"> </a>
+<a name="ln512">  fbox[0] -= roi-&gt;x;</a>
+<a name="ln513">  fbox[1] -= roi-&gt;y;</a>
+<a name="ln514">  fbox[2] -= roi-&gt;x;</a>
+<a name="ln515">  fbox[3] -= roi-&gt;y;</a>
+<a name="ln516"> </a>
+<a name="ln517">  // re-order edges of bounding box</a>
+<a name="ln518">  box[0] = fminf(fbox[0], fbox[2]);</a>
+<a name="ln519">  box[1] = fminf(fbox[1], fbox[3]);</a>
+<a name="ln520">  box[2] = fmaxf(fbox[0], fbox[2]);</a>
+<a name="ln521">  box[3] = fmaxf(fbox[1], fbox[3]);</a>
+<a name="ln522"> </a>
+<a name="ln523">  if(!darktable.lib-&gt;proxy.colorpicker.size)</a>
+<a name="ln524">  {</a>
+<a name="ln525">    // if we are sampling one point, make sure that we actually sample it.</a>
+<a name="ln526">    for(int k = 2; k &lt; 4; k++) box[k] += 1;</a>
+<a name="ln527">  }</a>
+<a name="ln528"> </a>
+<a name="ln529">  // do not continue if box is completely outside of roi</a>
+<a name="ln530">  if(box[0] &gt;= width || box[1] &gt;= height || box[2] &lt; 0 || box[3] &lt; 0) return 1;</a>
+<a name="ln531"> </a>
+<a name="ln532">  // clamp bounding box to roi</a>
+<a name="ln533">  for(int k = 0; k &lt; 4; k += 2) box[k] = MIN(width - 1, MAX(0, box[k]));</a>
+<a name="ln534">  for(int k = 1; k &lt; 4; k += 2) box[k] = MIN(height - 1, MAX(0, box[k]));</a>
+<a name="ln535"> </a>
+<a name="ln536">  // safety check: area needs to have minimum 1 pixel width and height</a>
+<a name="ln537">  if(box[2] - box[0] &lt; 1 || box[3] - box[1] &lt; 1) return 1;</a>
+<a name="ln538"> </a>
+<a name="ln539">  return 0;</a>
+<a name="ln540">}</a>
+<a name="ln541"> </a>
+<a name="ln542">static void pixelpipe_picker(dt_iop_module_t *module, dt_iop_buffer_dsc_t *dsc, const float *pixel,</a>
+<a name="ln543">                             const dt_iop_roi_t *roi, float *picked_color, float *picked_color_min,</a>
+<a name="ln544">                             float *picked_color_max, const dt_iop_colorspace_type_t image_cst, dt_pixelpipe_picker_source_t picker_source)</a>
+<a name="ln545">{</a>
+<a name="ln546">  int box[4];</a>
+<a name="ln547"> </a>
+<a name="ln548">  if(pixelpipe_picker_helper(module, roi, picked_color, picked_color_min, picked_color_max, picker_source, box))</a>
+<a name="ln549">  {</a>
+<a name="ln550">    for(int k = 0; k &lt; 4; k++)</a>
+<a name="ln551">    {</a>
+<a name="ln552">      picked_color_min[k] = INFINITY;</a>
+<a name="ln553">      picked_color_max[k] = -INFINITY;</a>
+<a name="ln554">      picked_color[k] = 0.0f;</a>
+<a name="ln555">    }</a>
+<a name="ln556"> </a>
+<a name="ln557">    return;</a>
+<a name="ln558">  }</a>
+<a name="ln559"> </a>
+<a name="ln560">  float min[4], max[4], avg[4];</a>
+<a name="ln561">  for(int k = 0; k &lt; 4; k++)</a>
+<a name="ln562">  {</a>
+<a name="ln563">    min[k] = INFINITY;</a>
+<a name="ln564">    max[k] = -INFINITY;</a>
+<a name="ln565">    avg[k] = 0.0f;</a>
+<a name="ln566">  }</a>
+<a name="ln567"> </a>
+<a name="ln568">  dt_color_picker_helper(dsc, pixel, roi, box, avg, min, max, image_cst,</a>
+<a name="ln569">                         dt_iop_color_picker_get_active_cst(module));</a>
+<a name="ln570"> </a>
+<a name="ln571">  for(int k = 0; k &lt; 4; k++)</a>
+<a name="ln572">  {</a>
+<a name="ln573">    picked_color_min[k] = min[k];</a>
+<a name="ln574">    picked_color_max[k] = max[k];</a>
+<a name="ln575">    picked_color[k] = avg[k];</a>
+<a name="ln576">  }</a>
+<a name="ln577">}</a>
+<a name="ln578"> </a>
+<a name="ln579"> </a>
+<a name="ln580">#ifdef HAVE_OPENCL</a>
+<a name="ln581">// helper for OpenCL color picking</a>
+<a name="ln582">//</a>
+<a name="ln583">// this algorithm is inefficient as hell when it comes to larger images. it's only acceptable</a>
+<a name="ln584">// as long as we work on small image sizes like in image preview</a>
+<a name="ln585">static void pixelpipe_picker_cl(int devid, dt_iop_module_t *module, dt_iop_buffer_dsc_t *dsc, cl_mem img,</a>
+<a name="ln586">                                const dt_iop_roi_t *roi, float *picked_color, float *picked_color_min,</a>
+<a name="ln587">                                float *picked_color_max, float *buffer, size_t bufsize,</a>
+<a name="ln588">                                const dt_iop_colorspace_type_t image_cst, dt_pixelpipe_picker_source_t picker_source)</a>
+<a name="ln589">{</a>
+<a name="ln590">  int box[4];</a>
+<a name="ln591"> </a>
+<a name="ln592">  if(pixelpipe_picker_helper(module, roi, picked_color, picked_color_min, picked_color_max, picker_source, box))</a>
+<a name="ln593">  {</a>
+<a name="ln594">    for(int k = 0; k &lt; 4; k++)</a>
+<a name="ln595">    {</a>
+<a name="ln596">      picked_color_min[k] = INFINITY;</a>
+<a name="ln597">      picked_color_max[k] = -INFINITY;</a>
+<a name="ln598">      picked_color[k] = 0.0f;</a>
+<a name="ln599">    }</a>
+<a name="ln600"> </a>
+<a name="ln601">    return;</a>
+<a name="ln602">  }</a>
+<a name="ln603"> </a>
+<a name="ln604">  size_t origin[3];</a>
+<a name="ln605">  size_t region[3];</a>
+<a name="ln606"> </a>
+<a name="ln607">  // Initializing bounds of colorpicker box</a>
+<a name="ln608">  origin[0] = box[0];</a>
+<a name="ln609">  origin[1] = box[1];</a>
+<a name="ln610">  origin[2] = 0;</a>
+<a name="ln611"> </a>
+<a name="ln612">  region[0] = box[2] - box[0];</a>
+<a name="ln613">  region[1] = box[3] - box[1];</a>
+<a name="ln614">  region[2] = 1;</a>
+<a name="ln615"> </a>
+<a name="ln616">  float *pixel;</a>
+<a name="ln617">  float *tmpbuf = NULL;</a>
+<a name="ln618"> </a>
+<a name="ln619">  const size_t size = region[0] * region[1];</a>
+<a name="ln620"> </a>
+<a name="ln621">  const size_t bpp = dt_iop_buffer_dsc_to_bpp(dsc);</a>
+<a name="ln622"> </a>
+<a name="ln623">  // if a buffer is supplied and if size fits let's use it</a>
+<a name="ln624">  if(buffer &amp;&amp; bufsize &gt;= size * bpp)</a>
+<a name="ln625">    pixel = buffer;</a>
+<a name="ln626">  else</a>
+<a name="ln627">    pixel = tmpbuf = dt_alloc_align(64, size * bpp);</a>
+<a name="ln628"> </a>
+<a name="ln629">  if(pixel == NULL) return;</a>
+<a name="ln630"> </a>
+<a name="ln631">  // get the required part of the image from opencl device</a>
+<a name="ln632">  cl_int err = dt_opencl_read_host_from_device_raw(devid, pixel, img, origin, region, region[0] * bpp, CL_TRUE);</a>
+<a name="ln633"> </a>
+<a name="ln634">  if(err != CL_SUCCESS) goto error;</a>
+<a name="ln635"> </a>
+<a name="ln636">  dt_iop_roi_t roi_copy = (dt_iop_roi_t){.x = roi-&gt;x + box[0], .y = roi-&gt;y + box[1], .width = region[0], .height = region[1] };</a>
+<a name="ln637"> </a>
+<a name="ln638">  box[0] = 0;</a>
+<a name="ln639">  box[1] = 0;</a>
+<a name="ln640">  box[2] = region[0];</a>
+<a name="ln641">  box[3] = region[1];</a>
+<a name="ln642"> </a>
+<a name="ln643">  float min[4], max[4], avg[4];</a>
+<a name="ln644">  for(int k = 0; k &lt; 4; k++)</a>
+<a name="ln645">  {</a>
+<a name="ln646">    min[k] = INFINITY;</a>
+<a name="ln647">    max[k] = -INFINITY;</a>
+<a name="ln648">    avg[k] = 0.0f;</a>
+<a name="ln649">  }</a>
+<a name="ln650"> </a>
+<a name="ln651">  dt_color_picker_helper(dsc, pixel, &amp;roi_copy, box, avg, min, max, image_cst,</a>
+<a name="ln652">                         dt_iop_color_picker_get_active_cst(module));</a>
+<a name="ln653"> </a>
+<a name="ln654">  for(int k = 0; k &lt; 4; k++)</a>
+<a name="ln655">  {</a>
+<a name="ln656">    picked_color_min[k] = min[k];</a>
+<a name="ln657">    picked_color_max[k] = max[k];</a>
+<a name="ln658">    picked_color[k] = avg[k];</a>
+<a name="ln659">  }</a>
+<a name="ln660"> </a>
+<a name="ln661">error:</a>
+<a name="ln662">  dt_free_align(tmpbuf);</a>
+<a name="ln663">}</a>
+<a name="ln664">#endif</a>
+<a name="ln665"> </a>
+<a name="ln666">static void _pixelpipe_pick_from_image(const float *const pixel, const dt_iop_roi_t *roi_in, </a>
+<a name="ln667">    cmsHTRANSFORM xform_rgb2lab, cmsHTRANSFORM xform_rgb2rgb,</a>
+<a name="ln668">    const float *const  pick_box, const float *const  pick_point, const int pick_size,</a>
+<a name="ln669">    float *pick_color_rgb_min, float *pick_color_rgb_max, float *pick_color_rgb_mean,</a>
+<a name="ln670">    float *pick_color_lab_min, float *pick_color_lab_max, float *pick_color_lab_mean)</a>
+<a name="ln671">{</a>
+<a name="ln672">  float picked_color_rgb_min[3];</a>
+<a name="ln673">  float picked_color_rgb_max[3];</a>
+<a name="ln674">  float picked_color_rgb_mean[3];</a>
+<a name="ln675"> </a>
+<a name="ln676">  for(int k = 0; k &lt; 3; k++) picked_color_rgb_min[k] = FLT_MAX;</a>
+<a name="ln677">  for(int k = 0; k &lt; 3; k++) picked_color_rgb_max[k] = FLT_MIN;</a>
+<a name="ln678"> </a>
+<a name="ln679">  int box[4];</a>
+<a name="ln680">  int point[2];</a>
+<a name="ln681"> </a>
+<a name="ln682">  for(int k = 0; k &lt; 4; k += 2)</a>
+<a name="ln683">    box[k] = MIN(roi_in-&gt;width - 1, MAX(0, pick_box[k] * roi_in-&gt;width));</a>
+<a name="ln684">  for(int k = 1; k &lt; 4; k += 2)</a>
+<a name="ln685">    box[k] = MIN(roi_in-&gt;height - 1, MAX(0, pick_box[k] * roi_in-&gt;height));</a>
+<a name="ln686">  point[0] = MIN(roi_in-&gt;width - 1, MAX(0, pick_point[0] * roi_in-&gt;width));</a>
+<a name="ln687">  point[1] = MIN(roi_in-&gt;height - 1, MAX(0, pick_point[1] * roi_in-&gt;height));</a>
+<a name="ln688"> </a>
+<a name="ln689">  float rgb[3];</a>
+<a name="ln690">  for(int k = 0; k &lt; 3; k++) rgb[k] = 0.0f;</a>
+<a name="ln691"> </a>
+<a name="ln692">  const float w = 1.0 / ((box[3] - box[1] + 1) * (box[2] - box[0] + 1));</a>
+<a name="ln693"> </a>
+<a name="ln694">  if(pick_size == DT_COLORPICKER_SIZE_BOX)</a>
+<a name="ln695">  {</a>
+<a name="ln696">    for(int j = box[1]; j &lt;= box[3]; j++)</a>
+<a name="ln697">      for(int i = box[0]; i &lt;= box[2]; i++)</a>
+<a name="ln698">      {</a>
+<a name="ln699">        for(int k = 0; k &lt; 3; k++)</a>
+<a name="ln700">        {</a>
+<a name="ln701">          picked_color_rgb_min[k]</a>
+<a name="ln702">              = MIN(picked_color_rgb_min[k], pixel[4 * (roi_in-&gt;width * j + i) + k]);</a>
+<a name="ln703">          picked_color_rgb_max[k]</a>
+<a name="ln704">              = MAX(picked_color_rgb_max[k], pixel[4 * (roi_in-&gt;width * j + i) + k]);</a>
+<a name="ln705">          rgb[k] += w * pixel[4 * (roi_in-&gt;width * j + i) + k];</a>
+<a name="ln706">        }</a>
+<a name="ln707">      }</a>
+<a name="ln708">    for(int k = 0; k &lt; 3; k++) picked_color_rgb_mean[k] = rgb[k];</a>
+<a name="ln709">  }</a>
+<a name="ln710">  else</a>
+<a name="ln711">  {</a>
+<a name="ln712">    for(int i = 0; i &lt; 3; i++)</a>
+<a name="ln713">      picked_color_rgb_mean[i] = picked_color_rgb_min[i]</a>
+<a name="ln714">          = picked_color_rgb_max[i] = pixel[4 * (roi_in-&gt;width * point[1] + point[0]) + i];</a>
+<a name="ln715">  }</a>
+<a name="ln716"> </a>
+<a name="ln717">  // Converting the display RGB values to histogram RGB</a>
+<a name="ln718">  if(xform_rgb2rgb)</a>
+<a name="ln719">  {</a>
+<a name="ln720">    // Preparing the data for transformation</a>
+<a name="ln721">    float rgb_ddata[9];</a>
+<a name="ln722">    for(int i = 0; i &lt; 3; i++)</a>
+<a name="ln723">    {</a>
+<a name="ln724">      rgb_ddata[i] = picked_color_rgb_mean[i];</a>
+<a name="ln725">      rgb_ddata[i + 3] = picked_color_rgb_min[i];</a>
+<a name="ln726">      rgb_ddata[i + 6] = picked_color_rgb_max[i];</a>
+<a name="ln727">    }</a>
+<a name="ln728"> </a>
+<a name="ln729">    float rgb_odata[9];</a>
+<a name="ln730">    cmsDoTransform(xform_rgb2rgb, rgb_ddata, rgb_odata, 3);</a>
+<a name="ln731"> </a>
+<a name="ln732">    for(int i = 0; i &lt; 3; i++)</a>
+<a name="ln733">    {</a>
+<a name="ln734">      pick_color_rgb_mean[i] = rgb_odata[i];</a>
+<a name="ln735">      pick_color_rgb_min[i] = rgb_odata[i + 3];</a>
+<a name="ln736">      pick_color_rgb_max[i] = rgb_odata[i + 6];</a>
+<a name="ln737">    }</a>
+<a name="ln738">  }</a>
+<a name="ln739">  else</a>
+<a name="ln740">  {</a>
+<a name="ln741">    for(int i = 0; i &lt; 3; i++)</a>
+<a name="ln742">    {</a>
+<a name="ln743">      pick_color_rgb_mean[i] = picked_color_rgb_mean[i];</a>
+<a name="ln744">      pick_color_rgb_min[i] = picked_color_rgb_min[i];</a>
+<a name="ln745">      pick_color_rgb_max[i] = picked_color_rgb_max[i];</a>
+<a name="ln746">    }</a>
+<a name="ln747">  }</a>
+<a name="ln748"> </a>
+<a name="ln749">  // Converting the RGB values to Lab</a>
+<a name="ln750">  if(xform_rgb2lab)</a>
+<a name="ln751">  {</a>
+<a name="ln752">    // Preparing the data for transformation</a>
+<a name="ln753">    float rgb_data[9];</a>
+<a name="ln754">    for(int i = 0; i &lt; 3; i++)</a>
+<a name="ln755">    {</a>
+<a name="ln756">      rgb_data[i] = picked_color_rgb_mean[i];</a>
+<a name="ln757">      rgb_data[i + 3] = picked_color_rgb_min[i];</a>
+<a name="ln758">      rgb_data[i + 6] = picked_color_rgb_max[i];</a>
+<a name="ln759">    }</a>
+<a name="ln760"> </a>
+<a name="ln761">    float Lab_data[9];</a>
+<a name="ln762">    cmsDoTransform(xform_rgb2lab, rgb_data, Lab_data, 3);</a>
+<a name="ln763"> </a>
+<a name="ln764">    for(int i = 0; i &lt; 3; i++)</a>
+<a name="ln765">    {</a>
+<a name="ln766">      pick_color_lab_mean[i] = Lab_data[i];</a>
+<a name="ln767">      pick_color_lab_min[i] = Lab_data[i + 3];</a>
+<a name="ln768">      pick_color_lab_max[i] = Lab_data[i + 6];</a>
+<a name="ln769">    }</a>
+<a name="ln770">  }</a>
+<a name="ln771">}</a>
+<a name="ln772"> </a>
+<a name="ln773">static void _pixelpipe_pick_live_samples(const float *const input, const dt_iop_roi_t *roi_in)</a>
+<a name="ln774">{</a>
+<a name="ln775">  cmsHPROFILE display_profile = NULL;</a>
+<a name="ln776">  cmsHPROFILE histogram_profile = NULL;</a>
+<a name="ln777">  cmsHPROFILE lab_profile = NULL;</a>
+<a name="ln778">  cmsHTRANSFORM xform_rgb2lab = NULL;</a>
+<a name="ln779">  cmsHTRANSFORM xform_rgb2rgb = NULL;</a>
+<a name="ln780">  dt_colorspaces_color_profile_type_t histogram_type = DT_COLORSPACE_SRGB;</a>
+<a name="ln781">  gchar *histogram_filename = NULL;</a>
+<a name="ln782">  gchar _histogram_filename[1] = { 0 };</a>
+<a name="ln783"> </a>
+<a name="ln784">  dt_ioppr_get_histogram_profile_type(&amp;histogram_type, &amp;histogram_filename);</a>
+<a name="ln785">  if(histogram_filename == NULL) histogram_filename = _histogram_filename;</a>
+<a name="ln786">  </a>
+<a name="ln787">  if(darktable.color_profiles-&gt;display_type == DT_COLORSPACE_DISPLAY || histogram_type == DT_COLORSPACE_DISPLAY)</a>
+<a name="ln788">    pthread_rwlock_rdlock(&amp;darktable.color_profiles-&gt;xprofile_lock);</a>
+<a name="ln789"> </a>
+<a name="ln790">  const dt_colorspaces_color_profile_t *d_profile = dt_colorspaces_get_profile(darktable.color_profiles-&gt;display_type,</a>
+<a name="ln791">                                                       darktable.color_profiles-&gt;display_filename,</a>
+<a name="ln792">                                                       DT_PROFILE_DIRECTION_OUT | DT_PROFILE_DIRECTION_DISPLAY);</a>
+<a name="ln793">  if(d_profile) display_profile = d_profile-&gt;profile;</a>
+<a name="ln794"> </a>
+<a name="ln795">  if((histogram_type != darktable.color_profiles-&gt;display_type) || </a>
+<a name="ln796">      (histogram_type == DT_COLORSPACE_FILE &amp;&amp;</a>
+<a name="ln797">      strcmp(histogram_filename, darktable.color_profiles-&gt;display_filename)))</a>
+<a name="ln798">  {</a>
+<a name="ln799">    const dt_colorspaces_color_profile_t *d_histogram = dt_colorspaces_get_profile(histogram_type,</a>
+<a name="ln800">                                                         histogram_filename,</a>
+<a name="ln801">                                                         DT_PROFILE_DIRECTION_OUT | DT_PROFILE_DIRECTION_DISPLAY);</a>
+<a name="ln802">    if(d_histogram) histogram_profile = d_histogram-&gt;profile;</a>
+<a name="ln803">  }</a>
+<a name="ln804">  </a>
+<a name="ln805">  lab_profile = dt_colorspaces_get_profile(DT_COLORSPACE_LAB, &quot;&quot;, DT_PROFILE_DIRECTION_ANY)-&gt;profile;</a>
+<a name="ln806"> </a>
+<a name="ln807">  // display rgb --&gt; lab</a>
+<a name="ln808">  if(display_profile &amp;&amp; lab_profile)</a>
+<a name="ln809">    xform_rgb2lab = cmsCreateTransform(display_profile, TYPE_RGB_FLT, lab_profile, TYPE_Lab_FLT, INTENT_PERCEPTUAL, 0);</a>
+<a name="ln810"> </a>
+<a name="ln811">  // display rgb --&gt; histogram rgb</a>
+<a name="ln812">  if(display_profile &amp;&amp; histogram_profile)</a>
+<a name="ln813">    xform_rgb2rgb = cmsCreateTransform(display_profile, TYPE_RGB_FLT, histogram_profile, TYPE_RGB_FLT, INTENT_PERCEPTUAL, 0);</a>
+<a name="ln814"> </a>
+<a name="ln815">  if(darktable.color_profiles-&gt;display_type == DT_COLORSPACE_DISPLAY || histogram_type == DT_COLORSPACE_DISPLAY)</a>
+<a name="ln816">    pthread_rwlock_unlock(&amp;darktable.color_profiles-&gt;xprofile_lock);</a>
+<a name="ln817"> </a>
+<a name="ln818">  dt_colorpicker_sample_t *sample = NULL;</a>
+<a name="ln819">  GSList *samples = darktable.lib-&gt;proxy.colorpicker.live_samples;</a>
+<a name="ln820"> </a>
+<a name="ln821">  while(samples)</a>
+<a name="ln822">  {</a>
+<a name="ln823">    sample = samples-&gt;data;</a>
+<a name="ln824"> </a>
+<a name="ln825">    if(sample-&gt;locked)</a>
+<a name="ln826">    {</a>
+<a name="ln827">      samples = g_slist_next(samples);</a>
+<a name="ln828">      continue;</a>
+<a name="ln829">    }</a>
+<a name="ln830"> </a>
+<a name="ln831">    _pixelpipe_pick_from_image(input, roi_in, xform_rgb2lab, xform_rgb2rgb,</a>
+<a name="ln832">        sample-&gt;box, sample-&gt;point, sample-&gt;size,</a>
+<a name="ln833">        sample-&gt;picked_color_rgb_min, sample-&gt;picked_color_rgb_max, sample-&gt;picked_color_rgb_mean,</a>
+<a name="ln834">        sample-&gt;picked_color_lab_min, sample-&gt;picked_color_lab_max, sample-&gt;picked_color_lab_mean);</a>
+<a name="ln835"> </a>
+<a name="ln836">    samples = g_slist_next(samples);</a>
+<a name="ln837">  }</a>
+<a name="ln838"> </a>
+<a name="ln839">  if(xform_rgb2lab) cmsDeleteTransform(xform_rgb2lab);</a>
+<a name="ln840">  if(xform_rgb2rgb) cmsDeleteTransform(xform_rgb2rgb);</a>
+<a name="ln841">}</a>
+<a name="ln842"> </a>
+<a name="ln843">static void _pixelpipe_pick_primary_colorpicker(dt_develop_t *dev, const float *const input, const dt_iop_roi_t *roi_in)</a>
+<a name="ln844">{</a>
+<a name="ln845">  cmsHPROFILE display_profile = NULL;</a>
+<a name="ln846">  cmsHPROFILE histogram_profile = NULL;</a>
+<a name="ln847">  cmsHPROFILE lab_profile = NULL;</a>
+<a name="ln848">  cmsHTRANSFORM xform_rgb2lab = NULL;</a>
+<a name="ln849">  cmsHTRANSFORM xform_rgb2rgb = NULL;</a>
+<a name="ln850">  dt_colorspaces_color_profile_type_t histogram_type = DT_COLORSPACE_SRGB;</a>
+<a name="ln851">  gchar *histogram_filename = NULL;</a>
+<a name="ln852">  gchar _histogram_filename[1] = { 0 };</a>
+<a name="ln853"> </a>
+<a name="ln854">  dt_ioppr_get_histogram_profile_type(&amp;histogram_type, &amp;histogram_filename);</a>
+<a name="ln855">  if(histogram_filename == NULL) histogram_filename = _histogram_filename;</a>
+<a name="ln856">  </a>
+<a name="ln857">  if(darktable.color_profiles-&gt;display_type == DT_COLORSPACE_DISPLAY || histogram_type == DT_COLORSPACE_DISPLAY)</a>
+<a name="ln858">    pthread_rwlock_rdlock(&amp;darktable.color_profiles-&gt;xprofile_lock);</a>
+<a name="ln859"> </a>
+<a name="ln860">  const dt_colorspaces_color_profile_t *d_profile = dt_colorspaces_get_profile(darktable.color_profiles-&gt;display_type,</a>
+<a name="ln861">                                                       darktable.color_profiles-&gt;display_filename,</a>
+<a name="ln862">                                                       DT_PROFILE_DIRECTION_OUT | DT_PROFILE_DIRECTION_DISPLAY);</a>
+<a name="ln863">  if(d_profile) display_profile = d_profile-&gt;profile;</a>
+<a name="ln864"> </a>
+<a name="ln865">  if((histogram_type != darktable.color_profiles-&gt;display_type) || </a>
+<a name="ln866">      (histogram_type == DT_COLORSPACE_FILE &amp;&amp;</a>
+<a name="ln867">      strcmp(histogram_filename, darktable.color_profiles-&gt;display_filename)))</a>
+<a name="ln868">  {</a>
+<a name="ln869">    const dt_colorspaces_color_profile_t *d_histogram = dt_colorspaces_get_profile(histogram_type,</a>
+<a name="ln870">                                                         histogram_filename,</a>
+<a name="ln871">                                                         DT_PROFILE_DIRECTION_OUT | DT_PROFILE_DIRECTION_DISPLAY);</a>
+<a name="ln872">    if(d_histogram) histogram_profile = d_histogram-&gt;profile;</a>
+<a name="ln873">  }</a>
+<a name="ln874">  </a>
+<a name="ln875">  lab_profile = dt_colorspaces_get_profile(DT_COLORSPACE_LAB, &quot;&quot;, DT_PROFILE_DIRECTION_ANY)-&gt;profile;</a>
+<a name="ln876"> </a>
+<a name="ln877">  // display rgb --&gt; lab</a>
+<a name="ln878">  if(display_profile &amp;&amp; lab_profile)</a>
+<a name="ln879">    xform_rgb2lab = cmsCreateTransform(display_profile, TYPE_RGB_FLT, lab_profile, TYPE_Lab_FLT, INTENT_PERCEPTUAL, 0);</a>
+<a name="ln880"> </a>
+<a name="ln881">  // display rgb --&gt; histogram rgb</a>
+<a name="ln882">  if(display_profile &amp;&amp; histogram_profile)</a>
+<a name="ln883">    xform_rgb2rgb = cmsCreateTransform(display_profile, TYPE_RGB_FLT, histogram_profile, TYPE_RGB_FLT, INTENT_PERCEPTUAL, 0);</a>
+<a name="ln884"> </a>
+<a name="ln885">  if(darktable.color_profiles-&gt;display_type == DT_COLORSPACE_DISPLAY || histogram_type == DT_COLORSPACE_DISPLAY)</a>
+<a name="ln886">    pthread_rwlock_unlock(&amp;darktable.color_profiles-&gt;xprofile_lock);</a>
+<a name="ln887"> </a>
+<a name="ln888">  _pixelpipe_pick_from_image(input, roi_in, xform_rgb2lab, xform_rgb2rgb,</a>
+<a name="ln889">      dev-&gt;gui_module-&gt;color_picker_box, dev-&gt;gui_module-&gt;color_picker_point, darktable.lib-&gt;proxy.colorpicker.size,</a>
+<a name="ln890">      darktable.lib-&gt;proxy.colorpicker.picked_color_rgb_min, darktable.lib-&gt;proxy.colorpicker.picked_color_rgb_max, darktable.lib-&gt;proxy.colorpicker.picked_color_rgb_mean,</a>
+<a name="ln891">      darktable.lib-&gt;proxy.colorpicker.picked_color_lab_min, darktable.lib-&gt;proxy.colorpicker.picked_color_lab_max, darktable.lib-&gt;proxy.colorpicker.picked_color_lab_mean);</a>
+<a name="ln892"> </a>
+<a name="ln893">  if(xform_rgb2lab) cmsDeleteTransform(xform_rgb2lab);</a>
+<a name="ln894">  if(xform_rgb2rgb) cmsDeleteTransform(xform_rgb2rgb);</a>
+<a name="ln895">}</a>
+<a name="ln896"> </a>
+<a name="ln897">static void _pixelpipe_final_histogram(dt_develop_t *dev, const float *const input, const dt_iop_roi_t *roi_in)</a>
+<a name="ln898">{</a>
+<a name="ln899">  float *img_tmp = NULL;</a>
+<a name="ln900">  </a>
+<a name="ln901">  dt_dev_histogram_collection_params_t histogram_params = { 0 };</a>
+<a name="ln902">  const dt_iop_colorspace_type_t cst = iop_cs_rgb;</a>
+<a name="ln903">  dt_dev_histogram_stats_t histogram_stats = { .bins_count = 256, .ch = 4, .pixels = 0 };</a>
+<a name="ln904">  uint32_t histogram_max[4] = { 0 };</a>
+<a name="ln905">  dt_histogram_roi_t histogram_roi = { .width = roi_in-&gt;width, .height = roi_in-&gt;height,</a>
+<a name="ln906">                                      .crop_x = 0, .crop_y = 0, .crop_width = 0, .crop_height = 0 };</a>
+<a name="ln907"> </a>
+<a name="ln908">  // Constraining the area if the colorpicker is active in area mode</a>
+<a name="ln909">  if(dev-&gt;gui_module &amp;&amp; !strcmp(dev-&gt;gui_module-&gt;op, &quot;colorout&quot;)</a>
+<a name="ln910">     &amp;&amp; dev-&gt;gui_module-&gt;request_color_pick != DT_REQUEST_COLORPICK_OFF</a>
+<a name="ln911">     &amp;&amp; darktable.lib-&gt;proxy.colorpicker.restrict_histogram)</a>
+<a name="ln912">  {</a>
+<a name="ln913">    if(darktable.lib-&gt;proxy.colorpicker.size == DT_COLORPICKER_SIZE_BOX)</a>
+<a name="ln914">    {</a>
+<a name="ln915">      histogram_roi.crop_x = MIN(roi_in-&gt;width, MAX(0, dev-&gt;gui_module-&gt;color_picker_box[0] * roi_in-&gt;width));</a>
+<a name="ln916">      histogram_roi.crop_y = MIN(roi_in-&gt;height, MAX(0, dev-&gt;gui_module-&gt;color_picker_box[1] * roi_in-&gt;height));</a>
+<a name="ln917">      histogram_roi.crop_width = roi_in-&gt;width - MIN(roi_in-&gt;width, MAX(0, dev-&gt;gui_module-&gt;color_picker_box[2] * roi_in-&gt;width));</a>
+<a name="ln918">      histogram_roi.crop_height = roi_in-&gt;height - MIN(roi_in-&gt;height, MAX(0, dev-&gt;gui_module-&gt;color_picker_box[3] * roi_in-&gt;height));</a>
+<a name="ln919">    }</a>
+<a name="ln920">    else</a>
+<a name="ln921">    {</a>
+<a name="ln922">      histogram_roi.crop_x = MIN(roi_in-&gt;width, MAX(0, dev-&gt;gui_module-&gt;color_picker_point[0] * roi_in-&gt;width));</a>
+<a name="ln923">      histogram_roi.crop_y = MIN(roi_in-&gt;height, MAX(0, dev-&gt;gui_module-&gt;color_picker_point[1] * roi_in-&gt;height));</a>
+<a name="ln924">      histogram_roi.crop_width = roi_in-&gt;width - MIN(roi_in-&gt;width, MAX(0, dev-&gt;gui_module-&gt;color_picker_point[0] * roi_in-&gt;width));</a>
+<a name="ln925">      histogram_roi.crop_height = roi_in-&gt;height - MIN(roi_in-&gt;height, MAX(0, dev-&gt;gui_module-&gt;color_picker_point[1] * roi_in-&gt;height));</a>
+<a name="ln926">    }</a>
+<a name="ln927">  }</a>
+<a name="ln928"> </a>
+<a name="ln929">  dt_colorspaces_color_profile_type_t histogram_type = DT_COLORSPACE_SRGB;</a>
+<a name="ln930">  gchar *histogram_filename = NULL;</a>
+<a name="ln931">  gchar _histogram_filename[1] = { 0 };</a>
+<a name="ln932"> </a>
+<a name="ln933">  dt_ioppr_get_histogram_profile_type(&amp;histogram_type, &amp;histogram_filename);</a>
+<a name="ln934">  if(histogram_filename == NULL) histogram_filename = _histogram_filename;</a>
+<a name="ln935">  </a>
+<a name="ln936">  if((histogram_type != darktable.color_profiles-&gt;display_type) || </a>
+<a name="ln937">      (histogram_type == DT_COLORSPACE_FILE &amp;&amp;</a>
+<a name="ln938">      strcmp(histogram_filename, darktable.color_profiles-&gt;display_filename)))</a>
+<a name="ln939">  {</a>
+<a name="ln940">    img_tmp = dt_alloc_align(64, roi_in-&gt;width * roi_in-&gt;height * 4 * sizeof(float));</a>
+<a name="ln941"> </a>
+<a name="ln942">    const dt_iop_order_iccprofile_info_t *const profile_info_from</a>
+<a name="ln943">        = dt_ioppr_add_profile_info_to_list(dev, darktable.color_profiles-&gt;display_type,</a>
+<a name="ln944">                                            darktable.color_profiles-&gt;display_filename, INTENT_PERCEPTUAL);</a>
+<a name="ln945">    const dt_iop_order_iccprofile_info_t *const profile_info_to</a>
+<a name="ln946">        = dt_ioppr_add_profile_info_to_list(dev, histogram_type, histogram_filename, INTENT_PERCEPTUAL);</a>
+<a name="ln947"> </a>
+<a name="ln948">    dt_ioppr_transform_image_colorspace_rgb(input, img_tmp, roi_in-&gt;width, roi_in-&gt;height, profile_info_from,</a>
+<a name="ln949">                                            profile_info_to, &quot;final histogram&quot;);</a>
+<a name="ln950">  }</a>
+<a name="ln951"> </a>
+<a name="ln952">  dev-&gt;histogram_max = 0;</a>
+<a name="ln953">  memset(dev-&gt;histogram, 0, sizeof(uint32_t) * 4 * 256);</a>
+<a name="ln954"> </a>
+<a name="ln955">  histogram_params.roi = &amp;histogram_roi;</a>
+<a name="ln956">  histogram_params.bins_count = 256;</a>
+<a name="ln957">  histogram_params.mul = histogram_params.bins_count - 1;</a>
+<a name="ln958"> </a>
+<a name="ln959">  dt_histogram_helper(&amp;histogram_params, &amp;histogram_stats, cst, iop_cs_NONE, (img_tmp) ? img_tmp: input, &amp;dev-&gt;histogram, FALSE, NULL);</a>
+<a name="ln960">  dt_histogram_max_helper(&amp;histogram_stats, cst, iop_cs_NONE, &amp;dev-&gt;histogram, histogram_max);</a>
+<a name="ln961">  dev-&gt;histogram_max = MAX(MAX(histogram_max[0], histogram_max[1]), histogram_max[2]);</a>
+<a name="ln962">  </a>
+<a name="ln963">  if(img_tmp) dt_free_align(img_tmp);</a>
+<a name="ln964">}</a>
+<a name="ln965"> </a>
+<a name="ln966">static void _pixelpipe_final_histogram_waveform(dt_develop_t *dev, const float *const input, const dt_iop_roi_t *roi_in)</a>
+<a name="ln967">{</a>
+<a name="ln968">  uint32_t *buf = (uint32_t *)calloc(dev-&gt;histogram_waveform_height * dev-&gt;histogram_waveform_width * 3,</a>
+<a name="ln969">                                     sizeof(uint32_t));</a>
+<a name="ln970">  memset(dev-&gt;histogram_waveform, 0,</a>
+<a name="ln971">         sizeof(uint32_t) * dev-&gt;histogram_waveform_height * dev-&gt;histogram_waveform_stride / 4);</a>
+<a name="ln972"> </a>
+<a name="ln973">  // 1.0 is at 8/9 of the height!</a>
+<a name="ln974">  const double bin_width = (double)(roi_in-&gt;width) / (double)dev-&gt;histogram_waveform_width,</a>
+<a name="ln975">               _height = (double)(dev-&gt;histogram_waveform_height - 1);</a>
+<a name="ln976">  const float *const pixel = (const float *const )input;</a>
+<a name="ln977">  //         uint32_t mincol[3] = {UINT32_MAX,UINT32_MAX,UINT32_MAX}, maxcol[3] = {0,0,0};</a>
+<a name="ln978"> </a>
+<a name="ln979">  // count the colors into buf ...</a>
+<a name="ln980">  for(int y = 0; y &lt; roi_in-&gt;height; y++)</a>
+<a name="ln981">  {</a>
+<a name="ln982">    for(int x = 0; x &lt; roi_in-&gt;width; x++)</a>
+<a name="ln983">    {</a>
+<a name="ln984">      float rgb[3];</a>
+<a name="ln985">      for(int k = 0; k &lt; 3; k++) rgb[k] = pixel[4 * y * roi_in-&gt;width + 4 * x + 2 - k];</a>
+<a name="ln986"> </a>
+<a name="ln987">      const int out_x = MIN(x / bin_width, dev-&gt;histogram_waveform_width - 1);</a>
+<a name="ln988">      for(int k = 0; k &lt; 3; k++)</a>
+<a name="ln989">      {</a>
+<a name="ln990">        const float v = isnan(rgb[k]) ? 0.0f</a>
+<a name="ln991">                                      : rgb[k]; // catch NaNs as they don't convert well to integers</a>
+<a name="ln992">        const int out_y = CLAMP(1.0 - (8.0 / 9.0) * v, 0.0, 1.0) * _height;</a>
+<a name="ln993">        uint32_t *const out = buf + (out_y * dev-&gt;histogram_waveform_width * 3 + out_x * 3 + k);</a>
+<a name="ln994">        (*out)++;</a>
+<a name="ln995">        //               mincol[k] = MIN(mincol[k], *out);</a>
+<a name="ln996">        //               maxcol[k] = MAX(maxcol[k], *out);</a>
+<a name="ln997">      }</a>
+<a name="ln998">    }</a>
+<a name="ln999">  }</a>
+<a name="ln1000"> </a>
+<a name="ln1001">  // TODO: Find a nicer function to map buf -&gt; image than just clipping</a>
+<a name="ln1002">  //         float factor[3];</a>
+<a name="ln1003">  //         for(int k = 0; k &lt; 3; k++)</a>
+<a name="ln1004">  //           factor[k] = 255.0 / (float)(maxcol[k] - mincol[k]); // leave some clipping</a>
+<a name="ln1005"> </a>
+<a name="ln1006">  // ... and scale that into a nice image. putting the pixels into the image directly gets too</a>
+<a name="ln1007">  // saturated/clips.</a>
+<a name="ln1008">  // new scale factor to do about the same as the old one for 1MP views, but scale to hidpi</a>
+<a name="ln1009">  const float scale = 0.5 * 1e6f/(roi_in-&gt;height*roi_in-&gt;width) *</a>
+<a name="ln1010">    (dev-&gt;histogram_waveform_width*dev-&gt;histogram_waveform_height) / (350.0f*233.);</a>
+<a name="ln1011">  for(int y = 0; y &lt; dev-&gt;histogram_waveform_height; y++)</a>
+<a name="ln1012">  {</a>
+<a name="ln1013">    for(int x = 0; x &lt; dev-&gt;histogram_waveform_width; x++)</a>
+<a name="ln1014">    {</a>
+<a name="ln1015">      uint32_t *const in = buf + (y * dev-&gt;histogram_waveform_width + x) * 3;</a>
+<a name="ln1016">      uint8_t *const out</a>
+<a name="ln1017">          = (uint8_t *)(dev-&gt;histogram_waveform + (y * dev-&gt;histogram_waveform_width + x));</a>
+<a name="ln1018">      for(int k = 0; k &lt; 3; k++)</a>
+<a name="ln1019">      {</a>
+<a name="ln1020">        if(in[k] == 0) continue;</a>
+<a name="ln1021">        out[k] = CLAMP(in[k] * scale, 5, 255);</a>
+<a name="ln1022">        //               if(in[k] == 0)</a>
+<a name="ln1023">        //                 out[k] = 0;</a>
+<a name="ln1024">        //               else</a>
+<a name="ln1025">        //                 out[k] = (float)(in[k] - mincol[k]) * factor[k];</a>
+<a name="ln1026">      }</a>
+<a name="ln1027">    }</a>
+<a name="ln1028">  }</a>
+<a name="ln1029"> </a>
+<a name="ln1030">  free(buf);</a>
+<a name="ln1031">}</a>
+<a name="ln1032"> </a>
+<a name="ln1033">// returns 1 if blend process need the module default colorspace</a>
+<a name="ln1034">static int _transform_for_blend(dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, const int cst_in, const int cst_out)</a>
+<a name="ln1035">{</a>
+<a name="ln1036">  int ret = 0;</a>
+<a name="ln1037">  const dt_develop_blend_params_t *const d = (const dt_develop_blend_params_t *const)piece-&gt;blendop_data;</a>
+<a name="ln1038">  if(d)</a>
+<a name="ln1039">  {</a>
+<a name="ln1040">    // check only if blend is active</a>
+<a name="ln1041">    if((self-&gt;flags() &amp; IOP_FLAGS_SUPPORTS_BLENDING) &amp;&amp; (d-&gt;mask_mode != DEVELOP_MASK_DISABLED))</a>
+<a name="ln1042">    {</a>
+<a name="ln1043">      ret = 1;</a>
+<a name="ln1044">    }</a>
+<a name="ln1045">  }</a>
+<a name="ln1046">  </a>
+<a name="ln1047">  return ret;</a>
+<a name="ln1048">}</a>
+<a name="ln1049"> </a>
+<a name="ln1050">// recursive helper for process:</a>
+<a name="ln1051">static int dt_dev_pixelpipe_process_rec(dt_dev_pixelpipe_t *pipe, dt_develop_t *dev, void **output,</a>
+<a name="ln1052">                                        void **cl_mem_output, dt_iop_buffer_dsc_t **out_format,</a>
+<a name="ln1053">                                        const dt_iop_roi_t *roi_out, GList *modules, GList *pieces, int pos)</a>
+<a name="ln1054">{</a>
+<a name="ln1055">  dt_iop_roi_t roi_in = *roi_out;</a>
+<a name="ln1056"> </a>
+<a name="ln1057">  char module_name[256] = { 0 };</a>
+<a name="ln1058">  void *input = NULL;</a>
+<a name="ln1059">  void *cl_mem_input = NULL;</a>
+<a name="ln1060">  *cl_mem_output = NULL;</a>
+<a name="ln1061">  dt_iop_module_t *module = NULL;</a>
+<a name="ln1062">  dt_dev_pixelpipe_iop_t *piece = NULL;</a>
+<a name="ln1063">  if(modules)</a>
+<a name="ln1064">  {</a>
+<a name="ln1065">    module = (dt_iop_module_t *)modules-&gt;data;</a>
+<a name="ln1066">    piece = (dt_dev_pixelpipe_iop_t *)pieces-&gt;data;</a>
+<a name="ln1067">    // skip this module?</a>
+<a name="ln1068">    if(!piece-&gt;enabled</a>
+<a name="ln1069">       || (dev-&gt;gui_module &amp;&amp; dev-&gt;gui_module-&gt;operation_tags_filter() &amp; module-&gt;operation_tags()))</a>
+<a name="ln1070">      return dt_dev_pixelpipe_process_rec(pipe, dev, output, cl_mem_output, out_format, &amp;roi_in,</a>
+<a name="ln1071">                                          g_list_previous(modules), g_list_previous(pieces), pos - 1);</a>
+<a name="ln1072">  }</a>
+<a name="ln1073"> </a>
+<a name="ln1074">  if(module) g_strlcpy(module_name, module-&gt;op, MIN(sizeof(module_name), sizeof(module-&gt;op)));</a>
+<a name="ln1075">  get_output_format(module, pipe, piece, dev, *out_format);</a>
+<a name="ln1076">  const size_t bpp = dt_iop_buffer_dsc_to_bpp(*out_format);</a>
+<a name="ln1077">  const size_t bufsize = (size_t)bpp * roi_out-&gt;width * roi_out-&gt;height;</a>
+<a name="ln1078"> </a>
+<a name="ln1079">  // 1) if cached buffer is still available, return data</a>
+<a name="ln1080">  dt_pthread_mutex_lock(&amp;pipe-&gt;busy_mutex);</a>
+<a name="ln1081">  if(pipe-&gt;shutdown)</a>
+<a name="ln1082">  {</a>
+<a name="ln1083">    dt_pthread_mutex_unlock(&amp;pipe-&gt;busy_mutex);</a>
+<a name="ln1084">    return 1;</a>
+<a name="ln1085">  }</a>
+<a name="ln1086">  uint64_t hash = dt_dev_pixelpipe_cache_hash(pipe-&gt;image.id, roi_out, pipe, pos);</a>
+<a name="ln1087">  if(dt_dev_pixelpipe_cache_available(&amp;(pipe-&gt;cache), hash))</a>
+<a name="ln1088">  {</a>
+<a name="ln1089">    // if(module) printf(&quot;found valid buf pos %d in cache for module %s %s %lu\n&quot;, pos, module-&gt;op, pipe ==</a>
+<a name="ln1090">    // dev-&gt;preview_pipe ? &quot;[preview]&quot; : &quot;&quot;, hash);</a>
+<a name="ln1091"> </a>
+<a name="ln1092">    (void)dt_dev_pixelpipe_cache_get(&amp;(pipe-&gt;cache), hash, bufsize, output, out_format);</a>
+<a name="ln1093"> </a>
+<a name="ln1094">    dt_pthread_mutex_unlock(&amp;pipe-&gt;busy_mutex);</a>
+<a name="ln1095">    if(!modules) return 0;</a>
+<a name="ln1096">    // go to post-collect directly:</a>
+<a name="ln1097">    goto post_process_collect_info;</a>
+<a name="ln1098">  }</a>
+<a name="ln1099">  else</a>
+<a name="ln1100">    dt_pthread_mutex_unlock(&amp;pipe-&gt;busy_mutex);</a>
+<a name="ln1101"> </a>
+<a name="ln1102">  // 2) if history changed or exit event, abort processing?</a>
+<a name="ln1103">  // preview pipe: abort on all but zoom events (same buffer anyways)</a>
+<a name="ln1104">  if(dt_iop_breakpoint(dev, pipe)) return 1;</a>
+<a name="ln1105">  // if image has changed, stop now.</a>
+<a name="ln1106">  if(pipe == dev-&gt;pipe &amp;&amp; dev-&gt;image_force_reload) return 1;</a>
+<a name="ln1107">  if(pipe == dev-&gt;preview_pipe &amp;&amp; dev-&gt;preview_loading) return 1;</a>
+<a name="ln1108">  if(pipe == dev-&gt;preview2_pipe &amp;&amp; dev-&gt;preview2_loading) return 1;</a>
+<a name="ln1109">  if(dev-&gt;gui_leaving) return 1;</a>
+<a name="ln1110"> </a>
+<a name="ln1111"> </a>
+<a name="ln1112">  // 3) input -&gt; output</a>
+<a name="ln1113">  if(!modules)</a>
+<a name="ln1114">  {</a>
+<a name="ln1115">    // 3a) import input array with given scale and roi</a>
+<a name="ln1116">    dt_pthread_mutex_lock(&amp;pipe-&gt;busy_mutex);</a>
+<a name="ln1117">    if(pipe-&gt;shutdown)</a>
+<a name="ln1118">    {</a>
+<a name="ln1119">      dt_pthread_mutex_unlock(&amp;pipe-&gt;busy_mutex);</a>
+<a name="ln1120">      return 1;</a>
+<a name="ln1121">    }</a>
+<a name="ln1122">    dt_times_t start;</a>
+<a name="ln1123">    dt_get_times(&amp;start);</a>
+<a name="ln1124">    // we're looking for the full buffer</a>
+<a name="ln1125">    {</a>
+<a name="ln1126">      if(roi_out-&gt;scale == 1.0 &amp;&amp; roi_out-&gt;x == 0 &amp;&amp; roi_out-&gt;y == 0 &amp;&amp; pipe-&gt;iwidth == roi_out-&gt;width</a>
+<a name="ln1127">         &amp;&amp; pipe-&gt;iheight == roi_out-&gt;height)</a>
+<a name="ln1128">      {</a>
+<a name="ln1129">        *output = pipe-&gt;input;</a>
+<a name="ln1130">      }</a>
+<a name="ln1131">      else if(dt_dev_pixelpipe_cache_get(&amp;(pipe-&gt;cache), hash, bufsize, output, out_format))</a>
+<a name="ln1132">      {</a>
+<a name="ln1133">        memset(*output, 0, bufsize);</a>
+<a name="ln1134">        if(roi_in.scale == 1.0f)</a>
+<a name="ln1135">        {</a>
+<a name="ln1136">          // fast branch for 1:1 pixel copies.</a>
+<a name="ln1137"> </a>
+<a name="ln1138">          // last minute clamping to catch potential out-of-bounds in roi_in and roi_out</a>
+<a name="ln1139"> </a>
+<a name="ln1140">          const int in_x = MAX(roi_in.x, 0);</a>
+<a name="ln1141">          const int in_y = MAX(roi_in.y, 0);</a>
+<a name="ln1142">          const int cp_width = MIN(roi_out-&gt;width, pipe-&gt;iwidth - in_x);</a>
+<a name="ln1143">          const int cp_height = MIN(roi_out-&gt;height, pipe-&gt;iheight - in_y);</a>
+<a name="ln1144"> </a>
+<a name="ln1145">#ifdef _OPENMP</a>
+<a name="ln1146">#pragma omp parallel for schedule(static) default(none) shared(pipe, roi_out, roi_in, output)</a>
+<a name="ln1147">#endif</a>
+<a name="ln1148">          for(int j = 0; j &lt; cp_height; j++)</a>
+<a name="ln1149">            memcpy(((char *)*output) + (size_t)bpp * j * roi_out-&gt;width,</a>
+<a name="ln1150">                   ((char *)pipe-&gt;input) + (size_t)bpp * (in_x + (in_y + j) * pipe-&gt;iwidth),</a>
+<a name="ln1151">                   (size_t)bpp * cp_width);</a>
+<a name="ln1152">        }</a>
+<a name="ln1153">        else</a>
+<a name="ln1154">        {</a>
+<a name="ln1155">          roi_in.x /= roi_out-&gt;scale;</a>
+<a name="ln1156">          roi_in.y /= roi_out-&gt;scale;</a>
+<a name="ln1157">          roi_in.width = pipe-&gt;iwidth;</a>
+<a name="ln1158">          roi_in.height = pipe-&gt;iheight;</a>
+<a name="ln1159">          roi_in.scale = 1.0f;</a>
+<a name="ln1160">          dt_iop_clip_and_zoom(*output, pipe-&gt;input, roi_out, &amp;roi_in, roi_out-&gt;width, pipe-&gt;iwidth);</a>
+<a name="ln1161">        }</a>
+<a name="ln1162">      }</a>
+<a name="ln1163">      // else found in cache.</a>
+<a name="ln1164">    }</a>
+<a name="ln1165"> </a>
+<a name="ln1166">    dt_show_times_f(&amp;start, &quot;[dev_pixelpipe]&quot;, &quot;initing base buffer [%s]&quot;, _pipe_type_to_str(pipe-&gt;type));</a>
+<a name="ln1167">    dt_pthread_mutex_unlock(&amp;pipe-&gt;busy_mutex);</a>
+<a name="ln1168">  }</a>
+<a name="ln1169">  else</a>
+<a name="ln1170">  {</a>
+<a name="ln1171">    // 3b) recurse and obtain output array in &amp;input</a>
+<a name="ln1172"> </a>
+<a name="ln1173">    // get region of interest which is needed in input</a>
+<a name="ln1174">    dt_pthread_mutex_lock(&amp;pipe-&gt;busy_mutex);</a>
+<a name="ln1175">    if(pipe-&gt;shutdown)</a>
+<a name="ln1176">    {</a>
+<a name="ln1177">      dt_pthread_mutex_unlock(&amp;pipe-&gt;busy_mutex);</a>
+<a name="ln1178">      return 1;</a>
+<a name="ln1179">    }</a>
+<a name="ln1180">    module-&gt;modify_roi_in(module, piece, roi_out, &amp;roi_in);</a>
+<a name="ln1181">    dt_pthread_mutex_unlock(&amp;pipe-&gt;busy_mutex);</a>
+<a name="ln1182"> </a>
+<a name="ln1183">    // recurse to get actual data of input buffer</a>
+<a name="ln1184"> </a>
+<a name="ln1185">    dt_iop_buffer_dsc_t _input_format = { 0 };</a>
+<a name="ln1186">    dt_iop_buffer_dsc_t *input_format = &amp;_input_format;</a>
+<a name="ln1187"> </a>
+<a name="ln1188">    piece = (dt_dev_pixelpipe_iop_t *)pieces-&gt;data;</a>
+<a name="ln1189"> </a>
+<a name="ln1190">    piece-&gt;processed_roi_in = roi_in;</a>
+<a name="ln1191">    piece-&gt;processed_roi_out = *roi_out;</a>
+<a name="ln1192"> </a>
+<a name="ln1193">    if(dt_dev_pixelpipe_process_rec(pipe, dev, &amp;input, &amp;cl_mem_input, &amp;input_format, &amp;roi_in,</a>
+<a name="ln1194">                                    g_list_previous(modules), g_list_previous(pieces), pos - 1))</a>
+<a name="ln1195">      return 1;</a>
+<a name="ln1196"> </a>
+<a name="ln1197">    const size_t in_bpp = dt_iop_buffer_dsc_to_bpp(input_format);</a>
+<a name="ln1198"> </a>
+<a name="ln1199">    piece-&gt;dsc_out = piece-&gt;dsc_in = *input_format;</a>
+<a name="ln1200"> </a>
+<a name="ln1201">    module-&gt;output_format(module, pipe, piece, &amp;piece-&gt;dsc_out);</a>
+<a name="ln1202"> </a>
+<a name="ln1203">    **out_format = pipe-&gt;dsc = piece-&gt;dsc_out;</a>
+<a name="ln1204"> </a>
+<a name="ln1205">    const size_t out_bpp = dt_iop_buffer_dsc_to_bpp(*out_format);</a>
+<a name="ln1206"> </a>
+<a name="ln1207">    // reserve new cache line: output</a>
+<a name="ln1208">    dt_pthread_mutex_lock(&amp;pipe-&gt;busy_mutex);</a>
+<a name="ln1209">    if(pipe-&gt;shutdown)</a>
+<a name="ln1210">    {</a>
+<a name="ln1211">      dt_pthread_mutex_unlock(&amp;pipe-&gt;busy_mutex);</a>
+<a name="ln1212">      return 1;</a>
+<a name="ln1213">    }</a>
+<a name="ln1214"> </a>
+<a name="ln1215">    if(!strcmp(module-&gt;op, &quot;gamma&quot;))</a>
+<a name="ln1216">      (void)dt_dev_pixelpipe_cache_get_important(&amp;(pipe-&gt;cache), hash, bufsize, output, out_format);</a>
+<a name="ln1217">    else</a>
+<a name="ln1218">      (void)dt_dev_pixelpipe_cache_get(&amp;(pipe-&gt;cache), hash, bufsize, output, out_format);</a>
+<a name="ln1219"> </a>
+<a name="ln1220">    dt_pthread_mutex_unlock(&amp;pipe-&gt;busy_mutex);</a>
+<a name="ln1221"> </a>
+<a name="ln1222">// if(module) printf(&quot;reserving new buf in cache for module %s %s: %ld buf %p\n&quot;, module-&gt;op, pipe ==</a>
+<a name="ln1223">// dev-&gt;preview_pipe ? &quot;[preview]&quot; : &quot;&quot;, hash, *output);</a>
+<a name="ln1224"> </a>
+<a name="ln1225">    dt_pthread_mutex_lock(&amp;pipe-&gt;busy_mutex);</a>
+<a name="ln1226">    if(pipe-&gt;shutdown)</a>
+<a name="ln1227">    {</a>
+<a name="ln1228">      dt_pthread_mutex_unlock(&amp;pipe-&gt;busy_mutex);</a>
+<a name="ln1229">      return 1;</a>
+<a name="ln1230">    }</a>
+<a name="ln1231"> </a>
+<a name="ln1232">    dt_times_t start;</a>
+<a name="ln1233">    dt_get_times(&amp;start);</a>
+<a name="ln1234"> </a>
+<a name="ln1235">    dt_pixelpipe_flow_t pixelpipe_flow = (PIXELPIPE_FLOW_NONE | PIXELPIPE_FLOW_HISTOGRAM_NONE);</a>
+<a name="ln1236"> </a>
+<a name="ln1237">    // special case: user requests to see channel data in the parametric mask of a module. In that case</a>
+<a name="ln1238">    // we skip all modules manipulating pixel content and only process image distorting modules. Finally</a>
+<a name="ln1239">    // &quot;gamma&quot; is responsible to display channel data accordingly.</a>
+<a name="ln1240">    if(strcmp(module-&gt;op, &quot;gamma&quot;) &amp;&amp; (pipe-&gt;mask_display &amp; DT_DEV_PIXELPIPE_DISPLAY_ANY) &amp;&amp; !(module-&gt;operation_tags() &amp; IOP_TAG_DISTORT) &amp;&amp;</a>
+<a name="ln1241">      (in_bpp == out_bpp) &amp;&amp; !memcmp(&amp;roi_in, roi_out, sizeof(struct dt_iop_roi_t)))</a>
+<a name="ln1242">    {</a>
+<a name="ln1243">#ifdef HAVE_OPENCL</a>
+<a name="ln1244">      if(dt_opencl_is_inited() &amp;&amp; pipe-&gt;opencl_enabled &amp;&amp; pipe-&gt;devid &gt;= 0 &amp;&amp; (cl_mem_input != NULL))</a>
+<a name="ln1245">      {</a>
+<a name="ln1246">        *cl_mem_output = cl_mem_input;</a>
+<a name="ln1247">      }</a>
+<a name="ln1248">      else</a>
+<a name="ln1249">      {</a>
+<a name="ln1250">#ifdef _OPENMP</a>
+<a name="ln1251">#pragma omp parallel for schedule(static) default(none) shared(roi_out, roi_in, output, input)</a>
+<a name="ln1252">#endif</a>
+<a name="ln1253">        for(int j = 0; j &lt; roi_out-&gt;height; j++)</a>
+<a name="ln1254">            memcpy(((char *)*output) + (size_t)out_bpp * j * roi_out-&gt;width,</a>
+<a name="ln1255">                   ((char *)input) + (size_t)in_bpp * j * roi_in.width,</a>
+<a name="ln1256">                   (size_t)in_bpp * roi_in.width);</a>
+<a name="ln1257">      }</a>
+<a name="ln1258">#else // don't HAVE_OPENCL</a>
+<a name="ln1259">#ifdef _OPENMP</a>
+<a name="ln1260">#pragma omp parallel for schedule(static) default(none) shared(roi_out, roi_in, output, input)</a>
+<a name="ln1261">#endif</a>
+<a name="ln1262">      for(int j = 0; j &lt; roi_out-&gt;height; j++)</a>
+<a name="ln1263">            memcpy(((char *)*output) + (size_t)out_bpp * j * roi_out-&gt;width,</a>
+<a name="ln1264">                   ((char *)input) + (size_t)in_bpp * j * roi_in.width,</a>
+<a name="ln1265">                   (size_t)in_bpp * roi_in.width);</a>
+<a name="ln1266">#endif</a>
+<a name="ln1267"> </a>
+<a name="ln1268">      dt_pthread_mutex_unlock(&amp;pipe-&gt;busy_mutex);</a>
+<a name="ln1269">      return 0;</a>
+<a name="ln1270">    }</a>
+<a name="ln1271"> </a>
+<a name="ln1272"> </a>
+<a name="ln1273">    /* get tiling requirement of module */</a>
+<a name="ln1274">    dt_develop_tiling_t tiling = { 0 };</a>
+<a name="ln1275">    module-&gt;tiling_callback(module, piece, &amp;roi_in, roi_out, &amp;tiling);</a>
+<a name="ln1276"> </a>
+<a name="ln1277">    /* does this module involve blending? */</a>
+<a name="ln1278">    if(piece-&gt;blendop_data &amp;&amp; (dt_develop_blend_params_t *)piece-&gt;blendop_data != DEVELOP_MASK_DISABLED)</a>
+<a name="ln1279">    {</a>
+<a name="ln1280">      /* get specific memory requirement for blending */</a>
+<a name="ln1281">      dt_develop_tiling_t tiling_blendop = { 0 };</a>
+<a name="ln1282">      tiling_callback_blendop(module, piece, &amp;roi_in, roi_out, &amp;tiling_blendop);</a>
+<a name="ln1283"> </a>
+<a name="ln1284">      /* aggregate in structure tiling */</a>
+<a name="ln1285">      tiling.factor = fmax(tiling.factor, tiling_blendop.factor);</a>
+<a name="ln1286">      tiling.maxbuf = fmax(tiling.maxbuf, tiling_blendop.maxbuf);</a>
+<a name="ln1287">      tiling.overhead = fmax(tiling.overhead, tiling_blendop.overhead);</a>
+<a name="ln1288">    }</a>
+<a name="ln1289"> </a>
+<a name="ln1290">    /* remark: we do not do tiling for blendop step, neither in opencl nor on cpu. if overall tiling</a>
+<a name="ln1291">       requirements (maximum of module and blendop) require tiling for opencl path, then following blend</a>
+<a name="ln1292">       step is anyhow done on cpu. we assume that blending itself will never require tiling in cpu path,</a>
+<a name="ln1293">       because memory requirements will still be low enough. */</a>
+<a name="ln1294"> </a>
+<a name="ln1295">    assert(tiling.factor &gt; 0.0f);</a>
+<a name="ln1296"> </a>
+<a name="ln1297">    if(pipe-&gt;shutdown)</a>
+<a name="ln1298">    {</a>
+<a name="ln1299">      dt_pthread_mutex_unlock(&amp;pipe-&gt;busy_mutex);</a>
+<a name="ln1300">      return 1;</a>
+<a name="ln1301">    }</a>
+<a name="ln1302"> </a>
+<a name="ln1303">#ifdef HAVE_OPENCL</a>
+<a name="ln1304">    /* do we have opencl at all? did user tell us to use it? did we get a resource? */</a>
+<a name="ln1305">    if(dt_opencl_is_inited() &amp;&amp; pipe-&gt;opencl_enabled &amp;&amp; pipe-&gt;devid &gt;= 0)</a>
+<a name="ln1306">    {</a>
+<a name="ln1307">      int success_opencl = TRUE;</a>
+<a name="ln1308">      dt_iop_colorspace_type_t input_cst_cl = input_format-&gt;cst;</a>
+<a name="ln1309"> </a>
+<a name="ln1310">      /* if input is on gpu memory only, remember this fact to later take appropriate action */</a>
+<a name="ln1311">      int valid_input_on_gpu_only = (cl_mem_input != NULL);</a>
+<a name="ln1312"> </a>
+<a name="ln1313">      /* pre-check if there is enough space on device for non-tiled processing */</a>
+<a name="ln1314">      const int fits_on_device = dt_opencl_image_fits_device(pipe-&gt;devid, MAX(roi_in.width, roi_out-&gt;width),</a>
+<a name="ln1315">                                                             MAX(roi_in.height, roi_out-&gt;height), MAX(in_bpp, bpp),</a>
+<a name="ln1316">                                                             tiling.factor, tiling.overhead);</a>
+<a name="ln1317"> </a>
+<a name="ln1318">      /* general remark: in case of opencl errors within modules or out-of-memory on GPU, we transparently</a>
+<a name="ln1319">         fall back to the respective cpu module and continue in pixelpipe. If we encounter errors we set</a>
+<a name="ln1320">         pipe-&gt;opencl_error=1, return this function with value 1, and leave appropriate action to the calling</a>
+<a name="ln1321">         function, which normally would restart pixelpipe without opencl.</a>
+<a name="ln1322">         Late errors are sometimes detected when trying to get back data from device into host memory and</a>
+<a name="ln1323">         are treated in the same manner. */</a>
+<a name="ln1324"> </a>
+<a name="ln1325">      /* try to enter opencl path after checking some module specific pre-requisites */</a>
+<a name="ln1326">      if(module-&gt;process_cl &amp;&amp; piece-&gt;process_cl_ready</a>
+<a name="ln1327">         &amp;&amp; !((pipe-&gt;type == DT_DEV_PIXELPIPE_PREVIEW || pipe-&gt;type == DT_DEV_PIXELPIPE_PREVIEW2)</a>
+<a name="ln1328">              &amp;&amp; (module-&gt;flags() &amp; IOP_FLAGS_PREVIEW_NON_OPENCL))</a>
+<a name="ln1329">         &amp;&amp; (fits_on_device || piece-&gt;process_tiling_ready))</a>
+<a name="ln1330">      {</a>
+<a name="ln1331"> </a>
+<a name="ln1332">        // fprintf(stderr, &quot;[opencl_pixelpipe 0] factor %f, overhead %d, width %d, height %d, bpp %d\n&quot;,</a>
+<a name="ln1333">        // (double)tiling.factor, tiling.overhead, roi_in.width, roi_in.height, bpp);</a>
+<a name="ln1334"> </a>
+<a name="ln1335">        // fprintf(stderr, &quot;[opencl_pixelpipe 1] for module `%s', have bufs %p and %p \n&quot;, module-&gt;op,</a>
+<a name="ln1336">        // cl_mem_input, *cl_mem_output);</a>
+<a name="ln1337">        // fprintf(stderr, &quot;[opencl_pixelpipe 1] module '%s'\n&quot;, module-&gt;op);</a>
+<a name="ln1338"> </a>
+<a name="ln1339">        if(fits_on_device)</a>
+<a name="ln1340">        {</a>
+<a name="ln1341">          /* image is small enough -&gt; try to directly process entire image with opencl */</a>
+<a name="ln1342"> </a>
+<a name="ln1343">          // fprintf(stderr, &quot;[opencl_pixelpipe 2] module '%s' running directly with process_cl\n&quot;,</a>
+<a name="ln1344">          // module-&gt;op);</a>
+<a name="ln1345"> </a>
+<a name="ln1346">          /* input is not on gpu memory -&gt; copy it there */</a>
+<a name="ln1347">          if(cl_mem_input == NULL)</a>
+<a name="ln1348">          {</a>
+<a name="ln1349">            cl_mem_input = dt_opencl_alloc_device(pipe-&gt;devid, roi_in.width, roi_in.height, in_bpp);</a>
+<a name="ln1350">            if(cl_mem_input == NULL)</a>
+<a name="ln1351">            {</a>
+<a name="ln1352">              dt_print(DT_DEBUG_OPENCL, &quot;[opencl_pixelpipe] couldn't generate input buffer for module %s\n&quot;,</a>
+<a name="ln1353">                       module-&gt;op);</a>
+<a name="ln1354">              success_opencl = FALSE;</a>
+<a name="ln1355">            }</a>
+<a name="ln1356"> </a>
+<a name="ln1357">            if(success_opencl)</a>
+<a name="ln1358">            {</a>
+<a name="ln1359">              cl_int err = dt_opencl_write_host_to_device(pipe-&gt;devid, input, cl_mem_input,</a>
+<a name="ln1360">                                                                       roi_in.width, roi_in.height, in_bpp);</a>
+<a name="ln1361">              if(err != CL_SUCCESS)</a>
+<a name="ln1362">              {</a>
+<a name="ln1363">                dt_print(DT_DEBUG_OPENCL,</a>
+<a name="ln1364">                         &quot;[opencl_pixelpipe] couldn't copy image to opencl device for module %s\n&quot;,</a>
+<a name="ln1365">                         module-&gt;op);</a>
+<a name="ln1366">                success_opencl = FALSE;</a>
+<a name="ln1367">              }</a>
+<a name="ln1368">            }</a>
+<a name="ln1369">          }</a>
+<a name="ln1370"> </a>
+<a name="ln1371">          if(pipe-&gt;shutdown)</a>
+<a name="ln1372">          {</a>
+<a name="ln1373">            dt_opencl_release_mem_object(cl_mem_input);</a>
+<a name="ln1374">            dt_pthread_mutex_unlock(&amp;pipe-&gt;busy_mutex);</a>
+<a name="ln1375">            return 1;</a>
+<a name="ln1376">          }</a>
+<a name="ln1377"> </a>
+<a name="ln1378">          /* try to allocate GPU memory for output */</a>
+<a name="ln1379">          if(success_opencl)</a>
+<a name="ln1380">          {</a>
+<a name="ln1381">            *cl_mem_output = dt_opencl_alloc_device(pipe-&gt;devid, roi_out-&gt;width, roi_out-&gt;height, bpp);</a>
+<a name="ln1382">            if(*cl_mem_output == NULL)</a>
+<a name="ln1383">            {</a>
+<a name="ln1384">              dt_print(DT_DEBUG_OPENCL, &quot;[opencl_pixelpipe] couldn't allocate output buffer for module %s\n&quot;,</a>
+<a name="ln1385">                       module-&gt;op);</a>
+<a name="ln1386">              success_opencl = FALSE;</a>
+<a name="ln1387">            }</a>
+<a name="ln1388">          }</a>
+<a name="ln1389"> </a>
+<a name="ln1390">          // fprintf(stderr, &quot;[opencl_pixelpipe 2] for module `%s', have bufs %p and %p \n&quot;, module-&gt;op,</a>
+<a name="ln1391">          // cl_mem_input, *cl_mem_output);</a>
+<a name="ln1392"> </a>
+<a name="ln1393">          // indirectly give gpu some air to breathe (and to do display related stuff)</a>
+<a name="ln1394">          dt_iop_nap(darktable.opencl-&gt;micro_nap);</a>
+<a name="ln1395"> </a>
+<a name="ln1396">          // transform to input colorspace</a>
+<a name="ln1397">          if(success_opencl)</a>
+<a name="ln1398">          {</a>
+<a name="ln1399">            success_opencl = dt_ioppr_transform_image_colorspace_cl(</a>
+<a name="ln1400">                module, piece-&gt;pipe-&gt;devid, cl_mem_input, cl_mem_input, roi_in.width, roi_in.height, input_cst_cl,</a>
+<a name="ln1401">                module-&gt;input_colorspace(module, pipe, piece), &amp;input_cst_cl,</a>
+<a name="ln1402">                dt_ioppr_get_pipe_work_profile_info(pipe));</a>
+<a name="ln1403">          }</a>
+<a name="ln1404"> </a>
+<a name="ln1405">          // histogram collection for module</a>
+<a name="ln1406">          if(success_opencl &amp;&amp; (dev-&gt;gui_attached || !(piece-&gt;request_histogram &amp; DT_REQUEST_ONLY_IN_GUI))</a>
+<a name="ln1407">             &amp;&amp; (piece-&gt;request_histogram &amp; DT_REQUEST_ON))</a>
+<a name="ln1408">          {</a>
+<a name="ln1409">            // we abuse the empty output buffer on host for intermediate storage of data in</a>
+<a name="ln1410">            // histogram_collect_cl()</a>
+<a name="ln1411">            size_t outbufsize = roi_out-&gt;width * roi_out-&gt;height * bpp;</a>
+<a name="ln1412"> </a>
+<a name="ln1413">            histogram_collect_cl(pipe-&gt;devid, piece, cl_mem_input, &amp;roi_in, &amp;(piece-&gt;histogram),</a>
+<a name="ln1414">                                 piece-&gt;histogram_max, *output, outbufsize);</a>
+<a name="ln1415">            pixelpipe_flow |= (PIXELPIPE_FLOW_HISTOGRAM_ON_GPU);</a>
+<a name="ln1416">            pixelpipe_flow &amp;= ~(PIXELPIPE_FLOW_HISTOGRAM_NONE | PIXELPIPE_FLOW_HISTOGRAM_ON_CPU);</a>
+<a name="ln1417"> </a>
+<a name="ln1418">            if(piece-&gt;histogram &amp;&amp; (module-&gt;request_histogram &amp; DT_REQUEST_ON)</a>
+<a name="ln1419">               &amp;&amp; pipe-&gt;type == DT_DEV_PIXELPIPE_PREVIEW)</a>
+<a name="ln1420">            {</a>
+<a name="ln1421">              const size_t buf_size = 4 * piece-&gt;histogram_stats.bins_count * sizeof(uint32_t);</a>
+<a name="ln1422">              module-&gt;histogram = realloc(module-&gt;histogram, buf_size);</a>
+<a name="ln1423">              memcpy(module-&gt;histogram, piece-&gt;histogram, buf_size);</a>
+<a name="ln1424">              module-&gt;histogram_stats = piece-&gt;histogram_stats;</a>
+<a name="ln1425">              memcpy(module-&gt;histogram_max, piece-&gt;histogram_max, sizeof(piece-&gt;histogram_max));</a>
+<a name="ln1426"> </a>
+<a name="ln1427">              dt_pthread_mutex_unlock(&amp;pipe-&gt;busy_mutex);</a>
+<a name="ln1428"> </a>
+<a name="ln1429">              if(module-&gt;widget) dt_control_queue_redraw_widget(module-&gt;widget);</a>
+<a name="ln1430"> </a>
+<a name="ln1431">              dt_pthread_mutex_lock(&amp;pipe-&gt;busy_mutex);</a>
+<a name="ln1432">            }</a>
+<a name="ln1433">          }</a>
+<a name="ln1434"> </a>
+<a name="ln1435">          if(pipe-&gt;shutdown)</a>
+<a name="ln1436">          {</a>
+<a name="ln1437">            dt_pthread_mutex_unlock(&amp;pipe-&gt;busy_mutex);</a>
+<a name="ln1438">            return 1;</a>
+<a name="ln1439">          }</a>
+<a name="ln1440"> </a>
+<a name="ln1441">          /* now call process_cl of module; module should emit meaningful messages in case of error */</a>
+<a name="ln1442">          if(success_opencl)</a>
+<a name="ln1443">          {</a>
+<a name="ln1444">            success_opencl</a>
+<a name="ln1445">                = module-&gt;process_cl(module, piece, cl_mem_input, *cl_mem_output, &amp;roi_in, roi_out);</a>
+<a name="ln1446">            pixelpipe_flow |= (PIXELPIPE_FLOW_PROCESSED_ON_GPU);</a>
+<a name="ln1447">            pixelpipe_flow &amp;= ~(PIXELPIPE_FLOW_PROCESSED_ON_CPU | PIXELPIPE_FLOW_PROCESSED_WITH_TILING);</a>
+<a name="ln1448">            </a>
+<a name="ln1449">            // and save the output colorspace</a>
+<a name="ln1450">            pipe-&gt;dsc.cst = module-&gt;output_colorspace(module, pipe, piece);</a>
+<a name="ln1451">          }</a>
+<a name="ln1452"> </a>
+<a name="ln1453">          if(pipe-&gt;shutdown)</a>
+<a name="ln1454">          {</a>
+<a name="ln1455">            dt_opencl_release_mem_object(cl_mem_input);</a>
+<a name="ln1456">            dt_pthread_mutex_unlock(&amp;pipe-&gt;busy_mutex);</a>
+<a name="ln1457">            return 1;</a>
+<a name="ln1458">          }</a>
+<a name="ln1459"> </a>
+<a name="ln1460">          // Lab color picking for module</a>
+<a name="ln1461">          if(success_opencl &amp;&amp; dev-&gt;gui_attached &amp;&amp; pipe == dev-&gt;preview_pipe</a>
+<a name="ln1462">             &amp;&amp;                           // pick from preview pipe to get pixels outside the viewport</a>
+<a name="ln1463">             module == dev-&gt;gui_module &amp;&amp; // only modules with focus can pick</a>
+<a name="ln1464">             module-&gt;request_color_pick != DT_REQUEST_COLORPICK_OFF) // and they want to pick ;)</a>
+<a name="ln1465">          {</a>
+<a name="ln1466">            // we abuse the empty output buffer on host for intermediate storage of data in</a>
+<a name="ln1467">            // pixelpipe_picker_cl()</a>
+<a name="ln1468">            size_t outbufsize = roi_out-&gt;width * roi_out-&gt;height * bpp;</a>
+<a name="ln1469"> </a>
+<a name="ln1470">            pixelpipe_picker_cl(pipe-&gt;devid, module, &amp;piece-&gt;dsc_in, cl_mem_input, &amp;roi_in, module-&gt;picked_color,</a>
+<a name="ln1471">                                module-&gt;picked_color_min, module-&gt;picked_color_max, *output, outbufsize,</a>
+<a name="ln1472">                                input_cst_cl, PIXELPIPE_PICKER_INPUT);</a>
+<a name="ln1473">            pixelpipe_picker_cl(pipe-&gt;devid, module, &amp;pipe-&gt;dsc, (*cl_mem_output), roi_out,</a>
+<a name="ln1474">                                module-&gt;picked_output_color, module-&gt;picked_output_color_min,</a>
+<a name="ln1475">                                module-&gt;picked_output_color_max, *output, outbufsize, pipe-&gt;dsc.cst, PIXELPIPE_PICKER_OUTPUT);</a>
+<a name="ln1476"> </a>
+<a name="ln1477">            dt_pthread_mutex_unlock(&amp;pipe-&gt;busy_mutex);</a>
+<a name="ln1478"> </a>
+<a name="ln1479">            dt_iop_color_picker_apply_module(module, piece);</a>
+<a name="ln1480"> </a>
+<a name="ln1481">            dt_pthread_mutex_lock(&amp;pipe-&gt;busy_mutex);</a>
+<a name="ln1482">          }</a>
+<a name="ln1483"> </a>
+<a name="ln1484">          if(pipe-&gt;shutdown)</a>
+<a name="ln1485">          {</a>
+<a name="ln1486">            dt_pthread_mutex_unlock(&amp;pipe-&gt;busy_mutex);</a>
+<a name="ln1487">            return 1;</a>
+<a name="ln1488">          }</a>
+<a name="ln1489"> </a>
+<a name="ln1490">          // blend needs input/output images with default colorspace</a>
+<a name="ln1491">          if(success_opencl)</a>
+<a name="ln1492">          {</a>
+<a name="ln1493">            if(_transform_for_blend(module, piece, input_cst_cl, pipe-&gt;dsc.cst))</a>
+<a name="ln1494">            {</a>
+<a name="ln1495">              success_opencl = dt_ioppr_transform_image_colorspace_cl(</a>
+<a name="ln1496">                  module, piece-&gt;pipe-&gt;devid, cl_mem_input, cl_mem_input, roi_in.width, roi_in.height,</a>
+<a name="ln1497">                  input_cst_cl, module-&gt;blend_colorspace(module, pipe, piece), &amp;input_cst_cl,</a>
+<a name="ln1498">                  dt_ioppr_get_pipe_work_profile_info(pipe));</a>
+<a name="ln1499"> </a>
+<a name="ln1500">              success_opencl = dt_ioppr_transform_image_colorspace_cl(</a>
+<a name="ln1501">                  module, piece-&gt;pipe-&gt;devid, *cl_mem_output, *cl_mem_output, roi_out-&gt;width, roi_out-&gt;height,</a>
+<a name="ln1502">                  pipe-&gt;dsc.cst, module-&gt;blend_colorspace(module, pipe, piece), &amp;pipe-&gt;dsc.cst,</a>
+<a name="ln1503">                  dt_ioppr_get_pipe_work_profile_info(pipe));</a>
+<a name="ln1504">            }</a>
+<a name="ln1505">          }</a>
+<a name="ln1506">          </a>
+<a name="ln1507">          /* process blending */</a>
+<a name="ln1508">          if(success_opencl)</a>
+<a name="ln1509">          {</a>
+<a name="ln1510">            success_opencl</a>
+<a name="ln1511">                = dt_develop_blend_process_cl(module, piece, cl_mem_input, *cl_mem_output, &amp;roi_in, roi_out);</a>
+<a name="ln1512">            pixelpipe_flow |= (PIXELPIPE_FLOW_BLENDED_ON_GPU);</a>
+<a name="ln1513">            pixelpipe_flow &amp;= ~(PIXELPIPE_FLOW_BLENDED_ON_CPU);</a>
+<a name="ln1514">          }</a>
+<a name="ln1515"> </a>
+<a name="ln1516">          /* synchronization point for opencl pipe */</a>
+<a name="ln1517">          if(success_opencl &amp;&amp; (!darktable.opencl-&gt;async_pixelpipe || pipe-&gt;type == DT_DEV_PIXELPIPE_EXPORT))</a>
+<a name="ln1518">            success_opencl = dt_opencl_finish(pipe-&gt;devid);</a>
+<a name="ln1519"> </a>
+<a name="ln1520"> </a>
+<a name="ln1521">          if(pipe-&gt;shutdown)</a>
+<a name="ln1522">          {</a>
+<a name="ln1523">            dt_opencl_release_mem_object(cl_mem_input);</a>
+<a name="ln1524">            dt_pthread_mutex_unlock(&amp;pipe-&gt;busy_mutex);</a>
+<a name="ln1525">            return 1;</a>
+<a name="ln1526">          }</a>
+<a name="ln1527">        }</a>
+<a name="ln1528">        else if(piece-&gt;process_tiling_ready)</a>
+<a name="ln1529">        {</a>
+<a name="ln1530">          /* image is too big for direct opencl processing -&gt; try to process image via tiling */</a>
+<a name="ln1531"> </a>
+<a name="ln1532">          // fprintf(stderr, &quot;[opencl_pixelpipe 3] module '%s' tiling with process_tiling_cl\n&quot;, module-&gt;op);</a>
+<a name="ln1533"> </a>
+<a name="ln1534">          /* we might need to copy back valid image from device to host */</a>
+<a name="ln1535">          if(cl_mem_input != NULL)</a>
+<a name="ln1536">          {</a>
+<a name="ln1537">            cl_int err;</a>
+<a name="ln1538"> </a>
+<a name="ln1539">            /* copy back to CPU buffer, then clean unneeded buffer */</a>
+<a name="ln1540">            err = dt_opencl_copy_device_to_host(pipe-&gt;devid, input, cl_mem_input, roi_in.width, roi_in.height,</a>
+<a name="ln1541">                                                in_bpp);</a>
+<a name="ln1542">            if(err != CL_SUCCESS)</a>
+<a name="ln1543">            {</a>
+<a name="ln1544">              /* late opencl error */</a>
+<a name="ln1545">              dt_print(</a>
+<a name="ln1546">                  DT_DEBUG_OPENCL,</a>
+<a name="ln1547">                  &quot;[opencl_pixelpipe (a)] late opencl error detected while copying back to cpu buffer: %d\n&quot;,</a>
+<a name="ln1548">                  err);</a>
+<a name="ln1549">              dt_opencl_release_mem_object(cl_mem_input);</a>
+<a name="ln1550">              pipe-&gt;opencl_error = 1;</a>
+<a name="ln1551">              dt_pthread_mutex_unlock(&amp;pipe-&gt;busy_mutex);</a>
+<a name="ln1552">              return 1;</a>
+<a name="ln1553">            }</a>
+<a name="ln1554">            else</a>
+<a name="ln1555">              input_format-&gt;cst = input_cst_cl;</a>
+<a name="ln1556">            dt_opencl_release_mem_object(cl_mem_input);</a>
+<a name="ln1557">            cl_mem_input = NULL;</a>
+<a name="ln1558">            valid_input_on_gpu_only = FALSE;</a>
+<a name="ln1559">          }</a>
+<a name="ln1560"> </a>
+<a name="ln1561">          if(pipe-&gt;shutdown)</a>
+<a name="ln1562">          {</a>
+<a name="ln1563">            dt_pthread_mutex_unlock(&amp;pipe-&gt;busy_mutex);</a>
+<a name="ln1564">            return 1;</a>
+<a name="ln1565">          }</a>
+<a name="ln1566"> </a>
+<a name="ln1567">          // indirectly give gpu some air to breathe (and to do display related stuff)</a>
+<a name="ln1568">          dt_iop_nap(darktable.opencl-&gt;micro_nap);</a>
+<a name="ln1569"> </a>
+<a name="ln1570">          // transform to module input colorspace</a>
+<a name="ln1571">          if(success_opencl)</a>
+<a name="ln1572">          {</a>
+<a name="ln1573">            dt_ioppr_transform_image_colorspace(module, input, input, roi_in.width, roi_in.height,</a>
+<a name="ln1574">                                                input_format-&gt;cst, module-&gt;input_colorspace(module, pipe, piece),</a>
+<a name="ln1575">                                                &amp;input_format-&gt;cst, dt_ioppr_get_pipe_work_profile_info(pipe));</a>
+<a name="ln1576">          }</a>
+<a name="ln1577"> </a>
+<a name="ln1578">          // histogram collection for module</a>
+<a name="ln1579">          if(success_opencl &amp;&amp; (dev-&gt;gui_attached || !(piece-&gt;request_histogram &amp; DT_REQUEST_ONLY_IN_GUI))</a>
+<a name="ln1580">             &amp;&amp; (piece-&gt;request_histogram &amp; DT_REQUEST_ON))</a>
+<a name="ln1581">          {</a>
+<a name="ln1582">            histogram_collect(piece, input, &amp;roi_in, &amp;(piece-&gt;histogram), piece-&gt;histogram_max);</a>
+<a name="ln1583">            pixelpipe_flow |= (PIXELPIPE_FLOW_HISTOGRAM_ON_CPU);</a>
+<a name="ln1584">            pixelpipe_flow &amp;= ~(PIXELPIPE_FLOW_HISTOGRAM_NONE | PIXELPIPE_FLOW_HISTOGRAM_ON_GPU);</a>
+<a name="ln1585"> </a>
+<a name="ln1586">            if(piece-&gt;histogram &amp;&amp; (module-&gt;request_histogram &amp; DT_REQUEST_ON)</a>
+<a name="ln1587">               &amp;&amp; pipe-&gt;type == DT_DEV_PIXELPIPE_PREVIEW)</a>
+<a name="ln1588">            {</a>
+<a name="ln1589">              const size_t buf_size = 4 * piece-&gt;histogram_stats.bins_count * sizeof(uint32_t);</a>
+<a name="ln1590">              module-&gt;histogram = realloc(module-&gt;histogram, buf_size);</a>
+<a name="ln1591">              memcpy(module-&gt;histogram, piece-&gt;histogram, buf_size);</a>
+<a name="ln1592">              module-&gt;histogram_stats = piece-&gt;histogram_stats;</a>
+<a name="ln1593">              memcpy(module-&gt;histogram_max, piece-&gt;histogram_max, sizeof(piece-&gt;histogram_max));</a>
+<a name="ln1594"> </a>
+<a name="ln1595">              dt_pthread_mutex_unlock(&amp;pipe-&gt;busy_mutex);</a>
+<a name="ln1596"> </a>
+<a name="ln1597">              if(module-&gt;widget) dt_control_queue_redraw_widget(module-&gt;widget);</a>
+<a name="ln1598"> </a>
+<a name="ln1599">              dt_pthread_mutex_lock(&amp;pipe-&gt;busy_mutex);</a>
+<a name="ln1600">            }</a>
+<a name="ln1601">          }</a>
+<a name="ln1602"> </a>
+<a name="ln1603">          if(pipe-&gt;shutdown)</a>
+<a name="ln1604">          {</a>
+<a name="ln1605">            dt_pthread_mutex_unlock(&amp;pipe-&gt;busy_mutex);</a>
+<a name="ln1606">            return 1;</a>
+<a name="ln1607">          }</a>
+<a name="ln1608"> </a>
+<a name="ln1609">          /* now call process_tiling_cl of module; module should emit meaningful messages in case of error */</a>
+<a name="ln1610">          if(success_opencl)</a>
+<a name="ln1611">          {</a>
+<a name="ln1612">            success_opencl</a>
+<a name="ln1613">                = module-&gt;process_tiling_cl(module, piece, input, *output, &amp;roi_in, roi_out, in_bpp);</a>
+<a name="ln1614">            pixelpipe_flow |= (PIXELPIPE_FLOW_PROCESSED_ON_GPU | PIXELPIPE_FLOW_PROCESSED_WITH_TILING);</a>
+<a name="ln1615">            pixelpipe_flow &amp;= ~(PIXELPIPE_FLOW_PROCESSED_ON_CPU);</a>
+<a name="ln1616">            </a>
+<a name="ln1617">            // and save the output colorspace</a>
+<a name="ln1618">            pipe-&gt;dsc.cst = module-&gt;output_colorspace(module, pipe, piece);</a>
+<a name="ln1619">          }</a>
+<a name="ln1620"> </a>
+<a name="ln1621">          if(pipe-&gt;shutdown)</a>
+<a name="ln1622">          {</a>
+<a name="ln1623">            dt_pthread_mutex_unlock(&amp;pipe-&gt;busy_mutex);</a>
+<a name="ln1624">            return 1;</a>
+<a name="ln1625">          }</a>
+<a name="ln1626"> </a>
+<a name="ln1627">          // Lab color picking for module</a>
+<a name="ln1628">          if(success_opencl &amp;&amp; dev-&gt;gui_attached &amp;&amp; pipe == dev-&gt;preview_pipe</a>
+<a name="ln1629">             &amp;&amp;                           // pick from preview pipe to get pixels outside the viewport</a>
+<a name="ln1630">             module == dev-&gt;gui_module &amp;&amp; // only modules with focus can pick</a>
+<a name="ln1631">             module-&gt;request_color_pick != DT_REQUEST_COLORPICK_OFF) // and they want to pick ;)</a>
+<a name="ln1632">          {</a>
+<a name="ln1633">            pixelpipe_picker(module, &amp;piece-&gt;dsc_in, (float *)input, &amp;roi_in, module-&gt;picked_color,</a>
+<a name="ln1634">                             module-&gt;picked_color_min, module-&gt;picked_color_max, input_format-&gt;cst, PIXELPIPE_PICKER_INPUT);</a>
+<a name="ln1635">            pixelpipe_picker(module, &amp;pipe-&gt;dsc, (float *)(*output), roi_out, module-&gt;picked_output_color,</a>
+<a name="ln1636">                             module-&gt;picked_output_color_min, module-&gt;picked_output_color_max,</a>
+<a name="ln1637">                             pipe-&gt;dsc.cst, PIXELPIPE_PICKER_OUTPUT);</a>
+<a name="ln1638"> </a>
+<a name="ln1639">            dt_pthread_mutex_unlock(&amp;pipe-&gt;busy_mutex);</a>
+<a name="ln1640"> </a>
+<a name="ln1641">            dt_iop_color_picker_apply_module(module, piece);</a>
+<a name="ln1642"> </a>
+<a name="ln1643">            dt_pthread_mutex_lock(&amp;pipe-&gt;busy_mutex);</a>
+<a name="ln1644">          }</a>
+<a name="ln1645"> </a>
+<a name="ln1646">          if(pipe-&gt;shutdown)</a>
+<a name="ln1647">          {</a>
+<a name="ln1648">            dt_pthread_mutex_unlock(&amp;pipe-&gt;busy_mutex);</a>
+<a name="ln1649">            return 1;</a>
+<a name="ln1650">          }</a>
+<a name="ln1651"> </a>
+<a name="ln1652">          // blend needs input/output images with default colorspace</a>
+<a name="ln1653">          if(success_opencl)</a>
+<a name="ln1654">          {</a>
+<a name="ln1655">            if(_transform_for_blend(module, piece, input_format-&gt;cst, pipe-&gt;dsc.cst))</a>
+<a name="ln1656">            {</a>
+<a name="ln1657">              dt_ioppr_transform_image_colorspace(module, input, input, roi_in.width, roi_in.height,</a>
+<a name="ln1658">                                                  input_format-&gt;cst, module-&gt;blend_colorspace(module, pipe, piece),</a>
+<a name="ln1659">                                                  &amp;input_format-&gt;cst, dt_ioppr_get_pipe_work_profile_info(pipe));</a>
+<a name="ln1660"> </a>
+<a name="ln1661">              dt_ioppr_transform_image_colorspace(module, *output, *output, roi_out-&gt;width, roi_out-&gt;height,</a>
+<a name="ln1662">                                                  pipe-&gt;dsc.cst, module-&gt;blend_colorspace(module, pipe, piece),</a>
+<a name="ln1663">                                                  &amp;pipe-&gt;dsc.cst, dt_ioppr_get_pipe_work_profile_info(pipe));</a>
+<a name="ln1664">            }</a>
+<a name="ln1665">          }</a>
+<a name="ln1666">          </a>
+<a name="ln1667">          /* do process blending on cpu (this is anyhow fast enough) */</a>
+<a name="ln1668">          if(success_opencl)</a>
+<a name="ln1669">          {</a>
+<a name="ln1670">            dt_develop_blend_process(module, piece, input, *output, &amp;roi_in, roi_out);</a>
+<a name="ln1671">            pixelpipe_flow |= (PIXELPIPE_FLOW_BLENDED_ON_CPU);</a>
+<a name="ln1672">            pixelpipe_flow &amp;= ~(PIXELPIPE_FLOW_BLENDED_ON_GPU);</a>
+<a name="ln1673">          }</a>
+<a name="ln1674"> </a>
+<a name="ln1675">          /* synchronization point for opencl pipe */</a>
+<a name="ln1676">          if(success_opencl &amp;&amp; (!darktable.opencl-&gt;async_pixelpipe || pipe-&gt;type == DT_DEV_PIXELPIPE_EXPORT))</a>
+<a name="ln1677">            success_opencl = dt_opencl_finish(pipe-&gt;devid);</a>
+<a name="ln1678"> </a>
+<a name="ln1679">          if(pipe-&gt;shutdown)</a>
+<a name="ln1680">          {</a>
+<a name="ln1681">            dt_pthread_mutex_unlock(&amp;pipe-&gt;busy_mutex);</a>
+<a name="ln1682">            return 1;</a>
+<a name="ln1683">          }</a>
+<a name="ln1684">        }</a>
+<a name="ln1685">        else</a>
+<a name="ln1686">        {</a>
+<a name="ln1687">          /* image is too big for direct opencl and tiling is not allowed -&gt; no opencl processing for this</a>
+<a name="ln1688">           * module */</a>
+<a name="ln1689">          success_opencl = FALSE;</a>
+<a name="ln1690">        }</a>
+<a name="ln1691"> </a>
+<a name="ln1692">        if(pipe-&gt;shutdown)</a>
+<a name="ln1693">        {</a>
+<a name="ln1694">          dt_opencl_release_mem_object(cl_mem_input);</a>
+<a name="ln1695">          dt_pthread_mutex_unlock(&amp;pipe-&gt;busy_mutex);</a>
+<a name="ln1696">          return 1;</a>
+<a name="ln1697">        }</a>
+<a name="ln1698"> </a>
+<a name="ln1699">        // if (rand() % 20 == 0) success_opencl = FALSE; // Test code: simulate spurious failures</a>
+<a name="ln1700"> </a>
+<a name="ln1701">        /* finally check, if we were successful */</a>
+<a name="ln1702">        if(success_opencl)</a>
+<a name="ln1703">        {</a>
+<a name="ln1704">          /* Nice, everything went fine */</a>
+<a name="ln1705"> </a>
+<a name="ln1706">          /* this is reasonable on slow GPUs only, where it's more expensive to reprocess the whole pixelpipe</a>
+<a name="ln1707">             than</a>
+<a name="ln1708">             regularly copying device buffers back to host. This would slow down fast GPUs considerably.</a>
+<a name="ln1709">             But it is worth copying data back from the GPU which is the input to the currently focused iop,</a>
+<a name="ln1710">             as that is the iop which is most likely to change next.</a>
+<a name="ln1711">          */</a>
+<a name="ln1712">          if((darktable.opencl-&gt;sync_cache == OPENCL_SYNC_TRUE) ||</a>
+<a name="ln1713">             ((darktable.opencl-&gt;sync_cache == OPENCL_SYNC_ACTIVE_MODULE) &amp;&amp; (module == darktable.develop-&gt;gui_module)))</a>
+<a name="ln1714">          {</a>
+<a name="ln1715">            /* write back input into cache for faster re-usal (not for export or thumbnails) */</a>
+<a name="ln1716">            if(cl_mem_input != NULL &amp;&amp; pipe-&gt;type != DT_DEV_PIXELPIPE_EXPORT</a>
+<a name="ln1717">               &amp;&amp; pipe-&gt;type != DT_DEV_PIXELPIPE_THUMBNAIL)</a>
+<a name="ln1718">            {</a>
+<a name="ln1719">              cl_int err;</a>
+<a name="ln1720"> </a>
+<a name="ln1721">              /* copy input to host memory, so we can find it in cache */</a>
+<a name="ln1722">              err = dt_opencl_copy_device_to_host(pipe-&gt;devid, input, cl_mem_input, roi_in.width,</a>
+<a name="ln1723">                                                  roi_in.height, in_bpp);</a>
+<a name="ln1724">              if(err != CL_SUCCESS)</a>
+<a name="ln1725">              {</a>
+<a name="ln1726">                /* late opencl error, not likely to happen here */</a>
+<a name="ln1727">                dt_print(DT_DEBUG_OPENCL, &quot;[opencl_pixelpipe (e)] late opencl error detected while copying &quot;</a>
+<a name="ln1728">                                          &quot;back to cpu buffer: %d\n&quot;,</a>
+<a name="ln1729">                         err);</a>
+<a name="ln1730">                /* that's all we do here, we later make sure to invalidate cache line */</a>
+<a name="ln1731">              }</a>
+<a name="ln1732">              else</a>
+<a name="ln1733">              {</a>
+<a name="ln1734">                /* success: cache line is valid now, so we will not need to invalidate it later */</a>
+<a name="ln1735">                valid_input_on_gpu_only = FALSE;</a>
+<a name="ln1736"> </a>
+<a name="ln1737">                input_format-&gt;cst = input_cst_cl;</a>
+<a name="ln1738">                // TODO: check if we need to wait for finished opencl pipe before we release cl_mem_input</a>
+<a name="ln1739">                // dt_dev_finish(pipe-&gt;devid);</a>
+<a name="ln1740">              }</a>
+<a name="ln1741">            }</a>
+<a name="ln1742"> </a>
+<a name="ln1743">            if(pipe-&gt;shutdown)</a>
+<a name="ln1744">            {</a>
+<a name="ln1745">              dt_opencl_release_mem_object(cl_mem_input);</a>
+<a name="ln1746">              dt_pthread_mutex_unlock(&amp;pipe-&gt;busy_mutex);</a>
+<a name="ln1747">              return 1;</a>
+<a name="ln1748">            }</a>
+<a name="ln1749">          }</a>
+<a name="ln1750"> </a>
+<a name="ln1751">          /* we can now release cl_mem_input */</a>
+<a name="ln1752">          dt_opencl_release_mem_object(cl_mem_input);</a>
+<a name="ln1753">          cl_mem_input = NULL;</a>
+<a name="ln1754">          // we speculate on the next plug-in to possibly copy back cl_mem_output to output,</a>
+<a name="ln1755">          // so we're not just yet invalidating the (empty) output cache line.</a>
+<a name="ln1756">        }</a>
+<a name="ln1757">        else</a>
+<a name="ln1758">        {</a>
+<a name="ln1759">          /* Bad luck, opencl failed. Let's clean up and fall back to cpu module */</a>
+<a name="ln1760">          dt_print(DT_DEBUG_OPENCL, &quot;[opencl_pixelpipe] could not run module '%s' on gpu. falling back to cpu path\n&quot;,</a>
+<a name="ln1761">                   module-&gt;op);</a>
+<a name="ln1762"> </a>
+<a name="ln1763">          // fprintf(stderr, &quot;[opencl_pixelpipe 4] module '%s' running on cpu\n&quot;, module-&gt;op);</a>
+<a name="ln1764"> </a>
+<a name="ln1765">          /* we might need to free unused output buffer */</a>
+<a name="ln1766">          if(*cl_mem_output != NULL)</a>
+<a name="ln1767">          {</a>
+<a name="ln1768">            dt_opencl_release_mem_object(*cl_mem_output);</a>
+<a name="ln1769">            *cl_mem_output = NULL;</a>
+<a name="ln1770">          }</a>
+<a name="ln1771"> </a>
+<a name="ln1772">          /* check where our input buffer is located */</a>
+<a name="ln1773">          if(cl_mem_input != NULL)</a>
+<a name="ln1774">          {</a>
+<a name="ln1775">            cl_int err;</a>
+<a name="ln1776"> </a>
+<a name="ln1777">            /* copy back to host memory, then clean no longer needed opencl buffer.</a>
+<a name="ln1778">               important info: in order to make this possible, opencl modules must</a>
+<a name="ln1779">               not spoil their input buffer, even in case of errors. */</a>
+<a name="ln1780">            err = dt_opencl_copy_device_to_host(pipe-&gt;devid, input, cl_mem_input, roi_in.width, roi_in.height,</a>
+<a name="ln1781">                                                in_bpp);</a>
+<a name="ln1782">            if(err != CL_SUCCESS)</a>
+<a name="ln1783">            {</a>
+<a name="ln1784">              /* late opencl error */</a>
+<a name="ln1785">              dt_print(</a>
+<a name="ln1786">                  DT_DEBUG_OPENCL,</a>
+<a name="ln1787">                  &quot;[opencl_pixelpipe (b)] late opencl error detected while copying back to cpu buffer: %d\n&quot;,</a>
+<a name="ln1788">                  err);</a>
+<a name="ln1789">              dt_opencl_release_mem_object(cl_mem_input);</a>
+<a name="ln1790">              pipe-&gt;opencl_error = 1;</a>
+<a name="ln1791">              dt_pthread_mutex_unlock(&amp;pipe-&gt;busy_mutex);</a>
+<a name="ln1792">              return 1;</a>
+<a name="ln1793">            }</a>
+<a name="ln1794">            else</a>
+<a name="ln1795">              input_format-&gt;cst = input_cst_cl;</a>
+<a name="ln1796"> </a>
+<a name="ln1797">            /* this is a good place to release event handles as we anyhow need to move from gpu to cpu here */</a>
+<a name="ln1798">            (void)dt_opencl_finish(pipe-&gt;devid);</a>
+<a name="ln1799">            dt_opencl_release_mem_object(cl_mem_input);</a>
+<a name="ln1800">            valid_input_on_gpu_only = FALSE;</a>
+<a name="ln1801">          }</a>
+<a name="ln1802"> </a>
+<a name="ln1803">          if(pipe-&gt;shutdown)</a>
+<a name="ln1804">          {</a>
+<a name="ln1805">            dt_pthread_mutex_unlock(&amp;pipe-&gt;busy_mutex);</a>
+<a name="ln1806">            return 1;</a>
+<a name="ln1807">          }</a>
+<a name="ln1808"> </a>
+<a name="ln1809">          // transform to module input colorspace</a>
+<a name="ln1810">          dt_ioppr_transform_image_colorspace(module, input, input, roi_in.width, roi_in.height, input_format-&gt;cst,</a>
+<a name="ln1811">                                              module-&gt;input_colorspace(module, pipe, piece), &amp;input_format-&gt;cst,</a>
+<a name="ln1812">                                              dt_ioppr_get_pipe_work_profile_info(pipe));</a>
+<a name="ln1813"> </a>
+<a name="ln1814">          // histogram collection for module</a>
+<a name="ln1815">          if((dev-&gt;gui_attached || !(piece-&gt;request_histogram &amp; DT_REQUEST_ONLY_IN_GUI))</a>
+<a name="ln1816">             &amp;&amp; (piece-&gt;request_histogram &amp; DT_REQUEST_ON))</a>
+<a name="ln1817">          {</a>
+<a name="ln1818">            histogram_collect(piece, input, &amp;roi_in, &amp;(piece-&gt;histogram), piece-&gt;histogram_max);</a>
+<a name="ln1819">            pixelpipe_flow |= (PIXELPIPE_FLOW_HISTOGRAM_ON_CPU);</a>
+<a name="ln1820">            pixelpipe_flow &amp;= ~(PIXELPIPE_FLOW_HISTOGRAM_NONE | PIXELPIPE_FLOW_HISTOGRAM_ON_GPU);</a>
+<a name="ln1821"> </a>
+<a name="ln1822">            if(piece-&gt;histogram &amp;&amp; (module-&gt;request_histogram &amp; DT_REQUEST_ON)</a>
+<a name="ln1823">               &amp;&amp; pipe-&gt;type == DT_DEV_PIXELPIPE_PREVIEW)</a>
+<a name="ln1824">            {</a>
+<a name="ln1825">              const size_t buf_size = 4 * piece-&gt;histogram_stats.bins_count * sizeof(uint32_t);</a>
+<a name="ln1826">              module-&gt;histogram = realloc(module-&gt;histogram, buf_size);</a>
+<a name="ln1827">              memcpy(module-&gt;histogram, piece-&gt;histogram, buf_size);</a>
+<a name="ln1828">              module-&gt;histogram_stats = piece-&gt;histogram_stats;</a>
+<a name="ln1829">              memcpy(module-&gt;histogram_max, piece-&gt;histogram_max, sizeof(piece-&gt;histogram_max));</a>
+<a name="ln1830"> </a>
+<a name="ln1831">              dt_pthread_mutex_unlock(&amp;pipe-&gt;busy_mutex);</a>
+<a name="ln1832"> </a>
+<a name="ln1833">              if(module-&gt;widget) dt_control_queue_redraw_widget(module-&gt;widget);</a>
+<a name="ln1834"> </a>
+<a name="ln1835">              dt_pthread_mutex_lock(&amp;pipe-&gt;busy_mutex);</a>
+<a name="ln1836">            }</a>
+<a name="ln1837">          }</a>
+<a name="ln1838"> </a>
+<a name="ln1839">          if(pipe-&gt;shutdown)</a>
+<a name="ln1840">          {</a>
+<a name="ln1841">            dt_pthread_mutex_unlock(&amp;pipe-&gt;busy_mutex);</a>
+<a name="ln1842">            return 1;</a>
+<a name="ln1843">          }</a>
+<a name="ln1844"> </a>
+<a name="ln1845">          /* process module on cpu. use tiling if needed and possible. */</a>
+<a name="ln1846">          if(piece-&gt;process_tiling_ready</a>
+<a name="ln1847">             &amp;&amp; !dt_tiling_piece_fits_host_memory(MAX(roi_in.width, roi_out-&gt;width),</a>
+<a name="ln1848">                                                  MAX(roi_in.height, roi_out-&gt;height), MAX(in_bpp, bpp),</a>
+<a name="ln1849">                                                  tiling.factor, tiling.overhead))</a>
+<a name="ln1850">          {</a>
+<a name="ln1851">            module-&gt;process_tiling(module, piece, input, *output, &amp;roi_in, roi_out, in_bpp);</a>
+<a name="ln1852">            pixelpipe_flow |= (PIXELPIPE_FLOW_PROCESSED_ON_CPU | PIXELPIPE_FLOW_PROCESSED_WITH_TILING);</a>
+<a name="ln1853">            pixelpipe_flow &amp;= ~(PIXELPIPE_FLOW_PROCESSED_ON_GPU);</a>
+<a name="ln1854">          }</a>
+<a name="ln1855">          else</a>
+<a name="ln1856">          {</a>
+<a name="ln1857">            module-&gt;process(module, piece, input, *output, &amp;roi_in, roi_out);</a>
+<a name="ln1858">            pixelpipe_flow |= (PIXELPIPE_FLOW_PROCESSED_ON_CPU);</a>
+<a name="ln1859">            pixelpipe_flow &amp;= ~(PIXELPIPE_FLOW_PROCESSED_ON_GPU | PIXELPIPE_FLOW_PROCESSED_WITH_TILING);</a>
+<a name="ln1860">          }</a>
+<a name="ln1861"> </a>
+<a name="ln1862">          // and save the output colorspace</a>
+<a name="ln1863">          pipe-&gt;dsc.cst = module-&gt;output_colorspace(module, pipe, piece);</a>
+<a name="ln1864"> </a>
+<a name="ln1865">          if(pipe-&gt;shutdown)</a>
+<a name="ln1866">          {</a>
+<a name="ln1867">            dt_pthread_mutex_unlock(&amp;pipe-&gt;busy_mutex);</a>
+<a name="ln1868">            return 1;</a>
+<a name="ln1869">          }</a>
+<a name="ln1870"> </a>
+<a name="ln1871">          // Lab color picking for module</a>
+<a name="ln1872">          if(dev-&gt;gui_attached &amp;&amp; pipe == dev-&gt;preview_pipe</a>
+<a name="ln1873">             &amp;&amp;                           // pick from preview pipe to get pixels outside the viewport</a>
+<a name="ln1874">             module == dev-&gt;gui_module &amp;&amp; // only modules with focus can pick</a>
+<a name="ln1875">             module-&gt;request_color_pick != DT_REQUEST_COLORPICK_OFF) // and they want to pick ;)</a>
+<a name="ln1876">          {</a>
+<a name="ln1877">            pixelpipe_picker(module, &amp;piece-&gt;dsc_in, (float *)input, &amp;roi_in, module-&gt;picked_color,</a>
+<a name="ln1878">                             module-&gt;picked_color_min, module-&gt;picked_color_max, input_format-&gt;cst, PIXELPIPE_PICKER_INPUT);</a>
+<a name="ln1879">            pixelpipe_picker(module, &amp;pipe-&gt;dsc, (float *)(*output), roi_out, module-&gt;picked_output_color,</a>
+<a name="ln1880">                             module-&gt;picked_output_color_min, module-&gt;picked_output_color_max,</a>
+<a name="ln1881">                             pipe-&gt;dsc.cst, PIXELPIPE_PICKER_OUTPUT);</a>
+<a name="ln1882"> </a>
+<a name="ln1883">            dt_pthread_mutex_unlock(&amp;pipe-&gt;busy_mutex);</a>
+<a name="ln1884"> </a>
+<a name="ln1885">            dt_iop_color_picker_apply_module(module, piece);</a>
+<a name="ln1886"> </a>
+<a name="ln1887">            dt_pthread_mutex_lock(&amp;pipe-&gt;busy_mutex);</a>
+<a name="ln1888">          }</a>
+<a name="ln1889"> </a>
+<a name="ln1890">          if(pipe-&gt;shutdown)</a>
+<a name="ln1891">          {</a>
+<a name="ln1892">            dt_pthread_mutex_unlock(&amp;pipe-&gt;busy_mutex);</a>
+<a name="ln1893">            return 1;</a>
+<a name="ln1894">          }</a>
+<a name="ln1895"> </a>
+<a name="ln1896">          // blend needs input/output images with default colorspace</a>
+<a name="ln1897">          if(_transform_for_blend(module, piece, input_format-&gt;cst, pipe-&gt;dsc.cst))</a>
+<a name="ln1898">          {</a>
+<a name="ln1899">            dt_ioppr_transform_image_colorspace(module, input, input, roi_in.width, roi_in.height,</a>
+<a name="ln1900">                                                input_format-&gt;cst, module-&gt;blend_colorspace(module, pipe, piece),</a>
+<a name="ln1901">                                                &amp;input_format-&gt;cst, dt_ioppr_get_pipe_work_profile_info(pipe));</a>
+<a name="ln1902"> </a>
+<a name="ln1903">            dt_ioppr_transform_image_colorspace(module, *output, *output, roi_out-&gt;width, roi_out-&gt;height,</a>
+<a name="ln1904">                                                pipe-&gt;dsc.cst, module-&gt;blend_colorspace(module, pipe, piece),</a>
+<a name="ln1905">                                                &amp;pipe-&gt;dsc.cst, dt_ioppr_get_pipe_work_profile_info(pipe));</a>
+<a name="ln1906">          }</a>
+<a name="ln1907">          </a>
+<a name="ln1908">          /* process blending on cpu */</a>
+<a name="ln1909">          dt_develop_blend_process(module, piece, input, *output, &amp;roi_in, roi_out);</a>
+<a name="ln1910">          pixelpipe_flow |= (PIXELPIPE_FLOW_BLENDED_ON_CPU);</a>
+<a name="ln1911">          pixelpipe_flow &amp;= ~(PIXELPIPE_FLOW_BLENDED_ON_GPU);</a>
+<a name="ln1912">        }</a>
+<a name="ln1913"> </a>
+<a name="ln1914">        if(pipe-&gt;shutdown)</a>
+<a name="ln1915">        {</a>
+<a name="ln1916">          dt_pthread_mutex_unlock(&amp;pipe-&gt;busy_mutex);</a>
+<a name="ln1917">          return 1;</a>
+<a name="ln1918">        }</a>
+<a name="ln1919">      }</a>
+<a name="ln1920">      else</a>
+<a name="ln1921">      {</a>
+<a name="ln1922">        /* we are not allowed to use opencl for this module */</a>
+<a name="ln1923"> </a>
+<a name="ln1924">        // fprintf(stderr, &quot;[opencl_pixelpipe 3] for module `%s', have bufs %p and %p \n&quot;, module-&gt;op,</a>
+<a name="ln1925">        // cl_mem_input, *cl_mem_output);</a>
+<a name="ln1926"> </a>
+<a name="ln1927">        *cl_mem_output = NULL;</a>
+<a name="ln1928"> </a>
+<a name="ln1929">        /* cleanup unneeded opencl buffer, and copy back to CPU buffer */</a>
+<a name="ln1930">        if(cl_mem_input != NULL)</a>
+<a name="ln1931">        {</a>
+<a name="ln1932">          cl_int err;</a>
+<a name="ln1933"> </a>
+<a name="ln1934">          err = dt_opencl_copy_device_to_host(pipe-&gt;devid, input, cl_mem_input, roi_in.width, roi_in.height,</a>
+<a name="ln1935">                                              in_bpp);</a>
+<a name="ln1936">          // if (rand() % 5 == 0) err = !CL_SUCCESS; // Test code: simulate spurious failures</a>
+<a name="ln1937">          if(err != CL_SUCCESS)</a>
+<a name="ln1938">          {</a>
+<a name="ln1939">            /* late opencl error */</a>
+<a name="ln1940">            dt_print(</a>
+<a name="ln1941">                DT_DEBUG_OPENCL,</a>
+<a name="ln1942">                &quot;[opencl_pixelpipe (c)] late opencl error detected while copying back to cpu buffer: %d\n&quot;,</a>
+<a name="ln1943">                err);</a>
+<a name="ln1944">            dt_opencl_release_mem_object(cl_mem_input);</a>
+<a name="ln1945">            pipe-&gt;opencl_error = 1;</a>
+<a name="ln1946">            dt_pthread_mutex_unlock(&amp;pipe-&gt;busy_mutex);</a>
+<a name="ln1947">            return 1;</a>
+<a name="ln1948">          }</a>
+<a name="ln1949">          else</a>
+<a name="ln1950">            input_format-&gt;cst = input_cst_cl;</a>
+<a name="ln1951"> </a>
+<a name="ln1952">          /* this is a good place to release event handles as we anyhow need to move from gpu to cpu here */</a>
+<a name="ln1953">          (void)dt_opencl_finish(pipe-&gt;devid);</a>
+<a name="ln1954">          dt_opencl_release_mem_object(cl_mem_input);</a>
+<a name="ln1955">          valid_input_on_gpu_only = FALSE;</a>
+<a name="ln1956">        }</a>
+<a name="ln1957"> </a>
+<a name="ln1958">        if(pipe-&gt;shutdown)</a>
+<a name="ln1959">        {</a>
+<a name="ln1960">          dt_pthread_mutex_unlock(&amp;pipe-&gt;busy_mutex);</a>
+<a name="ln1961">          return 1;</a>
+<a name="ln1962">        }</a>
+<a name="ln1963"> </a>
+<a name="ln1964">        // transform to module input colorspace</a>
+<a name="ln1965">        dt_ioppr_transform_image_colorspace(module, input, input, roi_in.width, roi_in.height, input_format-&gt;cst,</a>
+<a name="ln1966">                                            module-&gt;input_colorspace(module, pipe, piece), &amp;input_format-&gt;cst,</a>
+<a name="ln1967">                                            dt_ioppr_get_pipe_work_profile_info(pipe));</a>
+<a name="ln1968"> </a>
+<a name="ln1969">        // histogram collection for module</a>
+<a name="ln1970">        if((dev-&gt;gui_attached || !(piece-&gt;request_histogram &amp; DT_REQUEST_ONLY_IN_GUI))</a>
+<a name="ln1971">           &amp;&amp; (piece-&gt;request_histogram &amp; DT_REQUEST_ON))</a>
+<a name="ln1972">        {</a>
+<a name="ln1973">          histogram_collect(piece, input, &amp;roi_in, &amp;(piece-&gt;histogram), piece-&gt;histogram_max);</a>
+<a name="ln1974">          pixelpipe_flow |= (PIXELPIPE_FLOW_HISTOGRAM_ON_CPU);</a>
+<a name="ln1975">          pixelpipe_flow &amp;= ~(PIXELPIPE_FLOW_HISTOGRAM_NONE | PIXELPIPE_FLOW_HISTOGRAM_ON_GPU);</a>
+<a name="ln1976"> </a>
+<a name="ln1977">          if(piece-&gt;histogram &amp;&amp; (module-&gt;request_histogram &amp; DT_REQUEST_ON)</a>
+<a name="ln1978">             &amp;&amp; pipe-&gt;type == DT_DEV_PIXELPIPE_PREVIEW)</a>
+<a name="ln1979">          {</a>
+<a name="ln1980">            const size_t buf_size = 4 * piece-&gt;histogram_stats.bins_count * sizeof(uint32_t);</a>
+<a name="ln1981">            module-&gt;histogram = realloc(module-&gt;histogram, buf_size);</a>
+<a name="ln1982">            memcpy(module-&gt;histogram, piece-&gt;histogram, buf_size);</a>
+<a name="ln1983">            module-&gt;histogram_stats = piece-&gt;histogram_stats;</a>
+<a name="ln1984">            memcpy(module-&gt;histogram_max, piece-&gt;histogram_max, sizeof(piece-&gt;histogram_max));</a>
+<a name="ln1985"> </a>
+<a name="ln1986">            dt_pthread_mutex_unlock(&amp;pipe-&gt;busy_mutex);</a>
+<a name="ln1987"> </a>
+<a name="ln1988">            if(module-&gt;widget) dt_control_queue_redraw_widget(module-&gt;widget);</a>
+<a name="ln1989"> </a>
+<a name="ln1990">            dt_pthread_mutex_lock(&amp;pipe-&gt;busy_mutex);</a>
+<a name="ln1991">          }</a>
+<a name="ln1992">        }</a>
+<a name="ln1993"> </a>
+<a name="ln1994">        if(pipe-&gt;shutdown)</a>
+<a name="ln1995">        {</a>
+<a name="ln1996">          dt_pthread_mutex_unlock(&amp;pipe-&gt;busy_mutex);</a>
+<a name="ln1997">          return 1;</a>
+<a name="ln1998">        }</a>
+<a name="ln1999"> </a>
+<a name="ln2000">        /* process module on cpu. use tiling if needed and possible. */</a>
+<a name="ln2001">        if(piece-&gt;process_tiling_ready</a>
+<a name="ln2002">           &amp;&amp; !dt_tiling_piece_fits_host_memory(MAX(roi_in.width, roi_out-&gt;width),</a>
+<a name="ln2003">                                                MAX(roi_in.height, roi_out-&gt;height), MAX(in_bpp, bpp),</a>
+<a name="ln2004">                                                tiling.factor, tiling.overhead))</a>
+<a name="ln2005">        {</a>
+<a name="ln2006">          module-&gt;process_tiling(module, piece, input, *output, &amp;roi_in, roi_out, in_bpp);</a>
+<a name="ln2007">          pixelpipe_flow |= (PIXELPIPE_FLOW_PROCESSED_ON_CPU | PIXELPIPE_FLOW_PROCESSED_WITH_TILING);</a>
+<a name="ln2008">          pixelpipe_flow &amp;= ~(PIXELPIPE_FLOW_PROCESSED_ON_GPU);</a>
+<a name="ln2009">        }</a>
+<a name="ln2010">        else</a>
+<a name="ln2011">        {</a>
+<a name="ln2012">          module-&gt;process(module, piece, input, *output, &amp;roi_in, roi_out);</a>
+<a name="ln2013">          pixelpipe_flow |= (PIXELPIPE_FLOW_PROCESSED_ON_CPU);</a>
+<a name="ln2014">          pixelpipe_flow &amp;= ~(PIXELPIPE_FLOW_PROCESSED_ON_GPU | PIXELPIPE_FLOW_PROCESSED_WITH_TILING);</a>
+<a name="ln2015">        }</a>
+<a name="ln2016"> </a>
+<a name="ln2017">        // and save the output colorspace</a>
+<a name="ln2018">        pipe-&gt;dsc.cst = module-&gt;output_colorspace(module, pipe, piece);</a>
+<a name="ln2019"> </a>
+<a name="ln2020">        if(pipe-&gt;shutdown)</a>
+<a name="ln2021">        {</a>
+<a name="ln2022">          dt_pthread_mutex_unlock(&amp;pipe-&gt;busy_mutex);</a>
+<a name="ln2023">          return 1;</a>
+<a name="ln2024">        }</a>
+<a name="ln2025"> </a>
+<a name="ln2026">        // Lab color picking for module</a>
+<a name="ln2027">        if(dev-&gt;gui_attached &amp;&amp; pipe == dev-&gt;preview_pipe</a>
+<a name="ln2028">           &amp;&amp;                           // pick from preview pipe to get pixels outside the viewport</a>
+<a name="ln2029">           module == dev-&gt;gui_module &amp;&amp; // only modules with focus can pick</a>
+<a name="ln2030">           module-&gt;request_color_pick != DT_REQUEST_COLORPICK_OFF) // and they want to pick ;)</a>
+<a name="ln2031">        {</a>
+<a name="ln2032">          pixelpipe_picker(module, &amp;piece-&gt;dsc_in, (float *)input, &amp;roi_in, module-&gt;picked_color,</a>
+<a name="ln2033">                           module-&gt;picked_color_min, module-&gt;picked_color_max, input_format-&gt;cst, PIXELPIPE_PICKER_INPUT);</a>
+<a name="ln2034">          pixelpipe_picker(module, &amp;pipe-&gt;dsc, (float *)(*output), roi_out, module-&gt;picked_output_color,</a>
+<a name="ln2035">                           module-&gt;picked_output_color_min, module-&gt;picked_output_color_max,</a>
+<a name="ln2036">                           pipe-&gt;dsc.cst, PIXELPIPE_PICKER_OUTPUT);</a>
+<a name="ln2037"> </a>
+<a name="ln2038">          dt_pthread_mutex_unlock(&amp;pipe-&gt;busy_mutex);</a>
+<a name="ln2039"> </a>
+<a name="ln2040">          dt_iop_color_picker_apply_module(module, piece);</a>
+<a name="ln2041"> </a>
+<a name="ln2042">          dt_pthread_mutex_lock(&amp;pipe-&gt;busy_mutex);</a>
+<a name="ln2043">        }</a>
+<a name="ln2044"> </a>
+<a name="ln2045">        if(pipe-&gt;shutdown)</a>
+<a name="ln2046">        {</a>
+<a name="ln2047">          dt_pthread_mutex_unlock(&amp;pipe-&gt;busy_mutex);</a>
+<a name="ln2048">          return 1;</a>
+<a name="ln2049">        }</a>
+<a name="ln2050"> </a>
+<a name="ln2051">        // blend needs input/output images with default colorspace</a>
+<a name="ln2052">        if(_transform_for_blend(module, piece, input_format-&gt;cst, pipe-&gt;dsc.cst))</a>
+<a name="ln2053">        {</a>
+<a name="ln2054">          dt_ioppr_transform_image_colorspace(module, input, input, roi_in.width, roi_in.height, input_format-&gt;cst,</a>
+<a name="ln2055">                                              module-&gt;blend_colorspace(module, pipe, piece), &amp;input_format-&gt;cst,</a>
+<a name="ln2056">                                              dt_ioppr_get_pipe_work_profile_info(pipe));</a>
+<a name="ln2057"> </a>
+<a name="ln2058">          dt_ioppr_transform_image_colorspace(module, *output, *output, roi_out-&gt;width, roi_out-&gt;height,</a>
+<a name="ln2059">                                              pipe-&gt;dsc.cst, module-&gt;blend_colorspace(module, pipe, piece),</a>
+<a name="ln2060">                                              &amp;pipe-&gt;dsc.cst, dt_ioppr_get_pipe_work_profile_info(pipe));</a>
+<a name="ln2061">        }</a>
+<a name="ln2062">        </a>
+<a name="ln2063">        /* process blending */</a>
+<a name="ln2064">        dt_develop_blend_process(module, piece, input, *output, &amp;roi_in, roi_out);</a>
+<a name="ln2065">        pixelpipe_flow |= (PIXELPIPE_FLOW_BLENDED_ON_CPU);</a>
+<a name="ln2066">        pixelpipe_flow &amp;= ~(PIXELPIPE_FLOW_BLENDED_ON_GPU);</a>
+<a name="ln2067"> </a>
+<a name="ln2068">        if(pipe-&gt;shutdown)</a>
+<a name="ln2069">        {</a>
+<a name="ln2070">          dt_pthread_mutex_unlock(&amp;pipe-&gt;busy_mutex);</a>
+<a name="ln2071">          return 1;</a>
+<a name="ln2072">        }</a>
+<a name="ln2073">      }</a>
+<a name="ln2074"> </a>
+<a name="ln2075">      /* input is still only on GPU? Let's invalidate CPU input buffer then */</a>
+<a name="ln2076">      if(valid_input_on_gpu_only) dt_dev_pixelpipe_cache_invalidate(&amp;(pipe-&gt;cache), input);</a>
+<a name="ln2077">    }</a>
+<a name="ln2078">    else</a>
+<a name="ln2079">    {</a>
+<a name="ln2080">      /* opencl is not inited or not enabled or we got no resource/device -&gt; everything runs on cpu */</a>
+<a name="ln2081"> </a>
+<a name="ln2082">      // transform to module input colorspace</a>
+<a name="ln2083">      dt_ioppr_transform_image_colorspace(module, input, input, roi_in.width, roi_in.height, input_format-&gt;cst,</a>
+<a name="ln2084">                                          module-&gt;input_colorspace(module, pipe, piece), &amp;input_format-&gt;cst,</a>
+<a name="ln2085">                                          dt_ioppr_get_pipe_work_profile_info(pipe));</a>
+<a name="ln2086"> </a>
+<a name="ln2087">      // histogram collection for module</a>
+<a name="ln2088">      if((dev-&gt;gui_attached || !(piece-&gt;request_histogram &amp; DT_REQUEST_ONLY_IN_GUI))</a>
+<a name="ln2089">         &amp;&amp; (piece-&gt;request_histogram &amp; DT_REQUEST_ON))</a>
+<a name="ln2090">      {</a>
+<a name="ln2091">        histogram_collect(piece, input, &amp;roi_in, &amp;(piece-&gt;histogram), piece-&gt;histogram_max);</a>
+<a name="ln2092">        pixelpipe_flow |= (PIXELPIPE_FLOW_HISTOGRAM_ON_CPU);</a>
+<a name="ln2093">        pixelpipe_flow &amp;= ~(PIXELPIPE_FLOW_HISTOGRAM_NONE | PIXELPIPE_FLOW_HISTOGRAM_ON_GPU);</a>
+<a name="ln2094"> </a>
+<a name="ln2095">        if(piece-&gt;histogram &amp;&amp; (module-&gt;request_histogram &amp; DT_REQUEST_ON)</a>
+<a name="ln2096">           &amp;&amp; pipe-&gt;type == DT_DEV_PIXELPIPE_PREVIEW)</a>
+<a name="ln2097">        {</a>
+<a name="ln2098">          const size_t buf_size = 4 * piece-&gt;histogram_stats.bins_count * sizeof(uint32_t);</a>
+<a name="ln2099">          module-&gt;histogram = realloc(module-&gt;histogram, buf_size);</a>
+<a name="ln2100">          memcpy(module-&gt;histogram, piece-&gt;histogram, buf_size);</a>
+<a name="ln2101">          module-&gt;histogram_stats = piece-&gt;histogram_stats;</a>
+<a name="ln2102">          memcpy(module-&gt;histogram_max, piece-&gt;histogram_max, sizeof(piece-&gt;histogram_max));</a>
+<a name="ln2103"> </a>
+<a name="ln2104">          dt_pthread_mutex_unlock(&amp;pipe-&gt;busy_mutex);</a>
+<a name="ln2105"> </a>
+<a name="ln2106">          if(module-&gt;widget) dt_control_queue_redraw_widget(module-&gt;widget);</a>
+<a name="ln2107"> </a>
+<a name="ln2108">          dt_pthread_mutex_lock(&amp;pipe-&gt;busy_mutex);</a>
+<a name="ln2109">        }</a>
+<a name="ln2110">      }</a>
+<a name="ln2111"> </a>
+<a name="ln2112">      if(pipe-&gt;shutdown)</a>
+<a name="ln2113">      {</a>
+<a name="ln2114">        dt_pthread_mutex_unlock(&amp;pipe-&gt;busy_mutex);</a>
+<a name="ln2115">        return 1;</a>
+<a name="ln2116">      }</a>
+<a name="ln2117"> </a>
+<a name="ln2118">      /* process module on cpu. use tiling if needed and possible. */</a>
+<a name="ln2119">      if(piece-&gt;process_tiling_ready</a>
+<a name="ln2120">         &amp;&amp; !dt_tiling_piece_fits_host_memory(MAX(roi_in.width, roi_out-&gt;width),</a>
+<a name="ln2121">                                              MAX(roi_in.height, roi_out-&gt;height), MAX(in_bpp, bpp),</a>
+<a name="ln2122">                                              tiling.factor, tiling.overhead))</a>
+<a name="ln2123">      {</a>
+<a name="ln2124">        module-&gt;process_tiling(module, piece, input, *output, &amp;roi_in, roi_out, in_bpp);</a>
+<a name="ln2125">        pixelpipe_flow |= (PIXELPIPE_FLOW_PROCESSED_ON_CPU | PIXELPIPE_FLOW_PROCESSED_WITH_TILING);</a>
+<a name="ln2126">        pixelpipe_flow &amp;= ~(PIXELPIPE_FLOW_PROCESSED_ON_GPU);</a>
+<a name="ln2127">      }</a>
+<a name="ln2128">      else</a>
+<a name="ln2129">      {</a>
+<a name="ln2130">        module-&gt;process(module, piece, input, *output, &amp;roi_in, roi_out);</a>
+<a name="ln2131">        pixelpipe_flow |= (PIXELPIPE_FLOW_PROCESSED_ON_CPU);</a>
+<a name="ln2132">        pixelpipe_flow &amp;= ~(PIXELPIPE_FLOW_PROCESSED_ON_GPU | PIXELPIPE_FLOW_PROCESSED_WITH_TILING);</a>
+<a name="ln2133">      }</a>
+<a name="ln2134"> </a>
+<a name="ln2135">      // and save the output colorspace</a>
+<a name="ln2136">      //(*out_format)-&gt;cst = module-&gt;output_colorspace(module, pipe, piece);</a>
+<a name="ln2137">      pipe-&gt;dsc.cst = module-&gt;output_colorspace(module, pipe, piece);</a>
+<a name="ln2138"> </a>
+<a name="ln2139">      if(pipe-&gt;shutdown)</a>
+<a name="ln2140">      {</a>
+<a name="ln2141">        dt_pthread_mutex_unlock(&amp;pipe-&gt;busy_mutex);</a>
+<a name="ln2142">        return 1;</a>
+<a name="ln2143">      }</a>
+<a name="ln2144"> </a>
+<a name="ln2145">      // Lab color picking for module</a>
+<a name="ln2146">      if(dev-&gt;gui_attached &amp;&amp; pipe == dev-&gt;preview_pipe</a>
+<a name="ln2147">         &amp;&amp;                           // pick from preview pipe to get pixels outside the viewport</a>
+<a name="ln2148">         module == dev-&gt;gui_module &amp;&amp; // only modules with focus can pick</a>
+<a name="ln2149">         module-&gt;request_color_pick != DT_REQUEST_COLORPICK_OFF) // and they want to pick ;)</a>
+<a name="ln2150">      {</a>
+<a name="ln2151">        pixelpipe_picker(module, &amp;piece-&gt;dsc_in, (float *)input, &amp;roi_in, module-&gt;picked_color,</a>
+<a name="ln2152">                         module-&gt;picked_color_min, module-&gt;picked_color_max, input_format-&gt;cst, PIXELPIPE_PICKER_INPUT);</a>
+<a name="ln2153">        pixelpipe_picker(module, &amp;pipe-&gt;dsc, (float *)(*output), roi_out, module-&gt;picked_output_color,</a>
+<a name="ln2154">                         module-&gt;picked_output_color_min, module-&gt;picked_output_color_max,</a>
+<a name="ln2155">                         pipe-&gt;dsc.cst, PIXELPIPE_PICKER_OUTPUT);</a>
+<a name="ln2156"> </a>
+<a name="ln2157">        dt_pthread_mutex_unlock(&amp;pipe-&gt;busy_mutex);</a>
+<a name="ln2158"> </a>
+<a name="ln2159">        dt_iop_color_picker_apply_module(module, piece);</a>
+<a name="ln2160"> </a>
+<a name="ln2161">        dt_pthread_mutex_lock(&amp;pipe-&gt;busy_mutex);</a>
+<a name="ln2162">      }</a>
+<a name="ln2163"> </a>
+<a name="ln2164">      if(pipe-&gt;shutdown)</a>
+<a name="ln2165">      {</a>
+<a name="ln2166">        dt_pthread_mutex_unlock(&amp;pipe-&gt;busy_mutex);</a>
+<a name="ln2167">        return 1;</a>
+<a name="ln2168">      }</a>
+<a name="ln2169"> </a>
+<a name="ln2170">      // blend needs input/output images with default colorspace</a>
+<a name="ln2171">      if(_transform_for_blend(module, piece, input_format-&gt;cst, pipe-&gt;dsc.cst))</a>
+<a name="ln2172">      {</a>
+<a name="ln2173">        dt_ioppr_transform_image_colorspace(module, input, input, roi_in.width, roi_in.height, input_format-&gt;cst,</a>
+<a name="ln2174">                                            module-&gt;blend_colorspace(module, pipe, piece), &amp;input_format-&gt;cst,</a>
+<a name="ln2175">                                            dt_ioppr_get_pipe_work_profile_info(pipe));</a>
+<a name="ln2176"> </a>
+<a name="ln2177">        dt_ioppr_transform_image_colorspace(module, *output, *output, roi_out-&gt;width, roi_out-&gt;height,</a>
+<a name="ln2178">                                            pipe-&gt;dsc.cst, module-&gt;blend_colorspace(module, pipe, piece),</a>
+<a name="ln2179">                                            &amp;pipe-&gt;dsc.cst, dt_ioppr_get_pipe_work_profile_info(pipe));</a>
+<a name="ln2180">      }</a>
+<a name="ln2181">      </a>
+<a name="ln2182">      /* process blending */</a>
+<a name="ln2183">      dt_develop_blend_process(module, piece, input, *output, &amp;roi_in, roi_out);</a>
+<a name="ln2184">      pixelpipe_flow |= (PIXELPIPE_FLOW_BLENDED_ON_CPU);</a>
+<a name="ln2185">      pixelpipe_flow &amp;= ~(PIXELPIPE_FLOW_BLENDED_ON_GPU);</a>
+<a name="ln2186">    }</a>
+<a name="ln2187">#else // HAVE_OPENCL</a>
+<a name="ln2188">    // transform to module input colorspace</a>
+<a name="ln2189">    dt_ioppr_transform_image_colorspace(module, input, input, roi_in.width, roi_in.height, input_format-&gt;cst,</a>
+<a name="ln2190">                                        module-&gt;input_colorspace(module, pipe, piece), &amp;input_format-&gt;cst,</a>
+<a name="ln2191">                                        dt_ioppr_get_pipe_work_profile_info(pipe));</a>
+<a name="ln2192"> </a>
+<a name="ln2193">    // histogram collection for module</a>
+<a name="ln2194">    if((dev-&gt;gui_attached || !(piece-&gt;request_histogram &amp; DT_REQUEST_ONLY_IN_GUI))</a>
+<a name="ln2195">       &amp;&amp; (piece-&gt;request_histogram &amp; DT_REQUEST_ON))</a>
+<a name="ln2196">    {</a>
+<a name="ln2197">      histogram_collect(piece, (float *)input, &amp;roi_in, &amp;(piece-&gt;histogram), piece-&gt;histogram_max);</a>
+<a name="ln2198">      pixelpipe_flow |= (PIXELPIPE_FLOW_HISTOGRAM_ON_CPU);</a>
+<a name="ln2199">      pixelpipe_flow &amp;= ~(PIXELPIPE_FLOW_HISTOGRAM_NONE | PIXELPIPE_FLOW_HISTOGRAM_ON_GPU);</a>
+<a name="ln2200"> </a>
+<a name="ln2201">      if(piece-&gt;histogram &amp;&amp; (module-&gt;request_histogram &amp; DT_REQUEST_ON)</a>
+<a name="ln2202">         &amp;&amp; pipe-&gt;type == DT_DEV_PIXELPIPE_PREVIEW)</a>
+<a name="ln2203">      {</a>
+<a name="ln2204">        const size_t buf_size = 4 * piece-&gt;histogram_stats.bins_count * sizeof(uint32_t);</a>
+<a name="ln2205">        module-&gt;histogram = realloc(module-&gt;histogram, buf_size);</a>
+<a name="ln2206">        memcpy(module-&gt;histogram, piece-&gt;histogram, buf_size);</a>
+<a name="ln2207">        module-&gt;histogram_stats = piece-&gt;histogram_stats;</a>
+<a name="ln2208">        memcpy(module-&gt;histogram_max, piece-&gt;histogram_max, sizeof(piece-&gt;histogram_max));</a>
+<a name="ln2209"> </a>
+<a name="ln2210">        dt_pthread_mutex_unlock(&amp;pipe-&gt;busy_mutex);</a>
+<a name="ln2211"> </a>
+<a name="ln2212">        if(module-&gt;widget) dt_control_queue_redraw_widget(module-&gt;widget);</a>
+<a name="ln2213"> </a>
+<a name="ln2214">        dt_pthread_mutex_lock(&amp;pipe-&gt;busy_mutex);</a>
+<a name="ln2215">      }</a>
+<a name="ln2216">    }</a>
+<a name="ln2217"> </a>
+<a name="ln2218">    if(pipe-&gt;shutdown)</a>
+<a name="ln2219">    {</a>
+<a name="ln2220">      dt_pthread_mutex_unlock(&amp;pipe-&gt;busy_mutex);</a>
+<a name="ln2221">      return 1;</a>
+<a name="ln2222">    }</a>
+<a name="ln2223"> </a>
+<a name="ln2224">    /* process module on cpu. use tiling if needed and possible. */</a>
+<a name="ln2225">    if(piece-&gt;process_tiling_ready</a>
+<a name="ln2226">       &amp;&amp; !dt_tiling_piece_fits_host_memory(MAX(roi_in.width, roi_out-&gt;width),</a>
+<a name="ln2227">                                            MAX(roi_in.height, roi_out-&gt;height), MAX(in_bpp, bpp),</a>
+<a name="ln2228">                                            tiling.factor, tiling.overhead))</a>
+<a name="ln2229">    {</a>
+<a name="ln2230">      module-&gt;process_tiling(module, piece, input, *output, &amp;roi_in, roi_out, in_bpp);</a>
+<a name="ln2231">      pixelpipe_flow |= (PIXELPIPE_FLOW_PROCESSED_ON_CPU | PIXELPIPE_FLOW_PROCESSED_WITH_TILING);</a>
+<a name="ln2232">      pixelpipe_flow &amp;= ~(PIXELPIPE_FLOW_PROCESSED_ON_GPU);</a>
+<a name="ln2233">    }</a>
+<a name="ln2234">    else</a>
+<a name="ln2235">    {</a>
+<a name="ln2236">      module-&gt;process(module, piece, input, *output, &amp;roi_in, roi_out);</a>
+<a name="ln2237">      pixelpipe_flow |= (PIXELPIPE_FLOW_PROCESSED_ON_CPU);</a>
+<a name="ln2238">      pixelpipe_flow &amp;= ~(PIXELPIPE_FLOW_PROCESSED_ON_GPU | PIXELPIPE_FLOW_PROCESSED_WITH_TILING);</a>
+<a name="ln2239">    }</a>
+<a name="ln2240"> </a>
+<a name="ln2241">    // and save the output colorspace</a>
+<a name="ln2242">    pipe-&gt;dsc.cst = module-&gt;output_colorspace(module, pipe, piece);</a>
+<a name="ln2243">    </a>
+<a name="ln2244">    if(pipe-&gt;shutdown)</a>
+<a name="ln2245">    {</a>
+<a name="ln2246">      dt_pthread_mutex_unlock(&amp;pipe-&gt;busy_mutex);</a>
+<a name="ln2247">      return 1;</a>
+<a name="ln2248">    }</a>
+<a name="ln2249"> </a>
+<a name="ln2250">    // Lab color picking for module</a>
+<a name="ln2251">    if(dev-&gt;gui_attached &amp;&amp; pipe == dev-&gt;preview_pipe</a>
+<a name="ln2252">       &amp;&amp;                           // pick from preview pipe to get pixels outside the viewport</a>
+<a name="ln2253">       module == dev-&gt;gui_module &amp;&amp; // only modules with focus can pick</a>
+<a name="ln2254">       module-&gt;request_color_pick != DT_REQUEST_COLORPICK_OFF) // and they want to pick ;)</a>
+<a name="ln2255">    {</a>
+<a name="ln2256">      pixelpipe_picker(module, &amp;piece-&gt;dsc_in, (float *)input, &amp;roi_in, module-&gt;picked_color,</a>
+<a name="ln2257">                       module-&gt;picked_color_min, module-&gt;picked_color_max, input_format-&gt;cst, PIXELPIPE_PICKER_INPUT);</a>
+<a name="ln2258">      pixelpipe_picker(module, &amp;pipe-&gt;dsc, (float *)(*output), roi_out, module-&gt;picked_output_color,</a>
+<a name="ln2259">                       module-&gt;picked_output_color_min, module-&gt;picked_output_color_max, pipe-&gt;dsc.cst, PIXELPIPE_PICKER_OUTPUT);</a>
+<a name="ln2260"> </a>
+<a name="ln2261">      dt_pthread_mutex_unlock(&amp;pipe-&gt;busy_mutex);</a>
+<a name="ln2262"> </a>
+<a name="ln2263">      dt_iop_color_picker_apply_module(module, piece);</a>
+<a name="ln2264"> </a>
+<a name="ln2265">      dt_pthread_mutex_lock(&amp;pipe-&gt;busy_mutex);</a>
+<a name="ln2266">    }</a>
+<a name="ln2267"> </a>
+<a name="ln2268">    if(pipe-&gt;shutdown)</a>
+<a name="ln2269">    {</a>
+<a name="ln2270">      dt_pthread_mutex_unlock(&amp;pipe-&gt;busy_mutex);</a>
+<a name="ln2271">      return 1;</a>
+<a name="ln2272">    }</a>
+<a name="ln2273"> </a>
+<a name="ln2274">    // blend needs input/output images with default colorspace</a>
+<a name="ln2275">    if(_transform_for_blend(module, piece, input_format-&gt;cst, pipe-&gt;dsc.cst))</a>
+<a name="ln2276">    {</a>
+<a name="ln2277">      dt_ioppr_transform_image_colorspace(module, input, input, roi_in.width, roi_in.height, input_format-&gt;cst,</a>
+<a name="ln2278">                                          module-&gt;blend_colorspace(module, pipe, piece), &amp;input_format-&gt;cst,</a>
+<a name="ln2279">                                          dt_ioppr_get_pipe_work_profile_info(pipe));</a>
+<a name="ln2280"> </a>
+<a name="ln2281">      dt_ioppr_transform_image_colorspace(module, *output, *output, roi_out-&gt;width, roi_out-&gt;height, pipe-&gt;dsc.cst,</a>
+<a name="ln2282">                                          module-&gt;blend_colorspace(module, pipe, piece), &amp;pipe-&gt;dsc.cst,</a>
+<a name="ln2283">                                          dt_ioppr_get_pipe_work_profile_info(pipe));</a>
+<a name="ln2284">    }</a>
+<a name="ln2285">    </a>
+<a name="ln2286">    /* process blending */</a>
+<a name="ln2287">    dt_develop_blend_process(module, piece, input, *output, &amp;roi_in, roi_out);</a>
+<a name="ln2288">    pixelpipe_flow |= (PIXELPIPE_FLOW_BLENDED_ON_CPU);</a>
+<a name="ln2289">    pixelpipe_flow &amp;= ~(PIXELPIPE_FLOW_BLENDED_ON_GPU);</a>
+<a name="ln2290">#endif // HAVE_OPENCL</a>
+<a name="ln2291"> </a>
+<a name="ln2292">    char histogram_log[32] = &quot;&quot;;</a>
+<a name="ln2293">    if(!(pixelpipe_flow &amp; PIXELPIPE_FLOW_HISTOGRAM_NONE))</a>
+<a name="ln2294">    {</a>
+<a name="ln2295">      snprintf(histogram_log, sizeof(histogram_log), &quot;, collected histogram on %s&quot;,</a>
+<a name="ln2296">               (pixelpipe_flow &amp; PIXELPIPE_FLOW_HISTOGRAM_ON_GPU</a>
+<a name="ln2297">                    ? &quot;GPU&quot;</a>
+<a name="ln2298">                    : pixelpipe_flow &amp; PIXELPIPE_FLOW_HISTOGRAM_ON_CPU ? &quot;CPU&quot; : &quot;&quot;));</a>
+<a name="ln2299">    }</a>
+<a name="ln2300"> </a>
+<a name="ln2301">    gchar *module_label = dt_history_item_get_name(module);</a>
+<a name="ln2302">    dt_show_times_f(</a>
+<a name="ln2303">        &amp;start, &quot;[dev_pixelpipe]&quot;, &quot;processed `%s' on %s%s%s, blended on %s [%s]&quot;, module_label,</a>
+<a name="ln2304">        pixelpipe_flow &amp; PIXELPIPE_FLOW_PROCESSED_ON_GPU</a>
+<a name="ln2305">            ? &quot;GPU&quot;</a>
+<a name="ln2306">            : pixelpipe_flow &amp; PIXELPIPE_FLOW_PROCESSED_ON_CPU ? &quot;CPU&quot; : &quot;&quot;,</a>
+<a name="ln2307">        pixelpipe_flow &amp; PIXELPIPE_FLOW_PROCESSED_WITH_TILING ? &quot; with tiling&quot; : &quot;&quot;,</a>
+<a name="ln2308">        (!(pixelpipe_flow &amp; PIXELPIPE_FLOW_HISTOGRAM_NONE) &amp;&amp; (piece-&gt;request_histogram &amp; DT_REQUEST_ON))</a>
+<a name="ln2309">            ? histogram_log</a>
+<a name="ln2310">            : &quot;&quot;,</a>
+<a name="ln2311">        pixelpipe_flow &amp; PIXELPIPE_FLOW_BLENDED_ON_GPU</a>
+<a name="ln2312">            ? &quot;GPU&quot;</a>
+<a name="ln2313">            : pixelpipe_flow &amp; PIXELPIPE_FLOW_BLENDED_ON_CPU ? &quot;CPU&quot; : &quot;&quot;,</a>
+<a name="ln2314">        _pipe_type_to_str(pipe-&gt;type));</a>
+<a name="ln2315">    g_free(module_label);</a>
+<a name="ln2316">    module_label = NULL;</a>
+<a name="ln2317"> </a>
+<a name="ln2318">    // in case we get this buffer from the cache in the future, cache some stuff:</a>
+<a name="ln2319">    **out_format = piece-&gt;dsc_out = pipe-&gt;dsc;</a>
+<a name="ln2320"> </a>
+<a name="ln2321">    dt_pthread_mutex_unlock(&amp;pipe-&gt;busy_mutex);</a>
+<a name="ln2322">    if(module == darktable.develop-&gt;gui_module)</a>
+<a name="ln2323">    {</a>
+<a name="ln2324">      // give the input buffer to the currently focussed plugin more weight.</a>
+<a name="ln2325">      // the user is likely to change that one soon, so keep it in cache.</a>
+<a name="ln2326">      dt_dev_pixelpipe_cache_reweight(&amp;(pipe-&gt;cache), input);</a>
+<a name="ln2327">    }</a>
+<a name="ln2328">#ifndef _DEBUG</a>
+<a name="ln2329">    if(darktable.unmuted &amp; DT_DEBUG_NAN)</a>
+<a name="ln2330">#endif</a>
+<a name="ln2331">    {</a>
+<a name="ln2332">      dt_pthread_mutex_lock(&amp;pipe-&gt;busy_mutex);</a>
+<a name="ln2333">      if(pipe-&gt;shutdown)</a>
+<a name="ln2334">      {</a>
+<a name="ln2335">        dt_pthread_mutex_unlock(&amp;pipe-&gt;busy_mutex);</a>
+<a name="ln2336">        return 1;</a>
+<a name="ln2337">      }</a>
+<a name="ln2338"> </a>
+<a name="ln2339">      if(strcmp(module-&gt;op, &quot;gamma&quot;) == 0)</a>
+<a name="ln2340">      {</a>
+<a name="ln2341">        dt_pthread_mutex_unlock(&amp;pipe-&gt;busy_mutex);</a>
+<a name="ln2342">        goto post_process_collect_info;</a>
+<a name="ln2343">      }</a>
+<a name="ln2344"> </a>
+<a name="ln2345">#ifdef HAVE_OPENCL</a>
+<a name="ln2346">      if(*cl_mem_output != NULL)</a>
+<a name="ln2347">        dt_opencl_copy_device_to_host(pipe-&gt;devid, *output, *cl_mem_output, roi_out-&gt;width, roi_out-&gt;height, bpp);</a>
+<a name="ln2348">#endif</a>
+<a name="ln2349"> </a>
+<a name="ln2350">      if((*out_format)-&gt;datatype == TYPE_FLOAT &amp;&amp; (*out_format)-&gt;channels == 4)</a>
+<a name="ln2351">      {</a>
+<a name="ln2352">        int hasinf = 0, hasnan = 0;</a>
+<a name="ln2353">        float min[3] = { FLT_MAX };</a>
+<a name="ln2354">        float max[3] = { FLT_MIN };</a>
+<a name="ln2355"> </a>
+<a name="ln2356">        for(int k = 0; k &lt; 4 * roi_out-&gt;width * roi_out-&gt;height; k++)</a>
+<a name="ln2357">        {</a>
+<a name="ln2358">          if((k &amp; 3) &lt; 3)</a>
+<a name="ln2359">          {</a>
+<a name="ln2360">            float f = ((float *)(*output))[k];</a>
+<a name="ln2361">            if(isnan(f))</a>
+<a name="ln2362">              hasnan = 1;</a>
+<a name="ln2363">            else if(isinf(f))</a>
+<a name="ln2364">              hasinf = 1;</a>
+<a name="ln2365">            else</a>
+<a name="ln2366">            {</a>
+<a name="ln2367">              min[k &amp; 3] = fmin(f, min[k &amp; 3]);</a>
+<a name="ln2368">              max[k &amp; 3] = fmax(f, max[k &amp; 3]);</a>
+<a name="ln2369">            }</a>
+<a name="ln2370">          }</a>
+<a name="ln2371">        }</a>
+<a name="ln2372">        module_label = dt_history_item_get_name(module);</a>
+<a name="ln2373">        if(hasnan)</a>
+<a name="ln2374">          fprintf(stderr, &quot;[dev_pixelpipe] module `%s' outputs NaNs! [%s]\n&quot;, module_label,</a>
+<a name="ln2375">                  _pipe_type_to_str(pipe-&gt;type));</a>
+<a name="ln2376">        if(hasinf)</a>
+<a name="ln2377">          fprintf(stderr, &quot;[dev_pixelpipe] module `%s' outputs non-finite floats! [%s]\n&quot;, module_label,</a>
+<a name="ln2378">                  _pipe_type_to_str(pipe-&gt;type));</a>
+<a name="ln2379">        fprintf(stderr, &quot;[dev_pixelpipe] module `%s' min: (%f; %f; %f) max: (%f; %f; %f) [%s]\n&quot;, module_label,</a>
+<a name="ln2380">                min[0], min[1], min[2], max[0], max[1], max[2], _pipe_type_to_str(pipe-&gt;type));</a>
+<a name="ln2381">        g_free(module_label);</a>
+<a name="ln2382">      }</a>
+<a name="ln2383">      else if((*out_format)-&gt;datatype == TYPE_FLOAT &amp;&amp; (*out_format)-&gt;channels == 1)</a>
+<a name="ln2384">      {</a>
+<a name="ln2385">        int hasinf = 0, hasnan = 0;</a>
+<a name="ln2386">        float min = FLT_MAX;</a>
+<a name="ln2387">        float max = FLT_MIN;</a>
+<a name="ln2388"> </a>
+<a name="ln2389">        for(int k = 0; k &lt; roi_out-&gt;width * roi_out-&gt;height; k++)</a>
+<a name="ln2390">        {</a>
+<a name="ln2391">          float f = ((float *)(*output))[k];</a>
+<a name="ln2392">          if(isnan(f))</a>
+<a name="ln2393">            hasnan = 1;</a>
+<a name="ln2394">          else if(isinf(f))</a>
+<a name="ln2395">            hasinf = 1;</a>
+<a name="ln2396">          else</a>
+<a name="ln2397">          {</a>
+<a name="ln2398">            min = fmin(f, min);</a>
+<a name="ln2399">            max = fmax(f, max);</a>
+<a name="ln2400">          }</a>
+<a name="ln2401">        }</a>
+<a name="ln2402">        module_label = dt_history_item_get_name(module);</a>
+<a name="ln2403">        if(hasnan)</a>
+<a name="ln2404">          fprintf(stderr, &quot;[dev_pixelpipe] module `%s' outputs NaNs! [%s]\n&quot;, module_label,</a>
+<a name="ln2405">                  _pipe_type_to_str(pipe-&gt;type));</a>
+<a name="ln2406">        if(hasinf)</a>
+<a name="ln2407">          fprintf(stderr, &quot;[dev_pixelpipe] module `%s' outputs non-finite floats! [%s]\n&quot;, module_label,</a>
+<a name="ln2408">                  _pipe_type_to_str(pipe-&gt;type));</a>
+<a name="ln2409">        fprintf(stderr, &quot;[dev_pixelpipe] module `%s' min: (%f) max: (%f) [%s]\n&quot;, module_label, min, max,</a>
+<a name="ln2410">                _pipe_type_to_str(pipe-&gt;type));</a>
+<a name="ln2411">        g_free(module_label);</a>
+<a name="ln2412">      }</a>
+<a name="ln2413"> </a>
+<a name="ln2414">      dt_pthread_mutex_unlock(&amp;pipe-&gt;busy_mutex);</a>
+<a name="ln2415">    }</a>
+<a name="ln2416"> </a>
+<a name="ln2417">post_process_collect_info:</a>
+<a name="ln2418"> </a>
+<a name="ln2419">    dt_pthread_mutex_lock(&amp;pipe-&gt;busy_mutex);</a>
+<a name="ln2420">    if(pipe-&gt;shutdown)</a>
+<a name="ln2421">    {</a>
+<a name="ln2422">      dt_pthread_mutex_unlock(&amp;pipe-&gt;busy_mutex);</a>
+<a name="ln2423">      return 1;</a>
+<a name="ln2424">    }</a>
+<a name="ln2425">    // Picking RGB for the live samples and converting to Lab</a>
+<a name="ln2426">    if(dev-&gt;gui_attached &amp;&amp; pipe == dev-&gt;preview_pipe &amp;&amp; (strcmp(module-&gt;op, &quot;gamma&quot;) == 0)</a>
+<a name="ln2427">       &amp;&amp; darktable.lib-&gt;proxy.colorpicker.live_samples &amp;&amp; input) // samples to pick</a>
+<a name="ln2428">    {</a>
+<a name="ln2429">      _pixelpipe_pick_live_samples((const float *const )input, &amp;roi_in);</a>
+<a name="ln2430">    }</a>
+<a name="ln2431">    // Picking RGB for primary colorpicker output and converting to Lab</a>
+<a name="ln2432">    if(dev-&gt;gui_attached &amp;&amp; pipe == dev-&gt;preview_pipe</a>
+<a name="ln2433">       &amp;&amp; (strcmp(module-&gt;op, &quot;gamma&quot;) == 0) // only gamma provides meaningful RGB data</a>
+<a name="ln2434">       &amp;&amp; dev-&gt;gui_module &amp;&amp; !strcmp(dev-&gt;gui_module-&gt;op, &quot;colorout&quot;)</a>
+<a name="ln2435">       &amp;&amp; dev-&gt;gui_module-&gt;request_color_pick != DT_REQUEST_COLORPICK_OFF</a>
+<a name="ln2436">       &amp;&amp; darktable.lib-&gt;proxy.colorpicker.picked_color_rgb_mean &amp;&amp; input) // colorpicker module active</a>
+<a name="ln2437">    {</a>
+<a name="ln2438">      _pixelpipe_pick_primary_colorpicker(dev, (const float *const )input, &amp;roi_in);</a>
+<a name="ln2439"> </a>
+<a name="ln2440">      dt_pthread_mutex_unlock(&amp;pipe-&gt;busy_mutex);</a>
+<a name="ln2441"> </a>
+<a name="ln2442">      if(module-&gt;widget) dt_control_queue_redraw_widget(module-&gt;widget);</a>
+<a name="ln2443">    }</a>
+<a name="ln2444">    else</a>
+<a name="ln2445">      dt_pthread_mutex_unlock(&amp;pipe-&gt;busy_mutex);</a>
+<a name="ln2446"> </a>
+<a name="ln2447">    // 4) final histogram:</a>
+<a name="ln2448">    dt_pthread_mutex_lock(&amp;pipe-&gt;busy_mutex);</a>
+<a name="ln2449">    if(pipe-&gt;shutdown)</a>
+<a name="ln2450">    {</a>
+<a name="ln2451">      dt_pthread_mutex_unlock(&amp;pipe-&gt;busy_mutex);</a>
+<a name="ln2452">      return 1;</a>
+<a name="ln2453">    }</a>
+<a name="ln2454">    if(dev-&gt;gui_attached &amp;&amp; !dev-&gt;gui_leaving &amp;&amp; pipe == dev-&gt;preview_pipe</a>
+<a name="ln2455">       &amp;&amp; (strcmp(module-&gt;op, &quot;gamma&quot;) == 0) &amp;&amp; input)</a>
+<a name="ln2456">    {</a>
+<a name="ln2457">      _pixelpipe_final_histogram(dev, (const float *const )input, &amp;roi_in);</a>
+<a name="ln2458"> </a>
+<a name="ln2459">      // calculate the waveform histogram. since this is drawn pixel by pixel we have to do it in the correct</a>
+<a name="ln2460">      // size (thus the weird gui stuff :().</a>
+<a name="ln2461">      // this HAS to be done on the float input data, otherwise we get really ugly artifacts due to rounding</a>
+<a name="ln2462">      // issues when putting colors into the bins.</a>
+<a name="ln2463">      //       dt_pthread_mutex_lock(&amp;dev-&gt;histogram_waveform_mutex);</a>
+<a name="ln2464">      if(dev-&gt;histogram_waveform_width != 0)</a>
+<a name="ln2465">      {</a>
+<a name="ln2466">        _pixelpipe_final_histogram_waveform(dev, (const float *const )input, &amp;roi_in);</a>
+<a name="ln2467">      }</a>
+<a name="ln2468">      //       dt_pthread_mutex_unlock(&amp;dev-&gt;histogram_waveform_mutex);</a>
+<a name="ln2469"> </a>
+<a name="ln2470">      dt_pthread_mutex_unlock(&amp;pipe-&gt;busy_mutex);</a>
+<a name="ln2471"> </a>
+<a name="ln2472">      /* raise preview pipe finished signal */</a>
+<a name="ln2473">      dt_control_signal_raise(darktable.signals, DT_SIGNAL_DEVELOP_PREVIEW_PIPE_FINISHED);</a>
+<a name="ln2474">    }</a>
+<a name="ln2475">    else if(dev-&gt;gui_attached &amp;&amp; !dev-&gt;gui_leaving &amp;&amp; pipe == dev-&gt;preview2_pipe</a>
+<a name="ln2476">            &amp;&amp; (strcmp(module-&gt;op, &quot;gamma&quot;) == 0))</a>
+<a name="ln2477">    {</a>
+<a name="ln2478">      dt_pthread_mutex_unlock(&amp;pipe-&gt;busy_mutex);</a>
+<a name="ln2479"> </a>
+<a name="ln2480">      /* raise preview2 pipe finished signal */</a>
+<a name="ln2481">      dt_control_signal_raise(darktable.signals, DT_SIGNAL_DEVELOP_PREVIEW2_PIPE_FINISHED);</a>
+<a name="ln2482">    }</a>
+<a name="ln2483">    else</a>
+<a name="ln2484">    {</a>
+<a name="ln2485">      dt_pthread_mutex_unlock(&amp;pipe-&gt;busy_mutex);</a>
+<a name="ln2486"> </a>
+<a name="ln2487">      /* if gui attached, lets raise pipe finish signal */</a>
+<a name="ln2488">      if(dev-&gt;gui_attached &amp;&amp; !dev-&gt;gui_leaving &amp;&amp; strcmp(module-&gt;op, &quot;gamma&quot;) == 0)</a>
+<a name="ln2489">        dt_control_signal_raise(darktable.signals, DT_SIGNAL_DEVELOP_UI_PIPE_FINISHED);</a>
+<a name="ln2490">    }</a>
+<a name="ln2491">  }</a>
+<a name="ln2492"> </a>
+<a name="ln2493">  return 0;</a>
+<a name="ln2494">}</a>
+<a name="ln2495"> </a>
+<a name="ln2496"> </a>
+<a name="ln2497">int dt_dev_pixelpipe_process_no_gamma(dt_dev_pixelpipe_t *pipe, dt_develop_t *dev, int x, int y, int width,</a>
+<a name="ln2498">                                      int height, float scale)</a>
+<a name="ln2499">{</a>
+<a name="ln2500">  // temporarily disable gamma mapping.</a>
+<a name="ln2501">  GList *gammap = g_list_last(pipe-&gt;nodes);</a>
+<a name="ln2502">  dt_dev_pixelpipe_iop_t *gamma = (dt_dev_pixelpipe_iop_t *)gammap-&gt;data;</a>
+<a name="ln2503">  while(strcmp(gamma-&gt;module-&gt;op, &quot;gamma&quot;))</a>
+<a name="ln2504">  {</a>
+<a name="ln2505">    gamma = NULL;</a>
+<a name="ln2506">    gammap = g_list_previous(gammap);</a>
+<a name="ln2507">    if(!gammap) break;</a>
+<a name="ln2508">    gamma = (dt_dev_pixelpipe_iop_t *)gammap-&gt;data;</a>
+<a name="ln2509">  }</a>
+<a name="ln2510">  if(gamma) gamma-&gt;enabled = 0;</a>
+<a name="ln2511">  int ret = dt_dev_pixelpipe_process(pipe, dev, x, y, width, height, scale);</a>
+<a name="ln2512">  if(gamma) gamma-&gt;enabled = 1;</a>
+<a name="ln2513">  return ret;</a>
+<a name="ln2514">}</a>
+<a name="ln2515"> </a>
+<a name="ln2516">void dt_dev_pixelpipe_disable_after(dt_dev_pixelpipe_t *pipe, const char *op)</a>
+<a name="ln2517">{</a>
+<a name="ln2518">  GList *nodes = g_list_last(pipe-&gt;nodes);</a>
+<a name="ln2519">  dt_dev_pixelpipe_iop_t *piece = (dt_dev_pixelpipe_iop_t *)nodes-&gt;data;</a>
+<a name="ln2520">  while(strcmp(piece-&gt;module-&gt;op, op))</a>
+<a name="ln2521">  {</a>
+<a name="ln2522">    piece-&gt;enabled = 0;</a>
+<a name="ln2523">    piece = NULL;</a>
+<a name="ln2524">    nodes = g_list_previous(nodes);</a>
+<a name="ln2525">    if(!nodes) break;</a>
+<a name="ln2526">    piece = (dt_dev_pixelpipe_iop_t *)nodes-&gt;data;</a>
+<a name="ln2527">  }</a>
+<a name="ln2528">}</a>
+<a name="ln2529"> </a>
+<a name="ln2530">void dt_dev_pixelpipe_disable_before(dt_dev_pixelpipe_t *pipe, const char *op)</a>
+<a name="ln2531">{</a>
+<a name="ln2532">  GList *nodes = pipe-&gt;nodes;</a>
+<a name="ln2533">  dt_dev_pixelpipe_iop_t *piece = (dt_dev_pixelpipe_iop_t *)nodes-&gt;data;</a>
+<a name="ln2534">  while(strcmp(piece-&gt;module-&gt;op, op))</a>
+<a name="ln2535">  {</a>
+<a name="ln2536">    piece-&gt;enabled = 0;</a>
+<a name="ln2537">    piece = NULL;</a>
+<a name="ln2538">    nodes = g_list_next(nodes);</a>
+<a name="ln2539">    if(!nodes) break;</a>
+<a name="ln2540">    piece = (dt_dev_pixelpipe_iop_t *)nodes-&gt;data;</a>
+<a name="ln2541">  }</a>
+<a name="ln2542">}</a>
+<a name="ln2543"> </a>
+<a name="ln2544">static int dt_dev_pixelpipe_process_rec_and_backcopy(dt_dev_pixelpipe_t *pipe, dt_develop_t *dev, void **output,</a>
+<a name="ln2545">                                                     void **cl_mem_output, dt_iop_buffer_dsc_t **out_format,</a>
+<a name="ln2546">                                                     const dt_iop_roi_t *roi_out, GList *modules, GList *pieces,</a>
+<a name="ln2547">                                                     int pos)</a>
+<a name="ln2548">{</a>
+<a name="ln2549">#ifdef HAVE_OPENCL</a>
+<a name="ln2550">  int ret</a>
+<a name="ln2551">      = dt_dev_pixelpipe_process_rec(pipe, dev, output, cl_mem_output, out_format, roi_out, modules, pieces, pos);</a>
+<a name="ln2552"> </a>
+<a name="ln2553">  // copy back final opencl buffer (if any) to CPU</a>
+<a name="ln2554">  dt_pthread_mutex_lock(&amp;pipe-&gt;busy_mutex);</a>
+<a name="ln2555">  if(ret)</a>
+<a name="ln2556">  {</a>
+<a name="ln2557">    dt_opencl_release_mem_object(*cl_mem_output);</a>
+<a name="ln2558">    *cl_mem_output = NULL;</a>
+<a name="ln2559">  }</a>
+<a name="ln2560">  else</a>
+<a name="ln2561">  {</a>
+<a name="ln2562">    if(*cl_mem_output != NULL)</a>
+<a name="ln2563">    {</a>
+<a name="ln2564">      cl_int err;</a>
+<a name="ln2565"> </a>
+<a name="ln2566">      err = dt_opencl_copy_device_to_host(pipe-&gt;devid, *output, *cl_mem_output, roi_out-&gt;width, roi_out-&gt;height,</a>
+<a name="ln2567">                                          dt_iop_buffer_dsc_to_bpp(*out_format));</a>
+<a name="ln2568">      dt_opencl_release_mem_object(*cl_mem_output);</a>
+<a name="ln2569">      *cl_mem_output = NULL;</a>
+<a name="ln2570"> </a>
+<a name="ln2571">      if(err != CL_SUCCESS)</a>
+<a name="ln2572">      {</a>
+<a name="ln2573">        /* this indicates a opencl problem earlier in the pipeline */</a>
+<a name="ln2574">        dt_print(DT_DEBUG_OPENCL,</a>
+<a name="ln2575">                 &quot;[opencl_pixelpipe (d)] late opencl error detected while copying back to cpu buffer: %d\n&quot;,</a>
+<a name="ln2576">                 err);</a>
+<a name="ln2577">        pipe-&gt;opencl_error = 1;</a>
+<a name="ln2578">        ret = 1;</a>
+<a name="ln2579">      }</a>
+<a name="ln2580">    }</a>
+<a name="ln2581">  }</a>
+<a name="ln2582">  dt_pthread_mutex_unlock(&amp;pipe-&gt;busy_mutex);</a>
+<a name="ln2583"> </a>
+<a name="ln2584">  return ret;</a>
+<a name="ln2585">#else</a>
+<a name="ln2586">  return dt_dev_pixelpipe_process_rec(pipe, dev, output, cl_mem_output, out_format, roi_out, modules, pieces, pos);</a>
+<a name="ln2587">#endif</a>
+<a name="ln2588">}</a>
+<a name="ln2589"> </a>
+<a name="ln2590"> </a>
+<a name="ln2591">int dt_dev_pixelpipe_process(dt_dev_pixelpipe_t *pipe, dt_develop_t *dev, int x, int y, int width, int height,</a>
+<a name="ln2592">                             float scale)</a>
+<a name="ln2593">{</a>
+<a name="ln2594">  pipe-&gt;processing = 1;</a>
+<a name="ln2595">  pipe-&gt;opencl_enabled = dt_opencl_update_settings(); // update enabled flag and profile from preferences</a>
+<a name="ln2596">  pipe-&gt;devid = (pipe-&gt;opencl_enabled) ? dt_opencl_lock_device(pipe-&gt;type)</a>
+<a name="ln2597">                                       : -1; // try to get/lock opencl resource</a>
+<a name="ln2598"> </a>
+<a name="ln2599">  dt_print(DT_DEBUG_OPENCL, &quot;[pixelpipe_process] [%s] using device %d\n&quot;, _pipe_type_to_str(pipe-&gt;type),</a>
+<a name="ln2600">           pipe-&gt;devid);</a>
+<a name="ln2601"> </a>
+<a name="ln2602">  if(darktable.unmuted &amp; DT_DEBUG_MEMORY)</a>
+<a name="ln2603">  {</a>
+<a name="ln2604">    fprintf(stderr, &quot;[memory] before pixelpipe process\n&quot;);</a>
+<a name="ln2605">    dt_print_mem_usage();</a>
+<a name="ln2606">  }</a>
+<a name="ln2607"> </a>
+<a name="ln2608">  if(pipe-&gt;devid &gt;= 0) dt_opencl_events_reset(pipe-&gt;devid);</a>
+<a name="ln2609"> </a>
+<a name="ln2610">  dt_iop_roi_t roi = (dt_iop_roi_t){ x, y, width, height, scale };</a>
+<a name="ln2611">  // printf(&quot;pixelpipe homebrew process start\n&quot;);</a>
+<a name="ln2612">  if(darktable.unmuted &amp; DT_DEBUG_DEV) dt_dev_pixelpipe_cache_print(&amp;pipe-&gt;cache);</a>
+<a name="ln2613"> </a>
+<a name="ln2614">  // get a snapshot of mask list</a>
+<a name="ln2615">  if(pipe-&gt;forms) g_list_free_full(pipe-&gt;forms, (void (*)(void *))dt_masks_free_form);</a>
+<a name="ln2616">  pipe-&gt;forms = dt_masks_dup_forms_deep(dev-&gt;forms, NULL);</a>
+<a name="ln2617"> </a>
+<a name="ln2618">  //  go through list of modules from the end:</a>
+<a name="ln2619">  guint pos = g_list_length(pipe-&gt;iop);</a>
+<a name="ln2620">  GList *modules = g_list_last(pipe-&gt;iop);</a>
+<a name="ln2621">  GList *pieces = g_list_last(pipe-&gt;nodes);</a>
+<a name="ln2622"> </a>
+<a name="ln2623">// re-entry point: in case of late opencl errors we start all over again with opencl-support disabled</a>
+<a name="ln2624">restart:</a>
+<a name="ln2625"> </a>
+<a name="ln2626">  // check if we should obsolete caches</a>
+<a name="ln2627">  if(pipe-&gt;cache_obsolete) dt_dev_pixelpipe_cache_flush(&amp;(pipe-&gt;cache));</a>
+<a name="ln2628">  pipe-&gt;cache_obsolete = 0;</a>
+<a name="ln2629"> </a>
+<a name="ln2630">  // mask display off as a starting point</a>
+<a name="ln2631">  pipe-&gt;mask_display = DT_DEV_PIXELPIPE_DISPLAY_NONE;</a>
+<a name="ln2632"> </a>
+<a name="ln2633">  void *buf = NULL;</a>
+<a name="ln2634">  void *cl_mem_out = NULL;</a>
+<a name="ln2635"> </a>
+<a name="ln2636">  dt_iop_buffer_dsc_t _out_format = { 0 };</a>
+<a name="ln2637">  dt_iop_buffer_dsc_t *out_format = &amp;_out_format;</a>
+<a name="ln2638"> </a>
+<a name="ln2639">  // run pixelpipe recursively and get error status</a>
+<a name="ln2640">  int err = dt_dev_pixelpipe_process_rec_and_backcopy(pipe, dev, &amp;buf, &amp;cl_mem_out, &amp;out_format, &amp;roi, modules,</a>
+<a name="ln2641">                                                      pieces, pos);</a>
+<a name="ln2642"> </a>
+<a name="ln2643">  // get status summary of opencl queue by checking the eventlist</a>
+<a name="ln2644">  int oclerr = (pipe-&gt;devid &gt;= 0) ? (dt_opencl_events_flush(pipe-&gt;devid, 1) != 0) : 0;</a>
+<a name="ln2645"> </a>
+<a name="ln2646">  // Check if we had opencl errors ....</a>
+<a name="ln2647">  // remark: opencl errors can come in two ways: pipe-&gt;opencl_error is TRUE (and err is TRUE) OR oclerr is</a>
+<a name="ln2648">  // TRUE</a>
+<a name="ln2649">  if(oclerr || (err &amp;&amp; pipe-&gt;opencl_error))</a>
+<a name="ln2650">  {</a>
+<a name="ln2651">    // Well, there were errors -&gt; we might need to free an invalid opencl memory object</a>
+<a name="ln2652">    dt_opencl_release_mem_object(cl_mem_out);</a>
+<a name="ln2653">    dt_opencl_unlock_device(pipe-&gt;devid); // release opencl resource</a>
+<a name="ln2654">    dt_pthread_mutex_lock(&amp;pipe-&gt;busy_mutex);</a>
+<a name="ln2655">    pipe-&gt;opencl_enabled = 0; // disable opencl for this pipe</a>
+<a name="ln2656">    pipe-&gt;opencl_error = 0;   // reset error status</a>
+<a name="ln2657">    pipe-&gt;devid = -1;</a>
+<a name="ln2658">    dt_pthread_mutex_unlock(&amp;pipe-&gt;busy_mutex);</a>
+<a name="ln2659"> </a>
+<a name="ln2660">    darktable.opencl-&gt;error_count++; // increase error count</a>
+<a name="ln2661">    if(darktable.opencl-&gt;error_count &gt;= DT_OPENCL_MAX_ERRORS)</a>
+<a name="ln2662">    {</a>
+<a name="ln2663">      // too frequent opencl errors encountered: this is a clear sign of a broken setup. give up on opencl</a>
+<a name="ln2664">      // during this session.</a>
+<a name="ln2665">      darktable.opencl-&gt;stopped = 1;</a>
+<a name="ln2666">      dt_print(DT_DEBUG_OPENCL,</a>
+<a name="ln2667">               &quot;[opencl] frequent opencl errors encountered; disabling opencl for this session!\n&quot;);</a>
+<a name="ln2668">      dt_control_log(</a>
+<a name="ln2669">          _(&quot;darktable discovered problems with your OpenCL setup; disabling OpenCL for this session!&quot;));</a>
+<a name="ln2670">      // also remove &quot;opencl&quot; from capabilities so that the preference entry is greyed out</a>
+<a name="ln2671">      dt_capabilities_remove(&quot;opencl&quot;);</a>
+<a name="ln2672">    }</a>
+<a name="ln2673"> </a>
+<a name="ln2674">    dt_dev_pixelpipe_flush_caches(pipe);</a>
+<a name="ln2675">    dt_dev_pixelpipe_change(pipe, dev);</a>
+<a name="ln2676">    dt_print(DT_DEBUG_OPENCL, &quot;[pixelpipe_process] [%s] falling back to cpu path\n&quot;,</a>
+<a name="ln2677">             _pipe_type_to_str(pipe-&gt;type));</a>
+<a name="ln2678">    goto restart; // try again (this time without opencl)</a>
+<a name="ln2679">  }</a>
+<a name="ln2680"> </a>
+<a name="ln2681">  // release resources:</a>
+<a name="ln2682">  if (pipe-&gt;forms)</a>
+<a name="ln2683">  {</a>
+<a name="ln2684">    g_list_free_full(pipe-&gt;forms, (void (*)(void *))dt_masks_free_form);</a>
+<a name="ln2685">    pipe-&gt;forms = NULL;</a>
+<a name="ln2686">  }</a>
+<a name="ln2687">  if(pipe-&gt;devid &gt;= 0)</a>
+<a name="ln2688">  {</a>
+<a name="ln2689">    dt_opencl_unlock_device(pipe-&gt;devid);</a>
+<a name="ln2690">    pipe-&gt;devid = -1;</a>
+<a name="ln2691">  }</a>
+<a name="ln2692">  // ... and in case of other errors ...</a>
+<a name="ln2693">  if(err)</a>
+<a name="ln2694">  {</a>
+<a name="ln2695">    pipe-&gt;processing = 0;</a>
+<a name="ln2696">    return 1;</a>
+<a name="ln2697">  }</a>
+<a name="ln2698"> </a>
+<a name="ln2699">  // terminate</a>
+<a name="ln2700">  dt_pthread_mutex_lock(&amp;pipe-&gt;backbuf_mutex);</a>
+<a name="ln2701">  pipe-&gt;backbuf_hash = dt_dev_pixelpipe_cache_hash(pipe-&gt;image.id, &amp;roi, pipe, 0);</a>
+<a name="ln2702">  pipe-&gt;backbuf = buf;</a>
+<a name="ln2703">  pipe-&gt;backbuf_width = width;</a>
+<a name="ln2704">  pipe-&gt;backbuf_height = height;</a>
+<a name="ln2705">  dt_pthread_mutex_unlock(&amp;pipe-&gt;backbuf_mutex);</a>
+<a name="ln2706"> </a>
+<a name="ln2707">  // printf(&quot;pixelpipe homebrew process end\n&quot;);</a>
+<a name="ln2708">  pipe-&gt;processing = 0;</a>
+<a name="ln2709">  return 0;</a>
+<a name="ln2710">}</a>
+<a name="ln2711"> </a>
+<a name="ln2712">void dt_dev_pixelpipe_flush_caches(dt_dev_pixelpipe_t *pipe)</a>
+<a name="ln2713">{</a>
+<a name="ln2714">  dt_dev_pixelpipe_cache_flush(&amp;pipe-&gt;cache);</a>
+<a name="ln2715">}</a>
+<a name="ln2716"> </a>
+<a name="ln2717">void dt_dev_pixelpipe_get_dimensions(dt_dev_pixelpipe_t *pipe, struct dt_develop_t *dev, int width_in,</a>
+<a name="ln2718">                                     int height_in, int *width, int *height)</a>
+<a name="ln2719">{</a>
+<a name="ln2720">  dt_pthread_mutex_lock(&amp;pipe-&gt;busy_mutex);</a>
+<a name="ln2721">  dt_iop_roi_t roi_in = (dt_iop_roi_t){ 0, 0, width_in, height_in, 1.0 };</a>
+<a name="ln2722">  dt_iop_roi_t roi_out;</a>
+<a name="ln2723">  GList *modules = pipe-&gt;iop;</a>
+<a name="ln2724">  GList *pieces = pipe-&gt;nodes;</a>
+<a name="ln2725">  while(modules)</a>
+<a name="ln2726">  {</a>
+<a name="ln2727">    dt_iop_module_t *module = (dt_iop_module_t *)modules-&gt;data;</a>
+<a name="ln2728">    dt_dev_pixelpipe_iop_t *piece = (dt_dev_pixelpipe_iop_t *)pieces-&gt;data;</a>
+<a name="ln2729"> </a>
+<a name="ln2730">    piece-&gt;buf_in = roi_in;</a>
+<a name="ln2731"> </a>
+<a name="ln2732">    // skip this module?</a>
+<a name="ln2733">    if(piece-&gt;enabled</a>
+<a name="ln2734">       &amp;&amp; !(dev-&gt;gui_module &amp;&amp; dev-&gt;gui_module-&gt;operation_tags_filter() &amp; module-&gt;operation_tags()))</a>
+<a name="ln2735">    {</a>
+<a name="ln2736">      module-&gt;modify_roi_out(module, piece, &amp;roi_out, &amp;roi_in);</a>
+<a name="ln2737">    }</a>
+<a name="ln2738">    else</a>
+<a name="ln2739">    {</a>
+<a name="ln2740">      // pass through regions of interest for gui post expose events</a>
+<a name="ln2741">      roi_out = roi_in;</a>
+<a name="ln2742">    }</a>
+<a name="ln2743"> </a>
+<a name="ln2744">    piece-&gt;buf_out = roi_out;</a>
+<a name="ln2745">    roi_in = roi_out;</a>
+<a name="ln2746"> </a>
+<a name="ln2747">    modules = g_list_next(modules);</a>
+<a name="ln2748">    pieces = g_list_next(pieces);</a>
+<a name="ln2749">  }</a>
+<a name="ln2750">  *width = roi_out.width;</a>
+<a name="ln2751">  *height = roi_out.height;</a>
+<a name="ln2752">  dt_pthread_mutex_unlock(&amp;pipe-&gt;busy_mutex);</a>
+<a name="ln2753">}</a>
+<a name="ln2754"> </a>
+<a name="ln2755">float *dt_dev_get_raster_mask(const dt_dev_pixelpipe_t *pipe, const dt_iop_module_t *raster_mask_source,</a>
+<a name="ln2756">                              const int raster_mask_id, const dt_iop_module_t *target_module,</a>
+<a name="ln2757">                              gboolean *free_mask)</a>
+<a name="ln2758">{</a>
+<a name="ln2759">  if(!raster_mask_source)</a>
+<a name="ln2760">    return NULL;</a>
+<a name="ln2761"> </a>
+<a name="ln2762">  *free_mask = FALSE;</a>
+<a name="ln2763">  float *raster_mask = NULL;</a>
+<a name="ln2764"> </a>
+<a name="ln2765">  GList *source_iter;</a>
+<a name="ln2766">  for(source_iter = pipe-&gt;nodes; source_iter; source_iter = g_list_next(source_iter))</a>
+<a name="ln2767">  {</a>
+<a name="ln2768">    const dt_dev_pixelpipe_iop_t *candidate = (dt_dev_pixelpipe_iop_t *)source_iter-&gt;data;</a>
+<a name="ln2769">    if(candidate-&gt;module == raster_mask_source)</a>
+<a name="ln2770">      break;</a>
+<a name="ln2771">  }</a>
+<a name="ln2772"> </a>
+<a name="ln2773">  if(source_iter)</a>
+<a name="ln2774">  {</a>
+<a name="ln2775">    const dt_dev_pixelpipe_iop_t *source_piece = (dt_dev_pixelpipe_iop_t *)source_iter-&gt;data;</a>
+<a name="ln2776">    if(source_piece)</a>
+<a name="ln2777">    {</a>
+<a name="ln2778">      raster_mask = g_hash_table_lookup(source_piece-&gt;raster_masks, GINT_TO_POINTER(raster_mask_id));</a>
+<a name="ln2779">      if(raster_mask)</a>
+<a name="ln2780">      {</a>
+<a name="ln2781">        for(GList *iter = g_list_next(source_iter); iter; iter = g_list_next(iter))</a>
+<a name="ln2782">        {</a>
+<a name="ln2783">          dt_dev_pixelpipe_iop_t *module = (dt_dev_pixelpipe_iop_t *)iter-&gt;data;</a>
+<a name="ln2784"> </a>
+<a name="ln2785">          if(module-&gt;enabled</a>
+<a name="ln2786">            &amp;&amp; !(module-&gt;module-&gt;dev-&gt;gui_module &amp;&amp; module-&gt;module-&gt;dev-&gt;gui_module-&gt;operation_tags_filter()</a>
+<a name="ln2787">                 &amp; module-&gt;module-&gt;operation_tags()))</a>
+<a name="ln2788">          {</a>
+<a name="ln2789">            if(module-&gt;module-&gt;distort_mask</a>
+<a name="ln2790">              &amp;&amp; !(!strcmp(module-&gt;module-&gt;op, &quot;finalscale&quot;) // hack against pipes not using finalscale</a>
+<a name="ln2791">                    &amp;&amp; module-&gt;processed_roi_in.width == 0</a>
+<a name="ln2792">                    &amp;&amp; module-&gt;processed_roi_in.height == 0))</a>
+<a name="ln2793">            {</a>
+<a name="ln2794">              float *transformed_mask = dt_alloc_align(64, sizeof(float)</a>
+<a name="ln2795">                                                          * module-&gt;processed_roi_out.width</a>
+<a name="ln2796">                                                          * module-&gt;processed_roi_out.height);</a>
+<a name="ln2797">              module-&gt;module-&gt;distort_mask(module-&gt;module,</a>
+<a name="ln2798">                                          module,</a>
+<a name="ln2799">                                          raster_mask,</a>
+<a name="ln2800">                                          transformed_mask,</a>
+<a name="ln2801">                                          &amp;module-&gt;processed_roi_in,</a>
+<a name="ln2802">                                          &amp;module-&gt;processed_roi_out);</a>
+<a name="ln2803">              if(*free_mask) dt_free_align(raster_mask);</a>
+<a name="ln2804">              *free_mask = TRUE;</a>
+<a name="ln2805">              raster_mask = transformed_mask;</a>
+<a name="ln2806">            }</a>
+<a name="ln2807">            else if(!module-&gt;module-&gt;distort_mask &amp;&amp;</a>
+<a name="ln2808">                    (module-&gt;processed_roi_in.width != module-&gt;processed_roi_out.width ||</a>
+<a name="ln2809">                     module-&gt;processed_roi_in.height != module-&gt;processed_roi_out.height ||</a>
+<a name="ln2810">                     module-&gt;processed_roi_in.x != module-&gt;processed_roi_out.x ||</a>
+<a name="ln2811">                     module-&gt;processed_roi_in.y != module-&gt;processed_roi_out.y))</a>
+<a name="ln2812">              printf(&quot;FIXME: module `%s' changed the roi from %d x %d @ %d / %d to %d x %d | %d / %d but doesn't have &quot;</a>
+<a name="ln2813">                     &quot;distort_mask() implemented!\n&quot;, module-&gt;module-&gt;op, module-&gt;processed_roi_in.width,</a>
+<a name="ln2814">                     module-&gt;processed_roi_in.height, module-&gt;processed_roi_in.x, module-&gt;processed_roi_in.y,</a>
+<a name="ln2815">                     module-&gt;processed_roi_out.width, module-&gt;processed_roi_out.height, module-&gt;processed_roi_out.x,</a>
+<a name="ln2816">                     module-&gt;processed_roi_out.y);</a>
+<a name="ln2817">          }</a>
+<a name="ln2818"> </a>
+<a name="ln2819">          if(module-&gt;module == target_module)</a>
+<a name="ln2820">            break;</a>
+<a name="ln2821">        }</a>
+<a name="ln2822">      }</a>
+<a name="ln2823">    }</a>
+<a name="ln2824">  }</a>
+<a name="ln2825"> </a>
+<a name="ln2826">  return raster_mask;</a>
+<a name="ln2827">}</a>
+<a name="ln2828"> </a>
+<a name="ln2829">// modelines: These editor modelines have been set for all relevant files by tools/update_modelines.sh</a>
+<a name="ln2830">// vim: shiftwidth=2 expandtab tabstop=2 cindent</a>
+<a name="ln2831">// kate: tab-indents: off; indent-width 2; replace-tabs on; indent-mode cstyle; remove-trailing-spaces modified;</a>
+
+</code></pre>
+<div class="balloon" rel="272"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v522/" target="_blank">V522</a> There might be dereferencing of a potential null pointer 'piece'. Check lines: 272, 271.</p></div>
+<div class="balloon" rel="993"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v769/" target="_blank">V769</a> The 'buf' pointer in the expression could be nullptr. In such case, resulting value of arithmetic operations on this pointer will be senseless and it should not be used. Check lines: 993, 968.</p></div>
+<div class="balloon" rel="1020"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v522/" target="_blank">V522</a> There might be dereferencing of a potential null pointer 'in'. Check lines: 1020, 968.</p></div>
+<div class="balloon" rel="1066"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v595/" target="_blank">V595</a> The 'pieces' pointer was utilized before it was verified against nullptr. Check lines: 1066, 1071.</p></div>
+<div class="balloon" rel="1226"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v547/" target="_blank">V547</a> Expression 'pipe->shutdown' is always false.</p></div>
+<div class="balloon" rel="1278"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v560/" target="_blank">V560</a> A part of conditional expression is always true.</p></div>
+<div class="balloon" rel="1297"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v547/" target="_blank">V547</a> Expression 'pipe->shutdown' is always false.</p></div>
+<div class="balloon" rel="1371"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v547/" target="_blank">V547</a> Expression 'pipe->shutdown' is always false.</p></div>
+<div class="balloon" rel="1422"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v701/" target="_blank">V701</a> realloc() possible leak: when realloc() fails in allocating memory, original pointer 'module->histogram' is lost. Consider assigning realloc() to a temporary pointer.</p></div>
+<div class="balloon" rel="1423"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v575/" target="_blank">V575</a> The potential null pointer is passed into 'memcpy' function. Inspect the first argument. Check lines: 1423, 1422.</p></div>
+<div class="balloon" rel="1484"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v547/" target="_blank">V547</a> Expression 'pipe->shutdown' is always false.</p></div>
+<div class="balloon" rel="1500"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v519/" target="_blank">V519</a> The 'success_opencl' variable is assigned values twice successively. Perhaps this is a mistake. Check lines: 1495, 1500.</p></div>
+<div class="balloon" rel="1561"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v547/" target="_blank">V547</a> Expression 'pipe->shutdown' is always false.</p></div>
+<div class="balloon" rel="1571"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v547/" target="_blank">V547</a> Expression 'success_opencl' is always true.</p></div>
+<div class="balloon" rel="1590"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v701/" target="_blank">V701</a> realloc() possible leak: when realloc() fails in allocating memory, original pointer 'module->histogram' is lost. Consider assigning realloc() to a temporary pointer.</p></div>
+<div class="balloon" rel="1610"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v547/" target="_blank">V547</a> Expression 'success_opencl' is always true.</p></div>
+<div class="balloon" rel="1646"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v547/" target="_blank">V547</a> Expression 'pipe->shutdown' is always false.</p></div>
+<div class="balloon" rel="1668"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v581/" target="_blank">V581</a> The conditional expressions of the 'if' statements situated alongside each other are identical. Check lines: 1653, 1668.</p></div>
+<div class="balloon" rel="1692"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v547/" target="_blank">V547</a> Expression 'pipe->shutdown' is always false.</p></div>
+<div class="balloon" rel="1743"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v547/" target="_blank">V547</a> Expression 'pipe->shutdown' is always false.</p></div>
+<div class="balloon" rel="1803"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v547/" target="_blank">V547</a> Expression 'pipe->shutdown' is always false.</p></div>
+<div class="balloon" rel="1826"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v701/" target="_blank">V701</a> realloc() possible leak: when realloc() fails in allocating memory, original pointer 'module->histogram' is lost. Consider assigning realloc() to a temporary pointer.</p></div>
+<div class="balloon" rel="1890"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v547/" target="_blank">V547</a> Expression 'pipe->shutdown' is always false.</p></div>
+<div class="balloon" rel="1958"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v547/" target="_blank">V547</a> Expression 'pipe->shutdown' is always false.</p></div>
+<div class="balloon" rel="1981"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v701/" target="_blank">V701</a> realloc() possible leak: when realloc() fails in allocating memory, original pointer 'module->histogram' is lost. Consider assigning realloc() to a temporary pointer.</p></div>
+<div class="balloon" rel="2045"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v547/" target="_blank">V547</a> Expression 'pipe->shutdown' is always false.</p></div>
+<div class="balloon" rel="2099"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v701/" target="_blank">V701</a> realloc() possible leak: when realloc() fails in allocating memory, original pointer 'module->histogram' is lost. Consider assigning realloc() to a temporary pointer.</p></div>
+<div class="balloon" rel="2164"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v547/" target="_blank">V547</a> Expression 'pipe->shutdown' is always false.</p></div>
+<div class="balloon" rel="2449"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v547/" target="_blank">V547</a> Expression 'pipe->shutdown' is always false.</p></div>
+<div class="balloon" rel="1188"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v595/" target="_blank">V595</a> The 'pieces' pointer was utilized before it was verified against nullptr. Check lines: 1188, 1194.</p></div>
+<div class="balloon" rel="2709"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v1020/" target="_blank">V1020</a> The function exited without calling the 'dt_opencl_unlock_device' function. Check lines: 2709, 2596.</p></div>
+<div class="balloon" rel="2696"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v1020/" target="_blank">V1020</a> The function exited without calling the 'dt_opencl_unlock_device' function. Check lines: 2696, 2596.</p></div>
+
+<link rel="stylesheet" href="highlight.css">
+<script src="highlight.pack.js"></script>
+<script src="highlightjs-line-numbers.js"></script>
+<script>hljs.initHighlightingOnLoad();</script>
+<script>hljs.initLineNumbersOnLoad();</script>
+<script>
+  $(document).ready(function() {
+      $('.balloon').each(function () {
+          var bl = $(this);
+          var line = bl.attr('rel');
+          var text = $('a[name="ln'+line+'"]').text();
+
+          var space_count = 0;
+          for(var i = 0; i<text.length; i++){
+              var char = text[i];
+              if((char !== ' ')&&(char !== '\t'))break;
+              if(char === '\t')space_count++;
+              space_count++;
+          }
+
+          bl.css('margin-left', space_count*8);
+          $('a[name="ln'+line+'"]').after(bl);
+      });
+
+      window.location = window.location;
+  });
+</script>
+</body>
+</html>

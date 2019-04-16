@@ -1,0 +1,1205 @@
+
+<html>
+<head>
+  <link rel="stylesheet" href="../style.css"/>
+  <script src="../jquery-3.2.1.min.js"></script>
+</head>
+<body>
+<pre><code class = "cpp">
+<a name="ln1">/*</a>
+<a name="ln2">    This file is part of darktable,</a>
+<a name="ln3">    copyright (c) 2009--2011 johannes hanika.</a>
+<a name="ln4">    copyright (c) 2014-2016 Roman Lebedev.</a>
+<a name="ln5"> </a>
+<a name="ln6">    darktable is free software: you can redistribute it and/or modify</a>
+<a name="ln7">    it under the terms of the GNU General Public License as published by</a>
+<a name="ln8">    the Free Software Foundation, either version 3 of the License, or</a>
+<a name="ln9">    (at your option) any later version.</a>
+<a name="ln10"> </a>
+<a name="ln11">    darktable is distributed in the hope that it will be useful,</a>
+<a name="ln12">    but WITHOUT ANY WARRANTY; without even the implied warranty of</a>
+<a name="ln13">    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the</a>
+<a name="ln14">    GNU General Public License for more details.</a>
+<a name="ln15"> </a>
+<a name="ln16">    You should have received a copy of the GNU General Public License</a>
+<a name="ln17">    along with darktable.  If not, see &lt;http://www.gnu.org/licenses/&gt;.</a>
+<a name="ln18">*/</a>
+<a name="ln19">#ifdef HAVE_CONFIG_H</a>
+<a name="ln20">#include &quot;config.h&quot;</a>
+<a name="ln21">#endif</a>
+<a name="ln22">#include &lt;assert.h&gt;</a>
+<a name="ln23">#include &lt;math.h&gt;</a>
+<a name="ln24">#include &lt;stdint.h&gt;</a>
+<a name="ln25">#include &lt;stdlib.h&gt;</a>
+<a name="ln26">#include &lt;string.h&gt;</a>
+<a name="ln27"> </a>
+<a name="ln28">#include &quot;bauhaus/bauhaus.h&quot;</a>
+<a name="ln29">#include &quot;common/colorspaces.h&quot;</a>
+<a name="ln30">#include &quot;common/opencl.h&quot;</a>
+<a name="ln31">#include &quot;control/control.h&quot;</a>
+<a name="ln32">#include &quot;develop/develop.h&quot;</a>
+<a name="ln33">#include &quot;develop/imageop.h&quot;</a>
+<a name="ln34">#include &quot;develop/imageop_math.h&quot;</a>
+<a name="ln35">#include &quot;dtgtk/drawingarea.h&quot;</a>
+<a name="ln36">#include &quot;gui/draw.h&quot;</a>
+<a name="ln37">#include &quot;gui/color_picker_proxy.h&quot;</a>
+<a name="ln38">#include &quot;gui/gtk.h&quot;</a>
+<a name="ln39">#include &quot;gui/presets.h&quot;</a>
+<a name="ln40">#include &quot;iop/iop_api.h&quot;</a>
+<a name="ln41"> </a>
+<a name="ln42">#define DT_GUI_CURVE_EDITOR_INSET DT_PIXEL_APPLY_DPI(5)</a>
+<a name="ln43">#define DT_GUI_CURVE_INFL .3f</a>
+<a name="ln44"> </a>
+<a name="ln45">DT_MODULE_INTROSPECTION(2, dt_iop_levels_params_t)</a>
+<a name="ln46"> </a>
+<a name="ln47">static gboolean dt_iop_levels_area_draw(GtkWidget *widget, cairo_t *crf, gpointer user_data);</a>
+<a name="ln48">static gboolean dt_iop_levels_motion_notify(GtkWidget *widget, GdkEventMotion *event, gpointer user_data);</a>
+<a name="ln49">static gboolean dt_iop_levels_button_press(GtkWidget *widget, GdkEventButton *event, gpointer user_data);</a>
+<a name="ln50">static gboolean dt_iop_levels_button_release(GtkWidget *widget, GdkEventButton *event, gpointer user_data);</a>
+<a name="ln51">static gboolean dt_iop_levels_leave_notify(GtkWidget *widget, GdkEventCrossing *event, gpointer user_data);</a>
+<a name="ln52">static gboolean dt_iop_levels_scroll(GtkWidget *widget, GdkEventScroll *event, gpointer user_data);</a>
+<a name="ln53">static void dt_iop_levels_autoadjust_callback(GtkRange *range, dt_iop_module_t *self);</a>
+<a name="ln54">static void dt_iop_levels_mode_callback(GtkWidget *combo, gpointer user_data);</a>
+<a name="ln55">static void dt_iop_levels_percentiles_callback(GtkWidget *slider, gpointer user_data);</a>
+<a name="ln56"> </a>
+<a name="ln57">typedef enum dt_iop_levels_mode_t</a>
+<a name="ln58">{</a>
+<a name="ln59">  LEVELS_MODE_MANUAL,</a>
+<a name="ln60">  LEVELS_MODE_AUTOMATIC</a>
+<a name="ln61">} dt_iop_levels_mode_t;</a>
+<a name="ln62"> </a>
+<a name="ln63">typedef struct dt_iop_levels_params_t</a>
+<a name="ln64">{</a>
+<a name="ln65">  dt_iop_levels_mode_t mode;</a>
+<a name="ln66">  float percentiles[3];</a>
+<a name="ln67">  float levels[3];</a>
+<a name="ln68">} dt_iop_levels_params_t;</a>
+<a name="ln69"> </a>
+<a name="ln70">typedef enum dt_iop_levels_pick_t</a>
+<a name="ln71">{</a>
+<a name="ln72">  NONE,</a>
+<a name="ln73">  BLACK,</a>
+<a name="ln74">  GREY,</a>
+<a name="ln75">  WHITE</a>
+<a name="ln76">} dt_iop_levels_pick_t;</a>
+<a name="ln77"> </a>
+<a name="ln78">typedef struct dt_iop_levels_gui_data_t</a>
+<a name="ln79">{</a>
+<a name="ln80">  GList *modes;</a>
+<a name="ln81">  GtkWidget *mode;</a>
+<a name="ln82">  GtkWidget *mode_stack;</a>
+<a name="ln83">  GtkDrawingArea *area;</a>
+<a name="ln84">  double mouse_x, mouse_y;</a>
+<a name="ln85">  int dragging, handle_move;</a>
+<a name="ln86">  float drag_start_percentage;</a>
+<a name="ln87">  dt_iop_color_picker_t color_picker;</a>
+<a name="ln88">  GtkToggleButton *activeToggleButton;</a>
+<a name="ln89">  float last_picked_color;</a>
+<a name="ln90">  GtkWidget *percentile_black;</a>
+<a name="ln91">  GtkWidget *percentile_grey;</a>
+<a name="ln92">  GtkWidget *percentile_white;</a>
+<a name="ln93">  float auto_levels[3];</a>
+<a name="ln94">  uint64_t hash;</a>
+<a name="ln95">  dt_pthread_mutex_t lock;</a>
+<a name="ln96">  GtkWidget *blackpick, *greypick, *whitepick;</a>
+<a name="ln97">} dt_iop_levels_gui_data_t;</a>
+<a name="ln98"> </a>
+<a name="ln99">typedef struct dt_iop_levels_data_t</a>
+<a name="ln100">{</a>
+<a name="ln101">  dt_iop_levels_mode_t mode;</a>
+<a name="ln102">  float percentiles[3];</a>
+<a name="ln103">  float levels[3];</a>
+<a name="ln104">  float in_inv_gamma;</a>
+<a name="ln105">  float lut[0x10000];</a>
+<a name="ln106">} dt_iop_levels_data_t;</a>
+<a name="ln107"> </a>
+<a name="ln108">typedef struct dt_iop_levels_global_data_t</a>
+<a name="ln109">{</a>
+<a name="ln110">  int kernel_levels;</a>
+<a name="ln111">} dt_iop_levels_global_data_t;</a>
+<a name="ln112"> </a>
+<a name="ln113"> </a>
+<a name="ln114">const char *name()</a>
+<a name="ln115">{</a>
+<a name="ln116">  return _(&quot;levels&quot;);</a>
+<a name="ln117">}</a>
+<a name="ln118"> </a>
+<a name="ln119">int default_group()</a>
+<a name="ln120">{</a>
+<a name="ln121">  return IOP_GROUP_TONE;</a>
+<a name="ln122">}</a>
+<a name="ln123"> </a>
+<a name="ln124">int flags()</a>
+<a name="ln125">{</a>
+<a name="ln126">  return IOP_FLAGS_SUPPORTS_BLENDING;</a>
+<a name="ln127">}</a>
+<a name="ln128"> </a>
+<a name="ln129">int default_colorspace(dt_iop_module_t *self, dt_dev_pixelpipe_t *pipe, dt_dev_pixelpipe_iop_t *piece)</a>
+<a name="ln130">{</a>
+<a name="ln131">  return iop_cs_Lab;</a>
+<a name="ln132">}</a>
+<a name="ln133"> </a>
+<a name="ln134">int legacy_params(dt_iop_module_t *self, const void *const old_params, const int old_version,</a>
+<a name="ln135">                  void *new_params, const int new_version)</a>
+<a name="ln136">{</a>
+<a name="ln137">  if(old_version == 1 &amp;&amp; new_version == 2)</a>
+<a name="ln138">  {</a>
+<a name="ln139">    typedef struct dt_iop_levels_params_v1_t</a>
+<a name="ln140">    {</a>
+<a name="ln141">      float levels[3];</a>
+<a name="ln142">      int levels_preset;</a>
+<a name="ln143">    } dt_iop_levels_params_v1_t;</a>
+<a name="ln144"> </a>
+<a name="ln145">    dt_iop_levels_params_v1_t *o = (dt_iop_levels_params_v1_t *)old_params;</a>
+<a name="ln146">    dt_iop_levels_params_t *n = (dt_iop_levels_params_t *)new_params;</a>
+<a name="ln147">    dt_iop_levels_params_t *d = (dt_iop_levels_params_t *)self-&gt;default_params;</a>
+<a name="ln148"> </a>
+<a name="ln149">    *n = *d; // start with a fresh copy of default parameters</a>
+<a name="ln150"> </a>
+<a name="ln151">    n-&gt;levels[0] = o-&gt;levels[0];</a>
+<a name="ln152">    n-&gt;levels[1] = o-&gt;levels[1];</a>
+<a name="ln153">    n-&gt;levels[2] = o-&gt;levels[2];</a>
+<a name="ln154">    return 0;</a>
+<a name="ln155">  }</a>
+<a name="ln156">  return 1;</a>
+<a name="ln157">}</a>
+<a name="ln158"> </a>
+<a name="ln159">static void dt_iop_levels_compute_levels_manual(const uint32_t *histogram, float *levels)</a>
+<a name="ln160">{</a>
+<a name="ln161">  if(!histogram) return;</a>
+<a name="ln162"> </a>
+<a name="ln163">  // search histogram for min (search from bottom)</a>
+<a name="ln164">  for(int k = 0; k &lt;= 4 * 255; k += 4)</a>
+<a name="ln165">  {</a>
+<a name="ln166">    if(histogram[k] &gt; 1)</a>
+<a name="ln167">    {</a>
+<a name="ln168">      levels[0] = ((float)(k) / (4 * 256));</a>
+<a name="ln169">      break;</a>
+<a name="ln170">    }</a>
+<a name="ln171">  }</a>
+<a name="ln172">  // then for max (search from top)</a>
+<a name="ln173">  for(int k = 4 * 255; k &gt;= 0; k -= 4)</a>
+<a name="ln174">  {</a>
+<a name="ln175">    if(histogram[k] &gt; 1)</a>
+<a name="ln176">    {</a>
+<a name="ln177">      levels[2] = ((float)(k) / (4 * 256));</a>
+<a name="ln178">      break;</a>
+<a name="ln179">    }</a>
+<a name="ln180">  }</a>
+<a name="ln181">  levels[1] = levels[0] / 2 + levels[2] / 2;</a>
+<a name="ln182">}</a>
+<a name="ln183"> </a>
+<a name="ln184">static void dt_iop_levels_compute_levels_automatic(dt_dev_pixelpipe_iop_t *piece)</a>
+<a name="ln185">{</a>
+<a name="ln186">  dt_iop_levels_data_t *d = (dt_iop_levels_data_t *)piece-&gt;data;</a>
+<a name="ln187"> </a>
+<a name="ln188">  uint32_t total = piece-&gt;histogram_stats.pixels;</a>
+<a name="ln189"> </a>
+<a name="ln190">  float thr[3];</a>
+<a name="ln191">  for(int k = 0; k &lt; 3; k++)</a>
+<a name="ln192">  {</a>
+<a name="ln193">    thr[k] = (float)total * d-&gt;percentiles[k] / 100.0f;</a>
+<a name="ln194">    d-&gt;levels[k] = NAN;</a>
+<a name="ln195">  }</a>
+<a name="ln196"> </a>
+<a name="ln197">  if(piece-&gt;histogram == NULL) return;</a>
+<a name="ln198"> </a>
+<a name="ln199">  // find min and max levels</a>
+<a name="ln200">  size_t n = 0;</a>
+<a name="ln201">  for(uint32_t i = 0; i &lt; piece-&gt;histogram_stats.bins_count; i++)</a>
+<a name="ln202">  {</a>
+<a name="ln203">    n += piece-&gt;histogram[4 * i];</a>
+<a name="ln204"> </a>
+<a name="ln205">    for(int k = 0; k &lt; 3; k++)</a>
+<a name="ln206">    {</a>
+<a name="ln207">      if(isnan(d-&gt;levels[k]) &amp;&amp; (n &gt;= thr[k]))</a>
+<a name="ln208">      {</a>
+<a name="ln209">        d-&gt;levels[k] = (float)i / (float)(piece-&gt;histogram_stats.bins_count - 1);</a>
+<a name="ln210">      }</a>
+<a name="ln211">    }</a>
+<a name="ln212">  }</a>
+<a name="ln213">  // for numerical reasons sometimes the threshold is sharp but in float and n is size_t.</a>
+<a name="ln214">  // in this case we want to make sure we don't keep nan:</a>
+<a name="ln215">  if(isnan(d-&gt;levels[2])) d-&gt;levels[2] = 1.0f;</a>
+<a name="ln216"> </a>
+<a name="ln217">  // compute middle level from min and max levels</a>
+<a name="ln218">  float center = d-&gt;percentiles[1] / 100.0f;</a>
+<a name="ln219">  if(!isnan(d-&gt;levels[0]) &amp;&amp; !isnan(d-&gt;levels[2]))</a>
+<a name="ln220">    d-&gt;levels[1] = (1.0f - center) * d-&gt;levels[0] + center * d-&gt;levels[2];</a>
+<a name="ln221">}</a>
+<a name="ln222"> </a>
+<a name="ln223">static void compute_lut(dt_dev_pixelpipe_iop_t *piece)</a>
+<a name="ln224">{</a>
+<a name="ln225">  dt_iop_levels_data_t *d = (dt_iop_levels_data_t *)piece-&gt;data;</a>
+<a name="ln226"> </a>
+<a name="ln227">  // Building the lut for values in the [0,1] range</a>
+<a name="ln228">  float delta = (d-&gt;levels[2] - d-&gt;levels[0]) / 2.0f;</a>
+<a name="ln229">  float mid = d-&gt;levels[0] + delta;</a>
+<a name="ln230">  float tmp = (d-&gt;levels[1] - mid) / delta;</a>
+<a name="ln231">  d-&gt;in_inv_gamma = pow(10, tmp);</a>
+<a name="ln232"> </a>
+<a name="ln233">  for(unsigned int i = 0; i &lt; 0x10000; i++)</a>
+<a name="ln234">  {</a>
+<a name="ln235">    float percentage = (float)i / (float)0x10000ul;</a>
+<a name="ln236">    d-&gt;lut[i] = 100.0f * pow(percentage, d-&gt;in_inv_gamma);</a>
+<a name="ln237">  }</a>
+<a name="ln238">}</a>
+<a name="ln239"> </a>
+<a name="ln240">static int _iop_color_picker_get_set(dt_iop_module_t *self, GtkWidget *button)</a>
+<a name="ln241">{</a>
+<a name="ln242">  dt_iop_levels_gui_data_t *g = (dt_iop_levels_gui_data_t *)self-&gt;gui_data;</a>
+<a name="ln243"> </a>
+<a name="ln244">  const dt_iop_levels_pick_t current_picker = g-&gt;color_picker.current_picker;</a>
+<a name="ln245"> </a>
+<a name="ln246">  g-&gt;color_picker.current_picker = NONE;</a>
+<a name="ln247"> </a>
+<a name="ln248">  if(button == GTK_WIDGET(g-&gt;blackpick))</a>
+<a name="ln249">    g-&gt;color_picker.current_picker = BLACK;</a>
+<a name="ln250">  else if(button == GTK_WIDGET(g-&gt;greypick))</a>
+<a name="ln251">    g-&gt;color_picker.current_picker = GREY;</a>
+<a name="ln252">  else if(button == GTK_WIDGET(g-&gt;whitepick))</a>
+<a name="ln253">    g-&gt;color_picker.current_picker = WHITE;</a>
+<a name="ln254"> </a>
+<a name="ln255">  if (current_picker == g-&gt;color_picker.current_picker)</a>
+<a name="ln256">    return DT_COLOR_PICKER_ALREADY_SELECTED;</a>
+<a name="ln257">  else</a>
+<a name="ln258">    return g-&gt;color_picker.current_picker;</a>
+<a name="ln259">}</a>
+<a name="ln260"> </a>
+<a name="ln261">static void _iop_color_picker_apply(struct dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece)</a>
+<a name="ln262">{</a>
+<a name="ln263">  dt_iop_levels_gui_data_t *c = (dt_iop_levels_gui_data_t *)self-&gt;gui_data;</a>
+<a name="ln264">  dt_iop_levels_params_t *p = (dt_iop_levels_params_t *)self-&gt;params;</a>
+<a name="ln265"> </a>
+<a name="ln266">  /* we need to save the last picked color to prevent flickering when</a>
+<a name="ln267">   * changing from one picker to another, as the picked_color value does not</a>
+<a name="ln268">   * update as rapidly */</a>
+<a name="ln269"> </a>
+<a name="ln270">  float mean_picked_color = *self-&gt;picked_color / 100.0;</a>
+<a name="ln271"> </a>
+<a name="ln272">  if(self-&gt;color_picker_point[0] &gt;= 0.0f</a>
+<a name="ln273">     &amp;&amp; self-&gt;color_picker_point[1] &gt;= 0.0f</a>
+<a name="ln274">     &amp;&amp; self-&gt;picked_color_max[0] &gt;= 0.0f</a>
+<a name="ln275">     &amp;&amp; mean_picked_color != c-&gt;last_picked_color)</a>
+<a name="ln276">  {</a>
+<a name="ln277">    float previous_color[3];</a>
+<a name="ln278">    previous_color[0] = p-&gt;levels[0];</a>
+<a name="ln279">    previous_color[1] = p-&gt;levels[1];</a>
+<a name="ln280">    previous_color[2] = p-&gt;levels[2];</a>
+<a name="ln281"> </a>
+<a name="ln282">    c-&gt;last_picked_color = mean_picked_color;</a>
+<a name="ln283"> </a>
+<a name="ln284">    if(BLACK == c-&gt;color_picker.current_picker)</a>
+<a name="ln285">    {</a>
+<a name="ln286">      if(mean_picked_color &gt; p-&gt;levels[1])</a>
+<a name="ln287">      {</a>
+<a name="ln288">        p-&gt;levels[0] = p-&gt;levels[1] - FLT_EPSILON;</a>
+<a name="ln289">      }</a>
+<a name="ln290">      else</a>
+<a name="ln291">      {</a>
+<a name="ln292">        p-&gt;levels[0] = mean_picked_color;</a>
+<a name="ln293">      }</a>
+<a name="ln294">    }</a>
+<a name="ln295">    else if(GREY == c-&gt;color_picker.current_picker)</a>
+<a name="ln296">    {</a>
+<a name="ln297">      if(mean_picked_color &lt; p-&gt;levels[0] || mean_picked_color &gt; p-&gt;levels[2])</a>
+<a name="ln298">      {</a>
+<a name="ln299">        p-&gt;levels[1] = p-&gt;levels[1];</a>
+<a name="ln300">      }</a>
+<a name="ln301">      else</a>
+<a name="ln302">      {</a>
+<a name="ln303">        p-&gt;levels[1] = mean_picked_color;</a>
+<a name="ln304">      }</a>
+<a name="ln305">    }</a>
+<a name="ln306">    else if(WHITE == c-&gt;color_picker.current_picker)</a>
+<a name="ln307">    {</a>
+<a name="ln308">      if(mean_picked_color &lt; p-&gt;levels[1])</a>
+<a name="ln309">      {</a>
+<a name="ln310">        p-&gt;levels[2] = p-&gt;levels[1] + FLT_EPSILON;</a>
+<a name="ln311">      }</a>
+<a name="ln312">      else</a>
+<a name="ln313">      {</a>
+<a name="ln314">        p-&gt;levels[2] = mean_picked_color;</a>
+<a name="ln315">      }</a>
+<a name="ln316">    }</a>
+<a name="ln317"> </a>
+<a name="ln318">    if(previous_color[0] != p-&gt;levels[0]</a>
+<a name="ln319">       || previous_color[1] != p-&gt;levels[1]</a>
+<a name="ln320">       || previous_color[2] != p-&gt;levels[2])</a>
+<a name="ln321">    {</a>
+<a name="ln322">      dt_dev_add_history_item(darktable.develop, self, TRUE);</a>
+<a name="ln323">    }</a>
+<a name="ln324">  }</a>
+<a name="ln325"> </a>
+<a name="ln326">}</a>
+<a name="ln327"> </a>
+<a name="ln328">static void _iop_color_picker_update(dt_iop_module_t *self)</a>
+<a name="ln329">{</a>
+<a name="ln330">  dt_iop_levels_gui_data_t *g = (dt_iop_levels_gui_data_t *)self-&gt;gui_data;</a>
+<a name="ln331">  const dt_iop_levels_pick_t which_colorpicker = g-&gt;color_picker.current_picker;</a>
+<a name="ln332">  darktable.gui-&gt;reset = 1;</a>
+<a name="ln333">  gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(g-&gt;blackpick), which_colorpicker == BLACK);</a>
+<a name="ln334">  gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(g-&gt;greypick), which_colorpicker == GREY);</a>
+<a name="ln335">  gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(g-&gt;whitepick), which_colorpicker == WHITE);</a>
+<a name="ln336">  darktable.gui-&gt;reset = 0;</a>
+<a name="ln337">}</a>
+<a name="ln338"> </a>
+<a name="ln339">/*</a>
+<a name="ln340"> * WARNING: unlike commit_params, which is thread safe wrt gui thread and</a>
+<a name="ln341"> * pipes, this function lives in the pipeline thread, and NOT thread safe!</a>
+<a name="ln342"> */</a>
+<a name="ln343">static void commit_params_late(dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece)</a>
+<a name="ln344">{</a>
+<a name="ln345">  dt_iop_levels_data_t *d = (dt_iop_levels_data_t *)piece-&gt;data;</a>
+<a name="ln346">  dt_iop_levels_gui_data_t *g = (dt_iop_levels_gui_data_t *)self-&gt;gui_data;</a>
+<a name="ln347"> </a>
+<a name="ln348">  if(d-&gt;mode == LEVELS_MODE_AUTOMATIC)</a>
+<a name="ln349">  {</a>
+<a name="ln350">    if(g &amp;&amp; piece-&gt;pipe-&gt;type == DT_DEV_PIXELPIPE_FULL)</a>
+<a name="ln351">    {</a>
+<a name="ln352">      dt_pthread_mutex_lock(&amp;g-&gt;lock);</a>
+<a name="ln353">      const uint64_t hash = g-&gt;hash;</a>
+<a name="ln354">      dt_pthread_mutex_unlock(&amp;g-&gt;lock);</a>
+<a name="ln355"> </a>
+<a name="ln356">      // note that the case 'hash == 0' on first invocation in a session implies that d-&gt;levels[]</a>
+<a name="ln357">      // contains NANs which initiates special handling below to avoid inconsistent results. in all</a>
+<a name="ln358">      // other cases we make sure that the preview pipe has left us with proper readings for</a>
+<a name="ln359">      // g-&gt;auto_levels[]. if data are not yet there we need to wait (with timeout).</a>
+<a name="ln360">      if(hash != 0 &amp;&amp; !dt_dev_sync_pixelpipe_hash(self-&gt;dev, piece-&gt;pipe, self-&gt;iop_order, DT_DEV_TRANSFORM_DIR_BACK_INCL, &amp;g-&gt;lock, &amp;g-&gt;hash))</a>
+<a name="ln361">        dt_control_log(_(&quot;inconsistent output&quot;));</a>
+<a name="ln362"> </a>
+<a name="ln363">      dt_pthread_mutex_lock(&amp;g-&gt;lock);</a>
+<a name="ln364">      d-&gt;levels[0] = g-&gt;auto_levels[0];</a>
+<a name="ln365">      d-&gt;levels[1] = g-&gt;auto_levels[1];</a>
+<a name="ln366">      d-&gt;levels[2] = g-&gt;auto_levels[2];</a>
+<a name="ln367">      dt_pthread_mutex_unlock(&amp;g-&gt;lock);</a>
+<a name="ln368"> </a>
+<a name="ln369">      compute_lut(piece);</a>
+<a name="ln370">    }</a>
+<a name="ln371"> </a>
+<a name="ln372">    if(piece-&gt;pipe-&gt;type == DT_DEV_PIXELPIPE_PREVIEW || isnan(d-&gt;levels[0]) || isnan(d-&gt;levels[1])</a>
+<a name="ln373">       || isnan(d-&gt;levels[2]))</a>
+<a name="ln374">    {</a>
+<a name="ln375">      dt_iop_levels_compute_levels_automatic(piece);</a>
+<a name="ln376">      compute_lut(piece);</a>
+<a name="ln377">    }</a>
+<a name="ln378"> </a>
+<a name="ln379">    if(g &amp;&amp; piece-&gt;pipe-&gt;type == DT_DEV_PIXELPIPE_PREVIEW &amp;&amp; d-&gt;mode == LEVELS_MODE_AUTOMATIC)</a>
+<a name="ln380">    {</a>
+<a name="ln381">      uint64_t hash = dt_dev_hash_plus(self-&gt;dev, piece-&gt;pipe, self-&gt;iop_order, DT_DEV_TRANSFORM_DIR_BACK_INCL);</a>
+<a name="ln382">      dt_pthread_mutex_lock(&amp;g-&gt;lock);</a>
+<a name="ln383">      g-&gt;auto_levels[0] = d-&gt;levels[0];</a>
+<a name="ln384">      g-&gt;auto_levels[1] = d-&gt;levels[1];</a>
+<a name="ln385">      g-&gt;auto_levels[2] = d-&gt;levels[2];</a>
+<a name="ln386">      g-&gt;hash = hash;</a>
+<a name="ln387">      dt_pthread_mutex_unlock(&amp;g-&gt;lock);</a>
+<a name="ln388">    }</a>
+<a name="ln389">  }</a>
+<a name="ln390">}</a>
+<a name="ln391"> </a>
+<a name="ln392">void process(dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, const void *const ivoid, void *const ovoid,</a>
+<a name="ln393">             const dt_iop_roi_t *const roi_in, const dt_iop_roi_t *const roi_out)</a>
+<a name="ln394">{</a>
+<a name="ln395">  const int ch = piece-&gt;colors;</a>
+<a name="ln396">  const dt_iop_levels_data_t *const d = (dt_iop_levels_data_t *)piece-&gt;data;</a>
+<a name="ln397"> </a>
+<a name="ln398">  if(d-&gt;mode == LEVELS_MODE_AUTOMATIC)</a>
+<a name="ln399">  {</a>
+<a name="ln400">    commit_params_late(self, piece);</a>
+<a name="ln401">  }</a>
+<a name="ln402"> </a>
+<a name="ln403">#ifdef _OPENMP</a>
+<a name="ln404">#pragma omp parallel for default(none) schedule(static)</a>
+<a name="ln405">#endif</a>
+<a name="ln406">  for(int k = 0; k &lt; roi_out-&gt;height; k++)</a>
+<a name="ln407">  {</a>
+<a name="ln408">    float *in = (float *)ivoid + (size_t)k * ch * roi_out-&gt;width;</a>
+<a name="ln409">    float *out = (float *)ovoid + (size_t)k * ch * roi_out-&gt;width;</a>
+<a name="ln410">    for(int j = 0; j &lt; roi_out-&gt;width; j++, in += ch, out += ch)</a>
+<a name="ln411">    {</a>
+<a name="ln412">      float L_in = in[0] / 100.0f;</a>
+<a name="ln413"> </a>
+<a name="ln414">      if(L_in &lt;= d-&gt;levels[0])</a>
+<a name="ln415">      {</a>
+<a name="ln416">        // Anything below the lower threshold just clips to zero</a>
+<a name="ln417">        out[0] = 0.0f;</a>
+<a name="ln418">      }</a>
+<a name="ln419">      else if(L_in &gt;= d-&gt;levels[2])</a>
+<a name="ln420">      {</a>
+<a name="ln421">        float percentage = (L_in - d-&gt;levels[0]) / (d-&gt;levels[2] - d-&gt;levels[0]);</a>
+<a name="ln422">        out[0] = 100.0f * pow(percentage, d-&gt;in_inv_gamma);</a>
+<a name="ln423">      }</a>
+<a name="ln424">      else</a>
+<a name="ln425">      {</a>
+<a name="ln426">        // Within the expected input range we can use the lookup table</a>
+<a name="ln427">        float percentage = (L_in - d-&gt;levels[0]) / (d-&gt;levels[2] - d-&gt;levels[0]);</a>
+<a name="ln428">        // out[0] = 100.0 * pow(percentage, d-&gt;in_inv_gamma);</a>
+<a name="ln429">        out[0] = d-&gt;lut[CLAMP((int)(percentage * 0x10000ul), 0, 0xffff)];</a>
+<a name="ln430">      }</a>
+<a name="ln431"> </a>
+<a name="ln432">      // Preserving contrast</a>
+<a name="ln433">      if(in[0] &gt; 0.01f)</a>
+<a name="ln434">      {</a>
+<a name="ln435">        out[1] = in[1] * out[0] / in[0];</a>
+<a name="ln436">        out[2] = in[2] * out[0] / in[0];</a>
+<a name="ln437">      }</a>
+<a name="ln438">      else</a>
+<a name="ln439">      {</a>
+<a name="ln440">        out[1] = in[1] * out[0] / 0.01f;</a>
+<a name="ln441">        out[2] = in[2] * out[0] / 0.01f;</a>
+<a name="ln442">      }</a>
+<a name="ln443">    }</a>
+<a name="ln444">  }</a>
+<a name="ln445"> </a>
+<a name="ln446">  if(piece-&gt;pipe-&gt;mask_display &amp; DT_DEV_PIXELPIPE_DISPLAY_MASK) dt_iop_alpha_copy(ivoid, ovoid, roi_out-&gt;width, roi_out-&gt;height);</a>
+<a name="ln447">}</a>
+<a name="ln448"> </a>
+<a name="ln449">#ifdef HAVE_OPENCL</a>
+<a name="ln450">int process_cl(dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, cl_mem dev_in, cl_mem dev_out,</a>
+<a name="ln451">               const dt_iop_roi_t *const roi_in, const dt_iop_roi_t *const roi_out)</a>
+<a name="ln452">{</a>
+<a name="ln453">  dt_iop_levels_data_t *d = (dt_iop_levels_data_t *)piece-&gt;data;</a>
+<a name="ln454">  dt_iop_levels_global_data_t *gd = (dt_iop_levels_global_data_t *)self-&gt;data;</a>
+<a name="ln455"> </a>
+<a name="ln456">  if(d-&gt;mode == LEVELS_MODE_AUTOMATIC)</a>
+<a name="ln457">  {</a>
+<a name="ln458">    commit_params_late(self, piece);</a>
+<a name="ln459">  }</a>
+<a name="ln460"> </a>
+<a name="ln461">  cl_mem dev_lut = NULL;</a>
+<a name="ln462">  cl_int err = -999;</a>
+<a name="ln463">  const int devid = piece-&gt;pipe-&gt;devid;</a>
+<a name="ln464"> </a>
+<a name="ln465">  const int width = roi_out-&gt;width;</a>
+<a name="ln466">  const int height = roi_out-&gt;height;</a>
+<a name="ln467"> </a>
+<a name="ln468">  dev_lut = dt_opencl_copy_host_to_device(devid, d-&gt;lut, 256, 256, sizeof(float));</a>
+<a name="ln469">  if(dev_lut == NULL) goto error;</a>
+<a name="ln470"> </a>
+<a name="ln471">  size_t sizes[2] = { ROUNDUPWD(width), ROUNDUPHT(height) };</a>
+<a name="ln472">  dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_levels, 0, sizeof(cl_mem), &amp;dev_in);</a>
+<a name="ln473">  dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_levels, 1, sizeof(cl_mem), &amp;dev_out);</a>
+<a name="ln474">  dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_levels, 2, sizeof(int), &amp;width);</a>
+<a name="ln475">  dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_levels, 3, sizeof(int), &amp;height);</a>
+<a name="ln476">  dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_levels, 4, sizeof(cl_mem), &amp;dev_lut);</a>
+<a name="ln477">  dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_levels, 5, sizeof(float), &amp;d-&gt;levels[0]);</a>
+<a name="ln478">  dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_levels, 6, sizeof(float), &amp;d-&gt;levels[2]);</a>
+<a name="ln479">  dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_levels, 7, sizeof(float), &amp;d-&gt;in_inv_gamma);</a>
+<a name="ln480">  err = dt_opencl_enqueue_kernel_2d(devid, gd-&gt;kernel_levels, sizes);</a>
+<a name="ln481">  if(err != CL_SUCCESS) goto error;</a>
+<a name="ln482"> </a>
+<a name="ln483">  dt_opencl_release_mem_object(dev_lut);</a>
+<a name="ln484"> </a>
+<a name="ln485">  return TRUE;</a>
+<a name="ln486"> </a>
+<a name="ln487">error:</a>
+<a name="ln488">  dt_opencl_release_mem_object(dev_lut);</a>
+<a name="ln489">  dt_print(DT_DEBUG_OPENCL, &quot;[opencl_levels] couldn't enqueue kernel! %d\n&quot;, err);</a>
+<a name="ln490">  return FALSE;</a>
+<a name="ln491">}</a>
+<a name="ln492">#endif</a>
+<a name="ln493"> </a>
+<a name="ln494">// void init_presets (dt_iop_module_so_t *self)</a>
+<a name="ln495">//{</a>
+<a name="ln496">//  dt_iop_levels_params_t p;</a>
+<a name="ln497">//  p.levels_preset = 0;</a>
+<a name="ln498">//</a>
+<a name="ln499">//  p.levels[0] = 0;</a>
+<a name="ln500">//  p.levels[1] = 0.5;</a>
+<a name="ln501">//  p.levels[2] = 1;</a>
+<a name="ln502">//  dt_gui_presets_add_generic(_(&quot;unmodified&quot;), self-&gt;op, self-&gt;version(), &amp;p, sizeof(p), 1);</a>
+<a name="ln503">//}</a>
+<a name="ln504"> </a>
+<a name="ln505">void commit_params(dt_iop_module_t *self, dt_iop_params_t *p1, dt_dev_pixelpipe_t *pipe,</a>
+<a name="ln506">                   dt_dev_pixelpipe_iop_t *piece)</a>
+<a name="ln507">{</a>
+<a name="ln508">  dt_iop_levels_data_t *d = (dt_iop_levels_data_t *)piece-&gt;data;</a>
+<a name="ln509">  dt_iop_levels_params_t *p = (dt_iop_levels_params_t *)p1;</a>
+<a name="ln510"> </a>
+<a name="ln511">  if(pipe-&gt;type == DT_DEV_PIXELPIPE_PREVIEW)</a>
+<a name="ln512">    piece-&gt;request_histogram |= (DT_REQUEST_ON);</a>
+<a name="ln513">  else</a>
+<a name="ln514">    piece-&gt;request_histogram &amp;= ~(DT_REQUEST_ON);</a>
+<a name="ln515"> </a>
+<a name="ln516">  piece-&gt;request_histogram |= (DT_REQUEST_ONLY_IN_GUI);</a>
+<a name="ln517"> </a>
+<a name="ln518">  piece-&gt;histogram_params.bins_count = 256;</a>
+<a name="ln519"> </a>
+<a name="ln520">  if(p-&gt;mode == LEVELS_MODE_AUTOMATIC)</a>
+<a name="ln521">  {</a>
+<a name="ln522">    d-&gt;mode = LEVELS_MODE_AUTOMATIC;</a>
+<a name="ln523"> </a>
+<a name="ln524">    piece-&gt;request_histogram |= (DT_REQUEST_ON);</a>
+<a name="ln525">    self-&gt;request_histogram &amp;= ~(DT_REQUEST_ON);</a>
+<a name="ln526"> </a>
+<a name="ln527">    if(!self-&gt;dev-&gt;gui_attached) piece-&gt;request_histogram &amp;= ~(DT_REQUEST_ONLY_IN_GUI);</a>
+<a name="ln528"> </a>
+<a name="ln529">    piece-&gt;histogram_params.bins_count = 16384;</a>
+<a name="ln530"> </a>
+<a name="ln531">    /*</a>
+<a name="ln532">     * in principle, we do not need/want histogram in FULL pipe</a>
+<a name="ln533">     * because we will use histogram from preview pipe there,</a>
+<a name="ln534">     * but it might happen that for some reasons we do not have</a>
+<a name="ln535">     * histogram of preview pipe yet - e.g. on first pipe run</a>
+<a name="ln536">     * (just after setting mode to automatic)</a>
+<a name="ln537">     */</a>
+<a name="ln538"> </a>
+<a name="ln539">    for(int k = 0; k &lt; 3; k++)</a>
+<a name="ln540">    {</a>
+<a name="ln541">      d-&gt;levels[k] = NAN;</a>
+<a name="ln542">      d-&gt;percentiles[k] = p-&gt;percentiles[k];</a>
+<a name="ln543">    }</a>
+<a name="ln544"> </a>
+<a name="ln545">    // commit_params_late() will compute LUT later</a>
+<a name="ln546">  }</a>
+<a name="ln547">  else</a>
+<a name="ln548">  {</a>
+<a name="ln549">    d-&gt;mode = LEVELS_MODE_MANUAL;</a>
+<a name="ln550"> </a>
+<a name="ln551">    self-&gt;request_histogram |= (DT_REQUEST_ON);</a>
+<a name="ln552"> </a>
+<a name="ln553">    d-&gt;levels[0] = p-&gt;levels[0];</a>
+<a name="ln554">    d-&gt;levels[1] = p-&gt;levels[1];</a>
+<a name="ln555">    d-&gt;levels[2] = p-&gt;levels[2];</a>
+<a name="ln556">    compute_lut(piece);</a>
+<a name="ln557">  }</a>
+<a name="ln558">}</a>
+<a name="ln559"> </a>
+<a name="ln560">void init_pipe(dt_iop_module_t *self, dt_dev_pixelpipe_t *pipe, dt_dev_pixelpipe_iop_t *piece)</a>
+<a name="ln561">{</a>
+<a name="ln562">  piece-&gt;data = malloc(sizeof(dt_iop_levels_data_t));</a>
+<a name="ln563">}</a>
+<a name="ln564"> </a>
+<a name="ln565">void cleanup_pipe(dt_iop_module_t *self, dt_dev_pixelpipe_t *pipe, dt_dev_pixelpipe_iop_t *piece)</a>
+<a name="ln566">{</a>
+<a name="ln567">  // clean up everything again.</a>
+<a name="ln568">  free(piece-&gt;data);</a>
+<a name="ln569">  piece-&gt;data = NULL;</a>
+<a name="ln570">}</a>
+<a name="ln571"> </a>
+<a name="ln572">void gui_update(dt_iop_module_t *self)</a>
+<a name="ln573">{</a>
+<a name="ln574">  dt_iop_levels_gui_data_t *g = (dt_iop_levels_gui_data_t *)self-&gt;gui_data;</a>
+<a name="ln575">  dt_iop_levels_params_t *p = (dt_iop_levels_params_t *)self-&gt;params;</a>
+<a name="ln576"> </a>
+<a name="ln577">  dt_bauhaus_combobox_set(g-&gt;mode, g_list_index(g-&gt;modes, GUINT_TO_POINTER(p-&gt;mode)));</a>
+<a name="ln578">  dt_bauhaus_slider_set(g-&gt;percentile_black, p-&gt;percentiles[0]);</a>
+<a name="ln579">  dt_bauhaus_slider_set(g-&gt;percentile_grey, p-&gt;percentiles[1]);</a>
+<a name="ln580">  dt_bauhaus_slider_set(g-&gt;percentile_white, p-&gt;percentiles[2]);</a>
+<a name="ln581"> </a>
+<a name="ln582">  switch(p-&gt;mode)</a>
+<a name="ln583">  {</a>
+<a name="ln584">    case LEVELS_MODE_AUTOMATIC:</a>
+<a name="ln585">      gtk_stack_set_visible_child_name(GTK_STACK(g-&gt;mode_stack), &quot;automatic&quot;);</a>
+<a name="ln586">      break;</a>
+<a name="ln587">    case LEVELS_MODE_MANUAL:</a>
+<a name="ln588">    default:</a>
+<a name="ln589">      gtk_stack_set_visible_child_name(GTK_STACK(g-&gt;mode_stack), &quot;manual&quot;);</a>
+<a name="ln590">      break;</a>
+<a name="ln591">  }</a>
+<a name="ln592"> </a>
+<a name="ln593">  dt_pthread_mutex_lock(&amp;g-&gt;lock);</a>
+<a name="ln594">  g-&gt;auto_levels[0] = NAN;</a>
+<a name="ln595">  g-&gt;auto_levels[1] = NAN;</a>
+<a name="ln596">  g-&gt;auto_levels[2] = NAN;</a>
+<a name="ln597">  g-&gt;hash = 0;</a>
+<a name="ln598">  dt_pthread_mutex_unlock(&amp;g-&gt;lock);</a>
+<a name="ln599"> </a>
+<a name="ln600">  gtk_widget_queue_draw(self-&gt;widget);</a>
+<a name="ln601">}</a>
+<a name="ln602"> </a>
+<a name="ln603">void reload_defaults(dt_iop_module_t *self)</a>
+<a name="ln604">{</a>
+<a name="ln605">  dt_iop_levels_params_t tmp</a>
+<a name="ln606">      = (dt_iop_levels_params_t){ LEVELS_MODE_MANUAL, { 0.0f, 50.0f, 100.0f }, { 0.0f, 0.5f, 1.0f } };</a>
+<a name="ln607">  memcpy(self-&gt;params, &amp;tmp, sizeof(dt_iop_levels_params_t));</a>
+<a name="ln608">  memcpy(self-&gt;default_params, &amp;tmp, sizeof(dt_iop_levels_params_t));</a>
+<a name="ln609">}</a>
+<a name="ln610"> </a>
+<a name="ln611">void init(dt_iop_module_t *self)</a>
+<a name="ln612">{</a>
+<a name="ln613">  self-&gt;params = calloc(1, sizeof(dt_iop_levels_params_t));</a>
+<a name="ln614">  self-&gt;default_params = calloc(1, sizeof(dt_iop_levels_params_t));</a>
+<a name="ln615">  self-&gt;default_enabled = 0;</a>
+<a name="ln616">  self-&gt;request_histogram |= (DT_REQUEST_ON);</a>
+<a name="ln617">  self-&gt;params_size = sizeof(dt_iop_levels_params_t);</a>
+<a name="ln618">  self-&gt;gui_data = NULL;</a>
+<a name="ln619">}</a>
+<a name="ln620"> </a>
+<a name="ln621">void init_global(dt_iop_module_so_t *self)</a>
+<a name="ln622">{</a>
+<a name="ln623">  const int program = 2; // basic.cl, from programs.conf</a>
+<a name="ln624">  dt_iop_levels_global_data_t *gd</a>
+<a name="ln625">      = (dt_iop_levels_global_data_t *)malloc(sizeof(dt_iop_levels_global_data_t));</a>
+<a name="ln626">  self-&gt;data = gd;</a>
+<a name="ln627">  gd-&gt;kernel_levels = dt_opencl_create_kernel(program, &quot;levels&quot;);</a>
+<a name="ln628">}</a>
+<a name="ln629"> </a>
+<a name="ln630">void cleanup_global(dt_iop_module_so_t *self)</a>
+<a name="ln631">{</a>
+<a name="ln632">  dt_iop_levels_global_data_t *gd = (dt_iop_levels_global_data_t *)self-&gt;data;</a>
+<a name="ln633">  dt_opencl_free_kernel(gd-&gt;kernel_levels);</a>
+<a name="ln634">  free(self-&gt;data);</a>
+<a name="ln635">  self-&gt;data = NULL;</a>
+<a name="ln636">}</a>
+<a name="ln637"> </a>
+<a name="ln638">void cleanup(dt_iop_module_t *self)</a>
+<a name="ln639">{</a>
+<a name="ln640">  free(self-&gt;params);</a>
+<a name="ln641">  self-&gt;params = NULL;</a>
+<a name="ln642">}</a>
+<a name="ln643"> </a>
+<a name="ln644">void gui_init(dt_iop_module_t *self)</a>
+<a name="ln645">{</a>
+<a name="ln646">  self-&gt;gui_data = malloc(sizeof(dt_iop_levels_gui_data_t));</a>
+<a name="ln647">  dt_iop_levels_gui_data_t *c = (dt_iop_levels_gui_data_t *)self-&gt;gui_data;</a>
+<a name="ln648">  dt_iop_levels_params_t *p = (dt_iop_levels_params_t *)self-&gt;params;</a>
+<a name="ln649"> </a>
+<a name="ln650">  dt_pthread_mutex_init(&amp;c-&gt;lock, NULL);</a>
+<a name="ln651"> </a>
+<a name="ln652">  dt_pthread_mutex_lock(&amp;c-&gt;lock);</a>
+<a name="ln653">  c-&gt;auto_levels[0] = NAN;</a>
+<a name="ln654">  c-&gt;auto_levels[1] = NAN;</a>
+<a name="ln655">  c-&gt;auto_levels[2] = NAN;</a>
+<a name="ln656">  c-&gt;hash = 0;</a>
+<a name="ln657">  dt_pthread_mutex_unlock(&amp;c-&gt;lock);</a>
+<a name="ln658"> </a>
+<a name="ln659">  c-&gt;modes = NULL;</a>
+<a name="ln660"> </a>
+<a name="ln661">  c-&gt;mouse_x = c-&gt;mouse_y = -1.0;</a>
+<a name="ln662">  c-&gt;dragging = 0;</a>
+<a name="ln663">  c-&gt;activeToggleButton = NULL;</a>
+<a name="ln664">  c-&gt;last_picked_color = -1;</a>
+<a name="ln665">  self-&gt;widget = GTK_WIDGET(gtk_box_new(GTK_ORIENTATION_VERTICAL, 5));</a>
+<a name="ln666">  dt_gui_add_help_link(self-&gt;widget, dt_get_help_url(self-&gt;op));</a>
+<a name="ln667"> </a>
+<a name="ln668">  c-&gt;mode = dt_bauhaus_combobox_new(self);</a>
+<a name="ln669">  dt_bauhaus_widget_set_label(c-&gt;mode, NULL, _(&quot;mode&quot;));</a>
+<a name="ln670"> </a>
+<a name="ln671">  dt_bauhaus_combobox_add(c-&gt;mode, C_(&quot;mode&quot;, &quot;manual&quot;));</a>
+<a name="ln672">  c-&gt;modes = g_list_append(c-&gt;modes, GUINT_TO_POINTER(LEVELS_MODE_MANUAL));</a>
+<a name="ln673"> </a>
+<a name="ln674">  dt_bauhaus_combobox_add(c-&gt;mode, _(&quot;automatic&quot;));</a>
+<a name="ln675">  c-&gt;modes = g_list_append(c-&gt;modes, GUINT_TO_POINTER(LEVELS_MODE_AUTOMATIC));</a>
+<a name="ln676"> </a>
+<a name="ln677">  dt_bauhaus_combobox_set_default(c-&gt;mode, LEVELS_MODE_MANUAL);</a>
+<a name="ln678">  dt_bauhaus_combobox_set(c-&gt;mode, g_list_index(c-&gt;modes, GUINT_TO_POINTER(p-&gt;mode)));</a>
+<a name="ln679">  gtk_box_pack_start(GTK_BOX(self-&gt;widget), c-&gt;mode, TRUE, TRUE, 0);</a>
+<a name="ln680"> </a>
+<a name="ln681">  c-&gt;mode_stack = gtk_stack_new();</a>
+<a name="ln682">  gtk_stack_set_homogeneous(GTK_STACK(c-&gt;mode_stack),FALSE);</a>
+<a name="ln683">  gtk_box_pack_start(GTK_BOX(self-&gt;widget), c-&gt;mode_stack, TRUE, TRUE, 0);</a>
+<a name="ln684"> </a>
+<a name="ln685">  c-&gt;area = GTK_DRAWING_AREA(dtgtk_drawing_area_new_with_aspect_ratio(9.0 / 16.0));</a>
+<a name="ln686">  GtkWidget *vbox_manual = GTK_WIDGET(gtk_box_new(GTK_ORIENTATION_VERTICAL, 0));</a>
+<a name="ln687">  gtk_box_pack_start(GTK_BOX(vbox_manual), GTK_WIDGET(c-&gt;area), TRUE, TRUE, 0);</a>
+<a name="ln688"> </a>
+<a name="ln689">  gtk_widget_set_tooltip_text(GTK_WIDGET(c-&gt;area),_(&quot;drag handles to set black, gray, and white points. &quot;</a>
+<a name="ln690">                                                    &quot;operates on L channel.&quot;));</a>
+<a name="ln691"> </a>
+<a name="ln692">  gtk_widget_add_events(GTK_WIDGET(c-&gt;area), GDK_POINTER_MOTION_MASK | GDK_POINTER_MOTION_HINT_MASK</a>
+<a name="ln693">                                             | GDK_BUTTON_PRESS_MASK | GDK_BUTTON_RELEASE_MASK</a>
+<a name="ln694">                                             | GDK_LEAVE_NOTIFY_MASK | darktable.gui-&gt;scroll_mask);</a>
+<a name="ln695">  g_signal_connect(G_OBJECT(c-&gt;area), &quot;draw&quot;, G_CALLBACK(dt_iop_levels_area_draw), self);</a>
+<a name="ln696">  g_signal_connect(G_OBJECT(c-&gt;area), &quot;button-press-event&quot;, G_CALLBACK(dt_iop_levels_button_press), self);</a>
+<a name="ln697">  g_signal_connect(G_OBJECT(c-&gt;area), &quot;button-release-event&quot;, G_CALLBACK(dt_iop_levels_button_release), self);</a>
+<a name="ln698">  g_signal_connect(G_OBJECT(c-&gt;area), &quot;motion-notify-event&quot;, G_CALLBACK(dt_iop_levels_motion_notify), self);</a>
+<a name="ln699">  g_signal_connect(G_OBJECT(c-&gt;area), &quot;leave-notify-event&quot;, G_CALLBACK(dt_iop_levels_leave_notify), self);</a>
+<a name="ln700">  g_signal_connect(G_OBJECT(c-&gt;area), &quot;scroll-event&quot;, G_CALLBACK(dt_iop_levels_scroll), self);</a>
+<a name="ln701"> </a>
+<a name="ln702">  GtkWidget *autobutton = gtk_button_new_with_label(_(&quot;auto&quot;));</a>
+<a name="ln703">  gtk_widget_set_tooltip_text(autobutton, _(&quot;apply auto levels&quot;));</a>
+<a name="ln704"> </a>
+<a name="ln705">  c-&gt;blackpick = dtgtk_togglebutton_new(dtgtk_cairo_paint_colorpicker, CPF_STYLE_FLAT, NULL);</a>
+<a name="ln706">  gtk_widget_set_tooltip_text(c-&gt;blackpick, _(&quot;pick black point from image&quot;));</a>
+<a name="ln707"> </a>
+<a name="ln708">  c-&gt;greypick = dtgtk_togglebutton_new(dtgtk_cairo_paint_colorpicker, CPF_STYLE_FLAT, NULL);</a>
+<a name="ln709">  gtk_widget_set_tooltip_text(c-&gt;greypick, _(&quot;pick medium gray point from image&quot;));</a>
+<a name="ln710"> </a>
+<a name="ln711">  c-&gt;whitepick = dtgtk_togglebutton_new(dtgtk_cairo_paint_colorpicker, CPF_STYLE_FLAT, NULL);</a>
+<a name="ln712">  gtk_widget_set_tooltip_text(c-&gt;whitepick, _(&quot;pick white point from image&quot;));</a>
+<a name="ln713"> </a>
+<a name="ln714">  GdkRGBA color = { 0 };</a>
+<a name="ln715">  color.alpha = 1.0;</a>
+<a name="ln716">  dtgtk_togglebutton_override_color(DTGTK_TOGGLEBUTTON(c-&gt;blackpick), &amp;color);</a>
+<a name="ln717">  color.red = color.green = color.blue = 0.5;</a>
+<a name="ln718">  dtgtk_togglebutton_override_color(DTGTK_TOGGLEBUTTON(c-&gt;greypick), &amp;color);</a>
+<a name="ln719">  color.red = color.green = color.blue = 1.0;</a>
+<a name="ln720">  dtgtk_togglebutton_override_color(DTGTK_TOGGLEBUTTON(c-&gt;whitepick), &amp;color);</a>
+<a name="ln721"> </a>
+<a name="ln722">  GtkWidget *box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);</a>
+<a name="ln723">  gtk_box_pack_start(GTK_BOX(box), GTK_WIDGET(autobutton), TRUE, TRUE, 0);</a>
+<a name="ln724">  gtk_box_pack_start(GTK_BOX(box), GTK_WIDGET(c-&gt;blackpick), TRUE, TRUE, 0);</a>
+<a name="ln725">  gtk_box_pack_start(GTK_BOX(box), GTK_WIDGET(c-&gt;greypick), TRUE, TRUE, 0);</a>
+<a name="ln726">  gtk_box_pack_end(GTK_BOX(box), GTK_WIDGET(c-&gt;whitepick), TRUE, TRUE, 0);</a>
+<a name="ln727"> </a>
+<a name="ln728">  gtk_box_pack_start(GTK_BOX(vbox_manual), box, TRUE, TRUE, 0);</a>
+<a name="ln729"> </a>
+<a name="ln730">  gtk_widget_show_all(vbox_manual);</a>
+<a name="ln731">  gtk_stack_add_named(GTK_STACK(c-&gt;mode_stack), vbox_manual, &quot;manual&quot;);</a>
+<a name="ln732"> </a>
+<a name="ln733">  c-&gt;percentile_black = dt_bauhaus_slider_new_with_range(self, 0.0f, 100.0f, .1f, p-&gt;percentiles[0], 3);</a>
+<a name="ln734">  gtk_widget_set_tooltip_text(c-&gt;percentile_black, _(&quot;black percentile&quot;));</a>
+<a name="ln735">  dt_bauhaus_slider_set_format(c-&gt;percentile_black, &quot;%.1f%%&quot;);</a>
+<a name="ln736">  dt_bauhaus_widget_set_label(c-&gt;percentile_black, NULL, _(&quot;black&quot;));</a>
+<a name="ln737"> </a>
+<a name="ln738">  c-&gt;percentile_grey = dt_bauhaus_slider_new_with_range(self, 0.0f, 100.0f, .1f, p-&gt;percentiles[1], 3);</a>
+<a name="ln739">  gtk_widget_set_tooltip_text(c-&gt;percentile_grey, _(&quot;gray percentile&quot;));</a>
+<a name="ln740">  dt_bauhaus_slider_set_format(c-&gt;percentile_grey, &quot;%.1f%%&quot;);</a>
+<a name="ln741">  dt_bauhaus_widget_set_label(c-&gt;percentile_grey, NULL, _(&quot;gray&quot;));</a>
+<a name="ln742"> </a>
+<a name="ln743">  c-&gt;percentile_white = dt_bauhaus_slider_new_with_range(self, 0.0f, 100.0f, .1f, p-&gt;percentiles[2], 3);</a>
+<a name="ln744">  gtk_widget_set_tooltip_text(c-&gt;percentile_white, _(&quot;white percentile&quot;));</a>
+<a name="ln745">  dt_bauhaus_slider_set_format(c-&gt;percentile_white, &quot;%.1f%%&quot;);</a>
+<a name="ln746">  dt_bauhaus_widget_set_label(c-&gt;percentile_white, NULL, _(&quot;white&quot;));</a>
+<a name="ln747"> </a>
+<a name="ln748">  GtkWidget *vbox_automatic = GTK_WIDGET(gtk_box_new(GTK_ORIENTATION_VERTICAL, 0));</a>
+<a name="ln749">  gtk_box_pack_start(GTK_BOX(vbox_automatic), GTK_WIDGET(c-&gt;percentile_black), FALSE, FALSE, 0);</a>
+<a name="ln750">  gtk_box_pack_start(GTK_BOX(vbox_automatic), GTK_WIDGET(c-&gt;percentile_grey), FALSE, FALSE, 0);</a>
+<a name="ln751">  gtk_box_pack_start(GTK_BOX(vbox_automatic), GTK_WIDGET(c-&gt;percentile_white), FALSE, FALSE, 0);</a>
+<a name="ln752"> </a>
+<a name="ln753">  gtk_widget_show_all(vbox_automatic);</a>
+<a name="ln754">  gtk_stack_add_named(GTK_STACK(c-&gt;mode_stack), vbox_automatic, &quot;automatic&quot;);</a>
+<a name="ln755"> </a>
+<a name="ln756">  switch(p-&gt;mode)</a>
+<a name="ln757">  {</a>
+<a name="ln758">    case LEVELS_MODE_AUTOMATIC:</a>
+<a name="ln759">      gtk_stack_set_visible_child_name(GTK_STACK(c-&gt;mode_stack), &quot;automatic&quot;);</a>
+<a name="ln760">      break;</a>
+<a name="ln761">    case LEVELS_MODE_MANUAL:</a>
+<a name="ln762">    default:</a>
+<a name="ln763">      gtk_stack_set_visible_child_name(GTK_STACK(c-&gt;mode_stack), &quot;manual&quot;);</a>
+<a name="ln764">      break;</a>
+<a name="ln765">  }</a>
+<a name="ln766"> </a>
+<a name="ln767">  g_signal_connect(G_OBJECT(c-&gt;mode), &quot;value-changed&quot;, G_CALLBACK(dt_iop_levels_mode_callback), self);</a>
+<a name="ln768">  g_signal_connect(G_OBJECT(c-&gt;percentile_black), &quot;value-changed&quot;,</a>
+<a name="ln769">                   G_CALLBACK(dt_iop_levels_percentiles_callback), self);</a>
+<a name="ln770">  g_signal_connect(G_OBJECT(c-&gt;percentile_grey), &quot;value-changed&quot;,</a>
+<a name="ln771">                   G_CALLBACK(dt_iop_levels_percentiles_callback), self);</a>
+<a name="ln772">  g_signal_connect(G_OBJECT(c-&gt;percentile_white), &quot;value-changed&quot;,</a>
+<a name="ln773">                   G_CALLBACK(dt_iop_levels_percentiles_callback), self);</a>
+<a name="ln774"> </a>
+<a name="ln775">  g_signal_connect(G_OBJECT(autobutton), &quot;clicked&quot;, G_CALLBACK(dt_iop_levels_autoadjust_callback),</a>
+<a name="ln776">                   (gpointer)self);</a>
+<a name="ln777">  g_signal_connect(G_OBJECT(c-&gt;blackpick), &quot;toggled&quot;, G_CALLBACK(dt_iop_color_picker_callback), &amp;c-&gt;color_picker);</a>
+<a name="ln778">  g_signal_connect(G_OBJECT(c-&gt;greypick), &quot;toggled&quot;, G_CALLBACK(dt_iop_color_picker_callback), &amp;c-&gt;color_picker);</a>
+<a name="ln779">  g_signal_connect(G_OBJECT(c-&gt;whitepick), &quot;toggled&quot;, G_CALLBACK(dt_iop_color_picker_callback), &amp;c-&gt;color_picker);</a>
+<a name="ln780"> </a>
+<a name="ln781">  dt_iop_init_picker(&amp;c-&gt;color_picker,</a>
+<a name="ln782">              self,</a>
+<a name="ln783">              DT_COLOR_PICKER_POINT,</a>
+<a name="ln784">              _iop_color_picker_get_set,</a>
+<a name="ln785">              _iop_color_picker_apply,</a>
+<a name="ln786">              _iop_color_picker_update);</a>
+<a name="ln787">}</a>
+<a name="ln788"> </a>
+<a name="ln789">void gui_cleanup(dt_iop_module_t *self)</a>
+<a name="ln790">{</a>
+<a name="ln791">  dt_iop_levels_gui_data_t *g = (dt_iop_levels_gui_data_t *)self-&gt;gui_data;</a>
+<a name="ln792">  g_list_free(g-&gt;modes);</a>
+<a name="ln793"> </a>
+<a name="ln794">  dt_pthread_mutex_destroy(&amp;g-&gt;lock);</a>
+<a name="ln795"> </a>
+<a name="ln796">  free(self-&gt;gui_data);</a>
+<a name="ln797">  self-&gt;gui_data = NULL;</a>
+<a name="ln798">}</a>
+<a name="ln799"> </a>
+<a name="ln800">static gboolean dt_iop_levels_leave_notify(GtkWidget *widget, GdkEventCrossing *event, gpointer user_data)</a>
+<a name="ln801">{</a>
+<a name="ln802">  dt_iop_module_t *self = (dt_iop_module_t *)user_data;</a>
+<a name="ln803">  dt_iop_levels_gui_data_t *c = (dt_iop_levels_gui_data_t *)self-&gt;gui_data;</a>
+<a name="ln804">  c-&gt;mouse_x = c-&gt;mouse_y = -1.0;</a>
+<a name="ln805">  gtk_widget_queue_draw(widget);</a>
+<a name="ln806">  return TRUE;</a>
+<a name="ln807">}</a>
+<a name="ln808"> </a>
+<a name="ln809">static gboolean dt_iop_levels_area_draw(GtkWidget *widget, cairo_t *crf, gpointer user_data)</a>
+<a name="ln810">{</a>
+<a name="ln811">  dt_iop_module_t *self = (dt_iop_module_t *)user_data;</a>
+<a name="ln812">  dt_iop_levels_gui_data_t *c = (dt_iop_levels_gui_data_t *)self-&gt;gui_data;</a>
+<a name="ln813">  dt_iop_levels_params_t *p = (dt_iop_levels_params_t *)self-&gt;params;</a>
+<a name="ln814"> </a>
+<a name="ln815">  dt_develop_t *dev = darktable.develop;</a>
+<a name="ln816">  const int inset = DT_GUI_CURVE_EDITOR_INSET;</a>
+<a name="ln817">  GtkAllocation allocation;</a>
+<a name="ln818">  gtk_widget_get_allocation(GTK_WIDGET(c-&gt;area), &amp;allocation);</a>
+<a name="ln819">  int width = allocation.width, height = allocation.height;</a>
+<a name="ln820">  cairo_surface_t *cst = dt_cairo_image_surface_create(CAIRO_FORMAT_ARGB32, width, height);</a>
+<a name="ln821">  cairo_t *cr = cairo_create(cst);</a>
+<a name="ln822"> </a>
+<a name="ln823">  // clear bg</a>
+<a name="ln824">  cairo_set_source_rgb(cr, .2, .2, .2);</a>
+<a name="ln825">  cairo_paint(cr);</a>
+<a name="ln826"> </a>
+<a name="ln827">  cairo_translate(cr, inset, inset);</a>
+<a name="ln828">  width -= 2 * inset;</a>
+<a name="ln829">  height -= 2 * inset;</a>
+<a name="ln830"> </a>
+<a name="ln831">  cairo_set_line_width(cr, DT_PIXEL_APPLY_DPI(1.0));</a>
+<a name="ln832">  cairo_set_source_rgb(cr, .1, .1, .1);</a>
+<a name="ln833">  cairo_rectangle(cr, 0, 0, width, height);</a>
+<a name="ln834">  cairo_stroke(cr);</a>
+<a name="ln835"> </a>
+<a name="ln836">  cairo_set_source_rgb(cr, .3, .3, .3);</a>
+<a name="ln837">  cairo_rectangle(cr, 0, 0, width, height);</a>
+<a name="ln838">  cairo_fill(cr);</a>
+<a name="ln839"> </a>
+<a name="ln840">  // draw grid</a>
+<a name="ln841">  cairo_set_line_width(cr, DT_PIXEL_APPLY_DPI(.4));</a>
+<a name="ln842">  cairo_set_source_rgb(cr, .1, .1, .1);</a>
+<a name="ln843">  if(dev-&gt;histogram_type == DT_DEV_HISTOGRAM_WAVEFORM)</a>
+<a name="ln844">    dt_draw_waveform_lines(cr, 0, 0, width, height);</a>
+<a name="ln845">  else</a>
+<a name="ln846">    dt_draw_vertical_lines(cr, 4, 0, 0, width, height);</a>
+<a name="ln847"> </a>
+<a name="ln848">  // Drawing the vertical line indicators</a>
+<a name="ln849">  cairo_set_line_width(cr, DT_PIXEL_APPLY_DPI(2.));</a>
+<a name="ln850"> </a>
+<a name="ln851">  for(int k = 0; k &lt; 3; k++)</a>
+<a name="ln852">  {</a>
+<a name="ln853">    if(k == c-&gt;handle_move &amp;&amp; c-&gt;mouse_x &gt; 0)</a>
+<a name="ln854">      cairo_set_source_rgb(cr, 1, 1, 1);</a>
+<a name="ln855">    else</a>
+<a name="ln856">      cairo_set_source_rgb(cr, .7, .7, .7);</a>
+<a name="ln857"> </a>
+<a name="ln858">    cairo_move_to(cr, width * p-&gt;levels[k], height);</a>
+<a name="ln859">    cairo_rel_line_to(cr, 0, -height);</a>
+<a name="ln860">    cairo_stroke(cr);</a>
+<a name="ln861">  }</a>
+<a name="ln862"> </a>
+<a name="ln863">  // draw x positions</a>
+<a name="ln864">  cairo_set_line_width(cr, DT_PIXEL_APPLY_DPI(1.));</a>
+<a name="ln865">  const float arrw = DT_PIXEL_APPLY_DPI(7.0f);</a>
+<a name="ln866">  for(int k = 0; k &lt; 3; k++)</a>
+<a name="ln867">  {</a>
+<a name="ln868">    switch(k)</a>
+<a name="ln869">    {</a>
+<a name="ln870">      case 0:</a>
+<a name="ln871">        cairo_set_source_rgb(cr, 0, 0, 0);</a>
+<a name="ln872">        break;</a>
+<a name="ln873"> </a>
+<a name="ln874">      case 1:</a>
+<a name="ln875">        cairo_set_source_rgb(cr, 0.5, 0.5, 0.5);</a>
+<a name="ln876">        break;</a>
+<a name="ln877"> </a>
+<a name="ln878">      default:</a>
+<a name="ln879">        cairo_set_source_rgb(cr, 1, 1, 1);</a>
+<a name="ln880">        break;</a>
+<a name="ln881">    }</a>
+<a name="ln882"> </a>
+<a name="ln883">    cairo_move_to(cr, width * p-&gt;levels[k], height + inset - 1);</a>
+<a name="ln884">    cairo_rel_line_to(cr, -arrw * .5f, 0);</a>
+<a name="ln885">    cairo_rel_line_to(cr, arrw * .5f, -arrw);</a>
+<a name="ln886">    cairo_rel_line_to(cr, arrw * .5f, arrw);</a>
+<a name="ln887">    cairo_close_path(cr);</a>
+<a name="ln888">    if(c-&gt;handle_move == k &amp;&amp; c-&gt;mouse_x &gt; 0)</a>
+<a name="ln889">      cairo_fill(cr);</a>
+<a name="ln890">    else</a>
+<a name="ln891">      cairo_stroke(cr);</a>
+<a name="ln892">  }</a>
+<a name="ln893"> </a>
+<a name="ln894">  cairo_translate(cr, 0, height);</a>
+<a name="ln895"> </a>
+<a name="ln896">  // draw lum histogram in background</a>
+<a name="ln897">  // only if the module is enabled</a>
+<a name="ln898">  if(self-&gt;enabled)</a>
+<a name="ln899">  {</a>
+<a name="ln900">    uint32_t *hist = self-&gt;histogram;</a>
+<a name="ln901">    float hist_max = dev-&gt;histogram_type == DT_DEV_HISTOGRAM_LINEAR ? self-&gt;histogram_max[0]</a>
+<a name="ln902">                                                                    : logf(1.0 + self-&gt;histogram_max[0]);</a>
+<a name="ln903">    if(hist &amp;&amp; hist_max &gt; 0.0f)</a>
+<a name="ln904">    {</a>
+<a name="ln905">      cairo_save(cr);</a>
+<a name="ln906">      cairo_scale(cr, width / 255.0, -(height - DT_PIXEL_APPLY_DPI(5)) / hist_max);</a>
+<a name="ln907">      cairo_set_source_rgba(cr, .2, .2, .2, 0.5);</a>
+<a name="ln908">      dt_draw_histogram_8(cr, hist, 4, 0, dev-&gt;histogram_type == DT_DEV_HISTOGRAM_LINEAR); // TODO: make draw</a>
+<a name="ln909">                                                                                        // handle waveform</a>
+<a name="ln910">                                                                                        // histograms</a>
+<a name="ln911">      cairo_restore(cr);</a>
+<a name="ln912">    }</a>
+<a name="ln913">  }</a>
+<a name="ln914"> </a>
+<a name="ln915">  // Cleaning up</a>
+<a name="ln916">  cairo_destroy(cr);</a>
+<a name="ln917">  cairo_set_source_surface(crf, cst, 0, 0);</a>
+<a name="ln918">  cairo_paint(crf);</a>
+<a name="ln919">  cairo_surface_destroy(cst);</a>
+<a name="ln920">  return TRUE;</a>
+<a name="ln921">}</a>
+<a name="ln922"> </a>
+<a name="ln923">/**</a>
+<a name="ln924"> * Move handler_move to new_pos, storing the value in handles,</a>
+<a name="ln925"> * while keeping new_pos within a valid range</a>
+<a name="ln926"> * and preserving the ratio between the three handles.</a>
+<a name="ln927"> *</a>
+<a name="ln928"> * @param self Pointer to this module to be able to access gui_data</a>
+<a name="ln929"> * @param handle_move Handle to move</a>
+<a name="ln930"> * @param new_pow New position (0..1)</a>
+<a name="ln931"> * @param levels Pointer to dt_iop_levels_params-&gt;levels.</a>
+<a name="ln932"> * @param drag_start_percentage Ratio between handle 1, 2 and 3.</a>
+<a name="ln933"> *</a>
+<a name="ln934"> * @return TRUE if the marker were given a new position. FALSE otherwise.</a>
+<a name="ln935"> */</a>
+<a name="ln936">static void dt_iop_levels_move_handle(dt_iop_module_t *self, int handle_move, float new_pos, float *levels,</a>
+<a name="ln937">                                      float drag_start_percentage)</a>
+<a name="ln938">{</a>
+<a name="ln939">  dt_iop_levels_gui_data_t *c = (dt_iop_levels_gui_data_t *)self-&gt;gui_data;</a>
+<a name="ln940">  float min_x = 0;</a>
+<a name="ln941">  float max_x = 1;</a>
+<a name="ln942"> </a>
+<a name="ln943">  if((handle_move &lt; 0) || handle_move &gt; 2) return;</a>
+<a name="ln944"> </a>
+<a name="ln945">  if(levels == NULL) return;</a>
+<a name="ln946"> </a>
+<a name="ln947">  // Determining the minimum and maximum bounds for the drag handles</a>
+<a name="ln948">  switch(handle_move)</a>
+<a name="ln949">  {</a>
+<a name="ln950">    case 0:</a>
+<a name="ln951">      max_x = fminf(levels[2] - (0.05 / drag_start_percentage), 1);</a>
+<a name="ln952">      max_x = fminf((levels[2] * (1 - drag_start_percentage) - 0.05) / (1 - drag_start_percentage), max_x);</a>
+<a name="ln953">      break;</a>
+<a name="ln954"> </a>
+<a name="ln955">    case 1:</a>
+<a name="ln956">      min_x = levels[0] + 0.05;</a>
+<a name="ln957">      max_x = levels[2] - 0.05;</a>
+<a name="ln958">      break;</a>
+<a name="ln959"> </a>
+<a name="ln960">    case 2:</a>
+<a name="ln961">      min_x = fmaxf((0.05 / drag_start_percentage) + levels[0], 0);</a>
+<a name="ln962">      min_x = fmaxf((levels[0] * (1 - drag_start_percentage) + 0.05) / (1 - drag_start_percentage), min_x);</a>
+<a name="ln963">      break;</a>
+<a name="ln964">  }</a>
+<a name="ln965"> </a>
+<a name="ln966">  levels[handle_move] = fminf(max_x, fmaxf(min_x, new_pos));</a>
+<a name="ln967"> </a>
+<a name="ln968">  if(handle_move != 1) levels[1] = levels[0] + (drag_start_percentage * (levels[2] - levels[0]));</a>
+<a name="ln969"> </a>
+<a name="ln970">  if(c-&gt;activeToggleButton != NULL) gtk_toggle_button_set_active(c-&gt;activeToggleButton, FALSE);</a>
+<a name="ln971">  c-&gt;last_picked_color = -1;</a>
+<a name="ln972">}</a>
+<a name="ln973"> </a>
+<a name="ln974">static gboolean dt_iop_levels_motion_notify(GtkWidget *widget, GdkEventMotion *event, gpointer user_data)</a>
+<a name="ln975">{</a>
+<a name="ln976">  dt_iop_module_t *self = (dt_iop_module_t *)user_data;</a>
+<a name="ln977">  dt_iop_levels_gui_data_t *c = (dt_iop_levels_gui_data_t *)self-&gt;gui_data;</a>
+<a name="ln978">  dt_iop_levels_params_t *p = (dt_iop_levels_params_t *)self-&gt;params;</a>
+<a name="ln979">  const int inset = DT_GUI_CURVE_EDITOR_INSET;</a>
+<a name="ln980">  GtkAllocation allocation;</a>
+<a name="ln981">  gtk_widget_get_allocation(widget, &amp;allocation);</a>
+<a name="ln982">  int height = allocation.height - 2 * inset, width = allocation.width - 2 * inset;</a>
+<a name="ln983">  if(!c-&gt;dragging)</a>
+<a name="ln984">  {</a>
+<a name="ln985">    c-&gt;mouse_x = CLAMP(event-&gt;x - inset, 0, width);</a>
+<a name="ln986">    c-&gt;drag_start_percentage = (p-&gt;levels[1] - p-&gt;levels[0]) / (p-&gt;levels[2] - p-&gt;levels[0]);</a>
+<a name="ln987">  }</a>
+<a name="ln988">  c-&gt;mouse_y = CLAMP(event-&gt;y - inset, 0, height);</a>
+<a name="ln989"> </a>
+<a name="ln990">  if(c-&gt;dragging)</a>
+<a name="ln991">  {</a>
+<a name="ln992">    if(c-&gt;handle_move &gt;= 0 &amp;&amp; c-&gt;handle_move &lt; 3)</a>
+<a name="ln993">    {</a>
+<a name="ln994">      const float mx = (CLAMP(event-&gt;x - inset, 0, width)) / (float)width;</a>
+<a name="ln995"> </a>
+<a name="ln996">      dt_iop_levels_move_handle(self, c-&gt;handle_move, mx, p-&gt;levels, c-&gt;drag_start_percentage);</a>
+<a name="ln997">    }</a>
+<a name="ln998">    dt_dev_add_history_item(darktable.develop, self, TRUE);</a>
+<a name="ln999">  }</a>
+<a name="ln1000">  else</a>
+<a name="ln1001">  {</a>
+<a name="ln1002">    c-&gt;handle_move = 0;</a>
+<a name="ln1003">    const float mx = CLAMP(event-&gt;x - inset, 0, width) / (float)width;</a>
+<a name="ln1004">    float dist = fabsf(p-&gt;levels[0] - mx);</a>
+<a name="ln1005">    for(int k = 1; k &lt; 3; k++)</a>
+<a name="ln1006">    {</a>
+<a name="ln1007">      float d2 = fabsf(p-&gt;levels[k] - mx);</a>
+<a name="ln1008">      if(d2 &lt; dist)</a>
+<a name="ln1009">      {</a>
+<a name="ln1010">        c-&gt;handle_move = k;</a>
+<a name="ln1011">        dist = d2;</a>
+<a name="ln1012">      }</a>
+<a name="ln1013">    }</a>
+<a name="ln1014">  }</a>
+<a name="ln1015">  gtk_widget_queue_draw(widget);</a>
+<a name="ln1016"> </a>
+<a name="ln1017">  gint x, y;</a>
+<a name="ln1018">#if GTK_CHECK_VERSION(3, 20, 0)</a>
+<a name="ln1019">  gdk_window_get_device_position(event-&gt;window,</a>
+<a name="ln1020">      gdk_seat_get_pointer(gdk_display_get_default_seat(gtk_widget_get_display(widget))),</a>
+<a name="ln1021">      &amp;x, &amp;y, 0);</a>
+<a name="ln1022">#else</a>
+<a name="ln1023">  gdk_window_get_device_position(event-&gt;window,</a>
+<a name="ln1024">                                 gdk_device_manager_get_client_pointer(</a>
+<a name="ln1025">                                     gdk_display_get_device_manager(gdk_window_get_display(event-&gt;window))),</a>
+<a name="ln1026">                                 &amp;x, &amp;y, NULL);</a>
+<a name="ln1027">#endif</a>
+<a name="ln1028">  return TRUE;</a>
+<a name="ln1029">}</a>
+<a name="ln1030"> </a>
+<a name="ln1031">static gboolean dt_iop_levels_button_press(GtkWidget *widget, GdkEventButton *event, gpointer user_data)</a>
+<a name="ln1032">{</a>
+<a name="ln1033">  // set active point</a>
+<a name="ln1034">  if(event-&gt;button == 1)</a>
+<a name="ln1035">  {</a>
+<a name="ln1036">    dt_iop_module_t *self = (dt_iop_module_t *)user_data;</a>
+<a name="ln1037"> </a>
+<a name="ln1038">    if(event-&gt;type == GDK_2BUTTON_PRESS)</a>
+<a name="ln1039">    {</a>
+<a name="ln1040">      // Reset</a>
+<a name="ln1041">      dt_iop_levels_gui_data_t *c = (dt_iop_levels_gui_data_t *)self-&gt;gui_data;</a>
+<a name="ln1042">      memcpy(self-&gt;params, self-&gt;default_params, self-&gt;params_size);</a>
+<a name="ln1043"> </a>
+<a name="ln1044">      // Needed in case the user scrolls or drags immediately after a reset,</a>
+<a name="ln1045">      // as drag_start_percentage is only updated when the mouse is moved.</a>
+<a name="ln1046">      c-&gt;drag_start_percentage = 0.5;</a>
+<a name="ln1047">      dt_dev_add_history_item(darktable.develop, self, TRUE);</a>
+<a name="ln1048">      gtk_widget_queue_draw(self-&gt;widget);</a>
+<a name="ln1049">    }</a>
+<a name="ln1050">    else</a>
+<a name="ln1051">    {</a>
+<a name="ln1052">      dt_iop_levels_gui_data_t *c = (dt_iop_levels_gui_data_t *)self-&gt;gui_data;</a>
+<a name="ln1053">      c-&gt;dragging = 1;</a>
+<a name="ln1054">    }</a>
+<a name="ln1055">    return TRUE;</a>
+<a name="ln1056">  }</a>
+<a name="ln1057">  return FALSE;</a>
+<a name="ln1058">}</a>
+<a name="ln1059"> </a>
+<a name="ln1060">static gboolean dt_iop_levels_button_release(GtkWidget *widget, GdkEventButton *event, gpointer user_data)</a>
+<a name="ln1061">{</a>
+<a name="ln1062">  if(event-&gt;button == 1)</a>
+<a name="ln1063">  {</a>
+<a name="ln1064">    dt_iop_module_t *self = (dt_iop_module_t *)user_data;</a>
+<a name="ln1065">    dt_iop_levels_gui_data_t *c = (dt_iop_levels_gui_data_t *)self-&gt;gui_data;</a>
+<a name="ln1066">    c-&gt;dragging = 0;</a>
+<a name="ln1067">    return TRUE;</a>
+<a name="ln1068">  }</a>
+<a name="ln1069">  return FALSE;</a>
+<a name="ln1070">}</a>
+<a name="ln1071"> </a>
+<a name="ln1072">static gboolean dt_iop_levels_scroll(GtkWidget *widget, GdkEventScroll *event, gpointer user_data)</a>
+<a name="ln1073">{</a>
+<a name="ln1074">  dt_iop_module_t *self = (dt_iop_module_t *)user_data;</a>
+<a name="ln1075">  dt_iop_levels_gui_data_t *c = (dt_iop_levels_gui_data_t *)self-&gt;gui_data;</a>
+<a name="ln1076">  dt_iop_levels_params_t *p = (dt_iop_levels_params_t *)self-&gt;params;</a>
+<a name="ln1077"> </a>
+<a name="ln1078">  dt_iop_color_picker_reset(self, TRUE);</a>
+<a name="ln1079"> </a>
+<a name="ln1080">  if(c-&gt;dragging)</a>
+<a name="ln1081">  {</a>
+<a name="ln1082">    return FALSE;</a>
+<a name="ln1083">  }</a>
+<a name="ln1084"> </a>
+<a name="ln1085">  const float interval = 0.002; // Distance moved for each scroll event</a>
+<a name="ln1086">  gdouble delta_y;</a>
+<a name="ln1087">  if(dt_gui_get_scroll_deltas(event, NULL, &amp;delta_y))</a>
+<a name="ln1088">  {</a>
+<a name="ln1089">    float new_position = p-&gt;levels[c-&gt;handle_move] - interval * delta_y;</a>
+<a name="ln1090">    dt_iop_levels_move_handle(self, c-&gt;handle_move, new_position, p-&gt;levels, c-&gt;drag_start_percentage);</a>
+<a name="ln1091">    dt_dev_add_history_item(darktable.develop, self, TRUE);</a>
+<a name="ln1092">    return TRUE;</a>
+<a name="ln1093">  }</a>
+<a name="ln1094"> </a>
+<a name="ln1095">  return FALSE;</a>
+<a name="ln1096">}</a>
+<a name="ln1097"> </a>
+<a name="ln1098">static void dt_iop_levels_autoadjust_callback(GtkRange *range, dt_iop_module_t *self)</a>
+<a name="ln1099">{</a>
+<a name="ln1100">  if(darktable.gui-&gt;reset) return;</a>
+<a name="ln1101">  dt_iop_levels_params_t *p = (dt_iop_levels_params_t *)self-&gt;params;</a>
+<a name="ln1102">  dt_iop_levels_gui_data_t *c = (dt_iop_levels_gui_data_t *)self-&gt;gui_data;</a>
+<a name="ln1103"> </a>
+<a name="ln1104">  dt_iop_color_picker_reset(self, TRUE);</a>
+<a name="ln1105"> </a>
+<a name="ln1106">  dt_iop_levels_compute_levels_manual(self-&gt;histogram, p-&gt;levels);</a>
+<a name="ln1107"> </a>
+<a name="ln1108">  if(c-&gt;activeToggleButton != NULL) gtk_toggle_button_set_active(c-&gt;activeToggleButton, FALSE);</a>
+<a name="ln1109">  c-&gt;last_picked_color = -1;</a>
+<a name="ln1110"> </a>
+<a name="ln1111">  dt_dev_add_history_item(darktable.develop, self, TRUE);</a>
+<a name="ln1112">}</a>
+<a name="ln1113"> </a>
+<a name="ln1114">static void dt_iop_levels_mode_callback(GtkWidget *combo, gpointer user_data)</a>
+<a name="ln1115">{</a>
+<a name="ln1116">  dt_iop_module_t *self = (dt_iop_module_t *)user_data;</a>
+<a name="ln1117"> </a>
+<a name="ln1118">  if(darktable.gui-&gt;reset) return;</a>
+<a name="ln1119"> </a>
+<a name="ln1120">  dt_iop_levels_gui_data_t *g = (dt_iop_levels_gui_data_t *)self-&gt;gui_data;</a>
+<a name="ln1121">  dt_iop_levels_params_t *p = (dt_iop_levels_params_t *)self-&gt;params;</a>
+<a name="ln1122"> </a>
+<a name="ln1123">  dt_iop_color_picker_reset(self, TRUE);</a>
+<a name="ln1124"> </a>
+<a name="ln1125">  const dt_iop_levels_mode_t new_mode</a>
+<a name="ln1126">      = GPOINTER_TO_UINT(g_list_nth_data(g-&gt;modes, dt_bauhaus_combobox_get(combo)));</a>
+<a name="ln1127"> </a>
+<a name="ln1128">  switch(new_mode)</a>
+<a name="ln1129">  {</a>
+<a name="ln1130">    case LEVELS_MODE_AUTOMATIC:</a>
+<a name="ln1131">      p-&gt;mode = LEVELS_MODE_AUTOMATIC;</a>
+<a name="ln1132">      gtk_stack_set_visible_child_name(GTK_STACK(g-&gt;mode_stack), &quot;automatic&quot;);</a>
+<a name="ln1133">      break;</a>
+<a name="ln1134">    case LEVELS_MODE_MANUAL:</a>
+<a name="ln1135">    default:</a>
+<a name="ln1136">      p-&gt;mode = LEVELS_MODE_MANUAL;</a>
+<a name="ln1137">      gtk_stack_set_visible_child_name(GTK_STACK(g-&gt;mode_stack), &quot;manual&quot;);</a>
+<a name="ln1138">      break;</a>
+<a name="ln1139">  }</a>
+<a name="ln1140"> </a>
+<a name="ln1141">  dt_dev_add_history_item(darktable.develop, self, TRUE);</a>
+<a name="ln1142">}</a>
+<a name="ln1143"> </a>
+<a name="ln1144">static void dt_iop_levels_percentiles_callback(GtkWidget *slider, gpointer user_data)</a>
+<a name="ln1145">{</a>
+<a name="ln1146">  dt_iop_module_t *self = (dt_iop_module_t *)user_data;</a>
+<a name="ln1147">  if(self-&gt;dt-&gt;gui-&gt;reset) return;</a>
+<a name="ln1148"> </a>
+<a name="ln1149">  dt_iop_levels_gui_data_t *g = (dt_iop_levels_gui_data_t *)self-&gt;gui_data;</a>
+<a name="ln1150">  dt_iop_levels_params_t *p = (dt_iop_levels_params_t *)self-&gt;params;</a>
+<a name="ln1151"> </a>
+<a name="ln1152">  p-&gt;percentiles[0] = dt_bauhaus_slider_get(g-&gt;percentile_black);</a>
+<a name="ln1153">  p-&gt;percentiles[1] = dt_bauhaus_slider_get(g-&gt;percentile_grey);</a>
+<a name="ln1154">  p-&gt;percentiles[2] = dt_bauhaus_slider_get(g-&gt;percentile_white);</a>
+<a name="ln1155"> </a>
+<a name="ln1156">  dt_dev_add_history_item(darktable.develop, self, TRUE);</a>
+<a name="ln1157">}</a>
+<a name="ln1158"> </a>
+<a name="ln1159">// modelines: These editor modelines have been set for all relevant files by tools/update_modelines.sh</a>
+<a name="ln1160">// vim: shiftwidth=2 expandtab tabstop=2 cindent</a>
+<a name="ln1161">// kate: tab-indents: off; indent-width 2; replace-tabs on; indent-mode cstyle; remove-trailing-spaces modified;</a>
+
+</code></pre>
+<div class="balloon" rel="299"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v570/" target="_blank">V570</a> The 'p->levels[1]' variable is assigned to itself.</p></div>
+<div class="balloon" rel="379"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v560/" target="_blank">V560</a> A part of conditional expression is always true: d->mode == LEVELS_MODE_AUTOMATIC.</p></div>
+<div class="balloon" rel="627"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v522/" target="_blank">V522</a> There might be dereferencing of a potential null pointer 'gd'. Check lines: 627, 625.</p></div>
+<div class="balloon" rel="650"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v522/" target="_blank">V522</a> There might be dereferencing of a potential null pointer 'c'. Check lines: 650, 646.</p></div>
+
+<link rel="stylesheet" href="highlight.css">
+<script src="highlight.pack.js"></script>
+<script src="highlightjs-line-numbers.js"></script>
+<script>hljs.initHighlightingOnLoad();</script>
+<script>hljs.initLineNumbersOnLoad();</script>
+<script>
+  $(document).ready(function() {
+      $('.balloon').each(function () {
+          var bl = $(this);
+          var line = bl.attr('rel');
+          var text = $('a[name="ln'+line+'"]').text();
+
+          var space_count = 0;
+          for(var i = 0; i<text.length; i++){
+              var char = text[i];
+              if((char !== ' ')&&(char !== '\t'))break;
+              if(char === '\t')space_count++;
+              space_count++;
+          }
+
+          bl.css('margin-left', space_count*8);
+          $('a[name="ln'+line+'"]').after(bl);
+      });
+
+      window.location = window.location;
+  });
+</script>
+</body>
+</html>
