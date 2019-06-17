@@ -1,0 +1,1949 @@
+
+<html>
+<head>
+  <link rel="stylesheet" href="../style.css"/>
+  <script src="../jquery-3.2.1.min.js"></script>
+</head>
+<body>
+<pre><code class = "cpp">
+<a name="ln1">/*</a>
+<a name="ln2">    This file is part of darktable,</a>
+<a name="ln3">    copyright (c) 2009--2011 johannes hanika.</a>
+<a name="ln4">    copyright (c) 2011 Henrik Andersson.</a>
+<a name="ln5">    copyright (c) 2012 tobias ellinghaus.</a>
+<a name="ln6">    copyright (c) 2016 Roman Lebedev.</a>
+<a name="ln7"> </a>
+<a name="ln8">    darktable is free software: you can redistribute it and/or modify</a>
+<a name="ln9">    it under the terms of the GNU General Public License as published by</a>
+<a name="ln10">    the Free Software Foundation, either version 3 of the License, or</a>
+<a name="ln11">    (at your option) any later version.</a>
+<a name="ln12"> </a>
+<a name="ln13">    darktable is distributed in the hope that it will be useful,</a>
+<a name="ln14">    but WITHOUT ANY WARRANTY; without even the implied warranty of</a>
+<a name="ln15">    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the</a>
+<a name="ln16">    GNU General Public License for more details.</a>
+<a name="ln17"> </a>
+<a name="ln18">    You should have received a copy of the GNU General Public License</a>
+<a name="ln19">    along with darktable.  If not, see &lt;http://www.gnu.org/licenses/&gt;.</a>
+<a name="ln20">*/</a>
+<a name="ln21"> </a>
+<a name="ln22">#include &quot;develop/imageop_math.h&quot;</a>
+<a name="ln23">#include &lt;assert.h&gt; // for assert</a>
+<a name="ln24">#ifdef __SSE__</a>
+<a name="ln25">#include &lt;emmintrin.h&gt; // for _mm_set_epi32, _mm_add_epi32</a>
+<a name="ln26">#endif</a>
+<a name="ln27">#include &lt;glib.h&gt; // for MIN, MAX, CLAMP, inline</a>
+<a name="ln28">#include &lt;math.h&gt; // for round, floorf, fmaxf</a>
+<a name="ln29">#ifdef __SSE__</a>
+<a name="ln30">#include &lt;xmmintrin.h&gt; // for _mm_set_ps, _mm_mul_ps, _mm_set...</a>
+<a name="ln31">#endif</a>
+<a name="ln32">#include &quot;common/darktable.h&quot;        // for darktable, darktable_t, dt_code...</a>
+<a name="ln33">#include &quot;common/imageio.h&quot;          // for FILTERS_ARE_4BAYER</a>
+<a name="ln34">#include &quot;common/interpolation.h&quot;    // for dt_interpolation_new, dt_interp...</a>
+<a name="ln35">#include &quot;develop/imageop.h&quot;         // for dt_iop_roi_t</a>
+<a name="ln36"> </a>
+<a name="ln37">void dt_iop_flip_and_zoom_8(const uint8_t *in, int32_t iw, int32_t ih, uint8_t *out, int32_t ow, int32_t oh,</a>
+<a name="ln38">                            const dt_image_orientation_t orientation, uint32_t *width, uint32_t *height)</a>
+<a name="ln39">{</a>
+<a name="ln40">  // init strides:</a>
+<a name="ln41">  const uint32_t iwd = (orientation &amp; ORIENTATION_SWAP_XY) ? ih : iw;</a>
+<a name="ln42">  const uint32_t iht = (orientation &amp; ORIENTATION_SWAP_XY) ? iw : ih;</a>
+<a name="ln43">  // DO NOT UPSCALE !!!</a>
+<a name="ln44">  const float scale = fmaxf(1.0, fmaxf(iwd / (float)ow, iht / (float)oh));</a>
+<a name="ln45">  const uint32_t wd = *width = MIN(ow, iwd / scale);</a>
+<a name="ln46">  const uint32_t ht = *height = MIN(oh, iht / scale);</a>
+<a name="ln47">  const int bpp = 4; // bytes per pixel</a>
+<a name="ln48">  int32_t ii = 0, jj = 0;</a>
+<a name="ln49">  int32_t si = 1, sj = iw;</a>
+<a name="ln50">  if(orientation &amp; ORIENTATION_FLIP_Y)</a>
+<a name="ln51">  {</a>
+<a name="ln52">    jj = ih - jj - 1;</a>
+<a name="ln53">    sj = -sj;</a>
+<a name="ln54">  }</a>
+<a name="ln55">  if(orientation &amp; ORIENTATION_FLIP_X)</a>
+<a name="ln56">  {</a>
+<a name="ln57">    ii = iw - ii - 1;</a>
+<a name="ln58">    si = -si;</a>
+<a name="ln59">  }</a>
+<a name="ln60">  if(orientation &amp; ORIENTATION_SWAP_XY)</a>
+<a name="ln61">  {</a>
+<a name="ln62">    int t = sj;</a>
+<a name="ln63">    sj = si;</a>
+<a name="ln64">    si = t;</a>
+<a name="ln65">  }</a>
+<a name="ln66">  const int32_t half_pixel = .5f * scale;</a>
+<a name="ln67">  const int32_t offm = half_pixel * bpp * MIN(MIN(0, si), MIN(sj, si + sj));</a>
+<a name="ln68">  const int32_t offM = half_pixel * bpp * MAX(MAX(0, si), MAX(sj, si + sj));</a>
+<a name="ln69">#ifdef _OPENMP</a>
+<a name="ln70">#pragma omp parallel for default(none) \</a>
+<a name="ln71">  dt_omp_firstprivate(bpp, half_pixel, ht, offM, offm, scale, wd) \</a>
+<a name="ln72">  shared(in, out, jj, ii, sj, si, iw, ih) \</a>
+<a name="ln73">  schedule(static)</a>
+<a name="ln74">#endif</a>
+<a name="ln75">  for(uint32_t j = 0; j &lt; ht; j++)</a>
+<a name="ln76">  {</a>
+<a name="ln77">    uint8_t *out2 = out + bpp * wd * j;</a>
+<a name="ln78">    const uint8_t *in2 = in + bpp * (iw * jj + ii + sj * (int32_t)(scale * j));</a>
+<a name="ln79">    float stepi = 0.0f;</a>
+<a name="ln80">    for(uint32_t i = 0; i &lt; wd; i++)</a>
+<a name="ln81">    {</a>
+<a name="ln82">      const uint8_t *in3 = in2 + ((int32_t)stepi) * si * bpp;</a>
+<a name="ln83">      // this should always be within the bounds of in[], due to the way</a>
+<a name="ln84">      // wd/ht are constructed by always just rounding down. half_pixel should never</a>
+<a name="ln85">      // add up to one pixel difference.</a>
+<a name="ln86">      // we have this check with the hope the branch predictor will get rid of it:</a>
+<a name="ln87">      if(in3 + offm &gt;= in &amp;&amp; in3 + offM &lt; in + bpp * iw * ih)</a>
+<a name="ln88">      {</a>
+<a name="ln89">        for(int k = 0; k &lt; 3; k++)</a>
+<a name="ln90">          out2[k] = // in3[k];</a>
+<a name="ln91">              CLAMP(((int32_t)in3[bpp * half_pixel * sj + k] + (int32_t)in3[bpp * half_pixel * (si + sj) + k]</a>
+<a name="ln92">                     + (int32_t)in3[bpp * half_pixel * si + k] + (int32_t)in3[k])</a>
+<a name="ln93">                        / 4,</a>
+<a name="ln94">                    0, 255);</a>
+<a name="ln95">      }</a>
+<a name="ln96">      out2 += bpp;</a>
+<a name="ln97">      stepi += scale;</a>
+<a name="ln98">    }</a>
+<a name="ln99">  }</a>
+<a name="ln100">}</a>
+<a name="ln101"> </a>
+<a name="ln102">void dt_iop_clip_and_zoom_8(const uint8_t *i, int32_t ix, int32_t iy, int32_t iw, int32_t ih, int32_t ibw,</a>
+<a name="ln103">                            int32_t ibh, uint8_t *o, int32_t ox, int32_t oy, int32_t ow, int32_t oh,</a>
+<a name="ln104">                            int32_t obw, int32_t obh)</a>
+<a name="ln105">{</a>
+<a name="ln106">  const float scalex = iw / (float)ow;</a>
+<a name="ln107">  const float scaley = ih / (float)oh;</a>
+<a name="ln108">  int32_t ix2 = MAX(ix, 0);</a>
+<a name="ln109">  int32_t iy2 = MAX(iy, 0);</a>
+<a name="ln110">  int32_t ox2 = MAX(ox, 0);</a>
+<a name="ln111">  int32_t oy2 = MAX(oy, 0);</a>
+<a name="ln112">  int32_t oh2 = MIN(MIN(oh, (ibh - iy2) / scaley), obh - oy2);</a>
+<a name="ln113">  int32_t ow2 = MIN(MIN(ow, (ibw - ix2) / scalex), obw - ox2);</a>
+<a name="ln114">  assert((int)(ix2 + ow2 * scalex) &lt;= ibw);</a>
+<a name="ln115">  assert((int)(iy2 + oh2 * scaley) &lt;= ibh);</a>
+<a name="ln116">  assert(ox2 + ow2 &lt;= obw);</a>
+<a name="ln117">  assert(oy2 + oh2 &lt;= obh);</a>
+<a name="ln118">  assert(ix2 &gt;= 0 &amp;&amp; iy2 &gt;= 0 &amp;&amp; ox2 &gt;= 0 &amp;&amp; oy2 &gt;= 0);</a>
+<a name="ln119">  float x = ix2, y = iy2;</a>
+<a name="ln120">  for(int s = 0; s &lt; oh2; s++)</a>
+<a name="ln121">  {</a>
+<a name="ln122">    int idx = ox2 + obw * (oy2 + s);</a>
+<a name="ln123">    for(int t = 0; t &lt; ow2; t++)</a>
+<a name="ln124">    {</a>
+<a name="ln125">      for(int k = 0; k &lt; 3; k++)</a>
+<a name="ln126">        o[4 * idx + k] = // i[3*(ibw* (int)y +             (int)x             ) + k)];</a>
+<a name="ln127">            CLAMP(((int32_t)i[(4 * (ibw * (int32_t)y + (int32_t)(x + .5f * scalex)) + k)]</a>
+<a name="ln128">                   + (int32_t)i[(4 * (ibw * (int32_t)(y + .5f * scaley) + (int32_t)(x + .5f * scalex)) + k)]</a>
+<a name="ln129">                   + (int32_t)i[(4 * (ibw * (int32_t)(y + .5f * scaley) + (int32_t)(x)) + k)]</a>
+<a name="ln130">                   + (int32_t)i[(4 * (ibw * (int32_t)y + (int32_t)(x)) + k)])</a>
+<a name="ln131">                      / 4,</a>
+<a name="ln132">                  0, 255);</a>
+<a name="ln133">      x += scalex;</a>
+<a name="ln134">      idx++;</a>
+<a name="ln135">    }</a>
+<a name="ln136">    y += scaley;</a>
+<a name="ln137">    x = ix2;</a>
+<a name="ln138">  }</a>
+<a name="ln139">}</a>
+<a name="ln140"> </a>
+<a name="ln141">// apply clip and zoom on parts of a supplied full image.</a>
+<a name="ln142">// roi_in and roi_out define which part to work on.</a>
+<a name="ln143">void dt_iop_clip_and_zoom(float *out, const float *const in, const dt_iop_roi_t *const roi_out,</a>
+<a name="ln144">                          const dt_iop_roi_t *const roi_in, const int32_t out_stride, const int32_t in_stride)</a>
+<a name="ln145">{</a>
+<a name="ln146">  const struct dt_interpolation *itor = dt_interpolation_new(DT_INTERPOLATION_USERPREF);</a>
+<a name="ln147">  dt_interpolation_resample(itor, out, roi_out, out_stride * 4 * sizeof(float), in, roi_in,</a>
+<a name="ln148">                            in_stride * 4 * sizeof(float));</a>
+<a name="ln149">}</a>
+<a name="ln150"> </a>
+<a name="ln151">// apply clip and zoom on the image region supplied in the input buffer.</a>
+<a name="ln152">// roi_in and roi_out describe which part of the full image this relates to.</a>
+<a name="ln153">void dt_iop_clip_and_zoom_roi(float *out, const float *const in, const dt_iop_roi_t *const roi_out,</a>
+<a name="ln154">                              const dt_iop_roi_t *const roi_in, const int32_t out_stride,</a>
+<a name="ln155">                              const int32_t in_stride)</a>
+<a name="ln156">{</a>
+<a name="ln157">  const struct dt_interpolation *itor = dt_interpolation_new(DT_INTERPOLATION_USERPREF);</a>
+<a name="ln158">  dt_interpolation_resample_roi(itor, out, roi_out, out_stride * 4 * sizeof(float), in, roi_in,</a>
+<a name="ln159">                                in_stride * 4 * sizeof(float));</a>
+<a name="ln160">}</a>
+<a name="ln161"> </a>
+<a name="ln162">#ifdef HAVE_OPENCL</a>
+<a name="ln163">// apply clip and zoom on parts of a supplied full image.</a>
+<a name="ln164">// roi_in and roi_out define which part to work on.</a>
+<a name="ln165">int dt_iop_clip_and_zoom_cl(int devid, cl_mem dev_out, cl_mem dev_in, const dt_iop_roi_t *const roi_out,</a>
+<a name="ln166">                            const dt_iop_roi_t *const roi_in)</a>
+<a name="ln167">{</a>
+<a name="ln168">  const struct dt_interpolation *itor = dt_interpolation_new(DT_INTERPOLATION_USERPREF);</a>
+<a name="ln169">  return dt_interpolation_resample_cl(itor, devid, dev_out, roi_out, dev_in, roi_in);</a>
+<a name="ln170">}</a>
+<a name="ln171"> </a>
+<a name="ln172">// apply clip and zoom on the image region supplied in the input buffer.</a>
+<a name="ln173">// roi_in and roi_out describe which part of the full image this relates to.</a>
+<a name="ln174">int dt_iop_clip_and_zoom_roi_cl(int devid, cl_mem dev_out, cl_mem dev_in, const dt_iop_roi_t *const roi_out,</a>
+<a name="ln175">                                const dt_iop_roi_t *const roi_in)</a>
+<a name="ln176">{</a>
+<a name="ln177">  const struct dt_interpolation *itor = dt_interpolation_new(DT_INTERPOLATION_USERPREF);</a>
+<a name="ln178">  return dt_interpolation_resample_roi_cl(itor, devid, dev_out, roi_out, dev_in, roi_in);</a>
+<a name="ln179">}</a>
+<a name="ln180"> </a>
+<a name="ln181">#endif</a>
+<a name="ln182"> </a>
+<a name="ln183">void dt_iop_clip_and_zoom_mosaic_half_size_plain(uint16_t *const out, const uint16_t *const in,</a>
+<a name="ln184">                                                 const dt_iop_roi_t *const roi_out,</a>
+<a name="ln185">                                                 const dt_iop_roi_t *const roi_in, const int32_t out_stride,</a>
+<a name="ln186">                                                 const int32_t in_stride, const uint32_t filters)</a>
+<a name="ln187">{</a>
+<a name="ln188">  // adjust to pixel region and don't sample more than scale/2 nbs!</a>
+<a name="ln189">  // pixel footprint on input buffer, radius:</a>
+<a name="ln190">  const float px_footprint = 1.f / roi_out-&gt;scale;</a>
+<a name="ln191"> </a>
+<a name="ln192">  // move to origin point 01 of a 2x2 CFA block</a>
+<a name="ln193">  // (RGGB=0112 or CYGM=0132)</a>
+<a name="ln194">  int trggbx = 0, trggby = 0;</a>
+<a name="ln195">  if(FC(trggby, trggbx + 1, filters) != 1) trggbx++;</a>
+<a name="ln196">  if(FC(trggby, trggbx, filters) != 0)</a>
+<a name="ln197">  {</a>
+<a name="ln198">    trggbx = (trggbx + 1) &amp; 1;</a>
+<a name="ln199">    trggby++;</a>
+<a name="ln200">  }</a>
+<a name="ln201">  const int rggbx = trggbx, rggby = trggby;</a>
+<a name="ln202"> </a>
+<a name="ln203">  // Create a reverse lookup of FC(): for each CFA color, a list of</a>
+<a name="ln204">  // offsets from start of a 2x2 block at which to find that</a>
+<a name="ln205">  // color. First index is color, second is to the list of offsets,</a>
+<a name="ln206">  // preceded by the number of offsets.</a>
+<a name="ln207">  int clut[4][3] = {{0}};</a>
+<a name="ln208">  for(int y = 0; y &lt; 2; ++y)</a>
+<a name="ln209">    for(int x = 0; x &lt; 2; ++x)</a>
+<a name="ln210">    {</a>
+<a name="ln211">      const int c = FC(y + rggby, x + rggbx, filters);</a>
+<a name="ln212">      assert(clut[c][0] &lt; 2);</a>
+<a name="ln213">      clut[c][++clut[c][0]] = x + y * in_stride;</a>
+<a name="ln214">    }</a>
+<a name="ln215"> </a>
+<a name="ln216">#ifdef _OPENMP</a>
+<a name="ln217">#pragma omp parallel for default(none) \</a>
+<a name="ln218">  dt_omp_firstprivate(filters, in, in_stride, out, out_stride, px_footprint, rggbx, rggby, roi_in, roi_out) \</a>
+<a name="ln219">  shared(clut) schedule(static)</a>
+<a name="ln220">#endif</a>
+<a name="ln221">  for(int y = 0; y &lt; roi_out-&gt;height; y++)</a>
+<a name="ln222">  {</a>
+<a name="ln223">    uint16_t *outc = out + out_stride * y;</a>
+<a name="ln224"> </a>
+<a name="ln225">    const float fy = (y + roi_out-&gt;y) * px_footprint;</a>
+<a name="ln226">    const int miny = (CLAMPS((int)floorf(fy - px_footprint), 0, roi_in-&gt;height-3) &amp; ~1u) + rggby;</a>
+<a name="ln227">    const int maxy = MIN(roi_in-&gt;height-1, (int)ceilf(fy + px_footprint));</a>
+<a name="ln228"> </a>
+<a name="ln229">    float fx = roi_out-&gt;x * px_footprint;</a>
+<a name="ln230">    for(int x = 0; x &lt; roi_out-&gt;width; x++, fx += px_footprint, outc++)</a>
+<a name="ln231">    {</a>
+<a name="ln232">      const int minx = (CLAMPS((int)floorf(fx - px_footprint), 0, roi_in-&gt;width-3) &amp; ~1u) + rggbx;</a>
+<a name="ln233">      const int maxx = MIN(roi_in-&gt;width-1, (int)ceilf(fx + px_footprint));</a>
+<a name="ln234"> </a>
+<a name="ln235">      const int c = FC(y, x, filters);</a>
+<a name="ln236">      int num = 0;</a>
+<a name="ln237">      uint32_t col = 0;</a>
+<a name="ln238"> </a>
+<a name="ln239">      for(int yy = miny; yy &lt; maxy; yy += 2)</a>
+<a name="ln240">        for(int xx = minx; xx &lt; maxx; xx += 2)</a>
+<a name="ln241">        {</a>
+<a name="ln242">          col += in[clut[c][1] + xx + in_stride * yy];</a>
+<a name="ln243">          num++;</a>
+<a name="ln244">          if (clut[c][0] == 2)</a>
+<a name="ln245">          { // G in RGGB CFA</a>
+<a name="ln246">            col += in[clut[c][2] + xx + in_stride * yy];</a>
+<a name="ln247">            num++;</a>
+<a name="ln248">          }</a>
+<a name="ln249">        }</a>
+<a name="ln250">      *outc = col / num;</a>
+<a name="ln251">    }</a>
+<a name="ln252">  }</a>
+<a name="ln253">}</a>
+<a name="ln254"> </a>
+<a name="ln255">#if defined(__SSE__)</a>
+<a name="ln256">void dt_iop_clip_and_zoom_mosaic_half_size_sse2(uint16_t *const out, const uint16_t *const in,</a>
+<a name="ln257">                                                const dt_iop_roi_t *const roi_out,</a>
+<a name="ln258">                                                const dt_iop_roi_t *const roi_in, const int32_t out_stride,</a>
+<a name="ln259">                                                const int32_t in_stride, const uint32_t filters)</a>
+<a name="ln260">{</a>
+<a name="ln261">  // adjust to pixel region and don't sample more than scale/2 nbs!</a>
+<a name="ln262">  // pixel footprint on input buffer, radius:</a>
+<a name="ln263">  const float px_footprint = 1.f / roi_out-&gt;scale;</a>
+<a name="ln264">  // how many 2x2 blocks can be sampled inside that area</a>
+<a name="ln265">  const int samples = round(px_footprint / 2);</a>
+<a name="ln266"> </a>
+<a name="ln267">  // move p to point to an rggb block:</a>
+<a name="ln268">  int trggbx = 0, trggby = 0;</a>
+<a name="ln269">  if(FC(trggby, trggbx + 1, filters) != 1) trggbx++;</a>
+<a name="ln270">  if(FC(trggby, trggbx, filters) != 0)</a>
+<a name="ln271">  {</a>
+<a name="ln272">    trggbx = (trggbx + 1) &amp; 1;</a>
+<a name="ln273">    trggby++;</a>
+<a name="ln274">  }</a>
+<a name="ln275">  const int rggbx = trggbx, rggby = trggby;</a>
+<a name="ln276"> </a>
+<a name="ln277">#ifdef _OPENMP</a>
+<a name="ln278">#pragma omp parallel for default(none) \</a>
+<a name="ln279">  dt_omp_firstprivate(in, in_stride, out, out_stride, px_footprint, rggbx, rggby, roi_in, roi_out, samples) \</a>
+<a name="ln280">  schedule(static)</a>
+<a name="ln281">#endif</a>
+<a name="ln282">  for(int y = 0; y &lt; roi_out-&gt;height; y++)</a>
+<a name="ln283">  {</a>
+<a name="ln284">    uint16_t *outc = out + out_stride * y;</a>
+<a name="ln285"> </a>
+<a name="ln286">    float fy = (y + roi_out-&gt;y) * px_footprint;</a>
+<a name="ln287">    int py = (int)fy &amp; ~1;</a>
+<a name="ln288">    const float dy = (fy - py) / 2;</a>
+<a name="ln289">    py = MIN(((roi_in-&gt;height - 6) &amp; ~1u), py) + rggby;</a>
+<a name="ln290"> </a>
+<a name="ln291">    int maxj = MIN(((roi_in-&gt;height - 5) &amp; ~1u) + rggby, py + 2 * samples);</a>
+<a name="ln292"> </a>
+<a name="ln293">    for(int x = 0; x &lt; roi_out-&gt;width; x++)</a>
+<a name="ln294">    {</a>
+<a name="ln295">      __m128 col = _mm_setzero_ps();</a>
+<a name="ln296"> </a>
+<a name="ln297">      float fx = (x + roi_out-&gt;x) * px_footprint;</a>
+<a name="ln298">      int px = (int)fx &amp; ~1;</a>
+<a name="ln299">      const float dx = (fx - px) / 2;</a>
+<a name="ln300">      px = MIN(((roi_in-&gt;width - 6) &amp; ~1u), px) + rggbx;</a>
+<a name="ln301"> </a>
+<a name="ln302">      int maxi = MIN(((roi_in-&gt;width - 5) &amp; ~1u) + rggbx, px + 2 * samples);</a>
+<a name="ln303"> </a>
+<a name="ln304">      float p1, p2, p3, p4;</a>
+<a name="ln305">      float num = 0;</a>
+<a name="ln306"> </a>
+<a name="ln307">      // upper left 2x2 block of sampling region</a>
+<a name="ln308">      p1 = in[px + in_stride * py];</a>
+<a name="ln309">      p2 = in[px + 1 + in_stride * py];</a>
+<a name="ln310">      p3 = in[px + in_stride * (py + 1)];</a>
+<a name="ln311">      p4 = in[px + 1 + in_stride * (py + 1)];</a>
+<a name="ln312">      col = _mm_add_ps(col, _mm_mul_ps(_mm_set1_ps((1 - dx) * (1 - dy)), _mm_set_ps(p4, p3, p2, p1)));</a>
+<a name="ln313"> </a>
+<a name="ln314">      // left 2x2 block border of sampling region</a>
+<a name="ln315">      for(int j = py + 2; j &lt;= maxj; j += 2)</a>
+<a name="ln316">      {</a>
+<a name="ln317">        p1 = in[px + in_stride * j];</a>
+<a name="ln318">        p2 = in[px + 1 + in_stride * j];</a>
+<a name="ln319">        p3 = in[px + in_stride * (j + 1)];</a>
+<a name="ln320">        p4 = in[px + 1 + in_stride * (j + 1)];</a>
+<a name="ln321">        col = _mm_add_ps(col, _mm_mul_ps(_mm_set1_ps(1 - dx), _mm_set_ps(p4, p3, p2, p1)));</a>
+<a name="ln322">      }</a>
+<a name="ln323"> </a>
+<a name="ln324">      // upper 2x2 block border of sampling region</a>
+<a name="ln325">      for(int i = px + 2; i &lt;= maxi; i += 2)</a>
+<a name="ln326">      {</a>
+<a name="ln327">        p1 = in[i + in_stride * py];</a>
+<a name="ln328">        p2 = in[i + 1 + in_stride * py];</a>
+<a name="ln329">        p3 = in[i + in_stride * (py + 1)];</a>
+<a name="ln330">        p4 = in[i + 1 + in_stride * (py + 1)];</a>
+<a name="ln331">        col = _mm_add_ps(col, _mm_mul_ps(_mm_set1_ps(1 - dy), _mm_set_ps(p4, p3, p2, p1)));</a>
+<a name="ln332">      }</a>
+<a name="ln333"> </a>
+<a name="ln334">      // 2x2 blocks in the middle of sampling region</a>
+<a name="ln335">      for(int j = py + 2; j &lt;= maxj; j += 2)</a>
+<a name="ln336">        for(int i = px + 2; i &lt;= maxi; i += 2)</a>
+<a name="ln337">        {</a>
+<a name="ln338">          p1 = in[i + in_stride * j];</a>
+<a name="ln339">          p2 = in[i + 1 + in_stride * j];</a>
+<a name="ln340">          p3 = in[i + in_stride * (j + 1)];</a>
+<a name="ln341">          p4 = in[i + 1 + in_stride * (j + 1)];</a>
+<a name="ln342">          col = _mm_add_ps(col, _mm_set_ps(p4, p3, p2, p1));</a>
+<a name="ln343">        }</a>
+<a name="ln344"> </a>
+<a name="ln345">      if(maxi == px + 2 * samples &amp;&amp; maxj == py + 2 * samples)</a>
+<a name="ln346">      {</a>
+<a name="ln347">        // right border</a>
+<a name="ln348">        for(int j = py + 2; j &lt;= maxj; j += 2)</a>
+<a name="ln349">        {</a>
+<a name="ln350">          p1 = in[maxi + 2 + in_stride * j];</a>
+<a name="ln351">          p2 = in[maxi + 3 + in_stride * j];</a>
+<a name="ln352">          p3 = in[maxi + 2 + in_stride * (j + 1)];</a>
+<a name="ln353">          p4 = in[maxi + 3 + in_stride * (j + 1)];</a>
+<a name="ln354">          col = _mm_add_ps(col, _mm_mul_ps(_mm_set1_ps(dx), _mm_set_ps(p4, p3, p2, p1)));</a>
+<a name="ln355">        }</a>
+<a name="ln356"> </a>
+<a name="ln357">        // upper right</a>
+<a name="ln358">        p1 = in[maxi + 2 + in_stride * py];</a>
+<a name="ln359">        p2 = in[maxi + 3 + in_stride * py];</a>
+<a name="ln360">        p3 = in[maxi + 2 + in_stride * (py + 1)];</a>
+<a name="ln361">        p4 = in[maxi + 3 + in_stride * (py + 1)];</a>
+<a name="ln362">        col = _mm_add_ps(col, _mm_mul_ps(_mm_set1_ps(dx * (1 - dy)), _mm_set_ps(p4, p3, p2, p1)));</a>
+<a name="ln363"> </a>
+<a name="ln364">        // lower border</a>
+<a name="ln365">        for(int i = px + 2; i &lt;= maxi; i += 2)</a>
+<a name="ln366">        {</a>
+<a name="ln367">          p1 = in[i + in_stride * (maxj + 2)];</a>
+<a name="ln368">          p2 = in[i + 1 + in_stride * (maxj + 2)];</a>
+<a name="ln369">          p3 = in[i + in_stride * (maxj + 3)];</a>
+<a name="ln370">          p4 = in[i + 1 + in_stride * (maxj + 3)];</a>
+<a name="ln371">          col = _mm_add_ps(col, _mm_mul_ps(_mm_set1_ps(dy), _mm_set_ps(p4, p3, p2, p1)));</a>
+<a name="ln372">        }</a>
+<a name="ln373"> </a>
+<a name="ln374">        // lower left 2x2 block</a>
+<a name="ln375">        p1 = in[px + in_stride * (maxj + 2)];</a>
+<a name="ln376">        p2 = in[px + 1 + in_stride * (maxj + 2)];</a>
+<a name="ln377">        p3 = in[px + in_stride * (maxj + 3)];</a>
+<a name="ln378">        p4 = in[px + 1 + in_stride * (maxj + 3)];</a>
+<a name="ln379">        col = _mm_add_ps(col, _mm_mul_ps(_mm_set1_ps((1 - dx) * dy), _mm_set_ps(p4, p3, p2, p1)));</a>
+<a name="ln380"> </a>
+<a name="ln381">        // lower right 2x2 block</a>
+<a name="ln382">        p1 = in[maxi + 2 + in_stride * (maxj + 2)];</a>
+<a name="ln383">        p2 = in[maxi + 3 + in_stride * (maxj + 2)];</a>
+<a name="ln384">        p3 = in[maxi + 2 + in_stride * (maxj + 3)];</a>
+<a name="ln385">        p4 = in[maxi + 3 + in_stride * (maxj + 3)];</a>
+<a name="ln386">        col = _mm_add_ps(col, _mm_mul_ps(_mm_set1_ps(dx * dy), _mm_set_ps(p4, p3, p2, p1)));</a>
+<a name="ln387"> </a>
+<a name="ln388">        num = (samples + 1) * (samples + 1);</a>
+<a name="ln389">      }</a>
+<a name="ln390">      else if(maxi == px + 2 * samples)</a>
+<a name="ln391">      {</a>
+<a name="ln392">        // right border</a>
+<a name="ln393">        for(int j = py + 2; j &lt;= maxj; j += 2)</a>
+<a name="ln394">        {</a>
+<a name="ln395">          p1 = in[maxi + 2 + in_stride * j];</a>
+<a name="ln396">          p2 = in[maxi + 3 + in_stride * j];</a>
+<a name="ln397">          p3 = in[maxi + 2 + in_stride * (j + 1)];</a>
+<a name="ln398">          p4 = in[maxi + 3 + in_stride * (j + 1)];</a>
+<a name="ln399">          col = _mm_add_ps(col, _mm_mul_ps(_mm_set1_ps(dx), _mm_set_ps(p4, p3, p2, p1)));</a>
+<a name="ln400">        }</a>
+<a name="ln401"> </a>
+<a name="ln402">        // upper right</a>
+<a name="ln403">        p1 = in[maxi + 2 + in_stride * py];</a>
+<a name="ln404">        p2 = in[maxi + 3 + in_stride * py];</a>
+<a name="ln405">        p3 = in[maxi + 2 + in_stride * (py + 1)];</a>
+<a name="ln406">        p4 = in[maxi + 3 + in_stride * (py + 1)];</a>
+<a name="ln407">        col = _mm_add_ps(col, _mm_mul_ps(_mm_set1_ps(dx * (1 - dy)), _mm_set_ps(p4, p3, p2, p1)));</a>
+<a name="ln408"> </a>
+<a name="ln409">        num = ((maxj - py) / 2 + 1 - dy) * (samples + 1);</a>
+<a name="ln410">      }</a>
+<a name="ln411">      else if(maxj == py + 2 * samples)</a>
+<a name="ln412">      {</a>
+<a name="ln413">        // lower border</a>
+<a name="ln414">        for(int i = px + 2; i &lt;= maxi; i += 2)</a>
+<a name="ln415">        {</a>
+<a name="ln416">          p1 = in[i + in_stride * (maxj + 2)];</a>
+<a name="ln417">          p2 = in[i + 1 + in_stride * (maxj + 2)];</a>
+<a name="ln418">          p3 = in[i + in_stride * (maxj + 3)];</a>
+<a name="ln419">          p4 = in[i + 1 + in_stride * (maxj + 3)];</a>
+<a name="ln420">          col = _mm_add_ps(col, _mm_mul_ps(_mm_set1_ps(dy), _mm_set_ps(p4, p3, p2, p1)));</a>
+<a name="ln421">        }</a>
+<a name="ln422"> </a>
+<a name="ln423">        // lower left 2x2 block</a>
+<a name="ln424">        p1 = in[px + in_stride * (maxj + 2)];</a>
+<a name="ln425">        p2 = in[px + 1 + in_stride * (maxj + 2)];</a>
+<a name="ln426">        p3 = in[px + in_stride * (maxj + 3)];</a>
+<a name="ln427">        p4 = in[px + 1 + in_stride * (maxj + 3)];</a>
+<a name="ln428">        col = _mm_add_ps(col, _mm_mul_ps(_mm_set1_ps((1 - dx) * dy), _mm_set_ps(p4, p3, p2, p1)));</a>
+<a name="ln429"> </a>
+<a name="ln430">        num = ((maxi - px) / 2 + 1 - dx) * (samples + 1);</a>
+<a name="ln431">      }</a>
+<a name="ln432">      else</a>
+<a name="ln433">      {</a>
+<a name="ln434">        num = ((maxi - px) / 2 + 1 - dx) * ((maxj - py) / 2 + 1 - dy);</a>
+<a name="ln435">      }</a>
+<a name="ln436"> </a>
+<a name="ln437">      num = 1.0f / num;</a>
+<a name="ln438">      col = _mm_mul_ps(col, _mm_set1_ps(num));</a>
+<a name="ln439"> </a>
+<a name="ln440">      float fcol[4] __attribute__((aligned(64)));</a>
+<a name="ln441">      _mm_store_ps(fcol, col);</a>
+<a name="ln442"> </a>
+<a name="ln443">      const int c = (2 * ((y + rggby) % 2) + ((x + rggbx) % 2));</a>
+<a name="ln444">      *outc = (uint16_t)(fcol[c]);</a>
+<a name="ln445">      outc++;</a>
+<a name="ln446">    }</a>
+<a name="ln447">  }</a>
+<a name="ln448">  _mm_sfence();</a>
+<a name="ln449">}</a>
+<a name="ln450">#endif</a>
+<a name="ln451"> </a>
+<a name="ln452">void dt_iop_clip_and_zoom_mosaic_half_size(uint16_t *const out, const uint16_t *const in,</a>
+<a name="ln453">                                           const dt_iop_roi_t *const roi_out, const dt_iop_roi_t *const roi_in,</a>
+<a name="ln454">                                           const int32_t out_stride, const int32_t in_stride,</a>
+<a name="ln455">                                           const uint32_t filters)</a>
+<a name="ln456">{</a>
+<a name="ln457">  if(1)//(darktable.codepath.OPENMP_SIMD)</a>
+<a name="ln458">    return dt_iop_clip_and_zoom_mosaic_half_size_plain(out, in, roi_out, roi_in, out_stride, in_stride, filters);</a>
+<a name="ln459">#if defined(__SSE__)</a>
+<a name="ln460">  else if(darktable.codepath.SSE2)</a>
+<a name="ln461">    return dt_iop_clip_and_zoom_mosaic_half_size_sse2(out, in, roi_out, roi_in, out_stride, in_stride, filters);</a>
+<a name="ln462">#endif</a>
+<a name="ln463">  else</a>
+<a name="ln464">    dt_unreachable_codepath();</a>
+<a name="ln465">}</a>
+<a name="ln466"> </a>
+<a name="ln467">void dt_iop_clip_and_zoom_mosaic_half_size_f_plain(float *const out, const float *const in,</a>
+<a name="ln468">                                                   const dt_iop_roi_t *const roi_out,</a>
+<a name="ln469">                                                   const dt_iop_roi_t *const roi_in, const int32_t out_stride,</a>
+<a name="ln470">                                                   const int32_t in_stride, const uint32_t filters)</a>
+<a name="ln471">{</a>
+<a name="ln472">  // adjust to pixel region and don't sample more than scale/2 nbs!</a>
+<a name="ln473">  // pixel footprint on input buffer, radius:</a>
+<a name="ln474">  const float px_footprint = 1.f / roi_out-&gt;scale;</a>
+<a name="ln475">  // how many 2x2 blocks can be sampled inside that area</a>
+<a name="ln476">  const int samples = round(px_footprint / 2);</a>
+<a name="ln477"> </a>
+<a name="ln478">  // move p to point to an rggb block:</a>
+<a name="ln479">  int trggbx = 0, trggby = 0;</a>
+<a name="ln480">  if(FC(trggby, trggbx + 1, filters) != 1) trggbx++;</a>
+<a name="ln481">  if(FC(trggby, trggbx, filters) != 0)</a>
+<a name="ln482">  {</a>
+<a name="ln483">    trggbx = (trggbx + 1) &amp; 1;</a>
+<a name="ln484">    trggby++;</a>
+<a name="ln485">  }</a>
+<a name="ln486">  const int rggbx = trggbx, rggby = trggby;</a>
+<a name="ln487"> </a>
+<a name="ln488">#ifdef _OPENMP</a>
+<a name="ln489">#pragma omp parallel for default(none) \</a>
+<a name="ln490">  dt_omp_firstprivate(in, in_stride, out, out_stride, px_footprint, rggbx, rggby, roi_in, roi_out, samples) \</a>
+<a name="ln491">  schedule(static)</a>
+<a name="ln492">#endif</a>
+<a name="ln493">  for(int y = 0; y &lt; roi_out-&gt;height; y++)</a>
+<a name="ln494">  {</a>
+<a name="ln495">    float *outc = out + out_stride * y;</a>
+<a name="ln496"> </a>
+<a name="ln497">    float fy = (y + roi_out-&gt;y) * px_footprint;</a>
+<a name="ln498">    int py = (int)fy &amp; ~1;</a>
+<a name="ln499">    const float dy = (fy - py) / 2;</a>
+<a name="ln500">    py = MIN(((roi_in-&gt;height - 6) &amp; ~1u), py) + rggby;</a>
+<a name="ln501"> </a>
+<a name="ln502">    int maxj = MIN(((roi_in-&gt;height - 5) &amp; ~1u) + rggby, py + 2 * samples);</a>
+<a name="ln503"> </a>
+<a name="ln504">    for(int x = 0; x &lt; roi_out-&gt;width; x++)</a>
+<a name="ln505">    {</a>
+<a name="ln506">      float col[4] = { 0, 0, 0, 0 };</a>
+<a name="ln507"> </a>
+<a name="ln508">      float fx = (x + roi_out-&gt;x) * px_footprint;</a>
+<a name="ln509">      int px = (int)fx &amp; ~1;</a>
+<a name="ln510">      const float dx = (fx - px) / 2;</a>
+<a name="ln511">      px = MIN(((roi_in-&gt;width - 6) &amp; ~1u), px) + rggbx;</a>
+<a name="ln512"> </a>
+<a name="ln513">      int maxi = MIN(((roi_in-&gt;width - 5) &amp; ~1u) + rggbx, px + 2 * samples);</a>
+<a name="ln514"> </a>
+<a name="ln515">      float p[4];</a>
+<a name="ln516">      float num = 0;</a>
+<a name="ln517"> </a>
+<a name="ln518">      // upper left 2x2 block of sampling region</a>
+<a name="ln519">      p[0] = in[px + in_stride * py];</a>
+<a name="ln520">      p[1] = in[px + 1 + in_stride * py];</a>
+<a name="ln521">      p[2] = in[px + in_stride * (py + 1)];</a>
+<a name="ln522">      p[3] = in[px + 1 + in_stride * (py + 1)];</a>
+<a name="ln523">      for(int c = 0; c &lt; 4; c++) col[c] += ((1 - dx) * (1 - dy)) * p[c];</a>
+<a name="ln524"> </a>
+<a name="ln525">      // left 2x2 block border of sampling region</a>
+<a name="ln526">      for(int j = py + 2; j &lt;= maxj; j += 2)</a>
+<a name="ln527">      {</a>
+<a name="ln528">        p[0] = in[px + in_stride * j];</a>
+<a name="ln529">        p[1] = in[px + 1 + in_stride * j];</a>
+<a name="ln530">        p[2] = in[px + in_stride * (j + 1)];</a>
+<a name="ln531">        p[3] = in[px + 1 + in_stride * (j + 1)];</a>
+<a name="ln532">        for(int c = 0; c &lt; 4; c++) col[c] += (1 - dx) * p[c];</a>
+<a name="ln533">      }</a>
+<a name="ln534"> </a>
+<a name="ln535">      // upper 2x2 block border of sampling region</a>
+<a name="ln536">      for(int i = px + 2; i &lt;= maxi; i += 2)</a>
+<a name="ln537">      {</a>
+<a name="ln538">        p[0] = in[i + in_stride * py];</a>
+<a name="ln539">        p[1] = in[i + 1 + in_stride * py];</a>
+<a name="ln540">        p[2] = in[i + in_stride * (py + 1)];</a>
+<a name="ln541">        p[3] = in[i + 1 + in_stride * (py + 1)];</a>
+<a name="ln542">        for(int c = 0; c &lt; 4; c++) col[c] += (1 - dy) * p[c];</a>
+<a name="ln543">      }</a>
+<a name="ln544"> </a>
+<a name="ln545">      // 2x2 blocks in the middle of sampling region</a>
+<a name="ln546">      for(int j = py + 2; j &lt;= maxj; j += 2)</a>
+<a name="ln547">        for(int i = px + 2; i &lt;= maxi; i += 2)</a>
+<a name="ln548">        {</a>
+<a name="ln549">          p[0] = in[i + in_stride * j];</a>
+<a name="ln550">          p[1] = in[i + 1 + in_stride * j];</a>
+<a name="ln551">          p[2] = in[i + in_stride * (j + 1)];</a>
+<a name="ln552">          p[3] = in[i + 1 + in_stride * (j + 1)];</a>
+<a name="ln553">          for(int c = 0; c &lt; 4; c++) col[c] += p[c];</a>
+<a name="ln554">        }</a>
+<a name="ln555"> </a>
+<a name="ln556">      if(maxi == px + 2 * samples &amp;&amp; maxj == py + 2 * samples)</a>
+<a name="ln557">      {</a>
+<a name="ln558">        // right border</a>
+<a name="ln559">        for(int j = py + 2; j &lt;= maxj; j += 2)</a>
+<a name="ln560">        {</a>
+<a name="ln561">          p[0] = in[maxi + 2 + in_stride * j];</a>
+<a name="ln562">          p[1] = in[maxi + 3 + in_stride * j];</a>
+<a name="ln563">          p[2] = in[maxi + 2 + in_stride * (j + 1)];</a>
+<a name="ln564">          p[3] = in[maxi + 3 + in_stride * (j + 1)];</a>
+<a name="ln565">          for(int c = 0; c &lt; 4; c++) col[c] += dx * p[c];</a>
+<a name="ln566">        }</a>
+<a name="ln567"> </a>
+<a name="ln568">        // upper right</a>
+<a name="ln569">        p[0] = in[maxi + 2 + in_stride * py];</a>
+<a name="ln570">        p[1] = in[maxi + 3 + in_stride * py];</a>
+<a name="ln571">        p[2] = in[maxi + 2 + in_stride * (py + 1)];</a>
+<a name="ln572">        p[3] = in[maxi + 3 + in_stride * (py + 1)];</a>
+<a name="ln573">        for(int c = 0; c &lt; 4; c++) col[c] += (dx * (1 - dy)) * p[c];</a>
+<a name="ln574"> </a>
+<a name="ln575">        // lower border</a>
+<a name="ln576">        for(int i = px + 2; i &lt;= maxi; i += 2)</a>
+<a name="ln577">        {</a>
+<a name="ln578">          p[0] = in[i + in_stride * (maxj + 2)];</a>
+<a name="ln579">          p[1] = in[i + 1 + in_stride * (maxj + 2)];</a>
+<a name="ln580">          p[2] = in[i + in_stride * (maxj + 3)];</a>
+<a name="ln581">          p[3] = in[i + 1 + in_stride * (maxj + 3)];</a>
+<a name="ln582">          for(int c = 0; c &lt; 4; c++) col[c] += dy * p[c];</a>
+<a name="ln583">        }</a>
+<a name="ln584"> </a>
+<a name="ln585">        // lower left 2x2 block</a>
+<a name="ln586">        p[0] = in[px + in_stride * (maxj + 2)];</a>
+<a name="ln587">        p[1] = in[px + 1 + in_stride * (maxj + 2)];</a>
+<a name="ln588">        p[2] = in[px + in_stride * (maxj + 3)];</a>
+<a name="ln589">        p[3] = in[px + 1 + in_stride * (maxj + 3)];</a>
+<a name="ln590">        for(int c = 0; c &lt; 4; c++) col[c] += ((1 - dx) * dy) * p[c];</a>
+<a name="ln591"> </a>
+<a name="ln592">        // lower right 2x2 block</a>
+<a name="ln593">        p[0] = in[maxi + 2 + in_stride * (maxj + 2)];</a>
+<a name="ln594">        p[1] = in[maxi + 3 + in_stride * (maxj + 2)];</a>
+<a name="ln595">        p[2] = in[maxi + 2 + in_stride * (maxj + 3)];</a>
+<a name="ln596">        p[3] = in[maxi + 3 + in_stride * (maxj + 3)];</a>
+<a name="ln597">        for(int c = 0; c &lt; 4; c++) col[c] += (dx * dy) * p[c];</a>
+<a name="ln598"> </a>
+<a name="ln599">        num = (samples + 1) * (samples + 1);</a>
+<a name="ln600">      }</a>
+<a name="ln601">      else if(maxi == px + 2 * samples)</a>
+<a name="ln602">      {</a>
+<a name="ln603">        // right border</a>
+<a name="ln604">        for(int j = py + 2; j &lt;= maxj; j += 2)</a>
+<a name="ln605">        {</a>
+<a name="ln606">          p[0] = in[maxi + 2 + in_stride * j];</a>
+<a name="ln607">          p[1] = in[maxi + 3 + in_stride * j];</a>
+<a name="ln608">          p[2] = in[maxi + 2 + in_stride * (j + 1)];</a>
+<a name="ln609">          p[3] = in[maxi + 3 + in_stride * (j + 1)];</a>
+<a name="ln610">          for(int c = 0; c &lt; 4; c++) col[c] += dx * p[c];</a>
+<a name="ln611">        }</a>
+<a name="ln612"> </a>
+<a name="ln613">        // upper right</a>
+<a name="ln614">        p[0] = in[maxi + 2 + in_stride * py];</a>
+<a name="ln615">        p[1] = in[maxi + 3 + in_stride * py];</a>
+<a name="ln616">        p[2] = in[maxi + 2 + in_stride * (py + 1)];</a>
+<a name="ln617">        p[3] = in[maxi + 3 + in_stride * (py + 1)];</a>
+<a name="ln618">        for(int c = 0; c &lt; 4; c++) col[c] += (dx * (1 - dy)) * p[c];</a>
+<a name="ln619"> </a>
+<a name="ln620">        num = ((maxj - py) / 2 + 1 - dy) * (samples + 1);</a>
+<a name="ln621">      }</a>
+<a name="ln622">      else if(maxj == py + 2 * samples)</a>
+<a name="ln623">      {</a>
+<a name="ln624">        // lower border</a>
+<a name="ln625">        for(int i = px + 2; i &lt;= maxi; i += 2)</a>
+<a name="ln626">        {</a>
+<a name="ln627">          p[0] = in[i + in_stride * (maxj + 2)];</a>
+<a name="ln628">          p[1] = in[i + 1 + in_stride * (maxj + 2)];</a>
+<a name="ln629">          p[2] = in[i + in_stride * (maxj + 3)];</a>
+<a name="ln630">          p[3] = in[i + 1 + in_stride * (maxj + 3)];</a>
+<a name="ln631">          for(int c = 0; c &lt; 4; c++) col[c] += dy * p[c];</a>
+<a name="ln632">        }</a>
+<a name="ln633"> </a>
+<a name="ln634">        // lower left 2x2 block</a>
+<a name="ln635">        p[0] = in[px + in_stride * (maxj + 2)];</a>
+<a name="ln636">        p[1] = in[px + 1 + in_stride * (maxj + 2)];</a>
+<a name="ln637">        p[2] = in[px + in_stride * (maxj + 3)];</a>
+<a name="ln638">        p[3] = in[px + 1 + in_stride * (maxj + 3)];</a>
+<a name="ln639">        for(int c = 0; c &lt; 4; c++) col[c] += ((1 - dx) * dy) * p[c];</a>
+<a name="ln640"> </a>
+<a name="ln641">        num = ((maxi - px) / 2 + 1 - dx) * (samples + 1);</a>
+<a name="ln642">      }</a>
+<a name="ln643">      else</a>
+<a name="ln644">      {</a>
+<a name="ln645">        num = ((maxi - px) / 2 + 1 - dx) * ((maxj - py) / 2 + 1 - dy);</a>
+<a name="ln646">      }</a>
+<a name="ln647"> </a>
+<a name="ln648">      const int c = (2 * ((y + rggby) % 2) + ((x + rggbx) % 2));</a>
+<a name="ln649">      *outc = col[c] / num;</a>
+<a name="ln650">      outc++;</a>
+<a name="ln651">    }</a>
+<a name="ln652">  }</a>
+<a name="ln653">}</a>
+<a name="ln654"> </a>
+<a name="ln655">#if defined(__SSE__)</a>
+<a name="ln656">void dt_iop_clip_and_zoom_mosaic_half_size_f_sse2(float *const out, const float *const in,</a>
+<a name="ln657">                                                  const dt_iop_roi_t *const roi_out,</a>
+<a name="ln658">                                                  const dt_iop_roi_t *const roi_in, const int32_t out_stride,</a>
+<a name="ln659">                                                  const int32_t in_stride, const uint32_t filters)</a>
+<a name="ln660">{</a>
+<a name="ln661">  // adjust to pixel region and don't sample more than scale/2 nbs!</a>
+<a name="ln662">  // pixel footprint on input buffer, radius:</a>
+<a name="ln663">  const float px_footprint = 1.f / roi_out-&gt;scale;</a>
+<a name="ln664">  // how many 2x2 blocks can be sampled inside that area</a>
+<a name="ln665">  const int samples = round(px_footprint / 2);</a>
+<a name="ln666"> </a>
+<a name="ln667">  // move p to point to an rggb block:</a>
+<a name="ln668">  int trggbx = 0, trggby = 0;</a>
+<a name="ln669">  if(FC(trggby, trggbx + 1, filters) != 1) trggbx++;</a>
+<a name="ln670">  if(FC(trggby, trggbx, filters) != 0)</a>
+<a name="ln671">  {</a>
+<a name="ln672">    trggbx = (trggbx + 1) &amp; 1;</a>
+<a name="ln673">    trggby++;</a>
+<a name="ln674">  }</a>
+<a name="ln675">  const int rggbx = trggbx, rggby = trggby;</a>
+<a name="ln676"> </a>
+<a name="ln677">#ifdef _OPENMP</a>
+<a name="ln678">#pragma omp parallel for default(none) \</a>
+<a name="ln679">  dt_omp_firstprivate(in, in_stride, out, out_stride, px_footprint, rggbx, \</a>
+<a name="ln680">                      rggby, roi_in, roi_out, samples) \</a>
+<a name="ln681">  schedule(static)</a>
+<a name="ln682">#endif</a>
+<a name="ln683">  for(int y = 0; y &lt; roi_out-&gt;height; y++)</a>
+<a name="ln684">  {</a>
+<a name="ln685">    float *outc = out + out_stride * y;</a>
+<a name="ln686"> </a>
+<a name="ln687">    float fy = (y + roi_out-&gt;y) * px_footprint;</a>
+<a name="ln688">    int py = (int)fy &amp; ~1;</a>
+<a name="ln689">    const float dy = (fy - py) / 2;</a>
+<a name="ln690">    py = MIN(((roi_in-&gt;height - 6) &amp; ~1u), py) + rggby;</a>
+<a name="ln691"> </a>
+<a name="ln692">    int maxj = MIN(((roi_in-&gt;height - 5) &amp; ~1u) + rggby, py + 2 * samples);</a>
+<a name="ln693"> </a>
+<a name="ln694">    for(int x = 0; x &lt; roi_out-&gt;width; x++)</a>
+<a name="ln695">    {</a>
+<a name="ln696">      __m128 col = _mm_setzero_ps();</a>
+<a name="ln697"> </a>
+<a name="ln698">      float fx = (x + roi_out-&gt;x) * px_footprint;</a>
+<a name="ln699">      int px = (int)fx &amp; ~1;</a>
+<a name="ln700">      const float dx = (fx - px) / 2;</a>
+<a name="ln701">      px = MIN(((roi_in-&gt;width - 6) &amp; ~1u), px) + rggbx;</a>
+<a name="ln702"> </a>
+<a name="ln703">      int maxi = MIN(((roi_in-&gt;width - 5) &amp; ~1u) + rggbx, px + 2 * samples);</a>
+<a name="ln704"> </a>
+<a name="ln705">      float p1, p2, p3, p4;</a>
+<a name="ln706">      float num = 0;</a>
+<a name="ln707"> </a>
+<a name="ln708">      // upper left 2x2 block of sampling region</a>
+<a name="ln709">      p1 = in[px + in_stride * py];</a>
+<a name="ln710">      p2 = in[px + 1 + in_stride * py];</a>
+<a name="ln711">      p3 = in[px + in_stride * (py + 1)];</a>
+<a name="ln712">      p4 = in[px + 1 + in_stride * (py + 1)];</a>
+<a name="ln713">      col = _mm_add_ps(col, _mm_mul_ps(_mm_set1_ps((1 - dx) * (1 - dy)), _mm_set_ps(p4, p3, p2, p1)));</a>
+<a name="ln714"> </a>
+<a name="ln715">      // left 2x2 block border of sampling region</a>
+<a name="ln716">      for(int j = py + 2; j &lt;= maxj; j += 2)</a>
+<a name="ln717">      {</a>
+<a name="ln718">        p1 = in[px + in_stride * j];</a>
+<a name="ln719">        p2 = in[px + 1 + in_stride * j];</a>
+<a name="ln720">        p3 = in[px + in_stride * (j + 1)];</a>
+<a name="ln721">        p4 = in[px + 1 + in_stride * (j + 1)];</a>
+<a name="ln722">        col = _mm_add_ps(col, _mm_mul_ps(_mm_set1_ps(1 - dx), _mm_set_ps(p4, p3, p2, p1)));</a>
+<a name="ln723">      }</a>
+<a name="ln724"> </a>
+<a name="ln725">      // upper 2x2 block border of sampling region</a>
+<a name="ln726">      for(int i = px + 2; i &lt;= maxi; i += 2)</a>
+<a name="ln727">      {</a>
+<a name="ln728">        p1 = in[i + in_stride * py];</a>
+<a name="ln729">        p2 = in[i + 1 + in_stride * py];</a>
+<a name="ln730">        p3 = in[i + in_stride * (py + 1)];</a>
+<a name="ln731">        p4 = in[i + 1 + in_stride * (py + 1)];</a>
+<a name="ln732">        col = _mm_add_ps(col, _mm_mul_ps(_mm_set1_ps(1 - dy), _mm_set_ps(p4, p3, p2, p1)));</a>
+<a name="ln733">      }</a>
+<a name="ln734"> </a>
+<a name="ln735">      // 2x2 blocks in the middle of sampling region</a>
+<a name="ln736">      for(int j = py + 2; j &lt;= maxj; j += 2)</a>
+<a name="ln737">        for(int i = px + 2; i &lt;= maxi; i += 2)</a>
+<a name="ln738">        {</a>
+<a name="ln739">          p1 = in[i + in_stride * j];</a>
+<a name="ln740">          p2 = in[i + 1 + in_stride * j];</a>
+<a name="ln741">          p3 = in[i + in_stride * (j + 1)];</a>
+<a name="ln742">          p4 = in[i + 1 + in_stride * (j + 1)];</a>
+<a name="ln743">          col = _mm_add_ps(col, _mm_set_ps(p4, p3, p2, p1));</a>
+<a name="ln744">        }</a>
+<a name="ln745"> </a>
+<a name="ln746">      if(maxi == px + 2 * samples &amp;&amp; maxj == py + 2 * samples)</a>
+<a name="ln747">      {</a>
+<a name="ln748">        // right border</a>
+<a name="ln749">        for(int j = py + 2; j &lt;= maxj; j += 2)</a>
+<a name="ln750">        {</a>
+<a name="ln751">          p1 = in[maxi + 2 + in_stride * j];</a>
+<a name="ln752">          p2 = in[maxi + 3 + in_stride * j];</a>
+<a name="ln753">          p3 = in[maxi + 2 + in_stride * (j + 1)];</a>
+<a name="ln754">          p4 = in[maxi + 3 + in_stride * (j + 1)];</a>
+<a name="ln755">          col = _mm_add_ps(col, _mm_mul_ps(_mm_set1_ps(dx), _mm_set_ps(p4, p3, p2, p1)));</a>
+<a name="ln756">        }</a>
+<a name="ln757"> </a>
+<a name="ln758">        // upper right</a>
+<a name="ln759">        p1 = in[maxi + 2 + in_stride * py];</a>
+<a name="ln760">        p2 = in[maxi + 3 + in_stride * py];</a>
+<a name="ln761">        p3 = in[maxi + 2 + in_stride * (py + 1)];</a>
+<a name="ln762">        p4 = in[maxi + 3 + in_stride * (py + 1)];</a>
+<a name="ln763">        col = _mm_add_ps(col, _mm_mul_ps(_mm_set1_ps(dx * (1 - dy)), _mm_set_ps(p4, p3, p2, p1)));</a>
+<a name="ln764"> </a>
+<a name="ln765">        // lower border</a>
+<a name="ln766">        for(int i = px + 2; i &lt;= maxi; i += 2)</a>
+<a name="ln767">        {</a>
+<a name="ln768">          p1 = in[i + in_stride * (maxj + 2)];</a>
+<a name="ln769">          p2 = in[i + 1 + in_stride * (maxj + 2)];</a>
+<a name="ln770">          p3 = in[i + in_stride * (maxj + 3)];</a>
+<a name="ln771">          p4 = in[i + 1 + in_stride * (maxj + 3)];</a>
+<a name="ln772">          col = _mm_add_ps(col, _mm_mul_ps(_mm_set1_ps(dy), _mm_set_ps(p4, p3, p2, p1)));</a>
+<a name="ln773">        }</a>
+<a name="ln774"> </a>
+<a name="ln775">        // lower left 2x2 block</a>
+<a name="ln776">        p1 = in[px + in_stride * (maxj + 2)];</a>
+<a name="ln777">        p2 = in[px + 1 + in_stride * (maxj + 2)];</a>
+<a name="ln778">        p3 = in[px + in_stride * (maxj + 3)];</a>
+<a name="ln779">        p4 = in[px + 1 + in_stride * (maxj + 3)];</a>
+<a name="ln780">        col = _mm_add_ps(col, _mm_mul_ps(_mm_set1_ps((1 - dx) * dy), _mm_set_ps(p4, p3, p2, p1)));</a>
+<a name="ln781"> </a>
+<a name="ln782">        // lower right 2x2 block</a>
+<a name="ln783">        p1 = in[maxi + 2 + in_stride * (maxj + 2)];</a>
+<a name="ln784">        p2 = in[maxi + 3 + in_stride * (maxj + 2)];</a>
+<a name="ln785">        p3 = in[maxi + 2 + in_stride * (maxj + 3)];</a>
+<a name="ln786">        p4 = in[maxi + 3 + in_stride * (maxj + 3)];</a>
+<a name="ln787">        col = _mm_add_ps(col, _mm_mul_ps(_mm_set1_ps(dx * dy), _mm_set_ps(p4, p3, p2, p1)));</a>
+<a name="ln788"> </a>
+<a name="ln789">        num = (samples + 1) * (samples + 1);</a>
+<a name="ln790">      }</a>
+<a name="ln791">      else if(maxi == px + 2 * samples)</a>
+<a name="ln792">      {</a>
+<a name="ln793">        // right border</a>
+<a name="ln794">        for(int j = py + 2; j &lt;= maxj; j += 2)</a>
+<a name="ln795">        {</a>
+<a name="ln796">          p1 = in[maxi + 2 + in_stride * j];</a>
+<a name="ln797">          p2 = in[maxi + 3 + in_stride * j];</a>
+<a name="ln798">          p3 = in[maxi + 2 + in_stride * (j + 1)];</a>
+<a name="ln799">          p4 = in[maxi + 3 + in_stride * (j + 1)];</a>
+<a name="ln800">          col = _mm_add_ps(col, _mm_mul_ps(_mm_set1_ps(dx), _mm_set_ps(p4, p3, p2, p1)));</a>
+<a name="ln801">        }</a>
+<a name="ln802"> </a>
+<a name="ln803">        // upper right</a>
+<a name="ln804">        p1 = in[maxi + 2 + in_stride * py];</a>
+<a name="ln805">        p2 = in[maxi + 3 + in_stride * py];</a>
+<a name="ln806">        p3 = in[maxi + 2 + in_stride * (py + 1)];</a>
+<a name="ln807">        p4 = in[maxi + 3 + in_stride * (py + 1)];</a>
+<a name="ln808">        col = _mm_add_ps(col, _mm_mul_ps(_mm_set1_ps(dx * (1 - dy)), _mm_set_ps(p4, p3, p2, p1)));</a>
+<a name="ln809"> </a>
+<a name="ln810">        num = ((maxj - py) / 2 + 1 - dy) * (samples + 1);</a>
+<a name="ln811">      }</a>
+<a name="ln812">      else if(maxj == py + 2 * samples)</a>
+<a name="ln813">      {</a>
+<a name="ln814">        // lower border</a>
+<a name="ln815">        for(int i = px + 2; i &lt;= maxi; i += 2)</a>
+<a name="ln816">        {</a>
+<a name="ln817">          p1 = in[i + in_stride * (maxj + 2)];</a>
+<a name="ln818">          p2 = in[i + 1 + in_stride * (maxj + 2)];</a>
+<a name="ln819">          p3 = in[i + in_stride * (maxj + 3)];</a>
+<a name="ln820">          p4 = in[i + 1 + in_stride * (maxj + 3)];</a>
+<a name="ln821">          col = _mm_add_ps(col, _mm_mul_ps(_mm_set1_ps(dy), _mm_set_ps(p4, p3, p2, p1)));</a>
+<a name="ln822">        }</a>
+<a name="ln823"> </a>
+<a name="ln824">        // lower left 2x2 block</a>
+<a name="ln825">        p1 = in[px + in_stride * (maxj + 2)];</a>
+<a name="ln826">        p2 = in[px + 1 + in_stride * (maxj + 2)];</a>
+<a name="ln827">        p3 = in[px + in_stride * (maxj + 3)];</a>
+<a name="ln828">        p4 = in[px + 1 + in_stride * (maxj + 3)];</a>
+<a name="ln829">        col = _mm_add_ps(col, _mm_mul_ps(_mm_set1_ps((1 - dx) * dy), _mm_set_ps(p4, p3, p2, p1)));</a>
+<a name="ln830"> </a>
+<a name="ln831">        num = ((maxi - px) / 2 + 1 - dx) * (samples + 1);</a>
+<a name="ln832">      }</a>
+<a name="ln833">      else</a>
+<a name="ln834">      {</a>
+<a name="ln835">        num = ((maxi - px) / 2 + 1 - dx) * ((maxj - py) / 2 + 1 - dy);</a>
+<a name="ln836">      }</a>
+<a name="ln837"> </a>
+<a name="ln838">      num = 1.0f / num;</a>
+<a name="ln839">      col = _mm_mul_ps(col, _mm_set1_ps(num));</a>
+<a name="ln840"> </a>
+<a name="ln841">      float fcol[4] __attribute__((aligned(64)));</a>
+<a name="ln842">      _mm_store_ps(fcol, col);</a>
+<a name="ln843"> </a>
+<a name="ln844">      const int c = (2 * ((y + rggby) % 2) + ((x + rggbx) % 2));</a>
+<a name="ln845">      *outc = fcol[c];</a>
+<a name="ln846">      outc++;</a>
+<a name="ln847">    }</a>
+<a name="ln848">  }</a>
+<a name="ln849">  _mm_sfence();</a>
+<a name="ln850">}</a>
+<a name="ln851">#endif</a>
+<a name="ln852"> </a>
+<a name="ln853">void dt_iop_clip_and_zoom_mosaic_half_size_f(float *const out, const float *const in,</a>
+<a name="ln854">                                             const dt_iop_roi_t *const roi_out, const dt_iop_roi_t *const roi_in,</a>
+<a name="ln855">                                             const int32_t out_stride, const int32_t in_stride,</a>
+<a name="ln856">                                             const uint32_t filters)</a>
+<a name="ln857">{</a>
+<a name="ln858">  if(darktable.codepath.OPENMP_SIMD)</a>
+<a name="ln859">    return dt_iop_clip_and_zoom_mosaic_half_size_f_plain(out, in, roi_out, roi_in, out_stride, in_stride, filters);</a>
+<a name="ln860">#if defined(__SSE__)</a>
+<a name="ln861">  else if(darktable.codepath.SSE2)</a>
+<a name="ln862">    return dt_iop_clip_and_zoom_mosaic_half_size_f_sse2(out, in, roi_out, roi_in, out_stride, in_stride, filters);</a>
+<a name="ln863">#endif</a>
+<a name="ln864">  else</a>
+<a name="ln865">    dt_unreachable_codepath();</a>
+<a name="ln866">}</a>
+<a name="ln867"> </a>
+<a name="ln868">/**</a>
+<a name="ln869"> * downscales and clips a Fujifilm X-Trans mosaiced buffer (in) to the given region of interest (r_*)</a>
+<a name="ln870"> * and writes it to out.</a>
+<a name="ln871"> */</a>
+<a name="ln872">void dt_iop_clip_and_zoom_mosaic_third_size_xtrans(uint16_t *const out, const uint16_t *const in,</a>
+<a name="ln873">                                                   const dt_iop_roi_t *const roi_out,</a>
+<a name="ln874">                                                   const dt_iop_roi_t *const roi_in, const int32_t out_stride,</a>
+<a name="ln875">                                                   const int32_t in_stride, const uint8_t (*const xtrans)[6])</a>
+<a name="ln876">{</a>
+<a name="ln877">  const float px_footprint = 1.f / roi_out-&gt;scale;</a>
+<a name="ln878">  // Use box filter of width px_footprint*2+1 centered on the current</a>
+<a name="ln879">  // sample (rounded to nearest input pixel) to anti-alias. Higher MP</a>
+<a name="ln880">  // images need larger filters to avoid artifacts.</a>
+<a name="ln881">#ifdef _OPENMP</a>
+<a name="ln882">#pragma omp parallel for default(none) \</a>
+<a name="ln883">  dt_omp_firstprivate(in, in_stride, out, out_stride, px_footprint, roi_in, roi_out, xtrans) \</a>
+<a name="ln884">  schedule(static)</a>
+<a name="ln885">#endif</a>
+<a name="ln886">  for(int y = 0; y &lt; roi_out-&gt;height; y++)</a>
+<a name="ln887">  {</a>
+<a name="ln888">    uint16_t *outc = out + out_stride * y;</a>
+<a name="ln889"> </a>
+<a name="ln890">    const float fy = (y + roi_out-&gt;y) * px_footprint;</a>
+<a name="ln891">    const int miny = MAX(0, (int)roundf(fy - px_footprint));</a>
+<a name="ln892">    const int maxy = MIN(roi_in-&gt;height-1, (int)roundf(fy + px_footprint));</a>
+<a name="ln893"> </a>
+<a name="ln894">    float fx = roi_out-&gt;x * px_footprint;</a>
+<a name="ln895">    for(int x = 0; x &lt; roi_out-&gt;width; x++, fx += px_footprint, outc++)</a>
+<a name="ln896">    {</a>
+<a name="ln897">      const int minx = MAX(0, (int)roundf(fx - px_footprint));</a>
+<a name="ln898">      const int maxx = MIN(roi_in-&gt;width-1, (int)roundf(fx + px_footprint));</a>
+<a name="ln899"> </a>
+<a name="ln900">      const int c = FCxtrans(y, x, roi_out, xtrans);</a>
+<a name="ln901">      int num = 0;</a>
+<a name="ln902">      uint32_t col = 0;</a>
+<a name="ln903"> </a>
+<a name="ln904">      for(int yy = miny; yy &lt;= maxy; ++yy)</a>
+<a name="ln905">        for(int xx = minx; xx &lt;= maxx; ++xx)</a>
+<a name="ln906">          if(FCxtrans(yy, xx, roi_in, xtrans) == c)</a>
+<a name="ln907">          {</a>
+<a name="ln908">            col += in[xx + in_stride * yy];</a>
+<a name="ln909">            num++;</a>
+<a name="ln910">          }</a>
+<a name="ln911">      *outc = col / num;</a>
+<a name="ln912">    }</a>
+<a name="ln913">  }</a>
+<a name="ln914">}</a>
+<a name="ln915"> </a>
+<a name="ln916">void dt_iop_clip_and_zoom_mosaic_third_size_xtrans_f(float *const out, const float *const in,</a>
+<a name="ln917">                                                     const dt_iop_roi_t *const roi_out,</a>
+<a name="ln918">                                                     const dt_iop_roi_t *const roi_in, const int32_t out_stride,</a>
+<a name="ln919">                                                     const int32_t in_stride, const uint8_t (*const xtrans)[6])</a>
+<a name="ln920">{</a>
+<a name="ln921">  const float px_footprint = 1.f / roi_out-&gt;scale;</a>
+<a name="ln922">#ifdef _OPENMP</a>
+<a name="ln923">#pragma omp parallel for default(none) \</a>
+<a name="ln924">  dt_omp_firstprivate(in, in_stride, out, out_stride, px_footprint, roi_in, roi_out, xtrans) \</a>
+<a name="ln925">  schedule(static)</a>
+<a name="ln926">#endif</a>
+<a name="ln927">  for(int y = 0; y &lt; roi_out-&gt;height; y++)</a>
+<a name="ln928">  {</a>
+<a name="ln929">    float *outc = out + out_stride * y;</a>
+<a name="ln930"> </a>
+<a name="ln931">    const float fy = (y + roi_out-&gt;y) * px_footprint;</a>
+<a name="ln932">    const int miny = MAX(0, (int)roundf(fy - px_footprint));</a>
+<a name="ln933">    const int maxy = MIN(roi_in-&gt;height-1, (int)roundf(fy + px_footprint));</a>
+<a name="ln934"> </a>
+<a name="ln935">    float fx = roi_out-&gt;x * px_footprint;</a>
+<a name="ln936">    for(int x = 0; x &lt; roi_out-&gt;width; x++, fx += px_footprint, outc++)</a>
+<a name="ln937">    {</a>
+<a name="ln938">      const int minx = MAX(0, (int)roundf(fx - px_footprint));</a>
+<a name="ln939">      const int maxx = MIN(roi_in-&gt;width-1, (int)roundf(fx + px_footprint));</a>
+<a name="ln940"> </a>
+<a name="ln941">      const int c = FCxtrans(y, x, roi_out, xtrans);</a>
+<a name="ln942">      int num = 0;</a>
+<a name="ln943">      float col = 0.f;</a>
+<a name="ln944"> </a>
+<a name="ln945">      for(int yy = miny; yy &lt;= maxy; ++yy)</a>
+<a name="ln946">        for(int xx = minx; xx &lt;= maxx; ++xx)</a>
+<a name="ln947">          if(FCxtrans(yy, xx, roi_in, xtrans) == c)</a>
+<a name="ln948">          {</a>
+<a name="ln949">            col += in[xx + in_stride * yy];</a>
+<a name="ln950">            num++;</a>
+<a name="ln951">          }</a>
+<a name="ln952">      *outc = col / (float)num;</a>
+<a name="ln953">    }</a>
+<a name="ln954">  }</a>
+<a name="ln955">}</a>
+<a name="ln956"> </a>
+<a name="ln957">void dt_iop_clip_and_zoom_demosaic_passthrough_monochrome_f_plain(float *out, const float *const in,</a>
+<a name="ln958">                                                                  const dt_iop_roi_t *const roi_out,</a>
+<a name="ln959">                                                                  const dt_iop_roi_t *const roi_in,</a>
+<a name="ln960">                                                                  const int32_t out_stride,</a>
+<a name="ln961">                                                                  const int32_t in_stride)</a>
+<a name="ln962">{</a>
+<a name="ln963">  // adjust to pixel region and don't sample more than scale/2 nbs!</a>
+<a name="ln964">  // pixel footprint on input buffer, radius:</a>
+<a name="ln965">  const float px_footprint = 1.f / roi_out-&gt;scale;</a>
+<a name="ln966">  // how many pixels can be sampled inside that area</a>
+<a name="ln967">  const int samples = round(px_footprint);</a>
+<a name="ln968"> </a>
+<a name="ln969">#ifdef _OPENMP</a>
+<a name="ln970">#pragma omp parallel for default(none) \</a>
+<a name="ln971">  dt_omp_firstprivate(in, in_stride, out_stride, px_footprint, roi_in, roi_out, samples) \</a>
+<a name="ln972">  shared(out) \</a>
+<a name="ln973">  schedule(static)</a>
+<a name="ln974">#endif</a>
+<a name="ln975">  for(int y = 0; y &lt; roi_out-&gt;height; y++)</a>
+<a name="ln976">  {</a>
+<a name="ln977">    float *outc = out + 4 * (out_stride * y);</a>
+<a name="ln978"> </a>
+<a name="ln979">    float fy = (y + roi_out-&gt;y) * px_footprint;</a>
+<a name="ln980">    int py = (int)fy;</a>
+<a name="ln981">    const float dy = fy - py;</a>
+<a name="ln982">    py = MIN(((roi_in-&gt;height - 3)), py);</a>
+<a name="ln983"> </a>
+<a name="ln984">    int maxj = MIN(((roi_in-&gt;height - 2)), py + samples);</a>
+<a name="ln985"> </a>
+<a name="ln986">    for(int x = 0; x &lt; roi_out-&gt;width; x++)</a>
+<a name="ln987">    {</a>
+<a name="ln988">      float col = 0.0f;</a>
+<a name="ln989"> </a>
+<a name="ln990">      float fx = (x + roi_out-&gt;x) * px_footprint;</a>
+<a name="ln991">      int px = (int)fx;</a>
+<a name="ln992">      const float dx = fx - px;</a>
+<a name="ln993">      px = MIN(((roi_in-&gt;width - 3)), px);</a>
+<a name="ln994"> </a>
+<a name="ln995">      int maxi = MIN(((roi_in-&gt;width - 2)), px + samples);</a>
+<a name="ln996"> </a>
+<a name="ln997">      float p;</a>
+<a name="ln998">      float num = 0;</a>
+<a name="ln999"> </a>
+<a name="ln1000">      // upper left pixel of sampling region</a>
+<a name="ln1001">      p = in[px + in_stride * py];</a>
+<a name="ln1002">      col += ((1 - dx) * (1 - dy)) * p;</a>
+<a name="ln1003"> </a>
+<a name="ln1004">      // left pixel border of sampling region</a>
+<a name="ln1005">      for(int j = py + 1; j &lt;= maxj; j++)</a>
+<a name="ln1006">      {</a>
+<a name="ln1007">        p = in[px + in_stride * j];</a>
+<a name="ln1008">        col += (1 - dx) * p;</a>
+<a name="ln1009">      }</a>
+<a name="ln1010"> </a>
+<a name="ln1011">      // upper pixel border of sampling region</a>
+<a name="ln1012">      for(int i = px + 1; i &lt;= maxi; i++)</a>
+<a name="ln1013">      {</a>
+<a name="ln1014">        p = in[i + in_stride * py];</a>
+<a name="ln1015">        col += (1 - dy) * p;</a>
+<a name="ln1016">      }</a>
+<a name="ln1017"> </a>
+<a name="ln1018">      // pixels in the middle of sampling region</a>
+<a name="ln1019">      for(int j = py + 1; j &lt;= maxj; j++)</a>
+<a name="ln1020">        for(int i = px + 1; i &lt;= maxi; i++)</a>
+<a name="ln1021">        {</a>
+<a name="ln1022">          p = in[i + in_stride * j];</a>
+<a name="ln1023">          col += p;</a>
+<a name="ln1024">        }</a>
+<a name="ln1025"> </a>
+<a name="ln1026">      if(maxi == px + samples &amp;&amp; maxj == py + samples)</a>
+<a name="ln1027">      {</a>
+<a name="ln1028">        // right border</a>
+<a name="ln1029">        for(int j = py + 1; j &lt;= maxj; j++)</a>
+<a name="ln1030">        {</a>
+<a name="ln1031">          p = in[maxi + 1 + in_stride * j];</a>
+<a name="ln1032">          col += dx * p;</a>
+<a name="ln1033">        }</a>
+<a name="ln1034"> </a>
+<a name="ln1035">        // upper right</a>
+<a name="ln1036">        p = in[maxi + 1 + in_stride * py];</a>
+<a name="ln1037">        col += (dx * (1 - dy)) * p;</a>
+<a name="ln1038"> </a>
+<a name="ln1039">        // lower border</a>
+<a name="ln1040">        for(int i = px + 1; i &lt;= maxi; i++)</a>
+<a name="ln1041">        {</a>
+<a name="ln1042">          p = in[i + in_stride * (maxj + 1)];</a>
+<a name="ln1043">          col += dy * p;</a>
+<a name="ln1044">        }</a>
+<a name="ln1045"> </a>
+<a name="ln1046">        // lower left pixel</a>
+<a name="ln1047">        p = in[px + in_stride * (maxj + 1)];</a>
+<a name="ln1048">        col += ((1 - dx) * dy) * p;</a>
+<a name="ln1049"> </a>
+<a name="ln1050">        // lower right pixel</a>
+<a name="ln1051">        p = in[maxi + 1 + in_stride * (maxj + 1)];</a>
+<a name="ln1052">        col += (dx * dy) * p;</a>
+<a name="ln1053"> </a>
+<a name="ln1054">        num = (samples + 1) * (samples + 1);</a>
+<a name="ln1055">      }</a>
+<a name="ln1056">      else if(maxi == px + samples)</a>
+<a name="ln1057">      {</a>
+<a name="ln1058">        // right border</a>
+<a name="ln1059">        for(int j = py + 1; j &lt;= maxj; j++)</a>
+<a name="ln1060">        {</a>
+<a name="ln1061">          p = in[maxi + 1 + in_stride * j];</a>
+<a name="ln1062">          col += dx * p;</a>
+<a name="ln1063">        }</a>
+<a name="ln1064"> </a>
+<a name="ln1065">        // upper right</a>
+<a name="ln1066">        p = in[maxi + 1 + in_stride * py];</a>
+<a name="ln1067">        col += (dx * (1 - dy)) * p;</a>
+<a name="ln1068"> </a>
+<a name="ln1069">        num = ((maxj - py) / 2 + 1 - dy) * (samples + 1);</a>
+<a name="ln1070">      }</a>
+<a name="ln1071">      else if(maxj == py + samples)</a>
+<a name="ln1072">      {</a>
+<a name="ln1073">        // lower border</a>
+<a name="ln1074">        for(int i = px + 1; i &lt;= maxi; i++)</a>
+<a name="ln1075">        {</a>
+<a name="ln1076">          p = in[i + in_stride * (maxj + 1)];</a>
+<a name="ln1077">          col += dy * p;</a>
+<a name="ln1078">        }</a>
+<a name="ln1079"> </a>
+<a name="ln1080">        // lower left pixel</a>
+<a name="ln1081">        p = in[px + in_stride * (maxj + 1)];</a>
+<a name="ln1082">        col += ((1 - dx) * dy) * p;</a>
+<a name="ln1083"> </a>
+<a name="ln1084">        num = ((maxi - px) / 2 + 1 - dx) * (samples + 1);</a>
+<a name="ln1085">      }</a>
+<a name="ln1086">      else</a>
+<a name="ln1087">      {</a>
+<a name="ln1088">        num = ((maxi - px) / 2 + 1 - dx) * ((maxj - py) / 2 + 1 - dy);</a>
+<a name="ln1089">      }</a>
+<a name="ln1090"> </a>
+<a name="ln1091">      const float pix = col / num;</a>
+<a name="ln1092">      outc[0] = pix;</a>
+<a name="ln1093">      outc[1] = pix;</a>
+<a name="ln1094">      outc[2] = pix;</a>
+<a name="ln1095">      outc[3] = 0.0f;</a>
+<a name="ln1096">      outc += 4;</a>
+<a name="ln1097">    }</a>
+<a name="ln1098">  }</a>
+<a name="ln1099">}</a>
+<a name="ln1100"> </a>
+<a name="ln1101">#if defined(__SSE__)</a>
+<a name="ln1102">void dt_iop_clip_and_zoom_demosaic_passthrough_monochrome_f_sse2(float *out, const float *const in,</a>
+<a name="ln1103">                                                                 const dt_iop_roi_t *const roi_out,</a>
+<a name="ln1104">                                                                 const dt_iop_roi_t *const roi_in,</a>
+<a name="ln1105">                                                                 const int32_t out_stride,</a>
+<a name="ln1106">                                                                 const int32_t in_stride)</a>
+<a name="ln1107">{</a>
+<a name="ln1108">  // adjust to pixel region and don't sample more than scale/2 nbs!</a>
+<a name="ln1109">  // pixel footprint on input buffer, radius:</a>
+<a name="ln1110">  const float px_footprint = 1.f / roi_out-&gt;scale;</a>
+<a name="ln1111">  // how many pixels can be sampled inside that area</a>
+<a name="ln1112">  const int samples = round(px_footprint);</a>
+<a name="ln1113"> </a>
+<a name="ln1114">#ifdef _OPENMP</a>
+<a name="ln1115">#pragma omp parallel for default(none) \</a>
+<a name="ln1116">  dt_omp_firstprivate(in, in_stride, out_stride, px_footprint, roi_in, roi_out, samples) \</a>
+<a name="ln1117">  shared(out) \</a>
+<a name="ln1118">  schedule(static)</a>
+<a name="ln1119">#endif</a>
+<a name="ln1120">  for(int y = 0; y &lt; roi_out-&gt;height; y++)</a>
+<a name="ln1121">  {</a>
+<a name="ln1122">    float *outc = out + 4 * (out_stride * y);</a>
+<a name="ln1123"> </a>
+<a name="ln1124">    float fy = (y + roi_out-&gt;y) * px_footprint;</a>
+<a name="ln1125">    int py = (int)fy;</a>
+<a name="ln1126">    const float dy = fy - py;</a>
+<a name="ln1127">    py = MIN(((roi_in-&gt;height - 3)), py);</a>
+<a name="ln1128"> </a>
+<a name="ln1129">    int maxj = MIN(((roi_in-&gt;height - 2)), py + samples);</a>
+<a name="ln1130"> </a>
+<a name="ln1131">    for(int x = 0; x &lt; roi_out-&gt;width; x++)</a>
+<a name="ln1132">    {</a>
+<a name="ln1133">      __m128 col = _mm_setzero_ps();</a>
+<a name="ln1134"> </a>
+<a name="ln1135">      float fx = (x + roi_out-&gt;x) * px_footprint;</a>
+<a name="ln1136">      int px = (int)fx;</a>
+<a name="ln1137">      const float dx = fx - px;</a>
+<a name="ln1138">      px = MIN(((roi_in-&gt;width - 3)), px);</a>
+<a name="ln1139"> </a>
+<a name="ln1140">      int maxi = MIN(((roi_in-&gt;width - 2)), px + samples);</a>
+<a name="ln1141"> </a>
+<a name="ln1142">      float p;</a>
+<a name="ln1143">      float num = 0;</a>
+<a name="ln1144"> </a>
+<a name="ln1145">      // upper left pixel of sampling region</a>
+<a name="ln1146">      p = in[px + in_stride * py];</a>
+<a name="ln1147">      col = _mm_add_ps(col, _mm_mul_ps(_mm_set1_ps((1 - dx) * (1 - dy)), _mm_set_ps(0.0f, p, p, p)));</a>
+<a name="ln1148"> </a>
+<a name="ln1149">      // left pixel border of sampling region</a>
+<a name="ln1150">      for(int j = py + 1; j &lt;= maxj; j++)</a>
+<a name="ln1151">      {</a>
+<a name="ln1152">        p = in[px + in_stride * j];</a>
+<a name="ln1153">        col = _mm_add_ps(col, _mm_mul_ps(_mm_set1_ps(1 - dx), _mm_set_ps(0.0f, p, p, p)));</a>
+<a name="ln1154">      }</a>
+<a name="ln1155"> </a>
+<a name="ln1156">      // upper pixel border of sampling region</a>
+<a name="ln1157">      for(int i = px + 1; i &lt;= maxi; i++)</a>
+<a name="ln1158">      {</a>
+<a name="ln1159">        p = in[i + in_stride * py];</a>
+<a name="ln1160">        col = _mm_add_ps(col, _mm_mul_ps(_mm_set1_ps(1 - dy), _mm_set_ps(0.0f, p, p, p)));</a>
+<a name="ln1161">      }</a>
+<a name="ln1162"> </a>
+<a name="ln1163">      // pixels in the middle of sampling region</a>
+<a name="ln1164">      for(int j = py + 1; j &lt;= maxj; j++)</a>
+<a name="ln1165">        for(int i = px + 1; i &lt;= maxi; i++)</a>
+<a name="ln1166">        {</a>
+<a name="ln1167">          p = in[i + in_stride * j];</a>
+<a name="ln1168">          col = _mm_add_ps(col, _mm_set_ps(0.0f, p, p, p));</a>
+<a name="ln1169">        }</a>
+<a name="ln1170"> </a>
+<a name="ln1171">      if(maxi == px + samples &amp;&amp; maxj == py + samples)</a>
+<a name="ln1172">      {</a>
+<a name="ln1173">        // right border</a>
+<a name="ln1174">        for(int j = py + 1; j &lt;= maxj; j++)</a>
+<a name="ln1175">        {</a>
+<a name="ln1176">          p = in[maxi + 1 + in_stride * j];</a>
+<a name="ln1177">          col = _mm_add_ps(col, _mm_mul_ps(_mm_set1_ps(dx), _mm_set_ps(0.0f, p, p, p)));</a>
+<a name="ln1178">        }</a>
+<a name="ln1179"> </a>
+<a name="ln1180">        // upper right</a>
+<a name="ln1181">        p = in[maxi + 1 + in_stride * py];</a>
+<a name="ln1182">        col = _mm_add_ps(col, _mm_mul_ps(_mm_set1_ps(dx * (1 - dy)), _mm_set_ps(0.0f, p, p, p)));</a>
+<a name="ln1183"> </a>
+<a name="ln1184">        // lower border</a>
+<a name="ln1185">        for(int i = px + 1; i &lt;= maxi; i++)</a>
+<a name="ln1186">        {</a>
+<a name="ln1187">          p = in[i + in_stride * (maxj + 1)];</a>
+<a name="ln1188">          col = _mm_add_ps(col, _mm_mul_ps(_mm_set1_ps(dy), _mm_set_ps(0.0f, p, p, p)));</a>
+<a name="ln1189">        }</a>
+<a name="ln1190"> </a>
+<a name="ln1191">        // lower left pixel</a>
+<a name="ln1192">        p = in[px + in_stride * (maxj + 1)];</a>
+<a name="ln1193">        col = _mm_add_ps(col, _mm_mul_ps(_mm_set1_ps((1 - dx) * dy), _mm_set_ps(0.0f, p, p, p)));</a>
+<a name="ln1194"> </a>
+<a name="ln1195">        // lower right pixel</a>
+<a name="ln1196">        p = in[maxi + 1 + in_stride * (maxj + 1)];</a>
+<a name="ln1197">        col = _mm_add_ps(col, _mm_mul_ps(_mm_set1_ps(dx * dy), _mm_set_ps(0.0f, p, p, p)));</a>
+<a name="ln1198"> </a>
+<a name="ln1199">        num = (samples + 1) * (samples + 1);</a>
+<a name="ln1200">      }</a>
+<a name="ln1201">      else if(maxi == px + samples)</a>
+<a name="ln1202">      {</a>
+<a name="ln1203">        // right border</a>
+<a name="ln1204">        for(int j = py + 1; j &lt;= maxj; j++)</a>
+<a name="ln1205">        {</a>
+<a name="ln1206">          p = in[maxi + 1 + in_stride * j];</a>
+<a name="ln1207">          col = _mm_add_ps(col, _mm_mul_ps(_mm_set1_ps(dx), _mm_set_ps(0.0f, p, p, p)));</a>
+<a name="ln1208">        }</a>
+<a name="ln1209"> </a>
+<a name="ln1210">        // upper right</a>
+<a name="ln1211">        p = in[maxi + 1 + in_stride * py];</a>
+<a name="ln1212">        col = _mm_add_ps(col, _mm_mul_ps(_mm_set1_ps(dx * (1 - dy)), _mm_set_ps(0.0f, p, p, p)));</a>
+<a name="ln1213"> </a>
+<a name="ln1214">        num = ((maxj - py) / 2 + 1 - dy) * (samples + 1);</a>
+<a name="ln1215">      }</a>
+<a name="ln1216">      else if(maxj == py + samples)</a>
+<a name="ln1217">      {</a>
+<a name="ln1218">        // lower border</a>
+<a name="ln1219">        for(int i = px + 1; i &lt;= maxi; i++)</a>
+<a name="ln1220">        {</a>
+<a name="ln1221">          p = in[i + in_stride * (maxj + 1)];</a>
+<a name="ln1222">          col = _mm_add_ps(col, _mm_mul_ps(_mm_set1_ps(dy), _mm_set_ps(0.0f, p, p, p)));</a>
+<a name="ln1223">        }</a>
+<a name="ln1224"> </a>
+<a name="ln1225">        // lower left pixel</a>
+<a name="ln1226">        p = in[px + in_stride * (maxj + 1)];</a>
+<a name="ln1227">        col = _mm_add_ps(col, _mm_mul_ps(_mm_set1_ps((1 - dx) * dy), _mm_set_ps(0.0f, p, p, p)));</a>
+<a name="ln1228"> </a>
+<a name="ln1229">        num = ((maxi - px) / 2 + 1 - dx) * (samples + 1);</a>
+<a name="ln1230">      }</a>
+<a name="ln1231">      else</a>
+<a name="ln1232">      {</a>
+<a name="ln1233">        num = ((maxi - px) / 2 + 1 - dx) * ((maxj - py) / 2 + 1 - dy);</a>
+<a name="ln1234">      }</a>
+<a name="ln1235"> </a>
+<a name="ln1236">      num = 1.0f / num;</a>
+<a name="ln1237">      col = _mm_mul_ps(col, _mm_set_ps(0.0f, num, num, num));</a>
+<a name="ln1238">      _mm_stream_ps(outc, col);</a>
+<a name="ln1239">      outc += 4;</a>
+<a name="ln1240">    }</a>
+<a name="ln1241">  }</a>
+<a name="ln1242">  _mm_sfence();</a>
+<a name="ln1243">}</a>
+<a name="ln1244">#endif</a>
+<a name="ln1245"> </a>
+<a name="ln1246">void dt_iop_clip_and_zoom_demosaic_passthrough_monochrome_f(float *out, const float *const in,</a>
+<a name="ln1247">                                                            const dt_iop_roi_t *const roi_out,</a>
+<a name="ln1248">                                                            const dt_iop_roi_t *const roi_in,</a>
+<a name="ln1249">                                                            const int32_t out_stride, const int32_t in_stride)</a>
+<a name="ln1250">{</a>
+<a name="ln1251">  if(darktable.codepath.OPENMP_SIMD)</a>
+<a name="ln1252">    return dt_iop_clip_and_zoom_demosaic_passthrough_monochrome_f_plain(out, in, roi_out, roi_in, out_stride,</a>
+<a name="ln1253">                                                                        in_stride);</a>
+<a name="ln1254">#if defined(__SSE__)</a>
+<a name="ln1255">  else if(darktable.codepath.SSE2)</a>
+<a name="ln1256">    return dt_iop_clip_and_zoom_demosaic_passthrough_monochrome_f_sse2(out, in, roi_out, roi_in, out_stride,</a>
+<a name="ln1257">                                                                       in_stride);</a>
+<a name="ln1258">#endif</a>
+<a name="ln1259">  else</a>
+<a name="ln1260">    dt_unreachable_codepath();</a>
+<a name="ln1261">}</a>
+<a name="ln1262"> </a>
+<a name="ln1263">#if 0 // gets rid of pink artifacts, but doesn't do sub-pixel sampling, so shows some staircasing artifacts.</a>
+<a name="ln1264">void</a>
+<a name="ln1265">dt_iop_clip_and_zoom_demosaic_half_size_f(</a>
+<a name="ln1266">  float *out,</a>
+<a name="ln1267">  const float *const in,</a>
+<a name="ln1268">  const dt_iop_roi_t *const roi_out,</a>
+<a name="ln1269">  const dt_iop_roi_t *const roi_in,</a>
+<a name="ln1270">  const int32_t out_stride,</a>
+<a name="ln1271">  const int32_t in_stride,</a>
+<a name="ln1272">  const uint32_t filters,</a>
+<a name="ln1273">  const float clip)</a>
+<a name="ln1274">{</a>
+<a name="ln1275">  // adjust to pixel region and don't sample more than scale/2 nbs!</a>
+<a name="ln1276">  // pixel footprint on input buffer, radius:</a>
+<a name="ln1277">  const float px_footprint = 1.f/roi_out-&gt;scale;</a>
+<a name="ln1278">  // how many 2x2 blocks can be sampled inside that area</a>
+<a name="ln1279">  const int samples = round(px_footprint/2);</a>
+<a name="ln1280"> </a>
+<a name="ln1281">  // move p to point to an rggb block:</a>
+<a name="ln1282">  int trggbx = 0, trggby = 0;</a>
+<a name="ln1283">  if(FC(trggby, trggbx+1, filters) != 1) trggbx ++;</a>
+<a name="ln1284">  if(FC(trggby, trggbx,   filters) != 0)</a>
+<a name="ln1285">  {</a>
+<a name="ln1286">    trggbx = (trggbx + 1)&amp;1;</a>
+<a name="ln1287">    trggby ++;</a>
+<a name="ln1288">  }</a>
+<a name="ln1289">  const int rggbx = trggbx, rggby = trggby;</a>
+<a name="ln1290"> </a>
+<a name="ln1291">#ifdef _OPENMP</a>
+<a name="ln1292">#pragma omp parallel for default(none) shared(out) schedule(static)</a>
+<a name="ln1293">#endif</a>
+<a name="ln1294">  for(int y=0; y&lt;roi_out-&gt;height; y++)</a>
+<a name="ln1295">  {</a>
+<a name="ln1296">    float *outc = out + 4*(out_stride*y);</a>
+<a name="ln1297"> </a>
+<a name="ln1298">    float fy = (y + roi_out-&gt;y)*px_footprint;</a>
+<a name="ln1299">    int py = (int)fy &amp; ~1;</a>
+<a name="ln1300">    py = MIN(((roi_in-&gt;height-4) &amp; ~1u), py) + rggby;</a>
+<a name="ln1301"> </a>
+<a name="ln1302">    int maxj = MIN(((roi_in-&gt;height-3)&amp;~1u)+rggby, py+2*samples);</a>
+<a name="ln1303"> </a>
+<a name="ln1304">    float fx = roi_out-&gt;x*px_footprint;</a>
+<a name="ln1305"> </a>
+<a name="ln1306">    for(int x=0; x&lt;roi_out-&gt;width; x++)</a>
+<a name="ln1307">    {</a>
+<a name="ln1308">      __m128 col = _mm_setzero_ps();</a>
+<a name="ln1309"> </a>
+<a name="ln1310">      fx += px_footprint;</a>
+<a name="ln1311">      int px = (int)fx &amp; ~1;</a>
+<a name="ln1312">      px = MIN(((roi_in-&gt;width -4) &amp; ~1u), px) + rggbx;</a>
+<a name="ln1313"> </a>
+<a name="ln1314">      int maxi = MIN(((roi_in-&gt;width -3)&amp;~1u)+rggbx, px+2*samples);</a>
+<a name="ln1315"> </a>
+<a name="ln1316">      int num = 0;</a>
+<a name="ln1317"> </a>
+<a name="ln1318">      const int idx = px + in_stride*py;</a>
+<a name="ln1319">      const float pc = MAX(MAX(in[idx], in[idx+1]), MAX(in[idx + in_stride], in[idx+1 + in_stride]));</a>
+<a name="ln1320"> </a>
+<a name="ln1321">      // 2x2 blocks in the middle of sampling region</a>
+<a name="ln1322">      __m128 sum = _mm_setzero_ps();</a>
+<a name="ln1323"> </a>
+<a name="ln1324">      for(int j=py; j&lt;=maxj; j+=2)</a>
+<a name="ln1325">        for(int i=px; i&lt;=maxi; i+=2)</a>
+<a name="ln1326">        {</a>
+<a name="ln1327">          const float p1 = in[i   + in_stride*j];</a>
+<a name="ln1328">          const float p2 = in[i+1 + in_stride*j];</a>
+<a name="ln1329">          const float p3 = in[i   + in_stride*(j + 1)];</a>
+<a name="ln1330">          const float p4 = in[i+1 + in_stride*(j + 1)];</a>
+<a name="ln1331"> </a>
+<a name="ln1332">          if (!((pc &gt;= clip) ^ (MAX(MAX(p1,p2),MAX(p3,p4)) &gt;= clip)))</a>
+<a name="ln1333">          {</a>
+<a name="ln1334">            sum = _mm_add_ps(sum, _mm_set_ps(0,p4,p3+p2,p1));</a>
+<a name="ln1335">            num++;</a>
+<a name="ln1336">          }</a>
+<a name="ln1337">        }</a>
+<a name="ln1338"> </a>
+<a name="ln1339">      col = _mm_mul_ps(sum, _mm_div_ps(_mm_set_ps(0.0f,1.0f,0.5f,1.0f),_mm_set1_ps(num)));</a>
+<a name="ln1340">      _mm_stream_ps(outc, col);</a>
+<a name="ln1341">      outc += 4;</a>
+<a name="ln1342">    }</a>
+<a name="ln1343">  }</a>
+<a name="ln1344">  _mm_sfence();</a>
+<a name="ln1345">}</a>
+<a name="ln1346"> </a>
+<a name="ln1347">#else</a>
+<a name="ln1348">// very fast and smooth, but doesn't handle highlights:</a>
+<a name="ln1349"> </a>
+<a name="ln1350">void dt_iop_clip_and_zoom_demosaic_half_size_f_plain(float *out, const float *const in,</a>
+<a name="ln1351">                                                     const dt_iop_roi_t *const roi_out,</a>
+<a name="ln1352">                                                     const dt_iop_roi_t *const roi_in, const int32_t out_stride,</a>
+<a name="ln1353">                                                     const int32_t in_stride, const uint32_t filters)</a>
+<a name="ln1354">{</a>
+<a name="ln1355">  // adjust to pixel region and don't sample more than scale/2 nbs!</a>
+<a name="ln1356">  // pixel footprint on input buffer, radius:</a>
+<a name="ln1357">  const float px_footprint = 1.f / roi_out-&gt;scale;</a>
+<a name="ln1358">  // how many 2x2 blocks can be sampled inside that area</a>
+<a name="ln1359">  const int samples = round(px_footprint / 2);</a>
+<a name="ln1360"> </a>
+<a name="ln1361">  // move p to point to an rggb block:</a>
+<a name="ln1362">  int trggbx = 0, trggby = 0;</a>
+<a name="ln1363">  if(FC(trggby, trggbx + 1, filters) != 1) trggbx++;</a>
+<a name="ln1364">  if(FC(trggby, trggbx, filters) != 0)</a>
+<a name="ln1365">  {</a>
+<a name="ln1366">    trggbx = (trggbx + 1) &amp; 1;</a>
+<a name="ln1367">    trggby++;</a>
+<a name="ln1368">  }</a>
+<a name="ln1369">  const int rggbx = trggbx, rggby = trggby;</a>
+<a name="ln1370"> </a>
+<a name="ln1371">#ifdef _OPENMP</a>
+<a name="ln1372">#pragma omp parallel for default(none) \</a>
+<a name="ln1373">  dt_omp_firstprivate(in, in_stride, out_stride, px_footprint, rggbx, rggby, roi_in, roi_out, samples) \</a>
+<a name="ln1374">  shared(out) \</a>
+<a name="ln1375">  schedule(static)</a>
+<a name="ln1376">#endif</a>
+<a name="ln1377">  for(int y = 0; y &lt; roi_out-&gt;height; y++)</a>
+<a name="ln1378">  {</a>
+<a name="ln1379">    float *outc = out + 4 * (out_stride * y);</a>
+<a name="ln1380"> </a>
+<a name="ln1381">    float fy = (y + roi_out-&gt;y) * px_footprint;</a>
+<a name="ln1382">    int py = (int)fy &amp; ~1;</a>
+<a name="ln1383">    const float dy = (fy - py) / 2;</a>
+<a name="ln1384">    py = MIN(((roi_in-&gt;height - 6) &amp; ~1u), py) + rggby;</a>
+<a name="ln1385"> </a>
+<a name="ln1386">    int maxj = MIN(((roi_in-&gt;height - 5) &amp; ~1u) + rggby, py + 2 * samples);</a>
+<a name="ln1387"> </a>
+<a name="ln1388">    for(int x = 0; x &lt; roi_out-&gt;width; x++)</a>
+<a name="ln1389">    {</a>
+<a name="ln1390">      float col[4] = { 0, 0, 0, 0 };</a>
+<a name="ln1391"> </a>
+<a name="ln1392">      float fx = (x + roi_out-&gt;x) * px_footprint;</a>
+<a name="ln1393">      int px = (int)fx &amp; ~1;</a>
+<a name="ln1394">      const float dx = (fx - px) / 2;</a>
+<a name="ln1395">      px = MIN(((roi_in-&gt;width - 6) &amp; ~1u), px) + rggbx;</a>
+<a name="ln1396"> </a>
+<a name="ln1397">      int maxi = MIN(((roi_in-&gt;width - 5) &amp; ~1u) + rggbx, px + 2 * samples);</a>
+<a name="ln1398"> </a>
+<a name="ln1399">      float p[3];</a>
+<a name="ln1400">      float num = 0;</a>
+<a name="ln1401"> </a>
+<a name="ln1402">      // upper left 2x2 block of sampling region</a>
+<a name="ln1403">      p[0] = in[px + in_stride * py];</a>
+<a name="ln1404">      p[1] = in[px + 1 + in_stride * py] + in[px + in_stride * (py + 1)];</a>
+<a name="ln1405">      p[2] = in[px + 1 + in_stride * (py + 1)];</a>
+<a name="ln1406">      for(int c = 0; c &lt; 3; c++) col[c] += ((1 - dx) * (1 - dy)) * p[c];</a>
+<a name="ln1407"> </a>
+<a name="ln1408">      // left 2x2 block border of sampling region</a>
+<a name="ln1409">      for(int j = py + 2; j &lt;= maxj; j += 2)</a>
+<a name="ln1410">      {</a>
+<a name="ln1411">        p[0] = in[px + in_stride * j];</a>
+<a name="ln1412">        p[1] = in[px + 1 + in_stride * j] + in[px + in_stride * (j + 1)];</a>
+<a name="ln1413">        p[2] = in[px + 1 + in_stride * (j + 1)];</a>
+<a name="ln1414">        for(int c = 0; c &lt; 3; c++) col[c] += (1 - dx) * p[c];</a>
+<a name="ln1415">      }</a>
+<a name="ln1416"> </a>
+<a name="ln1417">      // upper 2x2 block border of sampling region</a>
+<a name="ln1418">      for(int i = px + 2; i &lt;= maxi; i += 2)</a>
+<a name="ln1419">      {</a>
+<a name="ln1420">        p[0] = in[i + in_stride * py];</a>
+<a name="ln1421">        p[1] = in[i + 1 + in_stride * py] + in[i + in_stride * (py + 1)];</a>
+<a name="ln1422">        p[2] = in[i + 1 + in_stride * (py + 1)];</a>
+<a name="ln1423">        for(int c = 0; c &lt; 3; c++) col[c] += (1 - dy) * p[c];</a>
+<a name="ln1424">      }</a>
+<a name="ln1425"> </a>
+<a name="ln1426">      // 2x2 blocks in the middle of sampling region</a>
+<a name="ln1427">      for(int j = py + 2; j &lt;= maxj; j += 2)</a>
+<a name="ln1428">        for(int i = px + 2; i &lt;= maxi; i += 2)</a>
+<a name="ln1429">        {</a>
+<a name="ln1430">          p[0] = in[i + in_stride * j];</a>
+<a name="ln1431">          p[1] = in[i + 1 + in_stride * j] + in[i + in_stride * (j + 1)];</a>
+<a name="ln1432">          p[2] = in[i + 1 + in_stride * (j + 1)];</a>
+<a name="ln1433">          for(int c = 0; c &lt; 3; c++) col[c] += p[c];</a>
+<a name="ln1434">        }</a>
+<a name="ln1435"> </a>
+<a name="ln1436">      if(maxi == px + 2 * samples &amp;&amp; maxj == py + 2 * samples)</a>
+<a name="ln1437">      {</a>
+<a name="ln1438">        // right border</a>
+<a name="ln1439">        for(int j = py + 2; j &lt;= maxj; j += 2)</a>
+<a name="ln1440">        {</a>
+<a name="ln1441">          p[0] = in[maxi + 2 + in_stride * j];</a>
+<a name="ln1442">          p[1] = in[maxi + 3 + in_stride * j] + in[maxi + 2 + in_stride * (j + 1)];</a>
+<a name="ln1443">          p[2] = in[maxi + 3 + in_stride * (j + 1)];</a>
+<a name="ln1444">          for(int c = 0; c &lt; 3; c++) col[c] += dx * p[c];</a>
+<a name="ln1445">        }</a>
+<a name="ln1446"> </a>
+<a name="ln1447">        // upper right</a>
+<a name="ln1448">        p[0] = in[maxi + 2 + in_stride * py];</a>
+<a name="ln1449">        p[1] = in[maxi + 3 + in_stride * py] + in[maxi + 2 + in_stride * (py + 1)];</a>
+<a name="ln1450">        p[2] = in[maxi + 3 + in_stride * (py + 1)];</a>
+<a name="ln1451">        for(int c = 0; c &lt; 3; c++) col[c] += (dx * (1 - dy)) * p[c];</a>
+<a name="ln1452"> </a>
+<a name="ln1453">        // lower border</a>
+<a name="ln1454">        for(int i = px + 2; i &lt;= maxi; i += 2)</a>
+<a name="ln1455">        {</a>
+<a name="ln1456">          p[0] = in[i + in_stride * (maxj + 2)];</a>
+<a name="ln1457">          p[1] = in[i + 1 + in_stride * (maxj + 2)] + in[i + in_stride * (maxj + 3)];</a>
+<a name="ln1458">          p[2] = in[i + 1 + in_stride * (maxj + 3)];</a>
+<a name="ln1459">          for(int c = 0; c &lt; 3; c++) col[c] += dy * p[c];</a>
+<a name="ln1460">        }</a>
+<a name="ln1461"> </a>
+<a name="ln1462">        // lower left 2x2 block</a>
+<a name="ln1463">        p[0] = in[px + in_stride * (maxj + 2)];</a>
+<a name="ln1464">        p[1] = in[px + 1 + in_stride * (maxj + 2)] + in[px + in_stride * (maxj + 3)];</a>
+<a name="ln1465">        p[2] = in[px + 1 + in_stride * (maxj + 3)];</a>
+<a name="ln1466">        for(int c = 0; c &lt; 3; c++) col[c] += ((1 - dx) * dy) * p[c];</a>
+<a name="ln1467"> </a>
+<a name="ln1468">        // lower right 2x2 block</a>
+<a name="ln1469">        p[0] = in[maxi + 2 + in_stride * (maxj + 2)];</a>
+<a name="ln1470">        p[1] = in[maxi + 3 + in_stride * (maxj + 2)] + in[maxi + 2 + in_stride * (maxj + 3)];</a>
+<a name="ln1471">        p[2] = in[maxi + 3 + in_stride * (maxj + 3)];</a>
+<a name="ln1472">        for(int c = 0; c &lt; 3; c++) col[c] += (dx * dy) * p[c];</a>
+<a name="ln1473"> </a>
+<a name="ln1474">        num = (samples + 1) * (samples + 1);</a>
+<a name="ln1475">      }</a>
+<a name="ln1476">      else if(maxi == px + 2 * samples)</a>
+<a name="ln1477">      {</a>
+<a name="ln1478">        // right border</a>
+<a name="ln1479">        for(int j = py + 2; j &lt;= maxj; j += 2)</a>
+<a name="ln1480">        {</a>
+<a name="ln1481">          p[0] = in[maxi + 2 + in_stride * j];</a>
+<a name="ln1482">          p[1] = in[maxi + 3 + in_stride * j] + in[maxi + 2 + in_stride * (j + 1)];</a>
+<a name="ln1483">          p[2] = in[maxi + 3 + in_stride * (j + 1)];</a>
+<a name="ln1484">          for(int c = 0; c &lt; 3; c++) col[c] += dx * p[c];</a>
+<a name="ln1485">        }</a>
+<a name="ln1486"> </a>
+<a name="ln1487">        // upper right</a>
+<a name="ln1488">        p[0] = in[maxi + 2 + in_stride * py];</a>
+<a name="ln1489">        p[1] = in[maxi + 3 + in_stride * py] + in[maxi + 2 + in_stride * (py + 1)];</a>
+<a name="ln1490">        p[2] = in[maxi + 3 + in_stride * (py + 1)];</a>
+<a name="ln1491">        for(int c = 0; c &lt; 3; c++) col[c] += (dx * (1 - dy)) * p[c];</a>
+<a name="ln1492"> </a>
+<a name="ln1493">        num = ((maxj - py) / 2 + 1 - dy) * (samples + 1);</a>
+<a name="ln1494">      }</a>
+<a name="ln1495">      else if(maxj == py + 2 * samples)</a>
+<a name="ln1496">      {</a>
+<a name="ln1497">        // lower border</a>
+<a name="ln1498">        for(int i = px + 2; i &lt;= maxi; i += 2)</a>
+<a name="ln1499">        {</a>
+<a name="ln1500">          p[0] = in[i + in_stride * (maxj + 2)];</a>
+<a name="ln1501">          p[1] = in[i + 1 + in_stride * (maxj + 2)] + in[i + in_stride * (maxj + 3)];</a>
+<a name="ln1502">          p[2] = in[i + 1 + in_stride * (maxj + 3)];</a>
+<a name="ln1503">          for(int c = 0; c &lt; 3; c++) col[c] += dy * p[c];</a>
+<a name="ln1504">        }</a>
+<a name="ln1505"> </a>
+<a name="ln1506">        // lower left 2x2 block</a>
+<a name="ln1507">        p[0] = in[px + in_stride * (maxj + 2)];</a>
+<a name="ln1508">        p[1] = in[px + 1 + in_stride * (maxj + 2)] + in[px + in_stride * (maxj + 3)];</a>
+<a name="ln1509">        p[2] = in[px + 1 + in_stride * (maxj + 3)];</a>
+<a name="ln1510">        for(int c = 0; c &lt; 3; c++) col[c] += ((1 - dx) * dy) * p[c];</a>
+<a name="ln1511"> </a>
+<a name="ln1512">        num = ((maxi - px) / 2 + 1 - dx) * (samples + 1);</a>
+<a name="ln1513">      }</a>
+<a name="ln1514">      else</a>
+<a name="ln1515">      {</a>
+<a name="ln1516">        num = ((maxi - px) / 2 + 1 - dx) * ((maxj - py) / 2 + 1 - dy);</a>
+<a name="ln1517">      }</a>
+<a name="ln1518"> </a>
+<a name="ln1519">      outc[0] = col[0] / num;</a>
+<a name="ln1520">      outc[1] = (col[1] / num) / 2.0f;</a>
+<a name="ln1521">      outc[2] = col[2] / num;</a>
+<a name="ln1522">      outc[3] = 0.0f;</a>
+<a name="ln1523">      outc += 4;</a>
+<a name="ln1524">    }</a>
+<a name="ln1525">  }</a>
+<a name="ln1526">}</a>
+<a name="ln1527"> </a>
+<a name="ln1528">#if defined(__SSE__)</a>
+<a name="ln1529">void dt_iop_clip_and_zoom_demosaic_half_size_f_sse2(float *out, const float *const in,</a>
+<a name="ln1530">                                                    const dt_iop_roi_t *const roi_out,</a>
+<a name="ln1531">                                                    const dt_iop_roi_t *const roi_in, const int32_t out_stride,</a>
+<a name="ln1532">                                                    const int32_t in_stride, const uint32_t filters)</a>
+<a name="ln1533">{</a>
+<a name="ln1534">  // adjust to pixel region and don't sample more than scale/2 nbs!</a>
+<a name="ln1535">  // pixel footprint on input buffer, radius:</a>
+<a name="ln1536">  const float px_footprint = 1.f / roi_out-&gt;scale;</a>
+<a name="ln1537">  // how many 2x2 blocks can be sampled inside that area</a>
+<a name="ln1538">  const int samples = round(px_footprint / 2);</a>
+<a name="ln1539"> </a>
+<a name="ln1540">  // move p to point to an rggb block:</a>
+<a name="ln1541">  int trggbx = 0, trggby = 0;</a>
+<a name="ln1542">  if(FC(trggby, trggbx + 1, filters) != 1) trggbx++;</a>
+<a name="ln1543">  if(FC(trggby, trggbx, filters) != 0)</a>
+<a name="ln1544">  {</a>
+<a name="ln1545">    trggbx = (trggbx + 1) &amp; 1;</a>
+<a name="ln1546">    trggby++;</a>
+<a name="ln1547">  }</a>
+<a name="ln1548">  const int rggbx = trggbx, rggby = trggby;</a>
+<a name="ln1549"> </a>
+<a name="ln1550">#ifdef _OPENMP</a>
+<a name="ln1551">#pragma omp parallel for default(none) \</a>
+<a name="ln1552">  dt_omp_firstprivate(in, in_stride, px_footprint, rggbx, rggby, out_stride, roi_in, roi_out, samples) \</a>
+<a name="ln1553">  shared(out) \</a>
+<a name="ln1554">  schedule(static)</a>
+<a name="ln1555">#endif</a>
+<a name="ln1556">  for(int y = 0; y &lt; roi_out-&gt;height; y++)</a>
+<a name="ln1557">  {</a>
+<a name="ln1558">    float *outc = out + 4 * (out_stride * y);</a>
+<a name="ln1559"> </a>
+<a name="ln1560">    float fy = (y + roi_out-&gt;y) * px_footprint;</a>
+<a name="ln1561">    int py = (int)fy &amp; ~1;</a>
+<a name="ln1562">    const float dy = (fy - py) / 2;</a>
+<a name="ln1563">    py = MIN(((roi_in-&gt;height - 6) &amp; ~1u), py) + rggby;</a>
+<a name="ln1564"> </a>
+<a name="ln1565">    int maxj = MIN(((roi_in-&gt;height - 5) &amp; ~1u) + rggby, py + 2 * samples);</a>
+<a name="ln1566"> </a>
+<a name="ln1567">    for(int x = 0; x &lt; roi_out-&gt;width; x++)</a>
+<a name="ln1568">    {</a>
+<a name="ln1569">      __m128 col = _mm_setzero_ps();</a>
+<a name="ln1570"> </a>
+<a name="ln1571">      float fx = (x + roi_out-&gt;x) * px_footprint;</a>
+<a name="ln1572">      int px = (int)fx &amp; ~1;</a>
+<a name="ln1573">      const float dx = (fx - px) / 2;</a>
+<a name="ln1574">      px = MIN(((roi_in-&gt;width - 6) &amp; ~1u), px) + rggbx;</a>
+<a name="ln1575"> </a>
+<a name="ln1576">      int maxi = MIN(((roi_in-&gt;width - 5) &amp; ~1u) + rggbx, px + 2 * samples);</a>
+<a name="ln1577"> </a>
+<a name="ln1578">      float p1, p2, p4;</a>
+<a name="ln1579">      float num = 0;</a>
+<a name="ln1580"> </a>
+<a name="ln1581">      // upper left 2x2 block of sampling region</a>
+<a name="ln1582">      p1 = in[px + in_stride * py];</a>
+<a name="ln1583">      p2 = in[px + 1 + in_stride * py] + in[px + in_stride * (py + 1)];</a>
+<a name="ln1584">      p4 = in[px + 1 + in_stride * (py + 1)];</a>
+<a name="ln1585">      col = _mm_add_ps(col, _mm_mul_ps(_mm_set1_ps((1 - dx) * (1 - dy)), _mm_set_ps(0.0f, p4, p2, p1)));</a>
+<a name="ln1586"> </a>
+<a name="ln1587">      // left 2x2 block border of sampling region</a>
+<a name="ln1588">      for(int j = py + 2; j &lt;= maxj; j += 2)</a>
+<a name="ln1589">      {</a>
+<a name="ln1590">        p1 = in[px + in_stride * j];</a>
+<a name="ln1591">        p2 = in[px + 1 + in_stride * j] + in[px + in_stride * (j + 1)];</a>
+<a name="ln1592">        p4 = in[px + 1 + in_stride * (j + 1)];</a>
+<a name="ln1593">        col = _mm_add_ps(col, _mm_mul_ps(_mm_set1_ps(1 - dx), _mm_set_ps(0.0f, p4, p2, p1)));</a>
+<a name="ln1594">      }</a>
+<a name="ln1595"> </a>
+<a name="ln1596">      // upper 2x2 block border of sampling region</a>
+<a name="ln1597">      for(int i = px + 2; i &lt;= maxi; i += 2)</a>
+<a name="ln1598">      {</a>
+<a name="ln1599">        p1 = in[i + in_stride * py];</a>
+<a name="ln1600">        p2 = in[i + 1 + in_stride * py] + in[i + in_stride * (py + 1)];</a>
+<a name="ln1601">        p4 = in[i + 1 + in_stride * (py + 1)];</a>
+<a name="ln1602">        col = _mm_add_ps(col, _mm_mul_ps(_mm_set1_ps(1 - dy), _mm_set_ps(0.0f, p4, p2, p1)));</a>
+<a name="ln1603">      }</a>
+<a name="ln1604"> </a>
+<a name="ln1605">      // 2x2 blocks in the middle of sampling region</a>
+<a name="ln1606">      for(int j = py + 2; j &lt;= maxj; j += 2)</a>
+<a name="ln1607">        for(int i = px + 2; i &lt;= maxi; i += 2)</a>
+<a name="ln1608">        {</a>
+<a name="ln1609">          p1 = in[i + in_stride * j];</a>
+<a name="ln1610">          p2 = in[i + 1 + in_stride * j] + in[i + in_stride * (j + 1)];</a>
+<a name="ln1611">          p4 = in[i + 1 + in_stride * (j + 1)];</a>
+<a name="ln1612">          col = _mm_add_ps(col, _mm_set_ps(0.0f, p4, p2, p1));</a>
+<a name="ln1613">        }</a>
+<a name="ln1614"> </a>
+<a name="ln1615">      if(maxi == px + 2 * samples &amp;&amp; maxj == py + 2 * samples)</a>
+<a name="ln1616">      {</a>
+<a name="ln1617">        // right border</a>
+<a name="ln1618">        for(int j = py + 2; j &lt;= maxj; j += 2)</a>
+<a name="ln1619">        {</a>
+<a name="ln1620">          p1 = in[maxi + 2 + in_stride * j];</a>
+<a name="ln1621">          p2 = in[maxi + 3 + in_stride * j] + in[maxi + 2 + in_stride * (j + 1)];</a>
+<a name="ln1622">          p4 = in[maxi + 3 + in_stride * (j + 1)];</a>
+<a name="ln1623">          col = _mm_add_ps(col, _mm_mul_ps(_mm_set1_ps(dx), _mm_set_ps(0.0f, p4, p2, p1)));</a>
+<a name="ln1624">        }</a>
+<a name="ln1625"> </a>
+<a name="ln1626">        // upper right</a>
+<a name="ln1627">        p1 = in[maxi + 2 + in_stride * py];</a>
+<a name="ln1628">        p2 = in[maxi + 3 + in_stride * py] + in[maxi + 2 + in_stride * (py + 1)];</a>
+<a name="ln1629">        p4 = in[maxi + 3 + in_stride * (py + 1)];</a>
+<a name="ln1630">        col = _mm_add_ps(col, _mm_mul_ps(_mm_set1_ps(dx * (1 - dy)), _mm_set_ps(0.0f, p4, p2, p1)));</a>
+<a name="ln1631"> </a>
+<a name="ln1632">        // lower border</a>
+<a name="ln1633">        for(int i = px + 2; i &lt;= maxi; i += 2)</a>
+<a name="ln1634">        {</a>
+<a name="ln1635">          p1 = in[i + in_stride * (maxj + 2)];</a>
+<a name="ln1636">          p2 = in[i + 1 + in_stride * (maxj + 2)] + in[i + in_stride * (maxj + 3)];</a>
+<a name="ln1637">          p4 = in[i + 1 + in_stride * (maxj + 3)];</a>
+<a name="ln1638">          col = _mm_add_ps(col, _mm_mul_ps(_mm_set1_ps(dy), _mm_set_ps(0.0f, p4, p2, p1)));</a>
+<a name="ln1639">        }</a>
+<a name="ln1640"> </a>
+<a name="ln1641">        // lower left 2x2 block</a>
+<a name="ln1642">        p1 = in[px + in_stride * (maxj + 2)];</a>
+<a name="ln1643">        p2 = in[px + 1 + in_stride * (maxj + 2)] + in[px + in_stride * (maxj + 3)];</a>
+<a name="ln1644">        p4 = in[px + 1 + in_stride * (maxj + 3)];</a>
+<a name="ln1645">        col = _mm_add_ps(col, _mm_mul_ps(_mm_set1_ps((1 - dx) * dy), _mm_set_ps(0.0f, p4, p2, p1)));</a>
+<a name="ln1646"> </a>
+<a name="ln1647">        // lower right 2x2 block</a>
+<a name="ln1648">        p1 = in[maxi + 2 + in_stride * (maxj + 2)];</a>
+<a name="ln1649">        p2 = in[maxi + 3 + in_stride * (maxj + 2)] + in[maxi + 2 + in_stride * (maxj + 3)];</a>
+<a name="ln1650">        p4 = in[maxi + 3 + in_stride * (maxj + 3)];</a>
+<a name="ln1651">        col = _mm_add_ps(col, _mm_mul_ps(_mm_set1_ps(dx * dy), _mm_set_ps(0.0f, p4, p2, p1)));</a>
+<a name="ln1652"> </a>
+<a name="ln1653">        num = (samples + 1) * (samples + 1);</a>
+<a name="ln1654">      }</a>
+<a name="ln1655">      else if(maxi == px + 2 * samples)</a>
+<a name="ln1656">      {</a>
+<a name="ln1657">        // right border</a>
+<a name="ln1658">        for(int j = py + 2; j &lt;= maxj; j += 2)</a>
+<a name="ln1659">        {</a>
+<a name="ln1660">          p1 = in[maxi + 2 + in_stride * j];</a>
+<a name="ln1661">          p2 = in[maxi + 3 + in_stride * j] + in[maxi + 2 + in_stride * (j + 1)];</a>
+<a name="ln1662">          p4 = in[maxi + 3 + in_stride * (j + 1)];</a>
+<a name="ln1663">          col = _mm_add_ps(col, _mm_mul_ps(_mm_set1_ps(dx), _mm_set_ps(0.0f, p4, p2, p1)));</a>
+<a name="ln1664">        }</a>
+<a name="ln1665"> </a>
+<a name="ln1666">        // upper right</a>
+<a name="ln1667">        p1 = in[maxi + 2 + in_stride * py];</a>
+<a name="ln1668">        p2 = in[maxi + 3 + in_stride * py] + in[maxi + 2 + in_stride * (py + 1)];</a>
+<a name="ln1669">        p4 = in[maxi + 3 + in_stride * (py + 1)];</a>
+<a name="ln1670">        col = _mm_add_ps(col, _mm_mul_ps(_mm_set1_ps(dx * (1 - dy)), _mm_set_ps(0.0f, p4, p2, p1)));</a>
+<a name="ln1671"> </a>
+<a name="ln1672">        num = ((maxj - py) / 2 + 1 - dy) * (samples + 1);</a>
+<a name="ln1673">      }</a>
+<a name="ln1674">      else if(maxj == py + 2 * samples)</a>
+<a name="ln1675">      {</a>
+<a name="ln1676">        // lower border</a>
+<a name="ln1677">        for(int i = px + 2; i &lt;= maxi; i += 2)</a>
+<a name="ln1678">        {</a>
+<a name="ln1679">          p1 = in[i + in_stride * (maxj + 2)];</a>
+<a name="ln1680">          p2 = in[i + 1 + in_stride * (maxj + 2)] + in[i + in_stride * (maxj + 3)];</a>
+<a name="ln1681">          p4 = in[i + 1 + in_stride * (maxj + 3)];</a>
+<a name="ln1682">          col = _mm_add_ps(col, _mm_mul_ps(_mm_set1_ps(dy), _mm_set_ps(0.0f, p4, p2, p1)));</a>
+<a name="ln1683">        }</a>
+<a name="ln1684"> </a>
+<a name="ln1685">        // lower left 2x2 block</a>
+<a name="ln1686">        p1 = in[px + in_stride * (maxj + 2)];</a>
+<a name="ln1687">        p2 = in[px + 1 + in_stride * (maxj + 2)] + in[px + in_stride * (maxj + 3)];</a>
+<a name="ln1688">        p4 = in[px + 1 + in_stride * (maxj + 3)];</a>
+<a name="ln1689">        col = _mm_add_ps(col, _mm_mul_ps(_mm_set1_ps((1 - dx) * dy), _mm_set_ps(0.0f, p4, p2, p1)));</a>
+<a name="ln1690"> </a>
+<a name="ln1691">        num = ((maxi - px) / 2 + 1 - dx) * (samples + 1);</a>
+<a name="ln1692">      }</a>
+<a name="ln1693">      else</a>
+<a name="ln1694">      {</a>
+<a name="ln1695">        num = ((maxi - px) / 2 + 1 - dx) * ((maxj - py) / 2 + 1 - dy);</a>
+<a name="ln1696">      }</a>
+<a name="ln1697"> </a>
+<a name="ln1698">      num = 1.0f / num;</a>
+<a name="ln1699">      col = _mm_mul_ps(col, _mm_set_ps(0.0f, num, 0.5f * num, num));</a>
+<a name="ln1700">      _mm_stream_ps(outc, col);</a>
+<a name="ln1701">      outc += 4;</a>
+<a name="ln1702">    }</a>
+<a name="ln1703">  }</a>
+<a name="ln1704">  _mm_sfence();</a>
+<a name="ln1705">}</a>
+<a name="ln1706">#endif</a>
+<a name="ln1707">#endif</a>
+<a name="ln1708"> </a>
+<a name="ln1709">void dt_iop_clip_and_zoom_demosaic_half_size_f(float *out, const float *const in,</a>
+<a name="ln1710">                                               const dt_iop_roi_t *const roi_out, const dt_iop_roi_t *const roi_in,</a>
+<a name="ln1711">                                               const int32_t out_stride, const int32_t in_stride,</a>
+<a name="ln1712">                                               const uint32_t filters)</a>
+<a name="ln1713">{</a>
+<a name="ln1714">  if(darktable.codepath.OPENMP_SIMD)</a>
+<a name="ln1715">    return dt_iop_clip_and_zoom_demosaic_half_size_f_plain(out, in, roi_out, roi_in, out_stride, in_stride,</a>
+<a name="ln1716">                                                           filters);</a>
+<a name="ln1717">#if defined(__SSE__)</a>
+<a name="ln1718">  else if(darktable.codepath.SSE2)</a>
+<a name="ln1719">    return dt_iop_clip_and_zoom_demosaic_half_size_f_sse2(out, in, roi_out, roi_in, out_stride, in_stride, filters);</a>
+<a name="ln1720">#endif</a>
+<a name="ln1721">  else</a>
+<a name="ln1722">    dt_unreachable_codepath();</a>
+<a name="ln1723">}</a>
+<a name="ln1724"> </a>
+<a name="ln1725">void dt_iop_clip_and_zoom_demosaic_third_size_xtrans_f(float *out, const float *const in,</a>
+<a name="ln1726">                                                       const dt_iop_roi_t *const roi_out,</a>
+<a name="ln1727">                                                       const dt_iop_roi_t *const roi_in,</a>
+<a name="ln1728">                                                       const int32_t out_stride, const int32_t in_stride,</a>
+<a name="ln1729">                                                       const uint8_t (*const xtrans)[6])</a>
+<a name="ln1730">{</a>
+<a name="ln1731">  const float px_footprint = 1.f / roi_out-&gt;scale;</a>
+<a name="ln1732">  const int samples = MAX(1, (int)floorf(px_footprint / 3));</a>
+<a name="ln1733"> </a>
+<a name="ln1734">  // A slightly different algorithm than</a>
+<a name="ln1735">  // dt_iop_clip_and_zoom_demosaic_half_size_f() which aligns to 2x2</a>
+<a name="ln1736">  // Bayer grid and hence most pull additional data from all edges</a>
+<a name="ln1737">  // which don't align with CFA. Instead align to a 3x3 pattern (which</a>
+<a name="ln1738">  // is semi-regular in X-Trans CFA). This code doesn't worry about</a>
+<a name="ln1739">  // fractional pixel offset of top/left of pattern nor oversampling</a>
+<a name="ln1740">  // by non-integer number of samples.</a>
+<a name="ln1741"> </a>
+<a name="ln1742">#ifdef _OPENMP</a>
+<a name="ln1743">#pragma omp parallel for default(none) \</a>
+<a name="ln1744">  dt_omp_firstprivate(in, in_stride, out_stride, px_footprint, roi_in, roi_out, samples, xtrans) \</a>
+<a name="ln1745">  shared(out) \</a>
+<a name="ln1746">  schedule(static)</a>
+<a name="ln1747">#endif</a>
+<a name="ln1748">  for(int y = 0; y &lt; roi_out-&gt;height; y++)</a>
+<a name="ln1749">  {</a>
+<a name="ln1750">    float *outc = out + 4 * (out_stride * y);</a>
+<a name="ln1751">    const int py = CLAMPS((int)round((y + roi_out-&gt;y - 0.5f) * px_footprint), 0, roi_in-&gt;height - 3);</a>
+<a name="ln1752">    const int ymax = MIN(roi_in-&gt;height - 3, py + 3 * samples);</a>
+<a name="ln1753"> </a>
+<a name="ln1754">    for(int x = 0; x &lt; roi_out-&gt;width; x++, outc += 4)</a>
+<a name="ln1755">    {</a>
+<a name="ln1756">      float col[3] = { 0.0f };</a>
+<a name="ln1757">      int num = 0;</a>
+<a name="ln1758">      const int px = CLAMPS((int)round((x + roi_out-&gt;x - 0.5f) * px_footprint), 0, roi_in-&gt;width - 3);</a>
+<a name="ln1759">      const int xmax = MIN(roi_in-&gt;width - 3, px + 3 * samples);</a>
+<a name="ln1760">      for(int yy = py; yy &lt;= ymax; yy += 3)</a>
+<a name="ln1761">        for(int xx = px; xx &lt;= xmax; xx += 3)</a>
+<a name="ln1762">        {</a>
+<a name="ln1763">          for(int j = 0; j &lt; 3; ++j)</a>
+<a name="ln1764">            for(int i = 0; i &lt; 3; ++i)</a>
+<a name="ln1765">              col[FCxtrans(yy + j, xx + i, roi_in, xtrans)] += in[xx + i + in_stride * (yy + j)];</a>
+<a name="ln1766">          num++;</a>
+<a name="ln1767">        }</a>
+<a name="ln1768"> </a>
+<a name="ln1769">      // X-Trans RGB weighting averages to 2:5:2 for each 3x3 cell</a>
+<a name="ln1770">      outc[0] = col[0] / (num * 2);</a>
+<a name="ln1771">      outc[1] = col[1] / (num * 5);</a>
+<a name="ln1772">      outc[2] = col[2] / (num * 2);</a>
+<a name="ln1773">    }</a>
+<a name="ln1774">  }</a>
+<a name="ln1775">}</a>
+<a name="ln1776"> </a>
+<a name="ln1777">void dt_iop_RGB_to_YCbCr(const float *rgb, float *yuv)</a>
+<a name="ln1778">{</a>
+<a name="ln1779">  yuv[0] = 0.299 * rgb[0] + 0.587 * rgb[1] + 0.114 * rgb[2];</a>
+<a name="ln1780">  yuv[1] = -0.147 * rgb[0] - 0.289 * rgb[1] + 0.437 * rgb[2];</a>
+<a name="ln1781">  yuv[2] = 0.615 * rgb[0] - 0.515 * rgb[1] - 0.100 * rgb[2];</a>
+<a name="ln1782">}</a>
+<a name="ln1783"> </a>
+<a name="ln1784">void dt_iop_YCbCr_to_RGB(const float *yuv, float *rgb)</a>
+<a name="ln1785">{</a>
+<a name="ln1786">  rgb[0] = yuv[0] + 1.140 * yuv[2];</a>
+<a name="ln1787">  rgb[1] = yuv[0] - 0.394 * yuv[1] - 0.581 * yuv[2];</a>
+<a name="ln1788">  rgb[2] = yuv[0] + 2.028 * yuv[1];</a>
+<a name="ln1789">}</a>
+<a name="ln1790"> </a>
+<a name="ln1791">static inline void mat4inv(const float X[][4], float R[][4])</a>
+<a name="ln1792">{</a>
+<a name="ln1793">  const float det = X[0][3] * X[1][2] * X[2][1] * X[3][0] - X[0][2] * X[1][3] * X[2][1] * X[3][0]</a>
+<a name="ln1794">                    - X[0][3] * X[1][1] * X[2][2] * X[3][0] + X[0][1] * X[1][3] * X[2][2] * X[3][0]</a>
+<a name="ln1795">                    + X[0][2] * X[1][1] * X[2][3] * X[3][0] - X[0][1] * X[1][2] * X[2][3] * X[3][0]</a>
+<a name="ln1796">                    - X[0][3] * X[1][2] * X[2][0] * X[3][1] + X[0][2] * X[1][3] * X[2][0] * X[3][1]</a>
+<a name="ln1797">                    + X[0][3] * X[1][0] * X[2][2] * X[3][1] - X[0][0] * X[1][3] * X[2][2] * X[3][1]</a>
+<a name="ln1798">                    - X[0][2] * X[1][0] * X[2][3] * X[3][1] + X[0][0] * X[1][2] * X[2][3] * X[3][1]</a>
+<a name="ln1799">                    + X[0][3] * X[1][1] * X[2][0] * X[3][2] - X[0][1] * X[1][3] * X[2][0] * X[3][2]</a>
+<a name="ln1800">                    - X[0][3] * X[1][0] * X[2][1] * X[3][2] + X[0][0] * X[1][3] * X[2][1] * X[3][2]</a>
+<a name="ln1801">                    + X[0][1] * X[1][0] * X[2][3] * X[3][2] - X[0][0] * X[1][1] * X[2][3] * X[3][2]</a>
+<a name="ln1802">                    - X[0][2] * X[1][1] * X[2][0] * X[3][3] + X[0][1] * X[1][2] * X[2][0] * X[3][3]</a>
+<a name="ln1803">                    + X[0][2] * X[1][0] * X[2][1] * X[3][3] - X[0][0] * X[1][2] * X[2][1] * X[3][3]</a>
+<a name="ln1804">                    - X[0][1] * X[1][0] * X[2][2] * X[3][3] + X[0][0] * X[1][1] * X[2][2] * X[3][3];</a>
+<a name="ln1805">  R[0][0] = (X[1][2] * X[2][3] * X[3][1] - X[1][3] * X[2][2] * X[3][1] + X[1][3] * X[2][1] * X[3][2]</a>
+<a name="ln1806">             - X[1][1] * X[2][3] * X[3][2] - X[1][2] * X[2][1] * X[3][3] + X[1][1] * X[2][2] * X[3][3])</a>
+<a name="ln1807">            / det;</a>
+<a name="ln1808">  R[1][0] = (X[1][3] * X[2][2] * X[3][0] - X[1][2] * X[2][3] * X[3][0] - X[1][3] * X[2][0] * X[3][2]</a>
+<a name="ln1809">             + X[1][0] * X[2][3] * X[3][2] + X[1][2] * X[2][0] * X[3][3] - X[1][0] * X[2][2] * X[3][3])</a>
+<a name="ln1810">            / det;</a>
+<a name="ln1811">  R[2][0] = (X[1][1] * X[2][3] * X[3][0] - X[1][3] * X[2][1] * X[3][0] + X[1][3] * X[2][0] * X[3][1]</a>
+<a name="ln1812">             - X[1][0] * X[2][3] * X[3][1] - X[1][1] * X[2][0] * X[3][3] + X[1][0] * X[2][1] * X[3][3])</a>
+<a name="ln1813">            / det;</a>
+<a name="ln1814">  R[3][0] = (X[1][2] * X[2][1] * X[3][0] - X[1][1] * X[2][2] * X[3][0] - X[1][2] * X[2][0] * X[3][1]</a>
+<a name="ln1815">             + X[1][0] * X[2][2] * X[3][1] + X[1][1] * X[2][0] * X[3][2] - X[1][0] * X[2][1] * X[3][2])</a>
+<a name="ln1816">            / det;</a>
+<a name="ln1817"> </a>
+<a name="ln1818">  R[0][1] = (X[0][3] * X[2][2] * X[3][1] - X[0][2] * X[2][3] * X[3][1] - X[0][3] * X[2][1] * X[3][2]</a>
+<a name="ln1819">             + X[0][1] * X[2][3] * X[3][2] + X[0][2] * X[2][1] * X[3][3] - X[0][1] * X[2][2] * X[3][3])</a>
+<a name="ln1820">            / det;</a>
+<a name="ln1821">  R[1][1] = (X[0][2] * X[2][3] * X[3][0] - X[0][3] * X[2][2] * X[3][0] + X[0][3] * X[2][0] * X[3][2]</a>
+<a name="ln1822">             - X[0][0] * X[2][3] * X[3][2] - X[0][2] * X[2][0] * X[3][3] + X[0][0] * X[2][2] * X[3][3])</a>
+<a name="ln1823">            / det;</a>
+<a name="ln1824">  R[2][1] = (X[0][3] * X[2][1] * X[3][0] - X[0][1] * X[2][3] * X[3][0] - X[0][3] * X[2][0] * X[3][1]</a>
+<a name="ln1825">             + X[0][0] * X[2][3] * X[3][1] + X[0][1] * X[2][0] * X[3][3] - X[0][0] * X[2][1] * X[3][3])</a>
+<a name="ln1826">            / det;</a>
+<a name="ln1827">  R[3][1] = (X[0][1] * X[2][2] * X[3][0] - X[0][2] * X[2][1] * X[3][0] + X[0][2] * X[2][0] * X[3][1]</a>
+<a name="ln1828">             - X[0][0] * X[2][2] * X[3][1] - X[0][1] * X[2][0] * X[3][2] + X[0][0] * X[2][1] * X[3][2])</a>
+<a name="ln1829">            / det;</a>
+<a name="ln1830"> </a>
+<a name="ln1831">  R[0][2] = (X[0][2] * X[1][3] * X[3][1] - X[0][3] * X[1][2] * X[3][1] + X[0][3] * X[1][1] * X[3][2]</a>
+<a name="ln1832">             - X[0][1] * X[1][3] * X[3][2] - X[0][2] * X[1][1] * X[3][3] + X[0][1] * X[1][2] * X[3][3])</a>
+<a name="ln1833">            / det;</a>
+<a name="ln1834">  R[1][2] = (X[0][3] * X[1][2] * X[3][0] - X[0][2] * X[1][3] * X[3][0] - X[0][3] * X[1][0] * X[3][2]</a>
+<a name="ln1835">             + X[0][0] * X[1][3] * X[3][2] + X[0][2] * X[1][0] * X[3][3] - X[0][0] * X[1][2] * X[3][3])</a>
+<a name="ln1836">            / det;</a>
+<a name="ln1837">  R[2][2] = (X[0][1] * X[1][3] * X[3][0] - X[0][3] * X[1][1] * X[3][0] + X[0][3] * X[1][0] * X[3][1]</a>
+<a name="ln1838">             - X[0][0] * X[1][3] * X[3][1] - X[0][1] * X[1][0] * X[3][3] + X[0][0] * X[1][1] * X[3][3])</a>
+<a name="ln1839">            / det;</a>
+<a name="ln1840">  R[3][2] = (X[0][2] * X[1][1] * X[3][0] - X[0][1] * X[1][2] * X[3][0] - X[0][2] * X[1][0] * X[3][1]</a>
+<a name="ln1841">             + X[0][0] * X[1][2] * X[3][1] + X[0][1] * X[1][0] * X[3][2] - X[0][0] * X[1][1] * X[3][2])</a>
+<a name="ln1842">            / det;</a>
+<a name="ln1843"> </a>
+<a name="ln1844">  R[0][3] = (X[0][3] * X[1][2] * X[2][1] - X[0][2] * X[1][3] * X[2][1] - X[0][3] * X[1][1] * X[2][2]</a>
+<a name="ln1845">             + X[0][1] * X[1][3] * X[2][2] + X[0][2] * X[1][1] * X[2][3] - X[0][1] * X[1][2] * X[2][3])</a>
+<a name="ln1846">            / det;</a>
+<a name="ln1847">  R[1][3] = (X[0][2] * X[1][3] * X[2][0] - X[0][3] * X[1][2] * X[2][0] + X[0][3] * X[1][0] * X[2][2]</a>
+<a name="ln1848">             - X[0][0] * X[1][3] * X[2][2] - X[0][2] * X[1][0] * X[2][3] + X[0][0] * X[1][2] * X[2][3])</a>
+<a name="ln1849">            / det;</a>
+<a name="ln1850">  R[2][3] = (X[0][3] * X[1][1] * X[2][0] - X[0][1] * X[1][3] * X[2][0] - X[0][3] * X[1][0] * X[2][1]</a>
+<a name="ln1851">             + X[0][0] * X[1][3] * X[2][1] + X[0][1] * X[1][0] * X[2][3] - X[0][0] * X[1][1] * X[2][3])</a>
+<a name="ln1852">            / det;</a>
+<a name="ln1853">  R[3][3] = (X[0][1] * X[1][2] * X[2][0] - X[0][2] * X[1][1] * X[2][0] + X[0][2] * X[1][0] * X[2][1]</a>
+<a name="ln1854">             - X[0][0] * X[1][2] * X[2][1] - X[0][1] * X[1][0] * X[2][2] + X[0][0] * X[1][1] * X[2][2])</a>
+<a name="ln1855">            / det;</a>
+<a name="ln1856">}</a>
+<a name="ln1857"> </a>
+<a name="ln1858">static void mat4mulv(float *dst, float mat[][4], const float *const v)</a>
+<a name="ln1859">{</a>
+<a name="ln1860">  for(int k = 0; k &lt; 4; k++)</a>
+<a name="ln1861">  {</a>
+<a name="ln1862">    float x = 0.0f;</a>
+<a name="ln1863">    for(int i = 0; i &lt; 4; i++) x += mat[k][i] * v[i];</a>
+<a name="ln1864">    dst[k] = x;</a>
+<a name="ln1865">  }</a>
+<a name="ln1866">}</a>
+<a name="ln1867"> </a>
+<a name="ln1868">void dt_iop_estimate_cubic(const float *const x, const float *const y, float *a)</a>
+<a name="ln1869">{</a>
+<a name="ln1870">  // we want to fit a spline</a>
+<a name="ln1871">  // [y]   [x^3 x^2 x^1 1] [a^3]</a>
+<a name="ln1872">  // |y| = |x^3 x^2 x^1 1| |a^2|</a>
+<a name="ln1873">  // |y|   |x^3 x^2 x^1 1| |a^1|</a>
+<a name="ln1874">  // [y]   [x^3 x^2 x^1 1] [ 1 ]</a>
+<a name="ln1875">  // and do that by inverting the matrix X:</a>
+<a name="ln1876"> </a>
+<a name="ln1877">  const float X[4][4] = { { x[0] * x[0] * x[0], x[0] * x[0], x[0], 1.0f },</a>
+<a name="ln1878">                          { x[1] * x[1] * x[1], x[1] * x[1], x[1], 1.0f },</a>
+<a name="ln1879">                          { x[2] * x[2] * x[2], x[2] * x[2], x[2], 1.0f },</a>
+<a name="ln1880">                          { x[3] * x[3] * x[3], x[3] * x[3], x[3], 1.0f } };</a>
+<a name="ln1881">  float X_inv[4][4];</a>
+<a name="ln1882">  mat4inv(X, X_inv);</a>
+<a name="ln1883">  mat4mulv(a, X_inv, y);</a>
+<a name="ln1884">}</a>
+<a name="ln1885"> </a>
+<a name="ln1886">// modelines: These editor modelines have been set for all relevant files by tools/update_modelines.sh</a>
+<a name="ln1887">// vim: shiftwidth=2 expandtab tabstop=2 cindent</a>
+<a name="ln1888">// kate: tab-indents: off; indent-width 2; replace-tabs on; indent-mode cstyle; remove-trailing-spaces modified;</a>
+
+</code></pre>
+<div class="balloon" rel="409"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v636/" target="_blank">V636</a> The '(maxj - py) / 2' expression was implicitly cast from 'int' type to 'float' type. Consider utilizing an explicit type cast to avoid the loss of a fractional part. An example: double A = (double)(X) / Y;.</p></div>
+<div class="balloon" rel="430"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v636/" target="_blank">V636</a> The '(maxi - px) / 2' expression was implicitly cast from 'int' type to 'float' type. Consider utilizing an explicit type cast to avoid the loss of a fractional part. An example: double A = (double)(X) / Y;.</p></div>
+<div class="balloon" rel="434"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v636/" target="_blank">V636</a> The '(maxi - px) / 2' expression was implicitly cast from 'int' type to 'float' type. Consider utilizing an explicit type cast to avoid the loss of a fractional part. An example: double A = (double)(X) / Y;.</p></div>
+<div class="balloon" rel="620"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v636/" target="_blank">V636</a> The '(maxj - py) / 2' expression was implicitly cast from 'int' type to 'float' type. Consider utilizing an explicit type cast to avoid the loss of a fractional part. An example: double A = (double)(X) / Y;.</p></div>
+<div class="balloon" rel="641"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v636/" target="_blank">V636</a> The '(maxi - px) / 2' expression was implicitly cast from 'int' type to 'float' type. Consider utilizing an explicit type cast to avoid the loss of a fractional part. An example: double A = (double)(X) / Y;.</p></div>
+<div class="balloon" rel="645"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v636/" target="_blank">V636</a> The '(maxi - px) / 2' expression was implicitly cast from 'int' type to 'float' type. Consider utilizing an explicit type cast to avoid the loss of a fractional part. An example: double A = (double)(X) / Y;.</p></div>
+<div class="balloon" rel="810"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v636/" target="_blank">V636</a> The '(maxj - py) / 2' expression was implicitly cast from 'int' type to 'float' type. Consider utilizing an explicit type cast to avoid the loss of a fractional part. An example: double A = (double)(X) / Y;.</p></div>
+<div class="balloon" rel="831"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v636/" target="_blank">V636</a> The '(maxi - px) / 2' expression was implicitly cast from 'int' type to 'float' type. Consider utilizing an explicit type cast to avoid the loss of a fractional part. An example: double A = (double)(X) / Y;.</p></div>
+<div class="balloon" rel="835"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v636/" target="_blank">V636</a> The '(maxi - px) / 2' expression was implicitly cast from 'int' type to 'float' type. Consider utilizing an explicit type cast to avoid the loss of a fractional part. An example: double A = (double)(X) / Y;.</p></div>
+<div class="balloon" rel="1069"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v636/" target="_blank">V636</a> The '(maxj - py) / 2' expression was implicitly cast from 'int' type to 'float' type. Consider utilizing an explicit type cast to avoid the loss of a fractional part. An example: double A = (double)(X) / Y;.</p></div>
+<div class="balloon" rel="1084"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v636/" target="_blank">V636</a> The '(maxi - px) / 2' expression was implicitly cast from 'int' type to 'float' type. Consider utilizing an explicit type cast to avoid the loss of a fractional part. An example: double A = (double)(X) / Y;.</p></div>
+<div class="balloon" rel="1088"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v636/" target="_blank">V636</a> The '(maxi - px) / 2' expression was implicitly cast from 'int' type to 'float' type. Consider utilizing an explicit type cast to avoid the loss of a fractional part. An example: double A = (double)(X) / Y;.</p></div>
+<div class="balloon" rel="1214"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v636/" target="_blank">V636</a> The '(maxj - py) / 2' expression was implicitly cast from 'int' type to 'float' type. Consider utilizing an explicit type cast to avoid the loss of a fractional part. An example: double A = (double)(X) / Y;.</p></div>
+<div class="balloon" rel="1229"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v636/" target="_blank">V636</a> The '(maxi - px) / 2' expression was implicitly cast from 'int' type to 'float' type. Consider utilizing an explicit type cast to avoid the loss of a fractional part. An example: double A = (double)(X) / Y;.</p></div>
+<div class="balloon" rel="1233"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v636/" target="_blank">V636</a> The '(maxi - px) / 2' expression was implicitly cast from 'int' type to 'float' type. Consider utilizing an explicit type cast to avoid the loss of a fractional part. An example: double A = (double)(X) / Y;.</p></div>
+<div class="balloon" rel="1493"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v636/" target="_blank">V636</a> The '(maxj - py) / 2' expression was implicitly cast from 'int' type to 'float' type. Consider utilizing an explicit type cast to avoid the loss of a fractional part. An example: double A = (double)(X) / Y;.</p></div>
+<div class="balloon" rel="1512"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v636/" target="_blank">V636</a> The '(maxi - px) / 2' expression was implicitly cast from 'int' type to 'float' type. Consider utilizing an explicit type cast to avoid the loss of a fractional part. An example: double A = (double)(X) / Y;.</p></div>
+<div class="balloon" rel="1516"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v636/" target="_blank">V636</a> The '(maxi - px) / 2' expression was implicitly cast from 'int' type to 'float' type. Consider utilizing an explicit type cast to avoid the loss of a fractional part. An example: double A = (double)(X) / Y;.</p></div>
+<div class="balloon" rel="1672"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v636/" target="_blank">V636</a> The '(maxj - py) / 2' expression was implicitly cast from 'int' type to 'float' type. Consider utilizing an explicit type cast to avoid the loss of a fractional part. An example: double A = (double)(X) / Y;.</p></div>
+<div class="balloon" rel="1691"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v636/" target="_blank">V636</a> The '(maxi - px) / 2' expression was implicitly cast from 'int' type to 'float' type. Consider utilizing an explicit type cast to avoid the loss of a fractional part. An example: double A = (double)(X) / Y;.</p></div>
+<div class="balloon" rel="1695"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v636/" target="_blank">V636</a> The '(maxi - px) / 2' expression was implicitly cast from 'int' type to 'float' type. Consider utilizing an explicit type cast to avoid the loss of a fractional part. An example: double A = (double)(X) / Y;.</p></div>
+
+<link rel="stylesheet" href="highlight.css">
+<script src="highlight.pack.js"></script>
+<script src="highlightjs-line-numbers.js"></script>
+<script>hljs.initHighlightingOnLoad();</script>
+<script>hljs.initLineNumbersOnLoad();</script>
+<script>
+  $(document).ready(function() {
+      $('.balloon').each(function () {
+          var bl = $(this);
+          var line = bl.attr('rel');
+          var text = $('a[name="ln'+line+'"]').text();
+
+          var space_count = 0;
+          for(var i = 0; i<text.length; i++){
+              var char = text[i];
+              if((char !== ' ')&&(char !== '\t'))break;
+              if(char === '\t')space_count++;
+              space_count++;
+          }
+
+          bl.css('margin-left', space_count*8);
+          $('a[name="ln'+line+'"]').after(bl);
+      });
+
+      window.location = window.location;
+  });
+</script>
+</body>
+</html>

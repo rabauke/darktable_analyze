@@ -1,0 +1,1016 @@
+
+<html>
+<head>
+  <link rel="stylesheet" href="../style.css"/>
+  <script src="../jquery-3.2.1.min.js"></script>
+</head>
+<body>
+<pre><code class = "cpp">
+<a name="ln1">/*</a>
+<a name="ln2">    This file is part of darktable,</a>
+<a name="ln3">    copyright (c) 2010 henrik andersson,</a>
+<a name="ln4">    copyright (c) 2011-2012 johannes hanika</a>
+<a name="ln5"> </a>
+<a name="ln6">    darktable is free software: you can redistribute it and/or modify</a>
+<a name="ln7">    it under the terms of the GNU General Public License as published by</a>
+<a name="ln8">    the Free Software Foundation, either version 3 of the License, or</a>
+<a name="ln9">    (at your option) any later version.</a>
+<a name="ln10"> </a>
+<a name="ln11">    darktable is distributed in the hope that it will be useful,</a>
+<a name="ln12">    but WITHOUT ANY WARRANTY; without even the implied warranty of</a>
+<a name="ln13">    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the</a>
+<a name="ln14">    GNU General Public License for more details.</a>
+<a name="ln15"> </a>
+<a name="ln16">    You should have received a copy of the GNU General Public License</a>
+<a name="ln17">    along with darktable.  If not, see &lt;http://www.gnu.org/licenses/&gt;.</a>
+<a name="ln18">*/</a>
+<a name="ln19"> </a>
+<a name="ln20">#include &quot;common/history.h&quot;</a>
+<a name="ln21">#include &quot;common/darktable.h&quot;</a>
+<a name="ln22">#include &quot;common/debug.h&quot;</a>
+<a name="ln23">#include &quot;common/exif.h&quot;</a>
+<a name="ln24">#include &quot;common/image_cache.h&quot;</a>
+<a name="ln25">#include &quot;common/imageio.h&quot;</a>
+<a name="ln26">#include &quot;common/mipmap_cache.h&quot;</a>
+<a name="ln27">#include &quot;common/tags.h&quot;</a>
+<a name="ln28">#include &quot;common/utility.h&quot;</a>
+<a name="ln29">#include &quot;common/collection.h&quot;</a>
+<a name="ln30">#include &quot;common/history_snapshot.h&quot;</a>
+<a name="ln31">#include &quot;common/undo.h&quot;</a>
+<a name="ln32">#include &quot;control/control.h&quot;</a>
+<a name="ln33">#include &quot;develop/develop.h&quot;</a>
+<a name="ln34">#include &quot;develop/blend.h&quot;</a>
+<a name="ln35">#include &quot;develop/masks.h&quot;</a>
+<a name="ln36"> </a>
+<a name="ln37">void dt_history_item_free(gpointer data)</a>
+<a name="ln38">{</a>
+<a name="ln39">  dt_history_item_t *item = (dt_history_item_t *)data;</a>
+<a name="ln40">  g_free(item-&gt;op);</a>
+<a name="ln41">  g_free(item-&gt;name);</a>
+<a name="ln42">  item-&gt;op = NULL;</a>
+<a name="ln43">  item-&gt;name = NULL;</a>
+<a name="ln44">  g_free(item);</a>
+<a name="ln45">}</a>
+<a name="ln46"> </a>
+<a name="ln47">static void remove_preset_flag(const int imgid)</a>
+<a name="ln48">{</a>
+<a name="ln49">  dt_image_t *image = dt_image_cache_get(darktable.image_cache, imgid, 'w');</a>
+<a name="ln50"> </a>
+<a name="ln51">  // clear flag</a>
+<a name="ln52">  image-&gt;flags &amp;= ~DT_IMAGE_AUTO_PRESETS_APPLIED;</a>
+<a name="ln53"> </a>
+<a name="ln54">  // write through to sql+xmp</a>
+<a name="ln55">  dt_image_cache_write_release(darktable.image_cache, image, DT_IMAGE_CACHE_SAFE);</a>
+<a name="ln56">}</a>
+<a name="ln57"> </a>
+<a name="ln58">void dt_history_delete_on_image_ext(int32_t imgid, gboolean undo)</a>
+<a name="ln59">{</a>
+<a name="ln60">  dt_undo_lt_history_t *hist = undo?dt_history_snapshot_item_init():NULL;</a>
+<a name="ln61"> </a>
+<a name="ln62">  if(undo)</a>
+<a name="ln63">  {</a>
+<a name="ln64">    hist-&gt;imgid = imgid;</a>
+<a name="ln65">    dt_history_snapshot_undo_create(hist-&gt;imgid, &amp;hist-&gt;before, &amp;hist-&gt;before_history_end);</a>
+<a name="ln66">  }</a>
+<a name="ln67"> </a>
+<a name="ln68">  sqlite3_stmt *stmt;</a>
+<a name="ln69"> </a>
+<a name="ln70">  DT_DEBUG_SQLITE3_PREPARE_V2(dt_database_get(darktable.db), &quot;DELETE FROM main.history WHERE imgid = ?1&quot;, -1,</a>
+<a name="ln71">                              &amp;stmt, NULL);</a>
+<a name="ln72">  DT_DEBUG_SQLITE3_BIND_INT(stmt, 1, imgid);</a>
+<a name="ln73">  sqlite3_step(stmt);</a>
+<a name="ln74">  sqlite3_finalize(stmt);</a>
+<a name="ln75"> </a>
+<a name="ln76">  DT_DEBUG_SQLITE3_PREPARE_V2(dt_database_get(darktable.db),</a>
+<a name="ln77">                              &quot;UPDATE main.images SET history_end = 0, iop_order_version = 0 WHERE id = ?1&quot;, -1, &amp;stmt, NULL);</a>
+<a name="ln78">  DT_DEBUG_SQLITE3_BIND_INT(stmt, 1, imgid);</a>
+<a name="ln79">  sqlite3_step(stmt);</a>
+<a name="ln80">  sqlite3_finalize(stmt);</a>
+<a name="ln81"> </a>
+<a name="ln82">  DT_DEBUG_SQLITE3_PREPARE_V2(dt_database_get(darktable.db), &quot;DELETE FROM main.masks_history WHERE imgid = ?1&quot;, -1, &amp;stmt,</a>
+<a name="ln83">                              NULL);</a>
+<a name="ln84">  DT_DEBUG_SQLITE3_BIND_INT(stmt, 1, imgid);</a>
+<a name="ln85">  sqlite3_step(stmt);</a>
+<a name="ln86">  sqlite3_finalize(stmt);</a>
+<a name="ln87"> </a>
+<a name="ln88">  remove_preset_flag(imgid);</a>
+<a name="ln89"> </a>
+<a name="ln90">  /* if current image in develop reload history */</a>
+<a name="ln91">  if(dt_dev_is_current_image(darktable.develop, imgid)) dt_dev_reload_history_items(darktable.develop);</a>
+<a name="ln92"> </a>
+<a name="ln93">  /* make sure mipmaps are recomputed */</a>
+<a name="ln94">  dt_mipmap_cache_remove(darktable.mipmap_cache, imgid);</a>
+<a name="ln95">  dt_image_reset_final_size(imgid);</a>
+<a name="ln96"> </a>
+<a name="ln97">  /* remove darktable|style|* tags */</a>
+<a name="ln98">  dt_tag_detach_by_string(&quot;darktable|style%&quot;, imgid);</a>
+<a name="ln99">  dt_tag_detach_by_string(&quot;darktable|changed&quot;, imgid);</a>
+<a name="ln100"> </a>
+<a name="ln101">  if(undo)</a>
+<a name="ln102">  {</a>
+<a name="ln103">    dt_history_snapshot_undo_create(hist-&gt;imgid, &amp;hist-&gt;after, &amp;hist-&gt;after_history_end);</a>
+<a name="ln104"> </a>
+<a name="ln105">    dt_undo_start_group(darktable.undo, DT_UNDO_LT_HISTORY);</a>
+<a name="ln106">    dt_undo_record(darktable.undo, NULL, DT_UNDO_LT_HISTORY, (dt_undo_data_t)hist,</a>
+<a name="ln107">                   dt_history_snapshot_undo_pop, dt_history_snapshot_undo_lt_history_data_free);</a>
+<a name="ln108">    dt_undo_end_group(darktable.undo);</a>
+<a name="ln109">  }</a>
+<a name="ln110">}</a>
+<a name="ln111"> </a>
+<a name="ln112">void dt_history_delete_on_image(int32_t imgid)</a>
+<a name="ln113">{</a>
+<a name="ln114">  dt_history_delete_on_image_ext(imgid, TRUE);</a>
+<a name="ln115">}</a>
+<a name="ln116"> </a>
+<a name="ln117">void dt_history_delete_on_selection()</a>
+<a name="ln118">{</a>
+<a name="ln119">  sqlite3_stmt *stmt;</a>
+<a name="ln120"> </a>
+<a name="ln121">  dt_undo_start_group(darktable.undo, DT_UNDO_LT_HISTORY);</a>
+<a name="ln122"> </a>
+<a name="ln123">  DT_DEBUG_SQLITE3_PREPARE_V2(dt_database_get(darktable.db), &quot;SELECT imgid FROM main.selected_images&quot;,</a>
+<a name="ln124">                              -1, &amp;stmt, NULL);</a>
+<a name="ln125">  while(sqlite3_step(stmt) == SQLITE_ROW)</a>
+<a name="ln126">  {</a>
+<a name="ln127">    const int imgid = sqlite3_column_int(stmt, 0);</a>
+<a name="ln128">    dt_undo_lt_history_t *hist = dt_history_snapshot_item_init();</a>
+<a name="ln129"> </a>
+<a name="ln130">    hist-&gt;imgid = imgid;</a>
+<a name="ln131">    dt_history_snapshot_undo_create(hist-&gt;imgid, &amp;hist-&gt;before, &amp;hist-&gt;before_history_end);</a>
+<a name="ln132"> </a>
+<a name="ln133">    dt_history_delete_on_image_ext(imgid, FALSE);</a>
+<a name="ln134"> </a>
+<a name="ln135">    dt_history_snapshot_undo_create(hist-&gt;imgid, &amp;hist-&gt;after, &amp;hist-&gt;after_history_end);</a>
+<a name="ln136">    dt_undo_record(darktable.undo, NULL, DT_UNDO_LT_HISTORY, (dt_undo_data_t)hist,</a>
+<a name="ln137">                   dt_history_snapshot_undo_pop, dt_history_snapshot_undo_lt_history_data_free);</a>
+<a name="ln138"> </a>
+<a name="ln139">    /* update the aspect ratio if the current sorting is based on aspect ratio, otherwise the aspect ratio will be</a>
+<a name="ln140">       recalculated when the mimpap will be recreated */</a>
+<a name="ln141">    if (darktable.collection-&gt;params.sort == DT_COLLECTION_SORT_ASPECT_RATIO)</a>
+<a name="ln142">      dt_image_set_aspect_ratio(imgid);</a>
+<a name="ln143">  }</a>
+<a name="ln144">  sqlite3_finalize(stmt);</a>
+<a name="ln145"> </a>
+<a name="ln146">  dt_undo_end_group(darktable.undo);</a>
+<a name="ln147">}</a>
+<a name="ln148"> </a>
+<a name="ln149">int dt_history_load_and_apply(const int imgid, gchar *filename, int history_only)</a>
+<a name="ln150">{</a>
+<a name="ln151">  dt_image_t *img = dt_image_cache_get(darktable.image_cache, imgid, 'w');</a>
+<a name="ln152">  if(img)</a>
+<a name="ln153">  {</a>
+<a name="ln154">    dt_undo_lt_history_t *hist = dt_history_snapshot_item_init();</a>
+<a name="ln155">    hist-&gt;imgid = imgid;</a>
+<a name="ln156">    dt_history_snapshot_undo_create(hist-&gt;imgid, &amp;hist-&gt;before, &amp;hist-&gt;before_history_end);</a>
+<a name="ln157"> </a>
+<a name="ln158">    if(dt_exif_xmp_read(img, filename, history_only)) return 1;</a>
+<a name="ln159"> </a>
+<a name="ln160">    dt_history_snapshot_undo_create(hist-&gt;imgid, &amp;hist-&gt;after, &amp;hist-&gt;after_history_end);</a>
+<a name="ln161">    dt_undo_start_group(darktable.undo, DT_UNDO_LT_HISTORY);</a>
+<a name="ln162">    dt_undo_record(darktable.undo, NULL, DT_UNDO_LT_HISTORY, (dt_undo_data_t)hist,</a>
+<a name="ln163">                   dt_history_snapshot_undo_pop, dt_history_snapshot_undo_lt_history_data_free);</a>
+<a name="ln164">    dt_undo_end_group(darktable.undo);</a>
+<a name="ln165"> </a>
+<a name="ln166">    /* if current image in develop reload history */</a>
+<a name="ln167">    if(dt_dev_is_current_image(darktable.develop, imgid)) dt_dev_reload_history_items(darktable.develop);</a>
+<a name="ln168"> </a>
+<a name="ln169">    dt_image_cache_write_release(darktable.image_cache, img, DT_IMAGE_CACHE_SAFE);</a>
+<a name="ln170">    dt_mipmap_cache_remove(darktable.mipmap_cache, imgid);</a>
+<a name="ln171">    dt_image_reset_final_size(imgid);</a>
+<a name="ln172">  }</a>
+<a name="ln173">  return 0;</a>
+<a name="ln174">}</a>
+<a name="ln175"> </a>
+<a name="ln176">int dt_history_load_and_apply_on_selection(gchar *filename)</a>
+<a name="ln177">{</a>
+<a name="ln178">  int res = 0;</a>
+<a name="ln179">  sqlite3_stmt *stmt;</a>
+<a name="ln180">  DT_DEBUG_SQLITE3_PREPARE_V2(dt_database_get(darktable.db), &quot;SELECT imgid FROM main.selected_images&quot;,</a>
+<a name="ln181">                              -1, &amp;stmt, NULL);</a>
+<a name="ln182">  dt_undo_start_group(darktable.undo, DT_UNDO_LT_HISTORY);</a>
+<a name="ln183">  while(sqlite3_step(stmt) == SQLITE_ROW)</a>
+<a name="ln184">  {</a>
+<a name="ln185">    const int imgid = sqlite3_column_int(stmt, 0);</a>
+<a name="ln186">    if(dt_history_load_and_apply(imgid, filename, 1)) res = 1;</a>
+<a name="ln187">  }</a>
+<a name="ln188">  dt_undo_end_group(darktable.undo);</a>
+<a name="ln189">  sqlite3_finalize(stmt);</a>
+<a name="ln190">  return res;</a>
+<a name="ln191">}</a>
+<a name="ln192"> </a>
+<a name="ln193">// returns the first history item with hist-&gt;module == module</a>
+<a name="ln194">static dt_dev_history_item_t *_search_history_by_module(dt_develop_t *dev, dt_iop_module_t *module)</a>
+<a name="ln195">{</a>
+<a name="ln196">  dt_dev_history_item_t *hist_mod = NULL;</a>
+<a name="ln197">  GList *history = g_list_first(dev-&gt;history);</a>
+<a name="ln198">  while(history)</a>
+<a name="ln199">  {</a>
+<a name="ln200">    dt_dev_history_item_t *hist = (dt_dev_history_item_t *)(history-&gt;data);</a>
+<a name="ln201"> </a>
+<a name="ln202">    if(hist-&gt;module == module)</a>
+<a name="ln203">    {</a>
+<a name="ln204">      hist_mod = hist;</a>
+<a name="ln205">      break;</a>
+<a name="ln206">    }</a>
+<a name="ln207">    history = g_list_next(history);</a>
+<a name="ln208">  }</a>
+<a name="ln209">  return hist_mod;</a>
+<a name="ln210">}</a>
+<a name="ln211"> </a>
+<a name="ln212">// returns the first history item with corresponding module-&gt;op</a>
+<a name="ln213">static dt_dev_history_item_t *_search_history_by_op(dt_develop_t *dev, dt_iop_module_t *module)</a>
+<a name="ln214">{</a>
+<a name="ln215">  dt_dev_history_item_t *hist_mod = NULL;</a>
+<a name="ln216">  GList *history = g_list_first(dev-&gt;history);</a>
+<a name="ln217">  while(history)</a>
+<a name="ln218">  {</a>
+<a name="ln219">    dt_dev_history_item_t *hist = (dt_dev_history_item_t *)(history-&gt;data);</a>
+<a name="ln220"> </a>
+<a name="ln221">    if(strcmp(hist-&gt;module-&gt;op, module-&gt;op) == 0)</a>
+<a name="ln222">    {</a>
+<a name="ln223">      hist_mod = hist;</a>
+<a name="ln224">      break;</a>
+<a name="ln225">    }</a>
+<a name="ln226">    history = g_list_next(history);</a>
+<a name="ln227">  }</a>
+<a name="ln228">  return hist_mod;</a>
+<a name="ln229">}</a>
+<a name="ln230"> </a>
+<a name="ln231">// returns the module on modules_list that is equal to module</a>
+<a name="ln232">// used to check if module exists on the list</a>
+<a name="ln233">static dt_iop_module_t *_search_list_iop_by_module(GList *modules_list, dt_iop_module_t *module)</a>
+<a name="ln234">{</a>
+<a name="ln235">  dt_iop_module_t *mod_ret = NULL;</a>
+<a name="ln236">  GList *modules = g_list_first(modules_list);</a>
+<a name="ln237">  while(modules)</a>
+<a name="ln238">  {</a>
+<a name="ln239">    dt_iop_module_t *mod = (dt_iop_module_t *)(modules-&gt;data);</a>
+<a name="ln240"> </a>
+<a name="ln241">    if(mod == module)</a>
+<a name="ln242">    {</a>
+<a name="ln243">      mod_ret = mod;</a>
+<a name="ln244">      break;</a>
+<a name="ln245">    }</a>
+<a name="ln246">    modules = g_list_next(modules);</a>
+<a name="ln247">  }</a>
+<a name="ln248">  return mod_ret;</a>
+<a name="ln249">}</a>
+<a name="ln250"> </a>
+<a name="ln251">// returns the first module on modules_list with operation = op_name</a>
+<a name="ln252">static dt_iop_module_t *_search_list_iop_by_op(GList *modules_list, const char *op_name)</a>
+<a name="ln253">{</a>
+<a name="ln254">  dt_iop_module_t *mod_ret = NULL;</a>
+<a name="ln255">  GList *modules = g_list_first(modules_list);</a>
+<a name="ln256">  while(modules)</a>
+<a name="ln257">  {</a>
+<a name="ln258">    dt_iop_module_t *mod = (dt_iop_module_t *)(modules-&gt;data);</a>
+<a name="ln259"> </a>
+<a name="ln260">    if(strcmp(mod-&gt;op, op_name) == 0)</a>
+<a name="ln261">    {</a>
+<a name="ln262">      mod_ret = mod;</a>
+<a name="ln263">      break;</a>
+<a name="ln264">    }</a>
+<a name="ln265">    modules = g_list_next(modules);</a>
+<a name="ln266">  }</a>
+<a name="ln267">  return mod_ret;</a>
+<a name="ln268">}</a>
+<a name="ln269"> </a>
+<a name="ln270">// returns a new multi_priority number for op_name</a>
+<a name="ln271">static int _get_new_iop_multi_priority(dt_develop_t *dev, const char *op_name)</a>
+<a name="ln272">{</a>
+<a name="ln273">  int multi_priority_new = -1;</a>
+<a name="ln274">  GList *modules = g_list_first(dev-&gt;iop);</a>
+<a name="ln275">  while(modules)</a>
+<a name="ln276">  {</a>
+<a name="ln277">    dt_iop_module_t *mod = (dt_iop_module_t *)(modules-&gt;data);</a>
+<a name="ln278"> </a>
+<a name="ln279">    if(strcmp(mod-&gt;op, op_name) == 0)</a>
+<a name="ln280">    {</a>
+<a name="ln281">      multi_priority_new = MAX(multi_priority_new, mod-&gt;multi_priority);</a>
+<a name="ln282">    }</a>
+<a name="ln283">    modules = g_list_next(modules);</a>
+<a name="ln284">  }</a>
+<a name="ln285">  return (multi_priority_new + 1);</a>
+<a name="ln286">}</a>
+<a name="ln287"> </a>
+<a name="ln288">// fills used with formid, if it is a group it recurs and fill all sub-forms</a>
+<a name="ln289">static void _fill_used_forms(GList *forms_list, int formid, int *used, int nb)</a>
+<a name="ln290">{</a>
+<a name="ln291">  // first, we search for the formid in used table</a>
+<a name="ln292">  for(int i = 0; i &lt; nb; i++)</a>
+<a name="ln293">  {</a>
+<a name="ln294">    if(used[i] == 0)</a>
+<a name="ln295">    {</a>
+<a name="ln296">      // we store the formid</a>
+<a name="ln297">      used[i] = formid;</a>
+<a name="ln298">      break;</a>
+<a name="ln299">    }</a>
+<a name="ln300">    if(used[i] == formid) break;</a>
+<a name="ln301">  }</a>
+<a name="ln302"> </a>
+<a name="ln303">  // if the form is a group, we iterate through the sub-forms</a>
+<a name="ln304">  dt_masks_form_t *form = dt_masks_get_from_id_ext(forms_list, formid);</a>
+<a name="ln305">  if(form &amp;&amp; (form-&gt;type &amp; DT_MASKS_GROUP))</a>
+<a name="ln306">  {</a>
+<a name="ln307">    GList *grpts = g_list_first(form-&gt;points);</a>
+<a name="ln308">    while(grpts)</a>
+<a name="ln309">    {</a>
+<a name="ln310">      dt_masks_point_group_t *grpt = (dt_masks_point_group_t *)grpts-&gt;data;</a>
+<a name="ln311">      _fill_used_forms(forms_list, grpt-&gt;formid, used, nb);</a>
+<a name="ln312">      grpts = g_list_next(grpts);</a>
+<a name="ln313">    }</a>
+<a name="ln314">  }</a>
+<a name="ln315">}</a>
+<a name="ln316"> </a>
+<a name="ln317">// dev_src is used only to copy masks, if no mask will be copied it can be null</a>
+<a name="ln318">int dt_history_merge_module_into_history(dt_develop_t *dev_dest, dt_develop_t *dev_src, dt_iop_module_t *mod_src, GList **_modules_used, const int append)</a>
+<a name="ln319">{</a>
+<a name="ln320">  int module_added = 1;</a>
+<a name="ln321">  GList *modules_used = *_modules_used;</a>
+<a name="ln322">  dt_iop_module_t *module = NULL;</a>
+<a name="ln323">  dt_iop_module_t *mod_replace = NULL;</a>
+<a name="ln324"> </a>
+<a name="ln325">  // one-instance modules always replace the existing one</a>
+<a name="ln326">  if(mod_src-&gt;flags() &amp; IOP_FLAGS_ONE_INSTANCE)</a>
+<a name="ln327">  {</a>
+<a name="ln328">    mod_replace = _search_list_iop_by_op(dev_dest-&gt;iop, mod_src-&gt;op);</a>
+<a name="ln329">    if(mod_replace == NULL)</a>
+<a name="ln330">    {</a>
+<a name="ln331">      fprintf(stderr, &quot;[dt_history_merge_module_into_history] can't find single instance module %s\n&quot;,</a>
+<a name="ln332">              mod_src-&gt;op);</a>
+<a name="ln333">      module_added = 0;</a>
+<a name="ln334">    }</a>
+<a name="ln335">  }</a>
+<a name="ln336"> </a>
+<a name="ln337">  if(module_added &amp;&amp; !append)</a>
+<a name="ln338">  {</a>
+<a name="ln339">    // we haven't found a module to replace</a>
+<a name="ln340">    if(mod_replace == NULL)</a>
+<a name="ln341">    {</a>
+<a name="ln342">      // check if there's a module with the same (operation, multi_name) on dev-&gt;iop</a>
+<a name="ln343">      GList *modules_dest = g_list_first(dev_dest-&gt;iop);</a>
+<a name="ln344">      while(modules_dest)</a>
+<a name="ln345">      {</a>
+<a name="ln346">        dt_iop_module_t *mod_dest = (dt_iop_module_t *)(modules_dest-&gt;data);</a>
+<a name="ln347"> </a>
+<a name="ln348">        if(strcmp(mod_src-&gt;op, mod_dest-&gt;op) == 0 &amp;&amp; strcmp(mod_src-&gt;multi_name, mod_dest-&gt;multi_name) == 0)</a>
+<a name="ln349">        {</a>
+<a name="ln350">          // but only if it hasn't been used already</a>
+<a name="ln351">          if(_search_list_iop_by_module(modules_used, mod_dest) == NULL)</a>
+<a name="ln352">          {</a>
+<a name="ln353">            // we will replace this module</a>
+<a name="ln354">            modules_used = g_list_append(modules_used, mod_dest);</a>
+<a name="ln355">            mod_replace = mod_dest;</a>
+<a name="ln356">            break;</a>
+<a name="ln357">          }</a>
+<a name="ln358">        }</a>
+<a name="ln359">        modules_dest = g_list_next(modules_dest);</a>
+<a name="ln360">      }</a>
+<a name="ln361">    }</a>
+<a name="ln362">  }</a>
+<a name="ln363"> </a>
+<a name="ln364">  if(module_added)</a>
+<a name="ln365">  {</a>
+<a name="ln366">    // we haven't found a module to replace, so we will create a new instance</a>
+<a name="ln367">    if(mod_replace == NULL)</a>
+<a name="ln368">    {</a>
+<a name="ln369">      // but if there's an un-used instance on dev-&gt;iop we will use that</a>
+<a name="ln370">      if(_search_history_by_op(dev_dest, mod_src) == NULL)</a>
+<a name="ln371">      {</a>
+<a name="ln372">        // there should be only one instance of this iop (since is un-used)</a>
+<a name="ln373">        mod_replace = _search_list_iop_by_op(dev_dest-&gt;iop, mod_src-&gt;op);</a>
+<a name="ln374">        if(mod_replace == NULL)</a>
+<a name="ln375">        {</a>
+<a name="ln376">          fprintf(stderr, &quot;[dt_history_merge_module_into_history] can't find base instance module %s\n&quot;, mod_src-&gt;op);</a>
+<a name="ln377">          module_added = 0;</a>
+<a name="ln378">        }</a>
+<a name="ln379">      }</a>
+<a name="ln380">    }</a>
+<a name="ln381">  }</a>
+<a name="ln382"> </a>
+<a name="ln383">  if(module_added)</a>
+<a name="ln384">  {</a>
+<a name="ln385">    // if we are creating a new instance, create a new module</a>
+<a name="ln386">    if(!mod_replace)</a>
+<a name="ln387">    {</a>
+<a name="ln388">      dt_iop_module_t *base = _search_list_iop_by_op(dev_dest-&gt;iop, mod_src-&gt;op);</a>
+<a name="ln389">      module = (dt_iop_module_t *)calloc(1, sizeof(dt_iop_module_t));</a>
+<a name="ln390">      if(dt_iop_load_module(module, base-&gt;so, dev_dest))</a>
+<a name="ln391">      {</a>
+<a name="ln392">        fprintf(stderr, &quot;[dt_history_merge_module_into_history] can't load module %s\n&quot;, mod_src-&gt;op);</a>
+<a name="ln393">        module_added = 0;</a>
+<a name="ln394">      }</a>
+<a name="ln395">      else</a>
+<a name="ln396">      {</a>
+<a name="ln397">        module-&gt;instance = mod_src-&gt;instance;</a>
+<a name="ln398">        dt_iop_update_multi_priority(module, _get_new_iop_multi_priority(dev_dest, base-&gt;op));</a>
+<a name="ln399">        module-&gt;iop_order = DBL_MAX;</a>
+<a name="ln400">      }</a>
+<a name="ln401">    }</a>
+<a name="ln402">    else</a>
+<a name="ln403">    {</a>
+<a name="ln404">      module = mod_replace;</a>
+<a name="ln405">    }</a>
+<a name="ln406"> </a>
+<a name="ln407">    module-&gt;enabled = mod_src-&gt;enabled;</a>
+<a name="ln408">    snprintf(module-&gt;multi_name, sizeof(module-&gt;multi_name), &quot;%s&quot;, mod_src-&gt;multi_name);</a>
+<a name="ln409"> </a>
+<a name="ln410">    memcpy(module-&gt;params, mod_src-&gt;params, module-&gt;params_size);</a>
+<a name="ln411">    if(module-&gt;flags() &amp; IOP_FLAGS_SUPPORTS_BLENDING)</a>
+<a name="ln412">    {</a>
+<a name="ln413">      memcpy(module-&gt;blend_params, mod_src-&gt;blend_params, sizeof(dt_develop_blend_params_t));</a>
+<a name="ln414">      module-&gt;blend_params-&gt;mask_id = mod_src-&gt;blend_params-&gt;mask_id;</a>
+<a name="ln415">    }</a>
+<a name="ln416">  }</a>
+<a name="ln417"> </a>
+<a name="ln418">  // we have the module, we will use the source module iop_order unless there's already</a>
+<a name="ln419">  // a module with that order</a>
+<a name="ln420">  if(module_added)</a>
+<a name="ln421">  {</a>
+<a name="ln422">    dt_iop_module_t *module_duplicate = NULL;</a>
+<a name="ln423">    // check if there's a module with the same iop_order</a>
+<a name="ln424">    GList *modules_dest = g_list_first(dev_dest-&gt;iop);</a>
+<a name="ln425">    while(modules_dest)</a>
+<a name="ln426">    {</a>
+<a name="ln427">      dt_iop_module_t *mod = (dt_iop_module_t *)(modules_dest-&gt;data);</a>
+<a name="ln428"> </a>
+<a name="ln429">      if(module_duplicate != NULL)</a>
+<a name="ln430">      {</a>
+<a name="ln431">        module_duplicate = mod;</a>
+<a name="ln432">        break;</a>
+<a name="ln433">      }</a>
+<a name="ln434">      if(mod-&gt;iop_order == mod_src-&gt;iop_order &amp;&amp; mod != module)</a>
+<a name="ln435">      {</a>
+<a name="ln436">        module_duplicate = mod;</a>
+<a name="ln437">      }</a>
+<a name="ln438"> </a>
+<a name="ln439">      modules_dest = g_list_next(modules_dest);</a>
+<a name="ln440">    }</a>
+<a name="ln441"> </a>
+<a name="ln442">    // we are good, just use the source iop_order</a>
+<a name="ln443">    if(module_duplicate == NULL)</a>
+<a name="ln444">    {</a>
+<a name="ln445">      module-&gt;iop_order = mod_src-&gt;iop_order;</a>
+<a name="ln446">    }</a>
+<a name="ln447">    // if there's a conflict, add it after the offended module</a>
+<a name="ln448">    else</a>
+<a name="ln449">    {</a>
+<a name="ln450">      module-&gt;iop_order = mod_src-&gt;iop_order + (module_duplicate-&gt;iop_order - mod_src-&gt;iop_order) / 2.0;</a>
+<a name="ln451">    }</a>
+<a name="ln452"> </a>
+<a name="ln453">    // do some checking...</a>
+<a name="ln454">    if(mod_src-&gt;iop_order &lt;= 0.0 || mod_src-&gt;iop_order == DBL_MAX)</a>
+<a name="ln455">      fprintf(stderr, &quot;[dt_history_merge_module_into_history] invalid source module %s %s(%f)(%i)\n&quot;,</a>
+<a name="ln456">          mod_src-&gt;op, mod_src-&gt;multi_name, mod_src-&gt;iop_order, mod_src-&gt;multi_priority);</a>
+<a name="ln457">    if(module_duplicate &amp;&amp; (module_duplicate-&gt;iop_order &lt;= 0.0 || module_duplicate-&gt;iop_order == DBL_MAX))</a>
+<a name="ln458">      fprintf(stderr, &quot;[dt_history_merge_module_into_history] invalid duplicate module module %s %s(%f)(%i)\n&quot;,</a>
+<a name="ln459">          module_duplicate-&gt;op, module_duplicate-&gt;multi_name, module_duplicate-&gt;iop_order, module_duplicate-&gt;multi_priority);</a>
+<a name="ln460">    if(module-&gt;iop_order &lt;= 0.0 || module-&gt;iop_order == DBL_MAX)</a>
+<a name="ln461">      fprintf(stderr, &quot;[dt_history_merge_module_into_history] invalid iop_order for module %s %s(%f)(%i)\n&quot;,</a>
+<a name="ln462">          module-&gt;op, module-&gt;multi_name, module-&gt;iop_order, module-&gt;multi_priority);</a>
+<a name="ln463"> </a>
+<a name="ln464">    // if this is a new module just add it to the list</a>
+<a name="ln465">    if(mod_replace == NULL)</a>
+<a name="ln466">      dev_dest-&gt;iop = g_list_insert_sorted(dev_dest-&gt;iop, module, dt_sort_iop_by_order);</a>
+<a name="ln467">    else</a>
+<a name="ln468">      dev_dest-&gt;iop = g_list_sort(dev_dest-&gt;iop, dt_sort_iop_by_order);</a>
+<a name="ln469">  }</a>
+<a name="ln470"> </a>
+<a name="ln471">  // and we add it to history</a>
+<a name="ln472">  if(module_added)</a>
+<a name="ln473">  {</a>
+<a name="ln474">    // copy masks</a>
+<a name="ln475">    guint nbf = 0;</a>
+<a name="ln476">    int *forms_used_replace = NULL;</a>
+<a name="ln477"> </a>
+<a name="ln478">    if(dev_src)</a>
+<a name="ln479">    {</a>
+<a name="ln480">      // we will copy only used forms</a>
+<a name="ln481">      // record the masks used by this module</a>
+<a name="ln482">      if(mod_src-&gt;flags() &amp; IOP_FLAGS_SUPPORTS_BLENDING &amp;&amp; mod_src-&gt;blend_params-&gt;mask_id &gt; 0)</a>
+<a name="ln483">      {</a>
+<a name="ln484">        nbf = g_list_length(dev_src-&gt;forms);</a>
+<a name="ln485">        forms_used_replace = calloc(nbf, sizeof(int));</a>
+<a name="ln486"> </a>
+<a name="ln487">        _fill_used_forms(dev_src-&gt;forms, mod_src-&gt;blend_params-&gt;mask_id, forms_used_replace, nbf);</a>
+<a name="ln488"> </a>
+<a name="ln489">        // now copy masks</a>
+<a name="ln490">        for(int i = 0; i &lt; nbf &amp;&amp; forms_used_replace[i] &gt; 0; i++)</a>
+<a name="ln491">        {</a>
+<a name="ln492">          dt_masks_form_t *form = dt_masks_get_from_id_ext(dev_src-&gt;forms, forms_used_replace[i]);</a>
+<a name="ln493">          if(form)</a>
+<a name="ln494">          {</a>
+<a name="ln495">            // check if the form already exists in dest image</a>
+<a name="ln496">            // if so we'll remove it, so it is replaced</a>
+<a name="ln497">            dt_masks_form_t *form_dest = dt_masks_get_from_id_ext(dev_dest-&gt;forms, forms_used_replace[i]);</a>
+<a name="ln498">            if(form_dest)</a>
+<a name="ln499">            {</a>
+<a name="ln500">              dev_dest-&gt;forms = g_list_remove(dev_dest-&gt;forms, form_dest);</a>
+<a name="ln501">              // and add it to allforms to cleanup</a>
+<a name="ln502">              dev_dest-&gt;allforms = g_list_append(dev_dest-&gt;allforms, form_dest);</a>
+<a name="ln503">            }</a>
+<a name="ln504"> </a>
+<a name="ln505">            // and add it to dest image</a>
+<a name="ln506">            dt_masks_form_t *form_new = dt_masks_dup_masks_form(form);</a>
+<a name="ln507">            dev_dest-&gt;forms = g_list_append(dev_dest-&gt;forms, form_new);</a>
+<a name="ln508">          }</a>
+<a name="ln509">          else</a>
+<a name="ln510">            fprintf(stderr, &quot;[dt_history_merge_module_into_history] form %i not found in source image\n&quot;, forms_used_replace[i]);</a>
+<a name="ln511">        }</a>
+<a name="ln512">      }</a>
+<a name="ln513">    }</a>
+<a name="ln514"> </a>
+<a name="ln515">    if(nbf &gt; 0 &amp;&amp; forms_used_replace[0] &gt; 0)</a>
+<a name="ln516">      dt_dev_add_masks_history_item_ext(dev_dest, module, FALSE, TRUE);</a>
+<a name="ln517">    else</a>
+<a name="ln518">      dt_dev_add_history_item_ext(dev_dest, module, FALSE, TRUE);</a>
+<a name="ln519">    dt_dev_pop_history_items_ext(dev_dest, dev_dest-&gt;history_end);</a>
+<a name="ln520"> </a>
+<a name="ln521">    if(forms_used_replace) free(forms_used_replace);</a>
+<a name="ln522">  }</a>
+<a name="ln523"> </a>
+<a name="ln524">  *_modules_used = modules_used;</a>
+<a name="ln525"> </a>
+<a name="ln526">  return module_added;</a>
+<a name="ln527">}</a>
+<a name="ln528"> </a>
+<a name="ln529">static int _history_copy_and_paste_on_image_merge(int32_t imgid, int32_t dest_imgid, GList *ops)</a>
+<a name="ln530">{</a>
+<a name="ln531">  GList *modules_used = NULL;</a>
+<a name="ln532"> </a>
+<a name="ln533">  dt_develop_t _dev_src = { 0 };</a>
+<a name="ln534">  dt_develop_t _dev_dest = { 0 };</a>
+<a name="ln535"> </a>
+<a name="ln536">  dt_develop_t *dev_src = &amp;_dev_src;</a>
+<a name="ln537">  dt_develop_t *dev_dest = &amp;_dev_dest;</a>
+<a name="ln538"> </a>
+<a name="ln539">  // we will do the copy/paste on memory so we can deal with masks</a>
+<a name="ln540">  dt_dev_init(dev_src, FALSE);</a>
+<a name="ln541">  dt_dev_init(dev_dest, FALSE);</a>
+<a name="ln542"> </a>
+<a name="ln543">  dev_src-&gt;iop = dt_iop_load_modules_ext(dev_src, TRUE);</a>
+<a name="ln544">  dev_dest-&gt;iop = dt_iop_load_modules_ext(dev_dest, TRUE);</a>
+<a name="ln545"> </a>
+<a name="ln546">  dt_dev_read_history_ext(dev_src, imgid, TRUE);</a>
+<a name="ln547">  dt_dev_read_history_ext(dev_dest, dest_imgid, TRUE);</a>
+<a name="ln548"> </a>
+<a name="ln549">  dt_ioppr_check_iop_order(dev_src, imgid, &quot;_history_copy_and_paste_on_image_merge &quot;);</a>
+<a name="ln550">  dt_ioppr_check_iop_order(dev_dest, imgid, &quot;_history_copy_and_paste_on_image_merge &quot;);</a>
+<a name="ln551"> </a>
+<a name="ln552">  dt_dev_pop_history_items_ext(dev_src, dev_src-&gt;history_end);</a>
+<a name="ln553">  dt_dev_pop_history_items_ext(dev_dest, dev_dest-&gt;history_end);</a>
+<a name="ln554"> </a>
+<a name="ln555">  dt_ioppr_check_iop_order(dev_src, imgid, &quot;_history_copy_and_paste_on_image_merge 1&quot;);</a>
+<a name="ln556">  dt_ioppr_check_iop_order(dev_dest, imgid, &quot;_history_copy_and_paste_on_image_merge 1&quot;);</a>
+<a name="ln557"> </a>
+<a name="ln558">  // the user have selected some history entries</a>
+<a name="ln559">  if(ops)</a>
+<a name="ln560">  {</a>
+<a name="ln561">    // copy only selected history entries</a>
+<a name="ln562">    GList *l = g_list_last(ops);</a>
+<a name="ln563">    while(l)</a>
+<a name="ln564">    {</a>
+<a name="ln565">      unsigned int num = GPOINTER_TO_UINT(l-&gt;data);</a>
+<a name="ln566"> </a>
+<a name="ln567">      dt_dev_history_item_t *hist = g_list_nth_data(dev_src-&gt;history, num);</a>
+<a name="ln568"> </a>
+<a name="ln569">      if(hist)</a>
+<a name="ln570">      {</a>
+<a name="ln571">        // merge the entry</a>
+<a name="ln572">        dt_history_merge_module_into_history(dev_dest, dev_src, hist-&gt;module, &amp;modules_used, FALSE);</a>
+<a name="ln573">      }</a>
+<a name="ln574"> </a>
+<a name="ln575">      l = g_list_previous(l);</a>
+<a name="ln576">    }</a>
+<a name="ln577">  }</a>
+<a name="ln578">  else</a>
+<a name="ln579">  {</a>
+<a name="ln580">    // we will copy all modules</a>
+<a name="ln581">    GList *modules_src = g_list_first(dev_src-&gt;iop);</a>
+<a name="ln582">    while(modules_src)</a>
+<a name="ln583">    {</a>
+<a name="ln584">      dt_iop_module_t *mod_src = (dt_iop_module_t *)(modules_src-&gt;data);</a>
+<a name="ln585"> </a>
+<a name="ln586">      // but only if module is in history in source image</a>
+<a name="ln587">      if(_search_history_by_module(dev_src, mod_src) != NULL)</a>
+<a name="ln588">      {</a>
+<a name="ln589">        // merge the module into dest image</a>
+<a name="ln590">        dt_history_merge_module_into_history(dev_dest, dev_src, mod_src, &amp;modules_used, FALSE);</a>
+<a name="ln591">      }</a>
+<a name="ln592"> </a>
+<a name="ln593">      modules_src = g_list_next(modules_src);</a>
+<a name="ln594">    }</a>
+<a name="ln595">  }</a>
+<a name="ln596"> </a>
+<a name="ln597">  dt_ioppr_check_iop_order(dev_src, imgid, &quot;_history_copy_and_paste_on_image_merge 2&quot;);</a>
+<a name="ln598">  dt_ioppr_check_iop_order(dev_dest, imgid, &quot;_history_copy_and_paste_on_image_merge 2&quot;);</a>
+<a name="ln599"> </a>
+<a name="ln600">  // write history and forms to db</a>
+<a name="ln601">  dt_dev_write_history_ext(dev_dest, dest_imgid);</a>
+<a name="ln602"> </a>
+<a name="ln603">  dt_dev_cleanup(dev_src);</a>
+<a name="ln604">  dt_dev_cleanup(dev_dest);</a>
+<a name="ln605"> </a>
+<a name="ln606">  g_list_free(modules_used);</a>
+<a name="ln607"> </a>
+<a name="ln608">  return 0;</a>
+<a name="ln609">}</a>
+<a name="ln610"> </a>
+<a name="ln611">static int _history_copy_and_paste_on_image_overwrite(int32_t imgid, int32_t dest_imgid, GList *ops)</a>
+<a name="ln612">{</a>
+<a name="ln613">  int ret_val = 0;</a>
+<a name="ln614">  sqlite3_stmt *stmt;</a>
+<a name="ln615"> </a>
+<a name="ln616">  // replace history stack</a>
+<a name="ln617">  DT_DEBUG_SQLITE3_PREPARE_V2(dt_database_get(darktable.db), &quot;DELETE FROM main.history WHERE imgid = ?1&quot;, -1,</a>
+<a name="ln618">                              &amp;stmt, NULL);</a>
+<a name="ln619">  DT_DEBUG_SQLITE3_BIND_INT(stmt, 1, dest_imgid);</a>
+<a name="ln620">  sqlite3_step(stmt);</a>
+<a name="ln621">  sqlite3_finalize(stmt);</a>
+<a name="ln622"> </a>
+<a name="ln623">  // and shapes</a>
+<a name="ln624">  DT_DEBUG_SQLITE3_PREPARE_V2(dt_database_get(darktable.db), &quot;DELETE FROM main.masks_history WHERE imgid = ?1&quot;, -1, &amp;stmt,</a>
+<a name="ln625">                              NULL);</a>
+<a name="ln626">  DT_DEBUG_SQLITE3_BIND_INT(stmt, 1, dest_imgid);</a>
+<a name="ln627">  sqlite3_step(stmt);</a>
+<a name="ln628">  sqlite3_finalize(stmt);</a>
+<a name="ln629"> </a>
+<a name="ln630">  DT_DEBUG_SQLITE3_PREPARE_V2(dt_database_get(darktable.db),</a>
+<a name="ln631">                              &quot;UPDATE main.images SET history_end = 0, iop_order_version = 0 WHERE id = ?1&quot;,</a>
+<a name="ln632">                              -1, &amp;stmt, NULL);</a>
+<a name="ln633">  DT_DEBUG_SQLITE3_BIND_INT(stmt, 1, dest_imgid);</a>
+<a name="ln634">  sqlite3_step(stmt);</a>
+<a name="ln635">  sqlite3_finalize(stmt);</a>
+<a name="ln636"> </a>
+<a name="ln637">  // the user wants an exact duplicate of the history, so just copy the db</a>
+<a name="ln638">  if(!ops)</a>
+<a name="ln639">  {</a>
+<a name="ln640">    DT_DEBUG_SQLITE3_PREPARE_V2(dt_database_get(darktable.db),</a>
+<a name="ln641">                                &quot;INSERT INTO main.history &quot;</a>
+<a name="ln642">                                &quot;(imgid,num,module,operation,op_params,enabled,blendop_params, &quot;</a>
+<a name="ln643">                                &quot;blendop_version,multi_priority,multi_name,iop_order) SELECT &quot;</a>
+<a name="ln644">                                &quot;?1,num,module,operation,op_params,enabled,blendop_params, &quot;</a>
+<a name="ln645">                                &quot;blendop_version,multi_priority,multi_name,iop_order &quot;</a>
+<a name="ln646">                                &quot;FROM main.history WHERE imgid=?2 ORDER BY num&quot;,</a>
+<a name="ln647">                                -1, &amp;stmt, NULL);</a>
+<a name="ln648">    DT_DEBUG_SQLITE3_BIND_INT(stmt, 1, dest_imgid);</a>
+<a name="ln649">    DT_DEBUG_SQLITE3_BIND_INT(stmt, 2, imgid);</a>
+<a name="ln650">    sqlite3_step(stmt);</a>
+<a name="ln651">    sqlite3_finalize(stmt);</a>
+<a name="ln652"> </a>
+<a name="ln653">    DT_DEBUG_SQLITE3_PREPARE_V2(dt_database_get(darktable.db),</a>
+<a name="ln654">                                &quot;INSERT INTO main.masks_history &quot;</a>
+<a name="ln655">                                &quot;(imgid, num, formid, form, name, version, points, points_count, source) SELECT &quot;</a>
+<a name="ln656">                                &quot;?1, num, formid, form, name, version, points, points_count, source &quot;</a>
+<a name="ln657">                                &quot;FROM main.masks_history WHERE imgid = ?2&quot;,</a>
+<a name="ln658">                                -1, &amp;stmt, NULL);</a>
+<a name="ln659">    DT_DEBUG_SQLITE3_BIND_INT(stmt, 1, dest_imgid);</a>
+<a name="ln660">    DT_DEBUG_SQLITE3_BIND_INT(stmt, 2, imgid);</a>
+<a name="ln661">    sqlite3_step(stmt);</a>
+<a name="ln662">    sqlite3_finalize(stmt);</a>
+<a name="ln663"> </a>
+<a name="ln664">    int history_end = 0;</a>
+<a name="ln665">    int iop_order_version = 0;</a>
+<a name="ln666">    DT_DEBUG_SQLITE3_PREPARE_V2(dt_database_get(darktable.db),</a>
+<a name="ln667">                                &quot;SELECT history_end, iop_order_version FROM main.images WHERE id = ?1&quot;,</a>
+<a name="ln668">                                -1, &amp;stmt, NULL);</a>
+<a name="ln669">    DT_DEBUG_SQLITE3_BIND_INT(stmt, 1, imgid);</a>
+<a name="ln670">    if(sqlite3_step(stmt) == SQLITE_ROW)</a>
+<a name="ln671">    {</a>
+<a name="ln672">      if(sqlite3_column_type(stmt, 0) != SQLITE_NULL)</a>
+<a name="ln673">        history_end = sqlite3_column_int(stmt, 0);</a>
+<a name="ln674">      if(sqlite3_column_type(stmt, 1) != SQLITE_NULL)</a>
+<a name="ln675">        iop_order_version = sqlite3_column_int(stmt, 1);</a>
+<a name="ln676">    }</a>
+<a name="ln677">    sqlite3_finalize(stmt);</a>
+<a name="ln678"> </a>
+<a name="ln679">    DT_DEBUG_SQLITE3_PREPARE_V2(dt_database_get(darktable.db),</a>
+<a name="ln680">                                &quot;UPDATE main.images SET history_end = ?2, iop_order_version = ?3 &quot;</a>
+<a name="ln681">                                &quot; WHERE id = ?1&quot;,</a>
+<a name="ln682">                                -1, &amp;stmt, NULL);</a>
+<a name="ln683">    DT_DEBUG_SQLITE3_BIND_INT(stmt, 1, dest_imgid);</a>
+<a name="ln684">    DT_DEBUG_SQLITE3_BIND_INT(stmt, 2, history_end);</a>
+<a name="ln685">    DT_DEBUG_SQLITE3_BIND_INT(stmt, 3, iop_order_version);</a>
+<a name="ln686">    sqlite3_step(stmt);</a>
+<a name="ln687">    sqlite3_finalize(stmt);</a>
+<a name="ln688">  }</a>
+<a name="ln689">  else</a>
+<a name="ln690">  {</a>
+<a name="ln691">    // since the history and masks where deleted we can do a merge</a>
+<a name="ln692">    ret_val = _history_copy_and_paste_on_image_merge(imgid, dest_imgid, ops);</a>
+<a name="ln693">  }</a>
+<a name="ln694"> </a>
+<a name="ln695">  return ret_val;</a>
+<a name="ln696">}</a>
+<a name="ln697"> </a>
+<a name="ln698">int dt_history_copy_and_paste_on_image(int32_t imgid, int32_t dest_imgid, gboolean merge, GList *ops)</a>
+<a name="ln699">{</a>
+<a name="ln700">  if(imgid == dest_imgid) return 1;</a>
+<a name="ln701"> </a>
+<a name="ln702">  if(imgid == -1)</a>
+<a name="ln703">  {</a>
+<a name="ln704">    dt_control_log(_(&quot;you need to copy history from an image before you paste it onto another&quot;));</a>
+<a name="ln705">    return 1;</a>
+<a name="ln706">  }</a>
+<a name="ln707"> </a>
+<a name="ln708">  // be sure the current history is written before pasting some other history data</a>
+<a name="ln709">  const dt_view_t *cv = dt_view_manager_get_current_view(darktable.view_manager);</a>
+<a name="ln710">  if(cv-&gt;view((dt_view_t *)cv) == DT_VIEW_DARKROOM) dt_dev_write_history(darktable.develop);</a>
+<a name="ln711"> </a>
+<a name="ln712">  dt_undo_lt_history_t *hist = dt_history_snapshot_item_init();</a>
+<a name="ln713">  hist-&gt;imgid = dest_imgid;</a>
+<a name="ln714">  dt_history_snapshot_undo_create(hist-&gt;imgid, &amp;hist-&gt;before, &amp;hist-&gt;before_history_end);</a>
+<a name="ln715"> </a>
+<a name="ln716">  int ret_val = 0;</a>
+<a name="ln717">  if(merge)</a>
+<a name="ln718">    ret_val = _history_copy_and_paste_on_image_merge(imgid, dest_imgid, ops);</a>
+<a name="ln719">  else</a>
+<a name="ln720">    ret_val = _history_copy_and_paste_on_image_overwrite(imgid, dest_imgid, ops);</a>
+<a name="ln721"> </a>
+<a name="ln722">  dt_history_snapshot_undo_create(hist-&gt;imgid, &amp;hist-&gt;after, &amp;hist-&gt;after_history_end);</a>
+<a name="ln723">  dt_undo_start_group(darktable.undo, DT_UNDO_LT_HISTORY);</a>
+<a name="ln724">  dt_undo_record(darktable.undo, NULL, DT_UNDO_LT_HISTORY, (dt_undo_data_t)hist,</a>
+<a name="ln725">                 dt_history_snapshot_undo_pop, dt_history_snapshot_undo_lt_history_data_free);</a>
+<a name="ln726">  dt_undo_end_group(darktable.undo);</a>
+<a name="ln727"> </a>
+<a name="ln728">  /* attach changed tag reflecting actual change */</a>
+<a name="ln729">  guint tagid = 0;</a>
+<a name="ln730">  dt_tag_new(&quot;darktable|changed&quot;, &amp;tagid);</a>
+<a name="ln731">  dt_tag_attach(tagid, dest_imgid);</a>
+<a name="ln732"> </a>
+<a name="ln733">  /* if current image in develop reload history */</a>
+<a name="ln734">  if(dt_dev_is_current_image(darktable.develop, dest_imgid))</a>
+<a name="ln735">  {</a>
+<a name="ln736">    dt_dev_reload_history_items(darktable.develop);</a>
+<a name="ln737">    dt_dev_modulegroups_set(darktable.develop, dt_dev_modulegroups_get(darktable.develop));</a>
+<a name="ln738">  }</a>
+<a name="ln739"> </a>
+<a name="ln740">  /* update xmp file */</a>
+<a name="ln741">  dt_image_synch_xmp(dest_imgid);</a>
+<a name="ln742"> </a>
+<a name="ln743">  dt_mipmap_cache_remove(darktable.mipmap_cache, dest_imgid);</a>
+<a name="ln744">  dt_image_reset_final_size(imgid);</a>
+<a name="ln745"> </a>
+<a name="ln746">  /* update the aspect ratio if the current sorting is based on aspect ratio, otherwise the aspect ratio will be</a>
+<a name="ln747">     recalculated when the mimpap will be recreated */</a>
+<a name="ln748">  if (darktable.collection-&gt;params.sort == DT_COLLECTION_SORT_ASPECT_RATIO)</a>
+<a name="ln749">    dt_image_set_aspect_ratio(dest_imgid);</a>
+<a name="ln750"> </a>
+<a name="ln751">  return ret_val;</a>
+<a name="ln752">}</a>
+<a name="ln753"> </a>
+<a name="ln754">GList *dt_history_get_items(int32_t imgid, gboolean enabled)</a>
+<a name="ln755">{</a>
+<a name="ln756">  GList *result = NULL;</a>
+<a name="ln757">  sqlite3_stmt *stmt;</a>
+<a name="ln758"> </a>
+<a name="ln759">  DT_DEBUG_SQLITE3_PREPARE_V2(dt_database_get(darktable.db),</a>
+<a name="ln760">                              &quot;SELECT num, operation, enabled, multi_name FROM main.history WHERE imgid=?1 AND &quot;</a>
+<a name="ln761">                              &quot;num IN (SELECT MAX(num) FROM main.history hst2 WHERE hst2.imgid=?1 AND &quot;</a>
+<a name="ln762">                              &quot;hst2.operation=main.history.operation GROUP BY multi_priority) &quot;</a>
+<a name="ln763">                              &quot;ORDER BY num DESC&quot;,</a>
+<a name="ln764">                              -1, &amp;stmt, NULL);</a>
+<a name="ln765">  DT_DEBUG_SQLITE3_BIND_INT(stmt, 1, imgid);</a>
+<a name="ln766">  while(sqlite3_step(stmt) == SQLITE_ROW)</a>
+<a name="ln767">  {</a>
+<a name="ln768">    if(strcmp((const char*)sqlite3_column_text(stmt, 1), &quot;mask_manager&quot;) == 0) continue;</a>
+<a name="ln769"> </a>
+<a name="ln770">    char name[512] = { 0 };</a>
+<a name="ln771">    const int is_active = sqlite3_column_int(stmt, 2);</a>
+<a name="ln772"> </a>
+<a name="ln773">    if(enabled == FALSE || is_active)</a>
+<a name="ln774">    {</a>
+<a name="ln775">      dt_history_item_t *item = g_malloc(sizeof(dt_history_item_t));</a>
+<a name="ln776">      item-&gt;num = sqlite3_column_int(stmt, 0);</a>
+<a name="ln777">      char *mname = NULL;</a>
+<a name="ln778">      mname = g_strdup((gchar *)sqlite3_column_text(stmt, 3));</a>
+<a name="ln779">      if(enabled)</a>
+<a name="ln780">      {</a>
+<a name="ln781">        if(strcmp(mname, &quot;0&quot;) == 0)</a>
+<a name="ln782">          g_snprintf(name, sizeof(name), &quot;%s&quot;,</a>
+<a name="ln783">                     dt_iop_get_localized_name((char *)sqlite3_column_text(stmt, 1)));</a>
+<a name="ln784">        else</a>
+<a name="ln785">          g_snprintf(name, sizeof(name), &quot;%s %s&quot;,</a>
+<a name="ln786">                     dt_iop_get_localized_name((char *)sqlite3_column_text(stmt, 1)),</a>
+<a name="ln787">                     (char *)sqlite3_column_text(stmt, 3));</a>
+<a name="ln788">      }</a>
+<a name="ln789">      else</a>
+<a name="ln790">      {</a>
+<a name="ln791">        if(strcmp(mname, &quot;0&quot;) == 0)</a>
+<a name="ln792">          g_snprintf(name, sizeof(name), &quot;%s (%s)&quot;,</a>
+<a name="ln793">                     dt_iop_get_localized_name((char *)sqlite3_column_text(stmt, 1)),</a>
+<a name="ln794">                     (is_active != 0) ? _(&quot;on&quot;) : _(&quot;off&quot;));</a>
+<a name="ln795">        g_snprintf(name, sizeof(name), &quot;%s %s (%s)&quot;,</a>
+<a name="ln796">                   dt_iop_get_localized_name((char *)sqlite3_column_text(stmt, 1)),</a>
+<a name="ln797">                   (char *)sqlite3_column_text(stmt, 3), (is_active != 0) ? _(&quot;on&quot;) : _(&quot;off&quot;));</a>
+<a name="ln798">      }</a>
+<a name="ln799">      item-&gt;name = g_strdup(name);</a>
+<a name="ln800">      item-&gt;op = g_strdup((gchar *)sqlite3_column_text(stmt, 1));</a>
+<a name="ln801">      result = g_list_append(result, item);</a>
+<a name="ln802"> </a>
+<a name="ln803">      g_free(mname);</a>
+<a name="ln804">    }</a>
+<a name="ln805">  }</a>
+<a name="ln806">  sqlite3_finalize(stmt);</a>
+<a name="ln807">  return result;</a>
+<a name="ln808">}</a>
+<a name="ln809"> </a>
+<a name="ln810">char *dt_history_get_items_as_string(int32_t imgid)</a>
+<a name="ln811">{</a>
+<a name="ln812">  GList *items = NULL;</a>
+<a name="ln813">  const char *onoff[2] = { _(&quot;off&quot;), _(&quot;on&quot;) };</a>
+<a name="ln814">  sqlite3_stmt *stmt;</a>
+<a name="ln815">  DT_DEBUG_SQLITE3_PREPARE_V2(</a>
+<a name="ln816">      dt_database_get(darktable.db),</a>
+<a name="ln817">      &quot;SELECT operation, enabled, multi_name FROM main.history WHERE imgid=?1 ORDER BY num DESC&quot;, -1, &amp;stmt, NULL);</a>
+<a name="ln818">  DT_DEBUG_SQLITE3_BIND_INT(stmt, 1, imgid);</a>
+<a name="ln819"> </a>
+<a name="ln820">  // collect all the entries in the history from the db</a>
+<a name="ln821">  while(sqlite3_step(stmt) == SQLITE_ROW)</a>
+<a name="ln822">  {</a>
+<a name="ln823">    char *name = NULL, *multi_name = NULL;</a>
+<a name="ln824">    const char *mn = (char *)sqlite3_column_text(stmt, 2);</a>
+<a name="ln825">    if(mn &amp;&amp; *mn &amp;&amp; g_strcmp0(mn, &quot; &quot;) != 0 &amp;&amp; g_strcmp0(mn, &quot;0&quot;) != 0)</a>
+<a name="ln826">      multi_name = g_strconcat(&quot; &quot;, sqlite3_column_text(stmt, 2), NULL);</a>
+<a name="ln827">    name = g_strconcat(dt_iop_get_localized_name((char *)sqlite3_column_text(stmt, 0)),</a>
+<a name="ln828">                       multi_name ? multi_name : &quot;&quot;, &quot; (&quot;,</a>
+<a name="ln829">                       (sqlite3_column_int(stmt, 1) == 0) ? onoff[0] : onoff[1], &quot;)&quot;, NULL);</a>
+<a name="ln830">    items = g_list_append(items, name);</a>
+<a name="ln831">    g_free(multi_name);</a>
+<a name="ln832">  }</a>
+<a name="ln833">  sqlite3_finalize(stmt);</a>
+<a name="ln834">  char *result = dt_util_glist_to_str(&quot;\n&quot;, items);</a>
+<a name="ln835">  g_list_free_full(items, g_free);</a>
+<a name="ln836">  return result;</a>
+<a name="ln837">}</a>
+<a name="ln838"> </a>
+<a name="ln839">int dt_history_copy_and_paste_on_selection(int32_t imgid, gboolean merge, GList *ops)</a>
+<a name="ln840">{</a>
+<a name="ln841">  if(imgid &lt; 0) return 1;</a>
+<a name="ln842"> </a>
+<a name="ln843">  int res = 0;</a>
+<a name="ln844">  sqlite3_stmt *stmt;</a>
+<a name="ln845">  DT_DEBUG_SQLITE3_PREPARE_V2(dt_database_get(darktable.db),</a>
+<a name="ln846">                              &quot;SELECT imgid FROM main.selected_images WHERE imgid != ?1&quot;, -1, &amp;stmt, NULL);</a>
+<a name="ln847">  DT_DEBUG_SQLITE3_BIND_INT(stmt, 1, imgid);</a>
+<a name="ln848">  if(sqlite3_step(stmt) == SQLITE_ROW)</a>
+<a name="ln849">  {</a>
+<a name="ln850">    dt_undo_start_group(darktable.undo, DT_UNDO_LT_HISTORY);</a>
+<a name="ln851">    do</a>
+<a name="ln852">    {</a>
+<a name="ln853">      /* get imgid of selected image */</a>
+<a name="ln854">      int32_t dest_imgid = sqlite3_column_int(stmt, 0);</a>
+<a name="ln855"> </a>
+<a name="ln856">      /* paste history stack onto image id */</a>
+<a name="ln857">      dt_history_copy_and_paste_on_image(imgid, dest_imgid, merge, ops);</a>
+<a name="ln858"> </a>
+<a name="ln859">    } while(sqlite3_step(stmt) == SQLITE_ROW);</a>
+<a name="ln860">    dt_undo_end_group(darktable.undo);</a>
+<a name="ln861">  }</a>
+<a name="ln862">  else</a>
+<a name="ln863">    res = 1;</a>
+<a name="ln864"> </a>
+<a name="ln865">  sqlite3_finalize(stmt);</a>
+<a name="ln866">  return res;</a>
+<a name="ln867">}</a>
+<a name="ln868"> </a>
+<a name="ln869">void dt_history_compress_on_image(int32_t imgid)</a>
+<a name="ln870">{</a>
+<a name="ln871">  // make sure the right history is in there:</a>
+<a name="ln872">  dt_dev_write_history(darktable.develop);</a>
+<a name="ln873"> </a>
+<a name="ln874">  // compress history and remove disabled modules - adapted from libs/history.c</a>
+<a name="ln875">  sqlite3_stmt *stmt_local;</a>
+<a name="ln876">  DT_DEBUG_SQLITE3_PREPARE_V2(dt_database_get(darktable.db),</a>
+<a name="ln877">                              &quot;DELETE FROM main.history WHERE imgid = ?1 AND num &quot;</a>
+<a name="ln878">                              &quot;NOT IN (SELECT MAX(num) FROM main.history WHERE &quot;</a>
+<a name="ln879">                              &quot;imgid = ?1 AND enabled = 1 GROUP BY operation, &quot;</a>
+<a name="ln880">                              &quot;multi_priority)&quot;,</a>
+<a name="ln881">                              -1, &amp;stmt_local, NULL);</a>
+<a name="ln882">  DT_DEBUG_SQLITE3_BIND_INT(stmt_local, 1, imgid);</a>
+<a name="ln883">  sqlite3_step(stmt_local);</a>
+<a name="ln884">  sqlite3_finalize(stmt_local);</a>
+<a name="ln885"> </a>
+<a name="ln886">  // delete all mask_manager entries - copied from libs/history.c</a>
+<a name="ln887">  int masks_count = 0;</a>
+<a name="ln888">  char op_mask_manager[20] = { 0 };</a>
+<a name="ln889">  g_strlcpy(op_mask_manager, &quot;mask_manager&quot;, sizeof(op_mask_manager));</a>
+<a name="ln890"> </a>
+<a name="ln891">  DT_DEBUG_SQLITE3_PREPARE_V2(dt_database_get(darktable.db),</a>
+<a name="ln892">                              &quot;DELETE FROM main.history WHERE imgid = ?1 AND operation = ?2&quot;, -1, &amp;stmt_local,</a>
+<a name="ln893">                              NULL);</a>
+<a name="ln894">  DT_DEBUG_SQLITE3_BIND_INT(stmt_local, 1, imgid);</a>
+<a name="ln895">  DT_DEBUG_SQLITE3_BIND_TEXT(stmt_local, 2, op_mask_manager, -1, SQLITE_TRANSIENT);</a>
+<a name="ln896">  sqlite3_step(stmt_local);</a>
+<a name="ln897">  sqlite3_finalize(stmt_local);</a>
+<a name="ln898"> </a>
+<a name="ln899">  // if there's masks create a mask manage entry</a>
+<a name="ln900">  DT_DEBUG_SQLITE3_PREPARE_V2(dt_database_get(darktable.db),</a>
+<a name="ln901">                              &quot;SELECT COUNT(*) FROM main.masks_history WHERE imgid = ?1&quot;, -1, &amp;stmt_local, NULL);</a>
+<a name="ln902">  DT_DEBUG_SQLITE3_BIND_INT(stmt_local, 1, imgid);</a>
+<a name="ln903">  if(sqlite3_step(stmt_local) == SQLITE_ROW) masks_count = sqlite3_column_int(stmt_local, 0);</a>
+<a name="ln904">  sqlite3_finalize(stmt_local);</a>
+<a name="ln905"> </a>
+<a name="ln906">  if(masks_count &gt; 0)</a>
+<a name="ln907">  {</a>
+<a name="ln908">    // set the masks history as first entry</a>
+<a name="ln909">    DT_DEBUG_SQLITE3_PREPARE_V2(dt_database_get(darktable.db),</a>
+<a name="ln910">                                &quot;UPDATE main.masks_history SET num = 0 WHERE imgid = ?1&quot;, -1, &amp;stmt_local, NULL);</a>
+<a name="ln911">    DT_DEBUG_SQLITE3_BIND_INT(stmt_local, 1, imgid);</a>
+<a name="ln912">    sqlite3_step(stmt_local);</a>
+<a name="ln913">    sqlite3_finalize(stmt_local);</a>
+<a name="ln914"> </a>
+<a name="ln915">    // make room for mask manager history entry</a>
+<a name="ln916">    DT_DEBUG_SQLITE3_PREPARE_V2(dt_database_get(darktable.db),</a>
+<a name="ln917">                                &quot;UPDATE main.history SET num=num+1 WHERE imgid = ?1&quot;, -1, &amp;stmt_local, NULL);</a>
+<a name="ln918">    DT_DEBUG_SQLITE3_BIND_INT(stmt_local, 1, imgid);</a>
+<a name="ln919">    sqlite3_step(stmt_local);</a>
+<a name="ln920">    sqlite3_finalize(stmt_local);</a>
+<a name="ln921"> </a>
+<a name="ln922">    // update history end</a>
+<a name="ln923">    DT_DEBUG_SQLITE3_PREPARE_V2(dt_database_get(darktable.db),</a>
+<a name="ln924">                                &quot;UPDATE main.images SET history_end = history_end+1 WHERE id = ?1&quot;, -1,</a>
+<a name="ln925">                                &amp;stmt_local, NULL);</a>
+<a name="ln926">    DT_DEBUG_SQLITE3_BIND_INT(stmt_local, 1, imgid);</a>
+<a name="ln927">    sqlite3_step(stmt_local);</a>
+<a name="ln928">    sqlite3_finalize(stmt_local);</a>
+<a name="ln929"> </a>
+<a name="ln930">    const double iop_order = dt_ioppr_get_iop_order(darktable.develop-&gt;iop_order_list, op_mask_manager);</a>
+<a name="ln931"> </a>
+<a name="ln932">    // create a mask manager entry in history as first entry</a>
+<a name="ln933">    DT_DEBUG_SQLITE3_PREPARE_V2(dt_database_get(darktable.db),</a>
+<a name="ln934">                                &quot;INSERT INTO main.history (imgid, num, operation, op_params, module, enabled, &quot;</a>
+<a name="ln935">                                &quot;blendop_params, blendop_version, multi_priority, multi_name, iop_order) &quot;</a>
+<a name="ln936">                                &quot;VALUES(?1, 0, ?2, NULL, 1, 0, NULL, 0, 0, '', ?3)&quot;,</a>
+<a name="ln937">                                -1, &amp;stmt_local, NULL);</a>
+<a name="ln938">    DT_DEBUG_SQLITE3_BIND_INT(stmt_local, 1, imgid);</a>
+<a name="ln939">    DT_DEBUG_SQLITE3_BIND_TEXT(stmt_local, 2, op_mask_manager, -1, SQLITE_TRANSIENT);</a>
+<a name="ln940">    DT_DEBUG_SQLITE3_BIND_DOUBLE(stmt_local, 3, iop_order);</a>
+<a name="ln941">    sqlite3_step(stmt_local);</a>
+<a name="ln942">    sqlite3_finalize(stmt_local);</a>
+<a name="ln943">  }</a>
+<a name="ln944"> </a>
+<a name="ln945">  /* if current image in develop reload history */</a>
+<a name="ln946">  if(dt_dev_is_current_image(darktable.develop, imgid))</a>
+<a name="ln947">  {</a>
+<a name="ln948">    dt_dev_reload_history_items(darktable.develop);</a>
+<a name="ln949">    dt_dev_write_history(darktable.develop);</a>
+<a name="ln950">    dt_dev_modulegroups_set(darktable.develop, dt_dev_modulegroups_get(darktable.develop));</a>
+<a name="ln951">  }</a>
+<a name="ln952"> </a>
+<a name="ln953">  // Update XMP files</a>
+<a name="ln954">  dt_image_synch_xmp(imgid);</a>
+<a name="ln955">}</a>
+<a name="ln956"> </a>
+<a name="ln957">void dt_history_compress_on_selection()</a>
+<a name="ln958">{</a>
+<a name="ln959">  // Get the list of selected images</a>
+<a name="ln960">  sqlite3_stmt *stmt;</a>
+<a name="ln961">  DT_DEBUG_SQLITE3_PREPARE_V2(dt_database_get(darktable.db), &quot;SELECT imgid FROM main.selected_images&quot;, -1, &amp;stmt,</a>
+<a name="ln962">                              NULL);</a>
+<a name="ln963"> </a>
+<a name="ln964">  while(sqlite3_step(stmt) == SQLITE_ROW)</a>
+<a name="ln965">  {</a>
+<a name="ln966">    dt_history_compress_on_image(sqlite3_column_int(stmt, 0));</a>
+<a name="ln967">  }</a>
+<a name="ln968">  sqlite3_finalize(stmt);</a>
+<a name="ln969">}</a>
+<a name="ln970"> </a>
+<a name="ln971">// modelines: These editor modelines have been set for all relevant files by tools/update_modelines.sh</a>
+<a name="ln972">// vim: shiftwidth=2 expandtab tabstop=2 cindent</a>
+<a name="ln973">// kate: tab-indents: off; indent-width 2; replace-tabs on; indent-mode cstyle; remove-trailing-spaces modified;</a>
+
+</code></pre>
+<div class="balloon" rel="397"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v522/" target="_blank">V522</a> There might be dereferencing of a potential null pointer 'module'. Check lines: 397, 389.</p></div>
+<div class="balloon" rel="490"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v522/" target="_blank">V522</a> There might be dereferencing of a potential null pointer 'forms_used_replace'. Check lines: 490, 485.</p></div>
+<div class="balloon" rel="515"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v595/" target="_blank">V595</a> The 'forms_used_replace' pointer was utilized before it was verified against nullptr. Check lines: 515, 521.</p></div>
+
+<link rel="stylesheet" href="highlight.css">
+<script src="highlight.pack.js"></script>
+<script src="highlightjs-line-numbers.js"></script>
+<script>hljs.initHighlightingOnLoad();</script>
+<script>hljs.initLineNumbersOnLoad();</script>
+<script>
+  $(document).ready(function() {
+      $('.balloon').each(function () {
+          var bl = $(this);
+          var line = bl.attr('rel');
+          var text = $('a[name="ln'+line+'"]').text();
+
+          var space_count = 0;
+          for(var i = 0; i<text.length; i++){
+              var char = text[i];
+              if((char !== ' ')&&(char !== '\t'))break;
+              if(char === '\t')space_count++;
+              space_count++;
+          }
+
+          bl.css('margin-left', space_count*8);
+          $('a[name="ln'+line+'"]').after(bl);
+      });
+
+      window.location = window.location;
+  });
+</script>
+</body>
+</html>

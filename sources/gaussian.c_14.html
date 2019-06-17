@@ -1,0 +1,804 @@
+
+<html>
+<head>
+  <link rel="stylesheet" href="../style.css"/>
+  <script src="../jquery-3.2.1.min.js"></script>
+</head>
+<body>
+<pre><code class = "cpp">
+<a name="ln1">/*</a>
+<a name="ln2">    This file is part of darktable,</a>
+<a name="ln3">    copyright (c) 2012 Ulrich Pegelow.</a>
+<a name="ln4"> </a>
+<a name="ln5">    darktable is free software: you can redistribute it and/or modify</a>
+<a name="ln6">    it under the terms of the GNU General Public License as published by</a>
+<a name="ln7">    the Free Software Foundation, either version 3 of the License, or</a>
+<a name="ln8">    (at your option) any later version.</a>
+<a name="ln9"> </a>
+<a name="ln10">    darktable is distributed in the hope that it will be useful,</a>
+<a name="ln11">    but WITHOUT ANY WARRANTY; without even the implied warranty of</a>
+<a name="ln12">    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the</a>
+<a name="ln13">    GNU General Public License for more details.</a>
+<a name="ln14"> </a>
+<a name="ln15">    You should have received a copy of the GNU General Public License</a>
+<a name="ln16">    along with darktable.  If not, see &lt;http://www.gnu.org/licenses/&gt;.</a>
+<a name="ln17">*/</a>
+<a name="ln18"> </a>
+<a name="ln19"> </a>
+<a name="ln20">#include &lt;assert.h&gt;</a>
+<a name="ln21">#include &lt;math.h&gt;</a>
+<a name="ln22">#if defined(__SSE__)</a>
+<a name="ln23">#include &lt;xmmintrin.h&gt;</a>
+<a name="ln24">#endif</a>
+<a name="ln25">#include &quot;common/gaussian.h&quot;</a>
+<a name="ln26">#include &quot;common/opencl.h&quot;</a>
+<a name="ln27"> </a>
+<a name="ln28">#define CLAMPF(a, mn, mx) ((a) &lt; (mn) ? (mn) : ((a) &gt; (mx) ? (mx) : (a)))</a>
+<a name="ln29"> </a>
+<a name="ln30">#if defined(__SSE__)</a>
+<a name="ln31">#define MMCLAMPPS(a, mn, mx) (_mm_min_ps((mx), _mm_max_ps((a), (mn))))</a>
+<a name="ln32">#endif</a>
+<a name="ln33"> </a>
+<a name="ln34">#define BLOCKSIZE (1 &lt;&lt; 6)</a>
+<a name="ln35"> </a>
+<a name="ln36">static void compute_gauss_params(const float sigma, dt_gaussian_order_t order, float *a0, float *a1,</a>
+<a name="ln37">                                 float *a2, float *a3, float *b1, float *b2, float *coefp, float *coefn)</a>
+<a name="ln38">{</a>
+<a name="ln39">  const float alpha = 1.695f / sigma;</a>
+<a name="ln40">  const float ema = exp(-alpha);</a>
+<a name="ln41">  const float ema2 = exp(-2.0f * alpha);</a>
+<a name="ln42">  *b1 = -2.0f * ema;</a>
+<a name="ln43">  *b2 = ema2;</a>
+<a name="ln44">  *a0 = 0.0f;</a>
+<a name="ln45">  *a1 = 0.0f;</a>
+<a name="ln46">  *a2 = 0.0f;</a>
+<a name="ln47">  *a3 = 0.0f;</a>
+<a name="ln48">  *coefp = 0.0f;</a>
+<a name="ln49">  *coefn = 0.0f;</a>
+<a name="ln50"> </a>
+<a name="ln51">  switch(order)</a>
+<a name="ln52">  {</a>
+<a name="ln53">    default:</a>
+<a name="ln54">    case DT_IOP_GAUSSIAN_ZERO:</a>
+<a name="ln55">    {</a>
+<a name="ln56">      const float k = (1.0f - ema) * (1.0f - ema) / (1.0f + (2.0f * alpha * ema) - ema2);</a>
+<a name="ln57">      *a0 = k;</a>
+<a name="ln58">      *a1 = k * (alpha - 1.0f) * ema;</a>
+<a name="ln59">      *a2 = k * (alpha + 1.0f) * ema;</a>
+<a name="ln60">      *a3 = -k * ema2;</a>
+<a name="ln61">    }</a>
+<a name="ln62">    break;</a>
+<a name="ln63"> </a>
+<a name="ln64">    case DT_IOP_GAUSSIAN_ONE:</a>
+<a name="ln65">    {</a>
+<a name="ln66">      *a0 = (1.0f - ema) * (1.0f - ema);</a>
+<a name="ln67">      *a1 = 0.0f;</a>
+<a name="ln68">      *a2 = -*a0;</a>
+<a name="ln69">      *a3 = 0.0f;</a>
+<a name="ln70">    }</a>
+<a name="ln71">    break;</a>
+<a name="ln72"> </a>
+<a name="ln73">    case DT_IOP_GAUSSIAN_TWO:</a>
+<a name="ln74">    {</a>
+<a name="ln75">      const float k = -(ema2 - 1.0f) / (2.0f * alpha * ema);</a>
+<a name="ln76">      float kn = -2.0f * (-1.0f + (3.0f * ema) - (3.0f * ema * ema) + (ema * ema * ema));</a>
+<a name="ln77">      kn /= ((3.0f * ema) + 1.0f + (3.0f * ema * ema) + (ema * ema * ema));</a>
+<a name="ln78">      *a0 = kn;</a>
+<a name="ln79">      *a1 = -kn * (1.0f + (k * alpha)) * ema;</a>
+<a name="ln80">      *a2 = kn * (1.0f - (k * alpha)) * ema;</a>
+<a name="ln81">      *a3 = -kn * ema2;</a>
+<a name="ln82">    }</a>
+<a name="ln83">  }</a>
+<a name="ln84"> </a>
+<a name="ln85">  *coefp = (*a0 + *a1) / (1.0f + *b1 + *b2);</a>
+<a name="ln86">  *coefn = (*a2 + *a3) / (1.0f + *b1 + *b2);</a>
+<a name="ln87">}</a>
+<a name="ln88"> </a>
+<a name="ln89">size_t dt_gaussian_memory_use(const int width,    // width of input image</a>
+<a name="ln90">                              const int height,   // height of input image</a>
+<a name="ln91">                              const int channels) // channels per pixel</a>
+<a name="ln92">{</a>
+<a name="ln93">  size_t mem_use;</a>
+<a name="ln94">#ifdef HAVE_OPENCL</a>
+<a name="ln95">  mem_use = (size_t)(width + BLOCKSIZE) * (height + BLOCKSIZE) * channels * sizeof(float) * 2;</a>
+<a name="ln96">#else</a>
+<a name="ln97">  mem_use = (size_t)width * height * channels * sizeof(float);</a>
+<a name="ln98">#endif</a>
+<a name="ln99">  return mem_use;</a>
+<a name="ln100">}</a>
+<a name="ln101"> </a>
+<a name="ln102">size_t dt_gaussian_singlebuffer_size(const int width,    // width of input image</a>
+<a name="ln103">                                     const int height,   // height of input image</a>
+<a name="ln104">                                     const int channels) // channels per pixel</a>
+<a name="ln105">{</a>
+<a name="ln106">  size_t mem_use;</a>
+<a name="ln107">#ifdef HAVE_OPENCL</a>
+<a name="ln108">  mem_use = (size_t)(width + BLOCKSIZE) * (height + BLOCKSIZE) * channels * sizeof(float);</a>
+<a name="ln109">#else</a>
+<a name="ln110">  mem_use = (size_t)width * height * channels * sizeof(float);</a>
+<a name="ln111">#endif</a>
+<a name="ln112">  return mem_use;</a>
+<a name="ln113">}</a>
+<a name="ln114"> </a>
+<a name="ln115"> </a>
+<a name="ln116">dt_gaussian_t *dt_gaussian_init(const int width,    // width of input image</a>
+<a name="ln117">                                const int height,   // height of input image</a>
+<a name="ln118">                                const int channels, // channels per pixel</a>
+<a name="ln119">                                const float *max,   // maximum allowed values per channel for clamping</a>
+<a name="ln120">                                const float *min,   // minimum allowed values per channel for clamping</a>
+<a name="ln121">                                const float sigma,  // gaussian sigma</a>
+<a name="ln122">                                const int order)    // order of gaussian blur</a>
+<a name="ln123">{</a>
+<a name="ln124">  dt_gaussian_t *g = (dt_gaussian_t *)malloc(sizeof(dt_gaussian_t));</a>
+<a name="ln125">  if(!g) return NULL;</a>
+<a name="ln126"> </a>
+<a name="ln127">  g-&gt;width = width;</a>
+<a name="ln128">  g-&gt;height = height;</a>
+<a name="ln129">  g-&gt;channels = channels;</a>
+<a name="ln130">  g-&gt;sigma = sigma;</a>
+<a name="ln131">  g-&gt;order = order;</a>
+<a name="ln132">  g-&gt;buf = NULL;</a>
+<a name="ln133">  g-&gt;max = (float *)calloc(channels, sizeof(float));</a>
+<a name="ln134">  g-&gt;min = (float *)calloc(channels, sizeof(float));</a>
+<a name="ln135"> </a>
+<a name="ln136">  if(!g-&gt;min || !g-&gt;max) goto error;</a>
+<a name="ln137"> </a>
+<a name="ln138">  for(int k = 0; k &lt; channels; k++)</a>
+<a name="ln139">  {</a>
+<a name="ln140">    g-&gt;max[k] = max[k];</a>
+<a name="ln141">    g-&gt;min[k] = min[k];</a>
+<a name="ln142">  }</a>
+<a name="ln143"> </a>
+<a name="ln144">  g-&gt;buf = dt_alloc_align(64, (size_t)width * height * channels * sizeof(float));</a>
+<a name="ln145">  if(!g-&gt;buf) goto error;</a>
+<a name="ln146"> </a>
+<a name="ln147">  return g;</a>
+<a name="ln148"> </a>
+<a name="ln149">error:</a>
+<a name="ln150">  dt_free_align(g-&gt;buf);</a>
+<a name="ln151">  free(g-&gt;max);</a>
+<a name="ln152">  free(g-&gt;min);</a>
+<a name="ln153">  free(g);</a>
+<a name="ln154">  return NULL;</a>
+<a name="ln155">}</a>
+<a name="ln156"> </a>
+<a name="ln157"> </a>
+<a name="ln158">void dt_gaussian_blur(dt_gaussian_t *g, const float *const in, float *const out)</a>
+<a name="ln159">{</a>
+<a name="ln160"> </a>
+<a name="ln161">  const int width = g-&gt;width;</a>
+<a name="ln162">  const int height = g-&gt;height;</a>
+<a name="ln163">  const int ch = MIN(4, g-&gt;channels); // just to appease zealous compiler warnings about stack usage</a>
+<a name="ln164"> </a>
+<a name="ln165">  float a0, a1, a2, a3, b1, b2, coefp, coefn;</a>
+<a name="ln166"> </a>
+<a name="ln167">  compute_gauss_params(g-&gt;sigma, g-&gt;order, &amp;a0, &amp;a1, &amp;a2, &amp;a3, &amp;b1, &amp;b2, &amp;coefp, &amp;coefn);</a>
+<a name="ln168"> </a>
+<a name="ln169">  float *temp = g-&gt;buf;</a>
+<a name="ln170"> </a>
+<a name="ln171">  float *Labmax = g-&gt;max;</a>
+<a name="ln172">  float *Labmin = g-&gt;min;</a>
+<a name="ln173"> </a>
+<a name="ln174">// vertical blur column by column</a>
+<a name="ln175">#ifdef _OPENMP</a>
+<a name="ln176">#pragma omp parallel for default(none) \</a>
+<a name="ln177">  dt_omp_firstprivate(in, width, height, ch) \</a>
+<a name="ln178">  shared(temp, Labmin, Labmax, a0, a1, a2, a3, b1, b2, coefp, coefn) \</a>
+<a name="ln179">  schedule(static)</a>
+<a name="ln180">#endif</a>
+<a name="ln181">  for(int i = 0; i &lt; width; i++)</a>
+<a name="ln182">  {</a>
+<a name="ln183">    float xp[4] = {0.0f};</a>
+<a name="ln184">    float yb[4] = {0.0f};</a>
+<a name="ln185">    float yp[4] = {0.0f};</a>
+<a name="ln186">    float xc[4] = {0.0f};</a>
+<a name="ln187">    float yc[4] = {0.0f};</a>
+<a name="ln188">    float xn[4] = {0.0f};</a>
+<a name="ln189">    float xa[4] = {0.0f};</a>
+<a name="ln190">    float yn[4] = {0.0f};</a>
+<a name="ln191">    float ya[4] = {0.0f};</a>
+<a name="ln192"> </a>
+<a name="ln193">    // forward filter</a>
+<a name="ln194">    for(int k = 0; k &lt; ch; k++)</a>
+<a name="ln195">    {</a>
+<a name="ln196">      xp[k] = CLAMPF(in[(size_t)i * ch + k], Labmin[k], Labmax[k]);</a>
+<a name="ln197">      yb[k] = xp[k] * coefp;</a>
+<a name="ln198">      yp[k] = yb[k];</a>
+<a name="ln199">      xc[k] = yc[k] = xn[k] = xa[k] = yn[k] = ya[k] = 0.0f;</a>
+<a name="ln200">    }</a>
+<a name="ln201"> </a>
+<a name="ln202">    for(int j = 0; j &lt; height; j++)</a>
+<a name="ln203">    {</a>
+<a name="ln204">      size_t offset = ((size_t)j * width + i) * ch;</a>
+<a name="ln205"> </a>
+<a name="ln206">      for(int k = 0; k &lt; ch; k++)</a>
+<a name="ln207">      {</a>
+<a name="ln208">        xc[k] = CLAMPF(in[offset + k], Labmin[k], Labmax[k]);</a>
+<a name="ln209">        yc[k] = (a0 * xc[k]) + (a1 * xp[k]) - (b1 * yp[k]) - (b2 * yb[k]);</a>
+<a name="ln210"> </a>
+<a name="ln211">        temp[offset + k] = yc[k];</a>
+<a name="ln212"> </a>
+<a name="ln213">        xp[k] = xc[k];</a>
+<a name="ln214">        yb[k] = yp[k];</a>
+<a name="ln215">        yp[k] = yc[k];</a>
+<a name="ln216">      }</a>
+<a name="ln217">    }</a>
+<a name="ln218"> </a>
+<a name="ln219">    // backward filter</a>
+<a name="ln220">    for(int k = 0; k &lt; ch; k++)</a>
+<a name="ln221">    {</a>
+<a name="ln222">      xn[k] = CLAMPF(in[((size_t)(height - 1) * width + i) * ch + k], Labmin[k], Labmax[k]);</a>
+<a name="ln223">      xa[k] = xn[k];</a>
+<a name="ln224">      yn[k] = xn[k] * coefn;</a>
+<a name="ln225">      ya[k] = yn[k];</a>
+<a name="ln226">    }</a>
+<a name="ln227"> </a>
+<a name="ln228">    for(int j = height - 1; j &gt; -1; j--)</a>
+<a name="ln229">    {</a>
+<a name="ln230">      size_t offset = ((size_t)j * width + i) * ch;</a>
+<a name="ln231"> </a>
+<a name="ln232">      for(int k = 0; k &lt; ch; k++)</a>
+<a name="ln233">      {</a>
+<a name="ln234">        xc[k] = CLAMPF(in[offset + k], Labmin[k], Labmax[k]);</a>
+<a name="ln235"> </a>
+<a name="ln236">        yc[k] = (a2 * xn[k]) + (a3 * xa[k]) - (b1 * yn[k]) - (b2 * ya[k]);</a>
+<a name="ln237"> </a>
+<a name="ln238">        xa[k] = xn[k];</a>
+<a name="ln239">        xn[k] = xc[k];</a>
+<a name="ln240">        ya[k] = yn[k];</a>
+<a name="ln241">        yn[k] = yc[k];</a>
+<a name="ln242"> </a>
+<a name="ln243">        temp[offset + k] += yc[k];</a>
+<a name="ln244">      }</a>
+<a name="ln245">    }</a>
+<a name="ln246">  }</a>
+<a name="ln247"> </a>
+<a name="ln248">// horizontal blur line by line</a>
+<a name="ln249">#ifdef _OPENMP</a>
+<a name="ln250">#pragma omp parallel for default(none) \</a>
+<a name="ln251">  dt_omp_firstprivate(out, ch, width, height) \</a>
+<a name="ln252">  shared(temp, Labmin, Labmax, a0, a1, a2, a3, b1, b2, coefp, coefn) \</a>
+<a name="ln253">  schedule(static)</a>
+<a name="ln254">#endif</a>
+<a name="ln255">  for(int j = 0; j &lt; height; j++)</a>
+<a name="ln256">  {</a>
+<a name="ln257">    float xp[4] = {0.0f};</a>
+<a name="ln258">    float yb[4] = {0.0f};</a>
+<a name="ln259">    float yp[4] = {0.0f};</a>
+<a name="ln260">    float xc[4] = {0.0f};</a>
+<a name="ln261">    float yc[4] = {0.0f};</a>
+<a name="ln262">    float xn[4] = {0.0f};</a>
+<a name="ln263">    float xa[4] = {0.0f};</a>
+<a name="ln264">    float yn[4] = {0.0f};</a>
+<a name="ln265">    float ya[4] = {0.0f};</a>
+<a name="ln266"> </a>
+<a name="ln267">    // forward filter</a>
+<a name="ln268">    for(int k = 0; k &lt; ch; k++)</a>
+<a name="ln269">    {</a>
+<a name="ln270">      xp[k] = CLAMPF(temp[(size_t)j * width * ch + k], Labmin[k], Labmax[k]);</a>
+<a name="ln271">      yb[k] = xp[k] * coefp;</a>
+<a name="ln272">      yp[k] = yb[k];</a>
+<a name="ln273">      xc[k] = yc[k] = xn[k] = xa[k] = yn[k] = ya[k] = 0.0f;</a>
+<a name="ln274">    }</a>
+<a name="ln275"> </a>
+<a name="ln276">    for(int i = 0; i &lt; width; i++)</a>
+<a name="ln277">    {</a>
+<a name="ln278">      size_t offset = ((size_t)j * width + i) * ch;</a>
+<a name="ln279"> </a>
+<a name="ln280">      for(int k = 0; k &lt; ch; k++)</a>
+<a name="ln281">      {</a>
+<a name="ln282">        xc[k] = CLAMPF(temp[offset + k], Labmin[k], Labmax[k]);</a>
+<a name="ln283">        yc[k] = (a0 * xc[k]) + (a1 * xp[k]) - (b1 * yp[k]) - (b2 * yb[k]);</a>
+<a name="ln284"> </a>
+<a name="ln285">        out[offset + k] = yc[k];</a>
+<a name="ln286"> </a>
+<a name="ln287">        xp[k] = xc[k];</a>
+<a name="ln288">        yb[k] = yp[k];</a>
+<a name="ln289">        yp[k] = yc[k];</a>
+<a name="ln290">      }</a>
+<a name="ln291">    }</a>
+<a name="ln292"> </a>
+<a name="ln293">    // backward filter</a>
+<a name="ln294">    for(int k = 0; k &lt; ch; k++)</a>
+<a name="ln295">    {</a>
+<a name="ln296">      xn[k] = CLAMPF(temp[((size_t)(j + 1) * width - 1) * ch + k], Labmin[k], Labmax[k]);</a>
+<a name="ln297">      xa[k] = xn[k];</a>
+<a name="ln298">      yn[k] = xn[k] * coefn;</a>
+<a name="ln299">      ya[k] = yn[k];</a>
+<a name="ln300">    }</a>
+<a name="ln301"> </a>
+<a name="ln302">    for(int i = width - 1; i &gt; -1; i--)</a>
+<a name="ln303">    {</a>
+<a name="ln304">      size_t offset = ((size_t)j * width + i) * ch;</a>
+<a name="ln305"> </a>
+<a name="ln306">      for(int k = 0; k &lt; ch; k++)</a>
+<a name="ln307">      {</a>
+<a name="ln308">        xc[k] = CLAMPF(temp[offset + k], Labmin[k], Labmax[k]);</a>
+<a name="ln309"> </a>
+<a name="ln310">        yc[k] = (a2 * xn[k]) + (a3 * xa[k]) - (b1 * yn[k]) - (b2 * ya[k]);</a>
+<a name="ln311"> </a>
+<a name="ln312">        xa[k] = xn[k];</a>
+<a name="ln313">        xn[k] = xc[k];</a>
+<a name="ln314">        ya[k] = yn[k];</a>
+<a name="ln315">        yn[k] = yc[k];</a>
+<a name="ln316"> </a>
+<a name="ln317">        out[offset + k] += yc[k];</a>
+<a name="ln318">      }</a>
+<a name="ln319">    }</a>
+<a name="ln320">  }</a>
+<a name="ln321">}</a>
+<a name="ln322"> </a>
+<a name="ln323"> </a>
+<a name="ln324"> </a>
+<a name="ln325">#if defined(__SSE__)</a>
+<a name="ln326">static void dt_gaussian_blur_4c_sse(dt_gaussian_t *g, const float *const in, float *const out)</a>
+<a name="ln327">{</a>
+<a name="ln328"> </a>
+<a name="ln329">  const int width = g-&gt;width;</a>
+<a name="ln330">  const int height = g-&gt;height;</a>
+<a name="ln331">  const int ch = 4;</a>
+<a name="ln332"> </a>
+<a name="ln333">  assert(g-&gt;channels == 4);</a>
+<a name="ln334"> </a>
+<a name="ln335">  float a0, a1, a2, a3, b1, b2, coefp, coefn;</a>
+<a name="ln336"> </a>
+<a name="ln337">  compute_gauss_params(g-&gt;sigma, g-&gt;order, &amp;a0, &amp;a1, &amp;a2, &amp;a3, &amp;b1, &amp;b2, &amp;coefp, &amp;coefn);</a>
+<a name="ln338"> </a>
+<a name="ln339">  const __m128 Labmax = _mm_set_ps(g-&gt;max[3], g-&gt;max[2], g-&gt;max[1], g-&gt;max[0]);</a>
+<a name="ln340">  const __m128 Labmin = _mm_set_ps(g-&gt;min[3], g-&gt;min[2], g-&gt;min[1], g-&gt;min[0]);</a>
+<a name="ln341"> </a>
+<a name="ln342">  float *temp = g-&gt;buf;</a>
+<a name="ln343"> </a>
+<a name="ln344"> </a>
+<a name="ln345">// vertical blur column by column</a>
+<a name="ln346">#ifdef _OPENMP</a>
+<a name="ln347">#pragma omp parallel for default(none) \</a>
+<a name="ln348">  dt_omp_firstprivate(in, Labmin, Labmax, width, height, ch) \</a>
+<a name="ln349">  shared(temp, a0, a1, a2, a3, b1, b2, coefp, coefn) \</a>
+<a name="ln350">  schedule(static)</a>
+<a name="ln351">#endif</a>
+<a name="ln352">  for(int i = 0; i &lt; width; i++)</a>
+<a name="ln353">  {</a>
+<a name="ln354">    __m128 xp = _mm_setzero_ps();</a>
+<a name="ln355">    __m128 yb = _mm_setzero_ps();</a>
+<a name="ln356">    __m128 yp = _mm_setzero_ps();</a>
+<a name="ln357">    __m128 xc = _mm_setzero_ps();</a>
+<a name="ln358">    __m128 yc = _mm_setzero_ps();</a>
+<a name="ln359">    __m128 xn = _mm_setzero_ps();</a>
+<a name="ln360">    __m128 xa = _mm_setzero_ps();</a>
+<a name="ln361">    __m128 yn = _mm_setzero_ps();</a>
+<a name="ln362">    __m128 ya = _mm_setzero_ps();</a>
+<a name="ln363"> </a>
+<a name="ln364">    // forward filter</a>
+<a name="ln365">    xp = MMCLAMPPS(_mm_load_ps(in + i * ch), Labmin, Labmax);</a>
+<a name="ln366">    yb = _mm_mul_ps(_mm_set_ps1(coefp), xp);</a>
+<a name="ln367">    yp = yb;</a>
+<a name="ln368"> </a>
+<a name="ln369"> </a>
+<a name="ln370">    for(int j = 0; j &lt; height; j++)</a>
+<a name="ln371">    {</a>
+<a name="ln372">      size_t offset = ((size_t)j * width + i) * ch;</a>
+<a name="ln373"> </a>
+<a name="ln374">      xc = MMCLAMPPS(_mm_load_ps(in + offset), Labmin, Labmax);</a>
+<a name="ln375"> </a>
+<a name="ln376"> </a>
+<a name="ln377">      yc = _mm_add_ps(</a>
+<a name="ln378">          _mm_mul_ps(xc, _mm_set_ps1(a0)),</a>
+<a name="ln379">          _mm_sub_ps(_mm_mul_ps(xp, _mm_set_ps1(a1)),</a>
+<a name="ln380">                     _mm_add_ps(_mm_mul_ps(yp, _mm_set_ps1(b1)), _mm_mul_ps(yb, _mm_set_ps1(b2)))));</a>
+<a name="ln381"> </a>
+<a name="ln382">      _mm_store_ps(temp + offset, yc);</a>
+<a name="ln383"> </a>
+<a name="ln384">      xp = xc;</a>
+<a name="ln385">      yb = yp;</a>
+<a name="ln386">      yp = yc;</a>
+<a name="ln387">    }</a>
+<a name="ln388"> </a>
+<a name="ln389">    // backward filter</a>
+<a name="ln390">    xn = MMCLAMPPS(_mm_load_ps(in + ((size_t)(height - 1) * width + i) * ch), Labmin, Labmax);</a>
+<a name="ln391">    xa = xn;</a>
+<a name="ln392">    yn = _mm_mul_ps(_mm_set_ps1(coefn), xn);</a>
+<a name="ln393">    ya = yn;</a>
+<a name="ln394"> </a>
+<a name="ln395">    for(int j = height - 1; j &gt; -1; j--)</a>
+<a name="ln396">    {</a>
+<a name="ln397">      size_t offset = ((size_t)j * width + i) * ch;</a>
+<a name="ln398"> </a>
+<a name="ln399">      xc = MMCLAMPPS(_mm_load_ps(in + offset), Labmin, Labmax);</a>
+<a name="ln400"> </a>
+<a name="ln401">      yc = _mm_add_ps(</a>
+<a name="ln402">          _mm_mul_ps(xn, _mm_set_ps1(a2)),</a>
+<a name="ln403">          _mm_sub_ps(_mm_mul_ps(xa, _mm_set_ps1(a3)),</a>
+<a name="ln404">                     _mm_add_ps(_mm_mul_ps(yn, _mm_set_ps1(b1)), _mm_mul_ps(ya, _mm_set_ps1(b2)))));</a>
+<a name="ln405"> </a>
+<a name="ln406"> </a>
+<a name="ln407">      xa = xn;</a>
+<a name="ln408">      xn = xc;</a>
+<a name="ln409">      ya = yn;</a>
+<a name="ln410">      yn = yc;</a>
+<a name="ln411"> </a>
+<a name="ln412">      _mm_store_ps(temp + offset, _mm_add_ps(_mm_load_ps(temp + offset), yc));</a>
+<a name="ln413">    }</a>
+<a name="ln414">  }</a>
+<a name="ln415"> </a>
+<a name="ln416">// horizontal blur line by line</a>
+<a name="ln417">#ifdef _OPENMP</a>
+<a name="ln418">#pragma omp parallel for default(none) \</a>
+<a name="ln419">  dt_omp_firstprivate(out, Labmin, Labmax, width, height, ch) \</a>
+<a name="ln420">  shared(temp, a0, a1, a2, a3, b1, b2, coefp, coefn) \</a>
+<a name="ln421">  schedule(static)</a>
+<a name="ln422">#endif</a>
+<a name="ln423">  for(size_t j = 0; j &lt; height; j++)</a>
+<a name="ln424">  {</a>
+<a name="ln425">    __m128 xp = _mm_setzero_ps();</a>
+<a name="ln426">    __m128 yb = _mm_setzero_ps();</a>
+<a name="ln427">    __m128 yp = _mm_setzero_ps();</a>
+<a name="ln428">    __m128 xc = _mm_setzero_ps();</a>
+<a name="ln429">    __m128 yc = _mm_setzero_ps();</a>
+<a name="ln430">    __m128 xn = _mm_setzero_ps();</a>
+<a name="ln431">    __m128 xa = _mm_setzero_ps();</a>
+<a name="ln432">    __m128 yn = _mm_setzero_ps();</a>
+<a name="ln433">    __m128 ya = _mm_setzero_ps();</a>
+<a name="ln434"> </a>
+<a name="ln435">    // forward filter</a>
+<a name="ln436">    xp = MMCLAMPPS(_mm_load_ps(temp + j * width * ch), Labmin, Labmax);</a>
+<a name="ln437">    yb = _mm_mul_ps(_mm_set_ps1(coefp), xp);</a>
+<a name="ln438">    yp = yb;</a>
+<a name="ln439"> </a>
+<a name="ln440"> </a>
+<a name="ln441">    for(int i = 0; i &lt; width; i++)</a>
+<a name="ln442">    {</a>
+<a name="ln443">      size_t offset = ((size_t)j * width + i) * ch;</a>
+<a name="ln444"> </a>
+<a name="ln445">      xc = MMCLAMPPS(_mm_load_ps(temp + offset), Labmin, Labmax);</a>
+<a name="ln446"> </a>
+<a name="ln447">      yc = _mm_add_ps(</a>
+<a name="ln448">          _mm_mul_ps(xc, _mm_set_ps1(a0)),</a>
+<a name="ln449">          _mm_sub_ps(_mm_mul_ps(xp, _mm_set_ps1(a1)),</a>
+<a name="ln450">                     _mm_add_ps(_mm_mul_ps(yp, _mm_set_ps1(b1)), _mm_mul_ps(yb, _mm_set_ps1(b2)))));</a>
+<a name="ln451"> </a>
+<a name="ln452">      _mm_store_ps(out + offset, yc);</a>
+<a name="ln453"> </a>
+<a name="ln454">      xp = xc;</a>
+<a name="ln455">      yb = yp;</a>
+<a name="ln456">      yp = yc;</a>
+<a name="ln457">    }</a>
+<a name="ln458"> </a>
+<a name="ln459">    // backward filter</a>
+<a name="ln460">    xn = MMCLAMPPS(_mm_load_ps(temp + ((size_t)(j + 1) * width - 1) * ch), Labmin, Labmax);</a>
+<a name="ln461">    xa = xn;</a>
+<a name="ln462">    yn = _mm_mul_ps(_mm_set_ps1(coefn), xn);</a>
+<a name="ln463">    ya = yn;</a>
+<a name="ln464"> </a>
+<a name="ln465"> </a>
+<a name="ln466">    for(int i = width - 1; i &gt; -1; i--)</a>
+<a name="ln467">    {</a>
+<a name="ln468">      size_t offset = ((size_t)j * width + i) * ch;</a>
+<a name="ln469"> </a>
+<a name="ln470">      xc = MMCLAMPPS(_mm_load_ps(temp + offset), Labmin, Labmax);</a>
+<a name="ln471"> </a>
+<a name="ln472">      yc = _mm_add_ps(</a>
+<a name="ln473">          _mm_mul_ps(xn, _mm_set_ps1(a2)),</a>
+<a name="ln474">          _mm_sub_ps(_mm_mul_ps(xa, _mm_set_ps1(a3)),</a>
+<a name="ln475">                     _mm_add_ps(_mm_mul_ps(yn, _mm_set_ps1(b1)), _mm_mul_ps(ya, _mm_set_ps1(b2)))));</a>
+<a name="ln476"> </a>
+<a name="ln477"> </a>
+<a name="ln478">      xa = xn;</a>
+<a name="ln479">      xn = xc;</a>
+<a name="ln480">      ya = yn;</a>
+<a name="ln481">      yn = yc;</a>
+<a name="ln482"> </a>
+<a name="ln483">      _mm_store_ps(out + offset, _mm_add_ps(_mm_load_ps(out + offset), yc));</a>
+<a name="ln484">    }</a>
+<a name="ln485">  }</a>
+<a name="ln486">}</a>
+<a name="ln487">#endif</a>
+<a name="ln488"> </a>
+<a name="ln489">void dt_gaussian_blur_4c(dt_gaussian_t *g, const float *const in, float *const out)</a>
+<a name="ln490">{</a>
+<a name="ln491">  if(darktable.codepath.OPENMP_SIMD) return dt_gaussian_blur(g, in, out);</a>
+<a name="ln492">#if defined(__SSE__)</a>
+<a name="ln493">  else if(darktable.codepath.SSE2)</a>
+<a name="ln494">    return dt_gaussian_blur_4c_sse(g, in, out);</a>
+<a name="ln495">#endif</a>
+<a name="ln496">  else</a>
+<a name="ln497">    dt_unreachable_codepath();</a>
+<a name="ln498">}</a>
+<a name="ln499"> </a>
+<a name="ln500">void dt_gaussian_free(dt_gaussian_t *g)</a>
+<a name="ln501">{</a>
+<a name="ln502">  if(!g) return;</a>
+<a name="ln503">  dt_free_align(g-&gt;buf);</a>
+<a name="ln504">  free(g-&gt;min);</a>
+<a name="ln505">  free(g-&gt;max);</a>
+<a name="ln506">  free(g);</a>
+<a name="ln507">}</a>
+<a name="ln508"> </a>
+<a name="ln509"> </a>
+<a name="ln510">#ifdef HAVE_OPENCL</a>
+<a name="ln511">dt_gaussian_cl_global_t *dt_gaussian_init_cl_global()</a>
+<a name="ln512">{</a>
+<a name="ln513">  dt_gaussian_cl_global_t *g = (dt_gaussian_cl_global_t *)malloc(sizeof(dt_gaussian_cl_global_t));</a>
+<a name="ln514"> </a>
+<a name="ln515">  const int program = 6; // gaussian.cl, from programs.conf</a>
+<a name="ln516">  g-&gt;kernel_gaussian_column_1c = dt_opencl_create_kernel(program, &quot;gaussian_column_1c&quot;);</a>
+<a name="ln517">  g-&gt;kernel_gaussian_transpose_1c = dt_opencl_create_kernel(program, &quot;gaussian_transpose_1c&quot;);</a>
+<a name="ln518">  g-&gt;kernel_gaussian_column_4c = dt_opencl_create_kernel(program, &quot;gaussian_column_4c&quot;);</a>
+<a name="ln519">  g-&gt;kernel_gaussian_transpose_4c = dt_opencl_create_kernel(program, &quot;gaussian_transpose_4c&quot;);</a>
+<a name="ln520">  return g;</a>
+<a name="ln521">}</a>
+<a name="ln522"> </a>
+<a name="ln523">void dt_gaussian_free_cl(dt_gaussian_cl_t *g)</a>
+<a name="ln524">{</a>
+<a name="ln525">  if(!g) return;</a>
+<a name="ln526">  // be sure we're done with the memory:</a>
+<a name="ln527">  dt_opencl_finish(g-&gt;devid);</a>
+<a name="ln528"> </a>
+<a name="ln529">  free(g-&gt;min);</a>
+<a name="ln530">  free(g-&gt;max);</a>
+<a name="ln531">  // free device mem</a>
+<a name="ln532">  dt_opencl_release_mem_object(g-&gt;dev_temp1);</a>
+<a name="ln533">  dt_opencl_release_mem_object(g-&gt;dev_temp2);</a>
+<a name="ln534">  free(g);</a>
+<a name="ln535">}</a>
+<a name="ln536"> </a>
+<a name="ln537">dt_gaussian_cl_t *dt_gaussian_init_cl(const int devid,</a>
+<a name="ln538">                                      const int width,    // width of input image</a>
+<a name="ln539">                                      const int height,   // height of input image</a>
+<a name="ln540">                                      const int channels, // channels per pixel</a>
+<a name="ln541">                                      const float *max,   // maximum allowed values per channel for clamping</a>
+<a name="ln542">                                      const float *min,   // minimum allowed values per channel for clamping</a>
+<a name="ln543">                                      const float sigma,  // gaussian sigma</a>
+<a name="ln544">                                      const int order)    // order of gaussian blur</a>
+<a name="ln545">{</a>
+<a name="ln546">  assert(channels == 1 || channels == 4);</a>
+<a name="ln547"> </a>
+<a name="ln548">  if(!(channels == 1 || channels == 4)) return NULL;</a>
+<a name="ln549"> </a>
+<a name="ln550">  dt_gaussian_cl_t *g = (dt_gaussian_cl_t *)malloc(sizeof(dt_gaussian_cl_t));</a>
+<a name="ln551">  if(!g) return NULL;</a>
+<a name="ln552"> </a>
+<a name="ln553">  g-&gt;global = darktable.opencl-&gt;gaussian;</a>
+<a name="ln554">  g-&gt;devid = devid;</a>
+<a name="ln555">  g-&gt;width = width;</a>
+<a name="ln556">  g-&gt;height = height;</a>
+<a name="ln557">  g-&gt;channels = channels;</a>
+<a name="ln558">  g-&gt;sigma = sigma;</a>
+<a name="ln559">  g-&gt;order = order;</a>
+<a name="ln560">  g-&gt;dev_temp1 = NULL;</a>
+<a name="ln561">  g-&gt;dev_temp2 = NULL;</a>
+<a name="ln562">  g-&gt;max = (float *)calloc(channels, sizeof(float));</a>
+<a name="ln563">  g-&gt;min = (float *)calloc(channels, sizeof(float));</a>
+<a name="ln564"> </a>
+<a name="ln565">  if(!g-&gt;min || !g-&gt;max) goto error;</a>
+<a name="ln566"> </a>
+<a name="ln567">  for(int k = 0; k &lt; channels; k++)</a>
+<a name="ln568">  {</a>
+<a name="ln569">    g-&gt;max[k] = max[k];</a>
+<a name="ln570">    g-&gt;min[k] = min[k];</a>
+<a name="ln571">  }</a>
+<a name="ln572"> </a>
+<a name="ln573">  int kernel_gaussian_transpose = (channels == 1) ? g-&gt;global-&gt;kernel_gaussian_transpose_1c</a>
+<a name="ln574">                                                  : g-&gt;global-&gt;kernel_gaussian_transpose_4c;</a>
+<a name="ln575">  int blocksize;</a>
+<a name="ln576"> </a>
+<a name="ln577">  dt_opencl_local_buffer_t locopt</a>
+<a name="ln578">    = (dt_opencl_local_buffer_t){ .xoffset = 1, .xfactor = 1, .yoffset = 0, .yfactor = 1,</a>
+<a name="ln579">                                  .cellsize = channels * sizeof(float), .overhead = 0,</a>
+<a name="ln580">                                  .sizex = BLOCKSIZE, .sizey = BLOCKSIZE };</a>
+<a name="ln581"> </a>
+<a name="ln582">  if(dt_opencl_local_buffer_opt(devid, kernel_gaussian_transpose, &amp;locopt))</a>
+<a name="ln583">    blocksize = MIN(locopt.sizex, locopt.sizey);</a>
+<a name="ln584">  else</a>
+<a name="ln585">    blocksize = 1;</a>
+<a name="ln586"> </a>
+<a name="ln587">  // width and height of intermediate buffers. Need to be multiples of blocksize</a>
+<a name="ln588">  const size_t bwidth = ROUNDUP(width, blocksize);</a>
+<a name="ln589">  const size_t bheight = ROUNDUP(height, blocksize);</a>
+<a name="ln590"> </a>
+<a name="ln591">  g-&gt;blocksize = blocksize;</a>
+<a name="ln592">  g-&gt;bwidth = bwidth;</a>
+<a name="ln593">  g-&gt;bheight = bheight;</a>
+<a name="ln594"> </a>
+<a name="ln595">  // get intermediate vector buffers with read-write access</a>
+<a name="ln596">  g-&gt;dev_temp1 = dt_opencl_alloc_device_buffer(devid, (size_t)bwidth * bheight * channels * sizeof(float));</a>
+<a name="ln597">  if(!g-&gt;dev_temp1) goto error;</a>
+<a name="ln598">  g-&gt;dev_temp2 = dt_opencl_alloc_device_buffer(devid, (size_t)bwidth * bheight * channels * sizeof(float));</a>
+<a name="ln599">  if(!g-&gt;dev_temp2) goto error;</a>
+<a name="ln600"> </a>
+<a name="ln601">  return g;</a>
+<a name="ln602"> </a>
+<a name="ln603">error:</a>
+<a name="ln604">  free(g-&gt;min);</a>
+<a name="ln605">  free(g-&gt;max);</a>
+<a name="ln606">  dt_opencl_release_mem_object(g-&gt;dev_temp1);</a>
+<a name="ln607">  dt_opencl_release_mem_object(g-&gt;dev_temp2);</a>
+<a name="ln608">  g-&gt;dev_temp1 = g-&gt;dev_temp2 = NULL;</a>
+<a name="ln609">  free(g);</a>
+<a name="ln610">  return NULL;</a>
+<a name="ln611">}</a>
+<a name="ln612"> </a>
+<a name="ln613"> </a>
+<a name="ln614">cl_int dt_gaussian_blur_cl(dt_gaussian_cl_t *g, cl_mem dev_in, cl_mem dev_out)</a>
+<a name="ln615">{</a>
+<a name="ln616">  cl_int err = -999;</a>
+<a name="ln617">  const int devid = g-&gt;devid;</a>
+<a name="ln618"> </a>
+<a name="ln619">  const int width = g-&gt;width;</a>
+<a name="ln620">  const int height = g-&gt;height;</a>
+<a name="ln621">  const int channels = g-&gt;channels;</a>
+<a name="ln622">  const int bpp = channels * sizeof(float);</a>
+<a name="ln623">  cl_mem dev_temp1 = g-&gt;dev_temp1;</a>
+<a name="ln624">  cl_mem dev_temp2 = g-&gt;dev_temp2;</a>
+<a name="ln625"> </a>
+<a name="ln626">  const int blocksize = g-&gt;blocksize;</a>
+<a name="ln627">  const int bwidth = g-&gt;bwidth;</a>
+<a name="ln628">  const int bheight = g-&gt;bheight;</a>
+<a name="ln629"> </a>
+<a name="ln630">  float Labmax[4] = { 0.0f };</a>
+<a name="ln631">  float Labmin[4] = { 0.0f };</a>
+<a name="ln632"> </a>
+<a name="ln633">  for(int k = 0; k &lt; MIN(channels, 4); k++)</a>
+<a name="ln634">  {</a>
+<a name="ln635">    Labmax[k] = g-&gt;max[k];</a>
+<a name="ln636">    Labmin[k] = g-&gt;min[k];</a>
+<a name="ln637">  }</a>
+<a name="ln638"> </a>
+<a name="ln639">  int kernel_gaussian_column = -1;</a>
+<a name="ln640">  int kernel_gaussian_transpose = -1;</a>
+<a name="ln641"> </a>
+<a name="ln642">  if(channels == 1)</a>
+<a name="ln643">  {</a>
+<a name="ln644">    kernel_gaussian_column = g-&gt;global-&gt;kernel_gaussian_column_1c;</a>
+<a name="ln645">    kernel_gaussian_transpose = g-&gt;global-&gt;kernel_gaussian_transpose_1c;</a>
+<a name="ln646">  }</a>
+<a name="ln647">  else if(channels == 4)</a>
+<a name="ln648">  {</a>
+<a name="ln649">    kernel_gaussian_column = g-&gt;global-&gt;kernel_gaussian_column_4c;</a>
+<a name="ln650">    kernel_gaussian_transpose = g-&gt;global-&gt;kernel_gaussian_transpose_4c;</a>
+<a name="ln651">  }</a>
+<a name="ln652">  else</a>
+<a name="ln653">    return err;</a>
+<a name="ln654"> </a>
+<a name="ln655">  size_t origin[] = { 0, 0, 0 };</a>
+<a name="ln656">  size_t region[] = { width, height, 1 };</a>
+<a name="ln657">  size_t local[] = { blocksize, blocksize, 1 };</a>
+<a name="ln658">  size_t sizes[3];</a>
+<a name="ln659"> </a>
+<a name="ln660">  // compute gaussian parameters</a>
+<a name="ln661">  float a0, a1, a2, a3, b1, b2, coefp, coefn;</a>
+<a name="ln662">  compute_gauss_params(g-&gt;sigma, g-&gt;order, &amp;a0, &amp;a1, &amp;a2, &amp;a3, &amp;b1, &amp;b2, &amp;coefp, &amp;coefn);</a>
+<a name="ln663"> </a>
+<a name="ln664">  // copy dev_in to intermediate buffer dev_temp1</a>
+<a name="ln665">  err = dt_opencl_enqueue_copy_image_to_buffer(devid, dev_in, dev_temp1, origin, region, 0);</a>
+<a name="ln666">  if(err != CL_SUCCESS) return err;</a>
+<a name="ln667"> </a>
+<a name="ln668">  // first blur step: column by column with dev_temp1 -&gt; dev_temp2</a>
+<a name="ln669">  sizes[0] = ROUNDUPWD(width);</a>
+<a name="ln670">  sizes[1] = 1;</a>
+<a name="ln671">  sizes[2] = 1;</a>
+<a name="ln672">  dt_opencl_set_kernel_arg(devid, kernel_gaussian_column, 0, sizeof(cl_mem), (void *)&amp;dev_temp1);</a>
+<a name="ln673">  dt_opencl_set_kernel_arg(devid, kernel_gaussian_column, 1, sizeof(cl_mem), (void *)&amp;dev_temp2);</a>
+<a name="ln674">  dt_opencl_set_kernel_arg(devid, kernel_gaussian_column, 2, sizeof(int), (void *)&amp;width);</a>
+<a name="ln675">  dt_opencl_set_kernel_arg(devid, kernel_gaussian_column, 3, sizeof(int), (void *)&amp;height);</a>
+<a name="ln676">  dt_opencl_set_kernel_arg(devid, kernel_gaussian_column, 4, sizeof(float), (void *)&amp;a0);</a>
+<a name="ln677">  dt_opencl_set_kernel_arg(devid, kernel_gaussian_column, 5, sizeof(float), (void *)&amp;a1);</a>
+<a name="ln678">  dt_opencl_set_kernel_arg(devid, kernel_gaussian_column, 6, sizeof(float), (void *)&amp;a2);</a>
+<a name="ln679">  dt_opencl_set_kernel_arg(devid, kernel_gaussian_column, 7, sizeof(float), (void *)&amp;a3);</a>
+<a name="ln680">  dt_opencl_set_kernel_arg(devid, kernel_gaussian_column, 8, sizeof(float), (void *)&amp;b1);</a>
+<a name="ln681">  dt_opencl_set_kernel_arg(devid, kernel_gaussian_column, 9, sizeof(float), (void *)&amp;b2);</a>
+<a name="ln682">  dt_opencl_set_kernel_arg(devid, kernel_gaussian_column, 10, sizeof(float), (void *)&amp;coefp);</a>
+<a name="ln683">  dt_opencl_set_kernel_arg(devid, kernel_gaussian_column, 11, sizeof(float), (void *)&amp;coefn);</a>
+<a name="ln684">  dt_opencl_set_kernel_arg(devid, kernel_gaussian_column, 12, channels * sizeof(float), (void *)&amp;Labmax);</a>
+<a name="ln685">  dt_opencl_set_kernel_arg(devid, kernel_gaussian_column, 13, channels * sizeof(float), (void *)&amp;Labmin);</a>
+<a name="ln686">  err = dt_opencl_enqueue_kernel_2d(devid, kernel_gaussian_column, sizes);</a>
+<a name="ln687">  if(err != CL_SUCCESS) return err;</a>
+<a name="ln688"> </a>
+<a name="ln689">  // intermediate step: transpose dev_temp2 -&gt; dev_temp1</a>
+<a name="ln690">  sizes[0] = bwidth;</a>
+<a name="ln691">  sizes[1] = bheight;</a>
+<a name="ln692">  sizes[2] = 1;</a>
+<a name="ln693">  dt_opencl_set_kernel_arg(devid, kernel_gaussian_transpose, 0, sizeof(cl_mem), (void *)&amp;dev_temp2);</a>
+<a name="ln694">  dt_opencl_set_kernel_arg(devid, kernel_gaussian_transpose, 1, sizeof(cl_mem), (void *)&amp;dev_temp1);</a>
+<a name="ln695">  dt_opencl_set_kernel_arg(devid, kernel_gaussian_transpose, 2, sizeof(int), (void *)&amp;width);</a>
+<a name="ln696">  dt_opencl_set_kernel_arg(devid, kernel_gaussian_transpose, 3, sizeof(int), (void *)&amp;height);</a>
+<a name="ln697">  dt_opencl_set_kernel_arg(devid, kernel_gaussian_transpose, 4, sizeof(int), (void *)&amp;blocksize);</a>
+<a name="ln698">  dt_opencl_set_kernel_arg(devid, kernel_gaussian_transpose, 5, bpp * blocksize * (blocksize + 1), NULL);</a>
+<a name="ln699">  err = dt_opencl_enqueue_kernel_2d_with_local(devid, kernel_gaussian_transpose, sizes, local);</a>
+<a name="ln700">  if(err != CL_SUCCESS) return err;</a>
+<a name="ln701"> </a>
+<a name="ln702"> </a>
+<a name="ln703">  // second blur step: column by column of transposed image with dev_temp1 -&gt; dev_temp2 (!! height &lt;-&gt; width</a>
+<a name="ln704">  // !!)</a>
+<a name="ln705">  sizes[0] = ROUNDUPWD(height);</a>
+<a name="ln706">  sizes[1] = 1;</a>
+<a name="ln707">  sizes[2] = 1;</a>
+<a name="ln708">  dt_opencl_set_kernel_arg(devid, kernel_gaussian_column, 0, sizeof(cl_mem), (void *)&amp;dev_temp1);</a>
+<a name="ln709">  dt_opencl_set_kernel_arg(devid, kernel_gaussian_column, 1, sizeof(cl_mem), (void *)&amp;dev_temp2);</a>
+<a name="ln710">  dt_opencl_set_kernel_arg(devid, kernel_gaussian_column, 2, sizeof(int), (void *)&amp;height);</a>
+<a name="ln711">  dt_opencl_set_kernel_arg(devid, kernel_gaussian_column, 3, sizeof(int), (void *)&amp;width);</a>
+<a name="ln712">  dt_opencl_set_kernel_arg(devid, kernel_gaussian_column, 4, sizeof(float), (void *)&amp;a0);</a>
+<a name="ln713">  dt_opencl_set_kernel_arg(devid, kernel_gaussian_column, 5, sizeof(float), (void *)&amp;a1);</a>
+<a name="ln714">  dt_opencl_set_kernel_arg(devid, kernel_gaussian_column, 6, sizeof(float), (void *)&amp;a2);</a>
+<a name="ln715">  dt_opencl_set_kernel_arg(devid, kernel_gaussian_column, 7, sizeof(float), (void *)&amp;a3);</a>
+<a name="ln716">  dt_opencl_set_kernel_arg(devid, kernel_gaussian_column, 8, sizeof(float), (void *)&amp;b1);</a>
+<a name="ln717">  dt_opencl_set_kernel_arg(devid, kernel_gaussian_column, 9, sizeof(float), (void *)&amp;b2);</a>
+<a name="ln718">  dt_opencl_set_kernel_arg(devid, kernel_gaussian_column, 10, sizeof(float), (void *)&amp;coefp);</a>
+<a name="ln719">  dt_opencl_set_kernel_arg(devid, kernel_gaussian_column, 11, sizeof(float), (void *)&amp;coefn);</a>
+<a name="ln720">  dt_opencl_set_kernel_arg(devid, kernel_gaussian_column, 12, channels * sizeof(float), (void *)&amp;Labmax);</a>
+<a name="ln721">  dt_opencl_set_kernel_arg(devid, kernel_gaussian_column, 13, channels * sizeof(float), (void *)&amp;Labmin);</a>
+<a name="ln722">  err = dt_opencl_enqueue_kernel_2d(devid, kernel_gaussian_column, sizes);</a>
+<a name="ln723">  if(err != CL_SUCCESS) return err;</a>
+<a name="ln724"> </a>
+<a name="ln725"> </a>
+<a name="ln726">  // transpose back dev_temp2 -&gt; dev_temp1</a>
+<a name="ln727">  sizes[0] = bheight;</a>
+<a name="ln728">  sizes[1] = bwidth;</a>
+<a name="ln729">  sizes[2] = 1;</a>
+<a name="ln730">  dt_opencl_set_kernel_arg(devid, kernel_gaussian_transpose, 0, sizeof(cl_mem), (void *)&amp;dev_temp2);</a>
+<a name="ln731">  dt_opencl_set_kernel_arg(devid, kernel_gaussian_transpose, 1, sizeof(cl_mem), (void *)&amp;dev_temp1);</a>
+<a name="ln732">  dt_opencl_set_kernel_arg(devid, kernel_gaussian_transpose, 2, sizeof(int), (void *)&amp;height);</a>
+<a name="ln733">  dt_opencl_set_kernel_arg(devid, kernel_gaussian_transpose, 3, sizeof(int), (void *)&amp;width);</a>
+<a name="ln734">  dt_opencl_set_kernel_arg(devid, kernel_gaussian_transpose, 4, sizeof(int), (void *)&amp;blocksize);</a>
+<a name="ln735">  dt_opencl_set_kernel_arg(devid, kernel_gaussian_transpose, 5, bpp * blocksize * (blocksize + 1), NULL);</a>
+<a name="ln736">  err = dt_opencl_enqueue_kernel_2d_with_local(devid, kernel_gaussian_transpose, sizes, local);</a>
+<a name="ln737">  if(err != CL_SUCCESS) return err;</a>
+<a name="ln738"> </a>
+<a name="ln739">  // finally produce output in dev_out</a>
+<a name="ln740">  err = dt_opencl_enqueue_copy_buffer_to_image(devid, dev_temp1, dev_out, 0, origin, region);</a>
+<a name="ln741">  if(err != CL_SUCCESS) return err;</a>
+<a name="ln742"> </a>
+<a name="ln743">  return CL_SUCCESS;</a>
+<a name="ln744">}</a>
+<a name="ln745"> </a>
+<a name="ln746"> </a>
+<a name="ln747">void dt_gaussian_free_cl_global(dt_gaussian_cl_global_t *g)</a>
+<a name="ln748">{</a>
+<a name="ln749">  if(!g) return;</a>
+<a name="ln750">  // destroy kernels</a>
+<a name="ln751">  dt_opencl_free_kernel(g-&gt;kernel_gaussian_column_1c);</a>
+<a name="ln752">  dt_opencl_free_kernel(g-&gt;kernel_gaussian_transpose_1c);</a>
+<a name="ln753">  dt_opencl_free_kernel(g-&gt;kernel_gaussian_column_4c);</a>
+<a name="ln754">  dt_opencl_free_kernel(g-&gt;kernel_gaussian_transpose_4c);</a>
+<a name="ln755">  free(g);</a>
+<a name="ln756">}</a>
+<a name="ln757"> </a>
+<a name="ln758">#endif</a>
+<a name="ln759">// modelines: These editor modelines have been set for all relevant files by tools/update_modelines.sh</a>
+<a name="ln760">// vim: shiftwidth=2 expandtab tabstop=2 cindent</a>
+<a name="ln761">// kate: tab-indents: off; indent-width 2; replace-tabs on; indent-mode cstyle; remove-trailing-spaces modified;</a>
+
+</code></pre>
+<div class="balloon" rel="150"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v575/" target="_blank">V575</a> The null pointer is passed into 'free' function. Inspect the first argument.</p></div>
+<div class="balloon" rel="296"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v1028/" target="_blank">V1028</a> Possible overflow. Consider casting operands of the 'j + 1' operator to the 'size_t' type, not the result.</p></div>
+<div class="balloon" rel="516"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v522/" target="_blank">V522</a> There might be dereferencing of a potential null pointer 'g'. Check lines: 516, 513.</p></div>
+
+<link rel="stylesheet" href="highlight.css">
+<script src="highlight.pack.js"></script>
+<script src="highlightjs-line-numbers.js"></script>
+<script>hljs.initHighlightingOnLoad();</script>
+<script>hljs.initLineNumbersOnLoad();</script>
+<script>
+  $(document).ready(function() {
+      $('.balloon').each(function () {
+          var bl = $(this);
+          var line = bl.attr('rel');
+          var text = $('a[name="ln'+line+'"]').text();
+
+          var space_count = 0;
+          for(var i = 0; i<text.length; i++){
+              var char = text[i];
+              if((char !== ' ')&&(char !== '\t'))break;
+              if(char === '\t')space_count++;
+              space_count++;
+          }
+
+          bl.css('margin-left', space_count*8);
+          $('a[name="ln'+line+'"]').after(bl);
+      });
+
+      window.location = window.location;
+  });
+</script>
+</body>
+</html>

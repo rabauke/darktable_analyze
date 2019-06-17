@@ -1,0 +1,702 @@
+
+<html>
+<head>
+  <link rel="stylesheet" href="../style.css"/>
+  <script src="../jquery-3.2.1.min.js"></script>
+</head>
+<body>
+<pre><code class = "cpp">
+<a name="ln1">/*</a>
+<a name="ln2">    This file is part of darktable,</a>
+<a name="ln3">    copyright (c) 2010-2012 Henrik Andersson.</a>
+<a name="ln4"> </a>
+<a name="ln5">    darktable is free software: you can redistribute it and/or modify</a>
+<a name="ln6">    it under the terms of the GNU General Public License as published by</a>
+<a name="ln7">    the Free Software Foundation, either version 3 of the License, or</a>
+<a name="ln8">    (at your option) any later version.</a>
+<a name="ln9"> </a>
+<a name="ln10">    darktable is distributed in the hope that it will be useful,</a>
+<a name="ln11">    but WITHOUT ANY WARRANTY; without even the implied warranty of</a>
+<a name="ln12">    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the</a>
+<a name="ln13">    GNU General Public License for more details.</a>
+<a name="ln14"> </a>
+<a name="ln15">    You should have received a copy of the GNU General Public License</a>
+<a name="ln16">    along with darktable.  If not, see &lt;http://www.gnu.org/licenses/&gt;.</a>
+<a name="ln17">*/</a>
+<a name="ln18">#ifdef HAVE_CONFIG_H</a>
+<a name="ln19">#include &quot;config.h&quot;</a>
+<a name="ln20">#endif</a>
+<a name="ln21">#include &lt;assert.h&gt;</a>
+<a name="ln22">#include &lt;math.h&gt;</a>
+<a name="ln23">#include &lt;stdlib.h&gt;</a>
+<a name="ln24">#include &lt;string.h&gt;</a>
+<a name="ln25"> </a>
+<a name="ln26">#include &quot;bauhaus/bauhaus.h&quot;</a>
+<a name="ln27">#include &quot;control/control.h&quot;</a>
+<a name="ln28">#include &quot;develop/develop.h&quot;</a>
+<a name="ln29">#include &quot;develop/imageop.h&quot;</a>
+<a name="ln30">#include &quot;gui/accelerators.h&quot;</a>
+<a name="ln31">#include &quot;gui/gtk.h&quot;</a>
+<a name="ln32">#include &quot;iop/iop_api.h&quot;</a>
+<a name="ln33">#include &lt;gtk/gtk.h&gt;</a>
+<a name="ln34">#include &lt;inttypes.h&gt;</a>
+<a name="ln35"> </a>
+<a name="ln36">#define GRAIN_LIGHTNESS_STRENGTH_SCALE 0.15</a>
+<a name="ln37">// (m_pi/2)/4 = half hue colorspan</a>
+<a name="ln38">#define GRAIN_HUE_COLORRANGE 0.392699082</a>
+<a name="ln39">#define GRAIN_HUE_STRENGTH_SCALE 0.25</a>
+<a name="ln40">#define GRAIN_SATURATION_STRENGTH_SCALE 0.25</a>
+<a name="ln41">#define GRAIN_RGB_STRENGTH_SCALE 0.25</a>
+<a name="ln42"> </a>
+<a name="ln43">#define GRAIN_SCALE_FACTOR 213.2</a>
+<a name="ln44"> </a>
+<a name="ln45">#define GRAIN_LUT_SIZE 128</a>
+<a name="ln46">#define GRAIN_LUT_DELTA_MAX 2.0</a>
+<a name="ln47">#define GRAIN_LUT_DELTA_MIN 0.0001</a>
+<a name="ln48">#define GRAIN_LUT_PAPER_GAMMA 1.0</a>
+<a name="ln49"> </a>
+<a name="ln50">#define CLIP(x) ((x &lt; 0) ? 0.0 : (x &gt; 1.0) ? 1.0 : x)</a>
+<a name="ln51">DT_MODULE_INTROSPECTION(2, dt_iop_grain_params_t)</a>
+<a name="ln52"> </a>
+<a name="ln53"> </a>
+<a name="ln54">typedef enum _dt_iop_grain_channel_t</a>
+<a name="ln55">{</a>
+<a name="ln56">  DT_GRAIN_CHANNEL_HUE = 0,</a>
+<a name="ln57">  DT_GRAIN_CHANNEL_SATURATION,</a>
+<a name="ln58">  DT_GRAIN_CHANNEL_LIGHTNESS,</a>
+<a name="ln59">  DT_GRAIN_CHANNEL_RGB</a>
+<a name="ln60">} _dt_iop_grain_channel_t;</a>
+<a name="ln61"> </a>
+<a name="ln62">typedef struct dt_iop_grain_params_t</a>
+<a name="ln63">{</a>
+<a name="ln64">  _dt_iop_grain_channel_t channel;</a>
+<a name="ln65">  float scale;</a>
+<a name="ln66">  float strength;</a>
+<a name="ln67">  float midtones_bias;</a>
+<a name="ln68">} dt_iop_grain_params_t;</a>
+<a name="ln69"> </a>
+<a name="ln70">typedef struct dt_iop_grain_gui_data_t</a>
+<a name="ln71">{</a>
+<a name="ln72">  GtkBox *vbox;</a>
+<a name="ln73">  GtkWidget *label1, *label2, *label3; // channel, scale, strength</a>
+<a name="ln74">  GtkWidget *scale1, *scale2, *scale3; // scale, strength, midtones_bias</a>
+<a name="ln75">} dt_iop_grain_gui_data_t;</a>
+<a name="ln76"> </a>
+<a name="ln77">typedef struct dt_iop_grain_data_t</a>
+<a name="ln78">{</a>
+<a name="ln79">  _dt_iop_grain_channel_t channel;</a>
+<a name="ln80">  float scale;</a>
+<a name="ln81">  float strength;</a>
+<a name="ln82">  float midtones_bias;</a>
+<a name="ln83">  float grain_lut[GRAIN_LUT_SIZE * GRAIN_LUT_SIZE];</a>
+<a name="ln84">} dt_iop_grain_data_t;</a>
+<a name="ln85"> </a>
+<a name="ln86"> </a>
+<a name="ln87">int legacy_params(dt_iop_module_t *self, const void *const old_params, const int old_version, void *new_params,</a>
+<a name="ln88">                  const int new_version)</a>
+<a name="ln89">{</a>
+<a name="ln90">  if(old_version == 1 &amp;&amp; new_version == 2)</a>
+<a name="ln91">  {</a>
+<a name="ln92">    typedef struct dt_iop_grain_params_v1_t</a>
+<a name="ln93">    {</a>
+<a name="ln94">      _dt_iop_grain_channel_t channel;</a>
+<a name="ln95">      float scale;</a>
+<a name="ln96">      float strength;</a>
+<a name="ln97">    } dt_iop_grain_params_v1_t;</a>
+<a name="ln98"> </a>
+<a name="ln99">    const dt_iop_grain_params_v1_t *o = old_params;</a>
+<a name="ln100">    dt_iop_grain_params_t *n = new_params;</a>
+<a name="ln101"> </a>
+<a name="ln102">    n-&gt;channel = o-&gt;channel;</a>
+<a name="ln103">    n-&gt;scale = o-&gt;scale;</a>
+<a name="ln104">    n-&gt;strength = o-&gt;strength;</a>
+<a name="ln105">    n-&gt;midtones_bias = 0.0; // it produces the same results as the old version</a>
+<a name="ln106"> </a>
+<a name="ln107">    return 0;</a>
+<a name="ln108">  }</a>
+<a name="ln109">  return 1;</a>
+<a name="ln110">}</a>
+<a name="ln111"> </a>
+<a name="ln112"> </a>
+<a name="ln113">static int grad3[12][3] = { { 1, 1, 0 },</a>
+<a name="ln114">                            { -1, 1, 0 },</a>
+<a name="ln115">                            { 1, -1, 0 },</a>
+<a name="ln116">                            { -1, -1, 0 },</a>
+<a name="ln117">                            { 1, 0, 1 },</a>
+<a name="ln118">                            { -1, 0, 1 },</a>
+<a name="ln119">                            { 1, 0, -1 },</a>
+<a name="ln120">                            { -1, 0, -1 },</a>
+<a name="ln121">                            { 0, 1, 1 },</a>
+<a name="ln122">                            { 0, -1, 1 },</a>
+<a name="ln123">                            { 0, 1, -1 },</a>
+<a name="ln124">                            { 0, -1, -1 } };</a>
+<a name="ln125"> </a>
+<a name="ln126">static int permutation[]</a>
+<a name="ln127">    = { 151, 160, 137, 91,  90,  15,  131, 13,  201, 95,  96,  53,  194, 233, 7,   225, 140, 36,  103, 30,</a>
+<a name="ln128">        69,  142, 8,   99,  37,  240, 21,  10,  23,  190, 6,   148, 247, 120, 234, 75,  0,   26,  197, 62,</a>
+<a name="ln129">        94,  252, 219, 203, 117, 35,  11,  32,  57,  177, 33,  88,  237, 149, 56,  87,  174, 20,  125, 136,</a>
+<a name="ln130">        171, 168, 68,  175, 74,  165, 71,  134, 139, 48,  27,  166, 77,  146, 158, 231, 83,  111, 229, 122,</a>
+<a name="ln131">        60,  211, 133, 230, 220, 105, 92,  41,  55,  46,  245, 40,  244, 102, 143, 54,  65,  25,  63,  161,</a>
+<a name="ln132">        1,   216, 80,  73,  209, 76,  132, 187, 208, 89,  18,  169, 200, 196, 135, 130, 116, 188, 159, 86,</a>
+<a name="ln133">        164, 100, 109, 198, 173, 186, 3,   64,  52,  217, 226, 250, 124, 123, 5,   202, 38,  147, 118, 126,</a>
+<a name="ln134">        255, 82,  85,  212, 207, 206, 59,  227, 47,  16,  58,  17,  182, 189, 28,  42,  223, 183, 170, 213,</a>
+<a name="ln135">        119, 248, 152, 2,   44,  154, 163, 70,  221, 153, 101, 155, 167, 43,  172, 9,   129, 22,  39,  253,</a>
+<a name="ln136">        19,  98,  108, 110, 79,  113, 224, 232, 178, 185, 112, 104, 218, 246, 97,  228, 251, 34,  242, 193,</a>
+<a name="ln137">        238, 210, 144, 12,  191, 179, 162, 241, 81,  51,  145, 235, 249, 14,  239, 107, 49,  192, 214, 31,</a>
+<a name="ln138">        181, 199, 106, 157, 184, 84,  204, 176, 115, 121, 50,  45,  127, 4,   150, 254, 138, 236, 205, 93,</a>
+<a name="ln139">        222, 114, 67,  29,  24,  72,  243, 141, 128, 195, 78,  66,  215, 61,  156, 180 };</a>
+<a name="ln140"> </a>
+<a name="ln141">static int perm[512];</a>
+<a name="ln142">static void _simplex_noise_init()</a>
+<a name="ln143">{</a>
+<a name="ln144">  for(int i = 0; i &lt; 512; i++) perm[i] = permutation[i &amp; 255];</a>
+<a name="ln145">}</a>
+<a name="ln146">static double dot(int g[], double x, double y, double z)</a>
+<a name="ln147">{</a>
+<a name="ln148">  return g[0] * x + g[1] * y + g[2] * z;</a>
+<a name="ln149">}</a>
+<a name="ln150"> </a>
+<a name="ln151">#define FASTFLOOR(x) (x &gt; 0 ? (int)(x) : (int)(x)-1)</a>
+<a name="ln152"> </a>
+<a name="ln153">static double _simplex_noise(double xin, double yin, double zin)</a>
+<a name="ln154">{</a>
+<a name="ln155">  double n0, n1, n2, n3; // Noise contributions from the four corners</a>
+<a name="ln156">                         // Skew the input space to determine which simplex cell we're in</a>
+<a name="ln157">  const double F3 = 1.0 / 3.0;</a>
+<a name="ln158">  const double s = (xin + yin + zin) * F3; // Very nice and simple skew factor for 3D</a>
+<a name="ln159">  const int i = FASTFLOOR(xin + s);</a>
+<a name="ln160">  const int j = FASTFLOOR(yin + s);</a>
+<a name="ln161">  const int k = FASTFLOOR(zin + s);</a>
+<a name="ln162">  const double G3 = 1.0 / 6.0; // Very nice and simple unskew factor, too</a>
+<a name="ln163">  const double t = (i + j + k) * G3;</a>
+<a name="ln164">  const double X0 = i - t; // Unskew the cell origin back to (x,y,z) space</a>
+<a name="ln165">  const double Y0 = j - t;</a>
+<a name="ln166">  const double Z0 = k - t;</a>
+<a name="ln167">  const double x0 = xin - X0; // The x,y,z distances from the cell origin</a>
+<a name="ln168">  const double y0 = yin - Y0;</a>
+<a name="ln169">  const double z0 = zin - Z0;</a>
+<a name="ln170">  // For the 3D case, the simplex shape is a slightly irregular tetrahedron.</a>
+<a name="ln171">  // Determine which simplex we are in.</a>
+<a name="ln172">  int i1, j1, k1; // Offsets for second corner of simplex in (i,j,k) coords</a>
+<a name="ln173">  int i2, j2, k2; // Offsets for third corner of simplex in (i,j,k) coords</a>
+<a name="ln174">  if(x0 &gt;= y0)</a>
+<a name="ln175">  {</a>
+<a name="ln176">    if(y0 &gt;= z0)</a>
+<a name="ln177">    {</a>
+<a name="ln178">      i1 = 1; // X Y Z order</a>
+<a name="ln179">      j1 = 0;</a>
+<a name="ln180">      k1 = 0;</a>
+<a name="ln181">      i2 = 1;</a>
+<a name="ln182">      j2 = 1;</a>
+<a name="ln183">      k2 = 0;</a>
+<a name="ln184">    }</a>
+<a name="ln185">    else if(x0 &gt;= z0)</a>
+<a name="ln186">    {</a>
+<a name="ln187">      i1 = 1; // X Z Y order</a>
+<a name="ln188">      j1 = 0;</a>
+<a name="ln189">      k1 = 0;</a>
+<a name="ln190">      i2 = 1;</a>
+<a name="ln191">      j2 = 0;</a>
+<a name="ln192">      k2 = 1;</a>
+<a name="ln193">    }</a>
+<a name="ln194">    else</a>
+<a name="ln195">    {</a>
+<a name="ln196">      i1 = 0; // Z X Y order</a>
+<a name="ln197">      j1 = 0;</a>
+<a name="ln198">      k1 = 1;</a>
+<a name="ln199">      i2 = 1;</a>
+<a name="ln200">      j2 = 0;</a>
+<a name="ln201">      k2 = 1;</a>
+<a name="ln202">    }</a>
+<a name="ln203">  }</a>
+<a name="ln204">  else // x0&lt;y0</a>
+<a name="ln205">  {</a>
+<a name="ln206">    if(y0 &lt; z0)</a>
+<a name="ln207">    {</a>
+<a name="ln208">      i1 = 0; // Z Y X order</a>
+<a name="ln209">      j1 = 0;</a>
+<a name="ln210">      k1 = 1;</a>
+<a name="ln211">      i2 = 0;</a>
+<a name="ln212">      j2 = 1;</a>
+<a name="ln213">      k2 = 1;</a>
+<a name="ln214">    }</a>
+<a name="ln215">    else if(x0 &lt; z0)</a>
+<a name="ln216">    {</a>
+<a name="ln217">      i1 = 0; // Y Z X order</a>
+<a name="ln218">      j1 = 1;</a>
+<a name="ln219">      k1 = 0;</a>
+<a name="ln220">      i2 = 0;</a>
+<a name="ln221">      j2 = 1;</a>
+<a name="ln222">      k2 = 1;</a>
+<a name="ln223">    }</a>
+<a name="ln224">    else</a>
+<a name="ln225">    {</a>
+<a name="ln226">      i1 = 0; // Y X Z order</a>
+<a name="ln227">      j1 = 1;</a>
+<a name="ln228">      k1 = 0;</a>
+<a name="ln229">      i2 = 1;</a>
+<a name="ln230">      j2 = 1;</a>
+<a name="ln231">      k2 = 0;</a>
+<a name="ln232">    }</a>
+<a name="ln233">  }</a>
+<a name="ln234">  //  A step of (1,0,0) in (i,j,k) means a step of (1-c,-c,-c) in (x,y,z),</a>
+<a name="ln235">  //  a step of (0,1,0) in (i,j,k) means a step of (-c,1-c,-c) in (x,y,z), and</a>
+<a name="ln236">  //  a step of (0,0,1) in (i,j,k) means a step of (-c,-c,1-c) in (x,y,z), where</a>
+<a name="ln237">  //  c = 1/6.</a>
+<a name="ln238">  const double x1 = x0 - i1 + G3; // Offsets for second corner in (x,y,z) coords</a>
+<a name="ln239">  const double y1 = y0 - j1 + G3;</a>
+<a name="ln240">  const double z1 = z0 - k1 + G3;</a>
+<a name="ln241">  const double x2 = x0 - i2 + 2.0 * G3; // Offsets for third corner in (x,y,z) coords</a>
+<a name="ln242">  const double y2 = y0 - j2 + 2.0 * G3;</a>
+<a name="ln243">  const double z2 = z0 - k2 + 2.0 * G3;</a>
+<a name="ln244">  const double x3 = x0 - 1.0 + 3.0 * G3; // Offsets for last corner in (x,y,z) coords</a>
+<a name="ln245">  const double y3 = y0 - 1.0 + 3.0 * G3;</a>
+<a name="ln246">  const double z3 = z0 - 1.0 + 3.0 * G3;</a>
+<a name="ln247">  // Work out the hashed gradient indices of the four simplex corners</a>
+<a name="ln248">  const int ii = i &amp; 255;</a>
+<a name="ln249">  const int jj = j &amp; 255;</a>
+<a name="ln250">  const int kk = k &amp; 255;</a>
+<a name="ln251">  const int gi0 = perm[ii + perm[jj + perm[kk]]] % 12;</a>
+<a name="ln252">  const int gi1 = perm[ii + i1 + perm[jj + j1 + perm[kk + k1]]] % 12;</a>
+<a name="ln253">  const int gi2 = perm[ii + i2 + perm[jj + j2 + perm[kk + k2]]] % 12;</a>
+<a name="ln254">  const int gi3 = perm[ii + 1 + perm[jj + 1 + perm[kk + 1]]] % 12;</a>
+<a name="ln255">  // Calculate the contribution from the four corners</a>
+<a name="ln256">  double t0 = 0.6 - x0 * x0 - y0 * y0 - z0 * z0;</a>
+<a name="ln257">  if(t0 &lt; 0)</a>
+<a name="ln258">    n0 = 0.0;</a>
+<a name="ln259">  else</a>
+<a name="ln260">  {</a>
+<a name="ln261">    t0 *= t0;</a>
+<a name="ln262">    n0 = t0 * t0 * dot(grad3[gi0], x0, y0, z0);</a>
+<a name="ln263">  }</a>
+<a name="ln264">  double t1 = 0.6 - x1 * x1 - y1 * y1 - z1 * z1;</a>
+<a name="ln265">  if(t1 &lt; 0)</a>
+<a name="ln266">    n1 = 0.0;</a>
+<a name="ln267">  else</a>
+<a name="ln268">  {</a>
+<a name="ln269">    t1 *= t1;</a>
+<a name="ln270">    n1 = t1 * t1 * dot(grad3[gi1], x1, y1, z1);</a>
+<a name="ln271">  }</a>
+<a name="ln272">  double t2 = 0.6 - x2 * x2 - y2 * y2 - z2 * z2;</a>
+<a name="ln273">  if(t2 &lt; 0)</a>
+<a name="ln274">    n2 = 0.0;</a>
+<a name="ln275">  else</a>
+<a name="ln276">  {</a>
+<a name="ln277">    t2 *= t2;</a>
+<a name="ln278">    n2 = t2 * t2 * dot(grad3[gi2], x2, y2, z2);</a>
+<a name="ln279">  }</a>
+<a name="ln280">  double t3 = 0.6 - x3 * x3 - y3 * y3 - z3 * z3;</a>
+<a name="ln281">  if(t3 &lt; 0)</a>
+<a name="ln282">    n3 = 0.0;</a>
+<a name="ln283">  else</a>
+<a name="ln284">  {</a>
+<a name="ln285">    t3 *= t3;</a>
+<a name="ln286">    n3 = t3 * t3 * dot(grad3[gi3], x3, y3, z3);</a>
+<a name="ln287">  }</a>
+<a name="ln288">  // Add contributions from each corner to get the final noise value.</a>
+<a name="ln289">  // The result is scaled to stay just inside [-1,1]</a>
+<a name="ln290">  return 32.0 * (n0 + n1 + n2 + n3);</a>
+<a name="ln291">}</a>
+<a name="ln292"> </a>
+<a name="ln293">#define PRIME_LEVELS 4</a>
+<a name="ln294">// static uint64_t _low_primes[PRIME_LEVELS] ={ 12503,14029,15649, 11369 };</a>
+<a name="ln295">// uint64_t _mid_primes[PRIME_LEVELS] ={ 784697,875783, 536461,639259};</a>
+<a name="ln296"> </a>
+<a name="ln297">/*static double __value_noise(uint32_t level,uint32_t x,uint32_t y)</a>
+<a name="ln298">{</a>
+<a name="ln299">  //uint32_t lvl=level%PRIME_LEVELS;</a>
+<a name="ln300">  uint32_t n = x + y * 57;</a>
+<a name="ln301">  n = (n&lt;&lt;13) ^ n;</a>
+<a name="ln302">  return ( 1.0 - (( (n * (n * n * 15731 + 789221) +1376312589) &amp; 0x7fffffff) / 1073741824.0));</a>
+<a name="ln303">}</a>
+<a name="ln304"> </a>
+<a name="ln305">static double __value_smooth_noise(uint32_t level,double x,double y)</a>
+<a name="ln306">{</a>
+<a name="ln307">  double corners = ( __value_noise(level,x-1, y-1)+__value_noise(level,x+1, y-1)+__value_noise(level,x-1,</a>
+<a name="ln308">y+1)+__value_noise(level,x+1, y+1) ) / 16;</a>
+<a name="ln309">  double sides   = ( __value_noise(level,x-1, y)  +__value_noise(level,x+1, y)  +__value_noise(level,x, y-1)</a>
+<a name="ln310">+__value_noise(level,x, y+1) ) /  8;</a>
+<a name="ln311">  double center  =  __value_noise(level,x, y) / 4;</a>
+<a name="ln312">  return corners + sides + center;</a>
+<a name="ln313">}</a>
+<a name="ln314"> </a>
+<a name="ln315">static double __preline_cosine_interpolate(double a,double b,double x)</a>
+<a name="ln316">{</a>
+<a name="ln317">  double ft = x * 3.1415927;</a>
+<a name="ln318">  double f = (1 - cos(ft)) * .5;</a>
+<a name="ln319">  return  a*(1-f) + b*f;</a>
+<a name="ln320">}</a>
+<a name="ln321"> </a>
+<a name="ln322">static double __value_interpolate(uint32_t level,double x,double y)</a>
+<a name="ln323">{</a>
+<a name="ln324">  double fx = x - (uint32_t)x;</a>
+<a name="ln325">  double fy = y - (uint32_t)y;</a>
+<a name="ln326"> </a>
+<a name="ln327">  double v1 = __value_smooth_noise(level,(uint32_t)x,     (uint32_t)y);</a>
+<a name="ln328">  double v2 = __value_smooth_noise(level,(uint32_t)x + 1, (uint32_t)y);</a>
+<a name="ln329">  double v3 = __value_smooth_noise(level,(uint32_t)x,     (uint32_t)y + 1);</a>
+<a name="ln330">  double v4 = __value_smooth_noise(level,(uint32_t)x + 1, (uint32_t)y + 1);</a>
+<a name="ln331"> </a>
+<a name="ln332">  double i1 = __preline_cosine_interpolate(v1 , v2 , fx);</a>
+<a name="ln333">  double i2 = __preline_cosine_interpolate(v3 , v4 , fx);</a>
+<a name="ln334"> </a>
+<a name="ln335">  return __preline_cosine_interpolate(i1 , i2 , fy);</a>
+<a name="ln336">}</a>
+<a name="ln337">static double _perlin_2d_noise(double x,double y,uint32_t octaves,double persistance,double z)</a>
+<a name="ln338">{</a>
+<a name="ln339">  double f=1,a=1,total=0;</a>
+<a name="ln340"> </a>
+<a name="ln341">  for(int o=0;o&lt;octaves;o++) {</a>
+<a name="ln342">    total+= (__value_interpolate(o,x*f/z,y*f/z)*a);</a>
+<a name="ln343">    f=2*o;</a>
+<a name="ln344">    a=persistance*o;</a>
+<a name="ln345">  }</a>
+<a name="ln346">  return total;</a>
+<a name="ln347">}*/</a>
+<a name="ln348"> </a>
+<a name="ln349">static double _simplex_2d_noise(double x, double y, uint32_t octaves, double persistance, double z)</a>
+<a name="ln350">{</a>
+<a name="ln351">  double total = 0;</a>
+<a name="ln352"> </a>
+<a name="ln353">  // parametrization of octaves to match power spectrum of real grain scans</a>
+<a name="ln354">  static double f[] = {0.4910, 0.9441, 1.7280};</a>
+<a name="ln355">  static double a[] = {0.2340, 0.7850, 1.2150};</a>
+<a name="ln356"> </a>
+<a name="ln357">  for(uint32_t o = 0; o &lt; octaves; o++)</a>
+<a name="ln358">  {</a>
+<a name="ln359">    total += (_simplex_noise(x * f[o] / z, y * f[o] / z, o) * a[o]);</a>
+<a name="ln360">  }</a>
+<a name="ln361">  return total;</a>
+<a name="ln362">}</a>
+<a name="ln363"> </a>
+<a name="ln364">static float paper_resp(float exposure, float mb, float gp)</a>
+<a name="ln365">{</a>
+<a name="ln366">  const float delta = GRAIN_LUT_DELTA_MAX * expf((mb / 100.0f) * logf(GRAIN_LUT_DELTA_MIN));</a>
+<a name="ln367">  const float density = (1.0f + 2.0f * delta) / (1.0f + expf( (4.0f * gp * (0.5f - exposure)) / (1.0f + 2.0f * delta) )) - delta;</a>
+<a name="ln368">  return density;</a>
+<a name="ln369">}</a>
+<a name="ln370"> </a>
+<a name="ln371">static float paper_resp_inverse(float density, float mb, float gp)</a>
+<a name="ln372">{</a>
+<a name="ln373">  const float delta = GRAIN_LUT_DELTA_MAX * expf((mb / 100.0f) * logf(GRAIN_LUT_DELTA_MIN));</a>
+<a name="ln374">  const float exposure = -logf((1.0f + 2.0f * delta) / (density + delta) - 1.0f) * (1.0f + 2.0f * delta) / (4.0f * gp) + 0.5f;</a>
+<a name="ln375">  return exposure;</a>
+<a name="ln376">}</a>
+<a name="ln377"> </a>
+<a name="ln378">static void evaluate_grain_lut(float *grain_lut, const float mb)</a>
+<a name="ln379">{</a>
+<a name="ln380">  for(int i = 0; i &lt; GRAIN_LUT_SIZE; i++)</a>
+<a name="ln381">  {</a>
+<a name="ln382">    for(int j = 0; j &lt; GRAIN_LUT_SIZE; j++)</a>
+<a name="ln383">    {</a>
+<a name="ln384">      const float gu = (float)i / (GRAIN_LUT_SIZE - 1) - 0.5;</a>
+<a name="ln385">      const float l = (float)j / (GRAIN_LUT_SIZE - 1);</a>
+<a name="ln386">      grain_lut[j * GRAIN_LUT_SIZE + i] = 100.0f * (paper_resp(gu + paper_resp_inverse(l, mb, GRAIN_LUT_PAPER_GAMMA), mb, GRAIN_LUT_PAPER_GAMMA) - l);</a>
+<a name="ln387">    }</a>
+<a name="ln388">  }</a>
+<a name="ln389">}</a>
+<a name="ln390"> </a>
+<a name="ln391">static float dt_lut_lookup_2d_1c(const float *grain_lut, const float x, const float y)</a>
+<a name="ln392">{</a>
+<a name="ln393">  const float _x = CLAMPS((x + 0.5) * (GRAIN_LUT_SIZE - 1), 0, GRAIN_LUT_SIZE - 1);</a>
+<a name="ln394">  const float _y = CLAMPS(y * (GRAIN_LUT_SIZE - 1), 0, GRAIN_LUT_SIZE - 1);</a>
+<a name="ln395"> </a>
+<a name="ln396">  const int _x0 = _x &lt; GRAIN_LUT_SIZE - 2 ? _x : GRAIN_LUT_SIZE - 2;</a>
+<a name="ln397">  const int _y0 = _y &lt; GRAIN_LUT_SIZE - 2 ? _y : GRAIN_LUT_SIZE - 2;</a>
+<a name="ln398"> </a>
+<a name="ln399">  const int _x1 = _x0 + 1;</a>
+<a name="ln400">  const int _y1 = _y0 + 1;</a>
+<a name="ln401"> </a>
+<a name="ln402">  const float x_diff = _x - _x0;</a>
+<a name="ln403">  const float y_diff = _y - _y0;</a>
+<a name="ln404"> </a>
+<a name="ln405">  const float l00 = grain_lut[_y0 * GRAIN_LUT_SIZE + _x0];</a>
+<a name="ln406">  const float l01 = grain_lut[_y0 * GRAIN_LUT_SIZE + _x1];</a>
+<a name="ln407">  const float l10 = grain_lut[_y1 * GRAIN_LUT_SIZE + _x0];</a>
+<a name="ln408">  const float l11 = grain_lut[_y1 * GRAIN_LUT_SIZE + _x1];</a>
+<a name="ln409"> </a>
+<a name="ln410">  const float xy0 = (1.0 - y_diff) * l00 + l10 * y_diff;</a>
+<a name="ln411">  const float xy1 = (1.0 - y_diff) * l01 + l11 * y_diff;</a>
+<a name="ln412">  return xy0 * (1.0f - x_diff) + xy1 * x_diff;</a>
+<a name="ln413">}</a>
+<a name="ln414"> </a>
+<a name="ln415"> </a>
+<a name="ln416">const char *name()</a>
+<a name="ln417">{</a>
+<a name="ln418">  return _(&quot;grain&quot;);</a>
+<a name="ln419">}</a>
+<a name="ln420"> </a>
+<a name="ln421">int flags()</a>
+<a name="ln422">{</a>
+<a name="ln423">  return IOP_FLAGS_INCLUDE_IN_STYLES | IOP_FLAGS_SUPPORTS_BLENDING;</a>
+<a name="ln424">}</a>
+<a name="ln425"> </a>
+<a name="ln426">int default_group()</a>
+<a name="ln427">{</a>
+<a name="ln428">  return IOP_GROUP_EFFECT;</a>
+<a name="ln429">}</a>
+<a name="ln430"> </a>
+<a name="ln431">int default_colorspace(dt_iop_module_t *self, dt_dev_pixelpipe_t *pipe, dt_dev_pixelpipe_iop_t *piece)</a>
+<a name="ln432">{</a>
+<a name="ln433">  return iop_cs_Lab;</a>
+<a name="ln434">}</a>
+<a name="ln435"> </a>
+<a name="ln436">#if 0 // BAUHAUS doesn't support keyaccels yet...</a>
+<a name="ln437">void init_key_accels(dt_iop_module_so_t *self)</a>
+<a name="ln438">{</a>
+<a name="ln439">  dt_accel_register_slider_iop(self, FALSE, NC_(&quot;accel&quot;, &quot;coarseness&quot;));</a>
+<a name="ln440">  dt_accel_register_slider_iop(self, FALSE, NC_(&quot;accel&quot;, &quot;strength&quot;));</a>
+<a name="ln441">}</a>
+<a name="ln442"> </a>
+<a name="ln443">void connect_key_accels(dt_iop_module_t *self)</a>
+<a name="ln444">{</a>
+<a name="ln445">  dt_iop_grain_gui_data_t *g = (dt_iop_grain_gui_data_t*)self-&gt;gui_data;</a>
+<a name="ln446"> </a>
+<a name="ln447">  dt_accel_connect_slider_iop(self, &quot;coarseness&quot;, GTK_WIDGET(g-&gt;scale1));</a>
+<a name="ln448">  dt_accel_connect_slider_iop(self, &quot;strength&quot;, GTK_WIDGET(g-&gt;scale2));</a>
+<a name="ln449">}</a>
+<a name="ln450"> </a>
+<a name="ln451">#endif</a>
+<a name="ln452"> </a>
+<a name="ln453">// see: http://eternallyconfuzzled.com/tuts/algorithms/jsw_tut_hashing.aspx</a>
+<a name="ln454">// this is the modified bernstein</a>
+<a name="ln455">static unsigned int _hash_string(char *s)</a>
+<a name="ln456">{</a>
+<a name="ln457">  unsigned int h = 0;</a>
+<a name="ln458">  while(*s) h = 33 * h ^ *s++;</a>
+<a name="ln459">  return h;</a>
+<a name="ln460">}</a>
+<a name="ln461"> </a>
+<a name="ln462">void process(struct dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, const void *const ivoid,</a>
+<a name="ln463">             void *const ovoid, const dt_iop_roi_t *const roi_in, const dt_iop_roi_t *const roi_out)</a>
+<a name="ln464">{</a>
+<a name="ln465">  dt_iop_grain_data_t *data = (dt_iop_grain_data_t *)piece-&gt;data;</a>
+<a name="ln466"> </a>
+<a name="ln467">  unsigned int hash = _hash_string(piece-&gt;pipe-&gt;image.filename) % (int)fmax(roi_out-&gt;width * 0.3, 1.0);</a>
+<a name="ln468"> </a>
+<a name="ln469">  const int ch = piece-&gt;colors;</a>
+<a name="ln470">  // Apply grain to image</a>
+<a name="ln471">  const double strength = (data-&gt;strength / 100.0);</a>
+<a name="ln472">  const double octaves = 3;</a>
+<a name="ln473">  // double zoom=1.0+(8*(data-&gt;scale/100.0));</a>
+<a name="ln474">  const double wd = fminf(piece-&gt;buf_in.width, piece-&gt;buf_in.height);</a>
+<a name="ln475">  const double zoom = (1.0 + 8 * data-&gt;scale / 100) / 800.0;</a>
+<a name="ln476">  const int filter = fabsf(roi_out-&gt;scale - 1.0f) &gt; 0.01;</a>
+<a name="ln477">  // filter width depends on world space (i.e. reverse wd norm and roi-&gt;scale, as well as buffer input to</a>
+<a name="ln478">  // pixelpipe iscale)</a>
+<a name="ln479">  const double filtermul = piece-&gt;iscale / (roi_out-&gt;scale * wd);</a>
+<a name="ln480">  const float fib1 = 34.0, fib2 = 21.0;</a>
+<a name="ln481">  const float fib1div2 = fib1 / fib2;</a>
+<a name="ln482"> </a>
+<a name="ln483">#ifdef _OPENMP</a>
+<a name="ln484">#pragma omp parallel for default(none) \</a>
+<a name="ln485">  dt_omp_firstprivate(ch, filter, filtermul, ivoid, ovoid, roi_out, strength, \</a>
+<a name="ln486">                      wd, zoom, octaves, fib2, fib1div2) \</a>
+<a name="ln487">  shared(data, hash)</a>
+<a name="ln488">#endif</a>
+<a name="ln489">  for(int j = 0; j &lt; roi_out-&gt;height; j++)</a>
+<a name="ln490">  {</a>
+<a name="ln491">    float *in = ((float *)ivoid) + (size_t)roi_out-&gt;width * j * ch;</a>
+<a name="ln492">    float *out = ((float *)ovoid) + (size_t)roi_out-&gt;width * j * ch;</a>
+<a name="ln493">    const double wy = (roi_out-&gt;y + j) / roi_out-&gt;scale;</a>
+<a name="ln494">    const double y = wy / wd;</a>
+<a name="ln495">    // y: normalized to shorter side of image, so with pixel aspect = 1.</a>
+<a name="ln496"> </a>
+<a name="ln497">    for(int i = 0; i &lt; roi_out-&gt;width; i++)</a>
+<a name="ln498">    {</a>
+<a name="ln499">      // calculate x, y in a resolution independent way:</a>
+<a name="ln500">      // wx,wy: worldspace in full image pixel coords:</a>
+<a name="ln501">      const double wx = (roi_out-&gt;x + i) / roi_out-&gt;scale;</a>
+<a name="ln502">      // x: normalized to shorter side of image, so with pixel aspect = 1.</a>
+<a name="ln503">      const double x = wx / wd;</a>
+<a name="ln504">      //  double noise=_perlin_2d_noise(x, y, octaves,0.25, zoom)*1.5;</a>
+<a name="ln505">      double noise = 0.0;</a>
+<a name="ln506">      if(filter)</a>
+<a name="ln507">      {</a>
+<a name="ln508">        // if zoomed out a lot, use rank-1 lattice downsampling</a>
+<a name="ln509">        for(int l = 0; l &lt; fib2; l++)</a>
+<a name="ln510">        {</a>
+<a name="ln511">          float px = l / fib2, py = l * fib1div2;</a>
+<a name="ln512">          py -= (int)py;</a>
+<a name="ln513">          float dx = px * filtermul, dy = py * filtermul;</a>
+<a name="ln514">          noise += (1.0 / fib2) * _simplex_2d_noise(x + dx + hash, y + dy, octaves, 1.0, zoom);</a>
+<a name="ln515">        }</a>
+<a name="ln516">      }</a>
+<a name="ln517">      else</a>
+<a name="ln518">      {</a>
+<a name="ln519">        noise = _simplex_2d_noise(x + hash, y, octaves, 1.0, zoom);</a>
+<a name="ln520">      }</a>
+<a name="ln521"> </a>
+<a name="ln522">      out[0] = in[0] + dt_lut_lookup_2d_1c(data-&gt;grain_lut, (noise * strength) * GRAIN_LIGHTNESS_STRENGTH_SCALE, in[0] / 100.0f);</a>
+<a name="ln523">      out[1] = in[1];</a>
+<a name="ln524">      out[2] = in[2];</a>
+<a name="ln525">      out[3] = in[3];</a>
+<a name="ln526"> </a>
+<a name="ln527">      out += ch;</a>
+<a name="ln528">      in += ch;</a>
+<a name="ln529">    }</a>
+<a name="ln530">  }</a>
+<a name="ln531">}</a>
+<a name="ln532"> </a>
+<a name="ln533">static void scale_callback(GtkWidget *slider, gpointer user_data)</a>
+<a name="ln534">{</a>
+<a name="ln535">  dt_iop_module_t *self = (dt_iop_module_t *)user_data;</a>
+<a name="ln536">  if(self-&gt;dt-&gt;gui-&gt;reset) return;</a>
+<a name="ln537">  dt_iop_grain_params_t *p = (dt_iop_grain_params_t *)self-&gt;params;</a>
+<a name="ln538">  p-&gt;scale = dt_bauhaus_slider_get(slider) / GRAIN_SCALE_FACTOR;</a>
+<a name="ln539">  dt_dev_add_history_item(darktable.develop, self, TRUE);</a>
+<a name="ln540">}</a>
+<a name="ln541"> </a>
+<a name="ln542">static void strength_callback(GtkWidget *slider, gpointer user_data)</a>
+<a name="ln543">{</a>
+<a name="ln544">  dt_iop_module_t *self = (dt_iop_module_t *)user_data;</a>
+<a name="ln545">  if(self-&gt;dt-&gt;gui-&gt;reset) return;</a>
+<a name="ln546">  dt_iop_grain_params_t *p = (dt_iop_grain_params_t *)self-&gt;params;</a>
+<a name="ln547">  p-&gt;strength = dt_bauhaus_slider_get(slider);</a>
+<a name="ln548">  dt_dev_add_history_item(darktable.develop, self, TRUE);</a>
+<a name="ln549">}</a>
+<a name="ln550"> </a>
+<a name="ln551">static void midtones_bias_callback(GtkWidget *slider, gpointer user_data)</a>
+<a name="ln552">{</a>
+<a name="ln553">  dt_iop_module_t *self = (dt_iop_module_t *)user_data;</a>
+<a name="ln554">  if(self-&gt;dt-&gt;gui-&gt;reset) return;</a>
+<a name="ln555">  dt_iop_grain_params_t *p = (dt_iop_grain_params_t *)self-&gt;params;</a>
+<a name="ln556">  p-&gt;midtones_bias = dt_bauhaus_slider_get(slider);</a>
+<a name="ln557">  dt_dev_add_history_item(darktable.develop, self, TRUE);</a>
+<a name="ln558">}</a>
+<a name="ln559"> </a>
+<a name="ln560">void commit_params(struct dt_iop_module_t *self, dt_iop_params_t *p1, dt_dev_pixelpipe_t *pipe,</a>
+<a name="ln561">                   dt_dev_pixelpipe_iop_t *piece)</a>
+<a name="ln562">{</a>
+<a name="ln563">  dt_iop_grain_params_t *p = (dt_iop_grain_params_t *)p1;</a>
+<a name="ln564">  dt_iop_grain_data_t *d = (dt_iop_grain_data_t *)piece-&gt;data;</a>
+<a name="ln565"> </a>
+<a name="ln566">  d-&gt;channel = p-&gt;channel;</a>
+<a name="ln567">  d-&gt;scale = p-&gt;scale;</a>
+<a name="ln568">  d-&gt;strength = p-&gt;strength;</a>
+<a name="ln569">  d-&gt;midtones_bias = p-&gt;midtones_bias;</a>
+<a name="ln570"> </a>
+<a name="ln571">  evaluate_grain_lut(d-&gt;grain_lut, d-&gt;midtones_bias);</a>
+<a name="ln572">}</a>
+<a name="ln573"> </a>
+<a name="ln574">void init_pipe(struct dt_iop_module_t *self, dt_dev_pixelpipe_t *pipe, dt_dev_pixelpipe_iop_t *piece)</a>
+<a name="ln575">{</a>
+<a name="ln576">  piece-&gt;data = calloc(1, sizeof(dt_iop_grain_data_t));</a>
+<a name="ln577">  self-&gt;commit_params(self, self-&gt;default_params, pipe, piece);</a>
+<a name="ln578">}</a>
+<a name="ln579"> </a>
+<a name="ln580">void cleanup_pipe(struct dt_iop_module_t *self, dt_dev_pixelpipe_t *pipe, dt_dev_pixelpipe_iop_t *piece)</a>
+<a name="ln581">{</a>
+<a name="ln582">  free(piece-&gt;data);</a>
+<a name="ln583">  piece-&gt;data = NULL;</a>
+<a name="ln584">}</a>
+<a name="ln585"> </a>
+<a name="ln586">void gui_update(struct dt_iop_module_t *self)</a>
+<a name="ln587">{</a>
+<a name="ln588">  dt_iop_module_t *module = (dt_iop_module_t *)self;</a>
+<a name="ln589">  dt_iop_grain_gui_data_t *g = (dt_iop_grain_gui_data_t *)self-&gt;gui_data;</a>
+<a name="ln590">  dt_iop_grain_params_t *p = (dt_iop_grain_params_t *)module-&gt;params;</a>
+<a name="ln591"> </a>
+<a name="ln592">  dt_bauhaus_slider_set(g-&gt;scale1, p-&gt;scale * GRAIN_SCALE_FACTOR);</a>
+<a name="ln593">  dt_bauhaus_slider_set(g-&gt;scale2, p-&gt;strength);</a>
+<a name="ln594">  dt_bauhaus_slider_set(g-&gt;scale3, p-&gt;midtones_bias);</a>
+<a name="ln595">}</a>
+<a name="ln596"> </a>
+<a name="ln597">void init(dt_iop_module_t *module)</a>
+<a name="ln598">{</a>
+<a name="ln599">  _simplex_noise_init();</a>
+<a name="ln600">  module-&gt;params = calloc(1, sizeof(dt_iop_grain_params_t));</a>
+<a name="ln601">  module-&gt;default_params = calloc(1, sizeof(dt_iop_grain_params_t));</a>
+<a name="ln602">  module-&gt;default_enabled = 0;</a>
+<a name="ln603">  module-&gt;params_size = sizeof(dt_iop_grain_params_t);</a>
+<a name="ln604">  module-&gt;gui_data = NULL;</a>
+<a name="ln605">  dt_iop_grain_params_t tmp</a>
+<a name="ln606">      = (dt_iop_grain_params_t){ DT_GRAIN_CHANNEL_LIGHTNESS, 1600.0 / GRAIN_SCALE_FACTOR, 25.0, 100.0 };</a>
+<a name="ln607">  memcpy(module-&gt;params, &amp;tmp, sizeof(dt_iop_grain_params_t));</a>
+<a name="ln608">  memcpy(module-&gt;default_params, &amp;tmp, sizeof(dt_iop_grain_params_t));</a>
+<a name="ln609">}</a>
+<a name="ln610"> </a>
+<a name="ln611">void cleanup(dt_iop_module_t *module)</a>
+<a name="ln612">{</a>
+<a name="ln613">  free(module-&gt;params);</a>
+<a name="ln614">  module-&gt;params = NULL;</a>
+<a name="ln615">}</a>
+<a name="ln616"> </a>
+<a name="ln617">void gui_init(struct dt_iop_module_t *self)</a>
+<a name="ln618">{</a>
+<a name="ln619">  self-&gt;gui_data = malloc(sizeof(dt_iop_grain_gui_data_t));</a>
+<a name="ln620">  dt_iop_grain_gui_data_t *g = (dt_iop_grain_gui_data_t *)self-&gt;gui_data;</a>
+<a name="ln621">  dt_iop_grain_params_t *p = (dt_iop_grain_params_t *)self-&gt;params;</a>
+<a name="ln622"> </a>
+<a name="ln623">  self-&gt;widget = gtk_box_new(GTK_ORIENTATION_VERTICAL, DT_BAUHAUS_SPACE);</a>
+<a name="ln624">  dt_gui_add_help_link(self-&gt;widget, dt_get_help_url(self-&gt;op));</a>
+<a name="ln625"> </a>
+<a name="ln626">  /* courseness */</a>
+<a name="ln627">  g-&gt;scale1 = dt_bauhaus_slider_new_with_range(self, 20.0, 6400.0, 20.0, p-&gt;scale * GRAIN_SCALE_FACTOR, 0);</a>
+<a name="ln628">  dt_bauhaus_widget_set_label(g-&gt;scale1, NULL, _(&quot;coarseness&quot;));</a>
+<a name="ln629">  dt_bauhaus_slider_set_format(g-&gt;scale1, &quot;%.0fISO&quot;);</a>
+<a name="ln630">  gtk_box_pack_start(GTK_BOX(self-&gt;widget), GTK_WIDGET(g-&gt;scale1), TRUE, TRUE, 0);</a>
+<a name="ln631">  gtk_widget_set_tooltip_text(g-&gt;scale1, _(&quot;the grain size (~ISO of the film)&quot;));</a>
+<a name="ln632">  g_signal_connect(G_OBJECT(g-&gt;scale1), &quot;value-changed&quot;, G_CALLBACK(scale_callback), self);</a>
+<a name="ln633"> </a>
+<a name="ln634">  /* strength */</a>
+<a name="ln635">  g-&gt;scale2 = dt_bauhaus_slider_new_with_range(self, 0.0, 100.0, 1.0, p-&gt;strength, 2);</a>
+<a name="ln636">  dt_bauhaus_widget_set_label(g-&gt;scale2, NULL, _(&quot;strength&quot;));</a>
+<a name="ln637">  dt_bauhaus_slider_set_format(g-&gt;scale2, &quot;%.0f%%&quot;);</a>
+<a name="ln638">  gtk_box_pack_start(GTK_BOX(self-&gt;widget), GTK_WIDGET(g-&gt;scale2), TRUE, TRUE, 0);</a>
+<a name="ln639">  gtk_widget_set_tooltip_text(g-&gt;scale2, _(&quot;the strength of applied grain&quot;));</a>
+<a name="ln640">  g_signal_connect(G_OBJECT(g-&gt;scale2), &quot;value-changed&quot;, G_CALLBACK(strength_callback), self);</a>
+<a name="ln641"> </a>
+<a name="ln642">  /* midtones bias */</a>
+<a name="ln643">  g-&gt;scale3 = dt_bauhaus_slider_new_with_range(self, 0.0, 100.0, 1.0, p-&gt;midtones_bias, 2);</a>
+<a name="ln644">  dt_bauhaus_widget_set_label(g-&gt;scale3, NULL, _(&quot;midtones bias&quot;));</a>
+<a name="ln645">  dt_bauhaus_slider_set_format(g-&gt;scale3, &quot;%.0f%%&quot;);</a>
+<a name="ln646">  gtk_box_pack_start(GTK_BOX(self-&gt;widget), GTK_WIDGET(g-&gt;scale3), TRUE, TRUE, 0);</a>
+<a name="ln647">  gtk_widget_set_tooltip_text(g-&gt;scale3, _(&quot;amount of midtones bias from the photographic paper response modeling. the greater the bias, the more pronounced the fall off of the grain in shadows and highlights&quot;));</a>
+<a name="ln648">  g_signal_connect(G_OBJECT(g-&gt;scale3), &quot;value-changed&quot;, G_CALLBACK(midtones_bias_callback), self);</a>
+<a name="ln649">}</a>
+<a name="ln650"> </a>
+<a name="ln651">void gui_cleanup(struct dt_iop_module_t *self)</a>
+<a name="ln652">{</a>
+<a name="ln653">  free(self-&gt;gui_data);</a>
+<a name="ln654">  self-&gt;gui_data = NULL;</a>
+<a name="ln655">}</a>
+<a name="ln656"> </a>
+<a name="ln657">// modelines: These editor modelines have been set for all relevant files by tools/update_modelines.sh</a>
+<a name="ln658">// vim: shiftwidth=2 expandtab tabstop=2 cindent</a>
+<a name="ln659">// kate: tab-indents: off; indent-width 2; replace-tabs on; indent-mode cstyle; remove-trailing-spaces modified;</a>
+
+</code></pre>
+<div class="balloon" rel="607"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v575/" target="_blank">V575</a> The potential null pointer is passed into 'memcpy' function. Inspect the first argument. Check lines: 607, 600.</p></div>
+<div class="balloon" rel="608"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v575/" target="_blank">V575</a> The potential null pointer is passed into 'memcpy' function. Inspect the first argument. Check lines: 608, 601.</p></div>
+<div class="balloon" rel="627"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v522/" target="_blank">V522</a> There might be dereferencing of a potential null pointer 'g'. Check lines: 627, 619.</p></div>
+
+<link rel="stylesheet" href="highlight.css">
+<script src="highlight.pack.js"></script>
+<script src="highlightjs-line-numbers.js"></script>
+<script>hljs.initHighlightingOnLoad();</script>
+<script>hljs.initLineNumbersOnLoad();</script>
+<script>
+  $(document).ready(function() {
+      $('.balloon').each(function () {
+          var bl = $(this);
+          var line = bl.attr('rel');
+          var text = $('a[name="ln'+line+'"]').text();
+
+          var space_count = 0;
+          for(var i = 0; i<text.length; i++){
+              var char = text[i];
+              if((char !== ' ')&&(char !== '\t'))break;
+              if(char === '\t')space_count++;
+              space_count++;
+          }
+
+          bl.css('margin-left', space_count*8);
+          $('a[name="ln'+line+'"]').after(bl);
+      });
+
+      window.location = window.location;
+  });
+</script>
+</body>
+</html>

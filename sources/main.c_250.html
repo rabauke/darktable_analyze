@@ -1,0 +1,1883 @@
+
+<html>
+<head>
+  <link rel="stylesheet" href="../style.css"/>
+  <script src="../jquery-3.2.1.min.js"></script>
+</head>
+<body>
+<pre><code class = "cpp">
+<a name="ln1">/*</a>
+<a name="ln2">    This file is part of darktable,</a>
+<a name="ln3">    copyright (c) 2016 tobias ellinghaus.</a>
+<a name="ln4"> </a>
+<a name="ln5">    darktable is free software: you can redistribute it and/or modify</a>
+<a name="ln6">    it under the terms of the GNU General Public License as published by</a>
+<a name="ln7">    the Free Software Foundation, either version 3 of the License, or</a>
+<a name="ln8">    (at your option) any later version.</a>
+<a name="ln9"> </a>
+<a name="ln10">    darktable is distributed in the hope that it will be useful,</a>
+<a name="ln11">    but WITHOUT ANY WARRANTY; without even the implied warranty of</a>
+<a name="ln12">    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the</a>
+<a name="ln13">    GNU General Public License for more details.</a>
+<a name="ln14"> </a>
+<a name="ln15">    You should have received a copy of the GNU General Public License</a>
+<a name="ln16">    along with darktable.  If not, see &lt;http://www.gnu.org/licenses/&gt;.</a>
+<a name="ln17">*/</a>
+<a name="ln18"> </a>
+<a name="ln19">#include &quot;chart/dtcairo.h&quot;</a>
+<a name="ln20">#include &quot;chart/colorchart.h&quot;</a>
+<a name="ln21">#include &quot;chart/common.h&quot;</a>
+<a name="ln22">#include &quot;chart/deltaE.h&quot;</a>
+<a name="ln23">#include &quot;chart/pfm.h&quot;</a>
+<a name="ln24">#include &quot;chart/thinplate.h&quot;</a>
+<a name="ln25">#include &quot;chart/tonecurve.h&quot;</a>
+<a name="ln26">#include &quot;common/exif.h&quot;</a>
+<a name="ln27"> </a>
+<a name="ln28">#include &lt;gtk/gtk.h&gt;</a>
+<a name="ln29">#include &lt;stdio.h&gt;</a>
+<a name="ln30">#include &lt;stdlib.h&gt;</a>
+<a name="ln31">#include &lt;string.h&gt;</a>
+<a name="ln32"> </a>
+<a name="ln33">#ifdef _WIN32</a>
+<a name="ln34">#include &quot;win/main_wrapper.h&quot;</a>
+<a name="ln35">#endif</a>
+<a name="ln36"> </a>
+<a name="ln37">const double thrs = 200.0;</a>
+<a name="ln38"> </a>
+<a name="ln39">enum</a>
+<a name="ln40">{</a>
+<a name="ln41">  COLUMN_NAME,</a>
+<a name="ln42">  COLUMN_RGB_IN,</a>
+<a name="ln43">  COLUMN_LAB_IN,</a>
+<a name="ln44">  COLUMN_LAB_REF,</a>
+<a name="ln45">  COLUMN_DE_1976,</a>
+<a name="ln46">  COLUMN_DE_1976_FLOAT,</a>
+<a name="ln47">  COLUMN_DE_2000,</a>
+<a name="ln48">  COLUMN_DE_2000_FLOAT,</a>
+<a name="ln49">  NUM_COLUMNS</a>
+<a name="ln50">};</a>
+<a name="ln51"> </a>
+<a name="ln52">typedef struct dt_lut_t</a>
+<a name="ln53">{</a>
+<a name="ln54">  // gtk gui</a>
+<a name="ln55">  GtkWidget *window, *image_button, *cht_button, *it8_button, *reference_image_button, *reference_it8_box,</a>
+<a name="ln56">      *reference_image_box, *process_button, *export_button, *export_raw_button, *reference_mode,</a>
+<a name="ln57">      *number_patches, *source_shrink, *reference_shrink, *result_label;</a>
+<a name="ln58">  GtkWidget *treeview;</a>
+<a name="ln59">  GtkTreeModel *model;</a>
+<a name="ln60"> </a>
+<a name="ln61">  // loaded files to be drawn/referenced</a>
+<a name="ln62">  image_t source;</a>
+<a name="ln63">  image_t reference;</a>
+<a name="ln64">  char *reference_filename;</a>
+<a name="ln65"> </a>
+<a name="ln66">  // computed data</a>
+<a name="ln67">  chart_t *chart;</a>
+<a name="ln68">  GHashTable *picked_source_patches;</a>
+<a name="ln69">  char *tonecurve_encoded, *colorchecker_encoded;</a>
+<a name="ln70">} dt_lut_t;</a>
+<a name="ln71"> </a>
+<a name="ln72">// boring helper functions</a>
+<a name="ln73">static void init_image(dt_lut_t *self, image_t *image, GCallback motion_cb);</a>
+<a name="ln74">static void image_lab_to_xyz(float *image, const int width, const int height);</a>
+<a name="ln75">static void map_boundingbox_to_view(image_t *image, point_t *bb);</a>
+<a name="ln76">static point_t map_point_to_view(image_t *image, point_t p);</a>
+<a name="ln77">static void get_xyz_sample_from_image(const image_t *const image, float shrink, box_t *box, float *xyz);</a>
+<a name="ln78">static void add_column(GtkTreeView *treeview, const char *title, int column_id, int sort_column);</a>
+<a name="ln79">static void update_table(dt_lut_t *self);</a>
+<a name="ln80">static void init_table(dt_lut_t *self);</a>
+<a name="ln81">static void get_Lab_from_box(box_t *box, float *Lab);</a>
+<a name="ln82">static void collect_source_patches(dt_lut_t *self);</a>
+<a name="ln83">static void collect_source_patches_foreach(gpointer key, gpointer value, gpointer user_data);</a>
+<a name="ln84">static void collect_reference_patches(dt_lut_t *self);</a>
+<a name="ln85">static void collect_reference_patches_foreach(gpointer key, gpointer value, gpointer user_data);</a>
+<a name="ln86">static box_t *find_patch(GHashTable *table, gpointer key);</a>
+<a name="ln87">static void get_boundingbox(const image_t *const image, point_t *bb);</a>
+<a name="ln88">static box_t get_sample_box(chart_t *chart, box_t *outer_box, float shrink);</a>
+<a name="ln89">static void get_corners(point_t *bb, box_t *box, point_t *corners);</a>
+<a name="ln90">static void get_pixel_region(const image_t *const image, const point_t *const corners, int *x_start, int *y_start,</a>
+<a name="ln91">                             int *x_end, int *y_end);</a>
+<a name="ln92">static void reset_bb(image_t *image);</a>
+<a name="ln93">static void free_image(image_t *image);</a>
+<a name="ln94">static gboolean handle_motion(GtkWidget *widget, GdkEventMotion *event, dt_lut_t *self, image_t *image);</a>
+<a name="ln95">static int find_closest_corner(point_t *bb, float x, float y);</a>
+<a name="ln96">static void map_mouse_to_0_1(GtkWidget *widget, GdkEventMotion *event, image_t *image, float *x, float *y);</a>
+<a name="ln97">static void update_corner(image_t *image, int which, float *x, float *y);</a>
+<a name="ln98">static gboolean open_source_image(dt_lut_t *self, const char *filename);</a>
+<a name="ln99">static gboolean open_reference_image(dt_lut_t *self, const char *filename);</a>
+<a name="ln100">static gboolean open_image(image_t *image, const char *filename);</a>
+<a name="ln101">static gboolean open_cht(dt_lut_t *self, const char *filename);</a>
+<a name="ln102">static gboolean open_it8(dt_lut_t *self, const char *filename);</a>
+<a name="ln103"> </a>
+<a name="ln104">static void size_allocate_callback(GtkWidget *widget, GdkRectangle *allocation, gpointer user_data)</a>
+<a name="ln105">{</a>
+<a name="ln106">  image_t *image = (image_t *)user_data;</a>
+<a name="ln107">  set_offset_and_scale(image, allocation-&gt;width, allocation-&gt;height);</a>
+<a name="ln108">}</a>
+<a name="ln109"> </a>
+<a name="ln110">static gboolean draw_image_callback(GtkWidget *widget, cairo_t *cr, gpointer user_data)</a>
+<a name="ln111">{</a>
+<a name="ln112">  image_t *image = (image_t *)user_data;</a>
+<a name="ln113">  chart_t *chart = *(image-&gt;chart);</a>
+<a name="ln114"> </a>
+<a name="ln115">  clear_background(cr);</a>
+<a name="ln116"> </a>
+<a name="ln117">  // done when no image is loaded</a>
+<a name="ln118">  if(!image-&gt;image)</a>
+<a name="ln119">  {</a>
+<a name="ln120">    draw_no_image(cr, widget);</a>
+<a name="ln121">    return FALSE;</a>
+<a name="ln122">  }</a>
+<a name="ln123"> </a>
+<a name="ln124">  center_image(cr, image);</a>
+<a name="ln125"> </a>
+<a name="ln126">  draw_image(cr, image);</a>
+<a name="ln127"> </a>
+<a name="ln128">  // done when no chart was loaded</a>
+<a name="ln129">  if(!chart) return FALSE;</a>
+<a name="ln130"> </a>
+<a name="ln131">  // draw overlay</a>
+<a name="ln132">  point_t bb[4];</a>
+<a name="ln133">  map_boundingbox_to_view(image, bb);</a>
+<a name="ln134"> </a>
+<a name="ln135">  draw_boundingbox(cr, bb);</a>
+<a name="ln136">  draw_f_boxes(cr, bb, chart);</a>
+<a name="ln137">  draw_d_boxes(cr, bb, chart);</a>
+<a name="ln138">  draw_color_boxes_outline(cr, bb, chart);</a>
+<a name="ln139"> </a>
+<a name="ln140">  stroke_boxes(cr, 1.0);</a>
+<a name="ln141"> </a>
+<a name="ln142">  draw_color_boxes_inside(cr, bb, chart, image-&gt;shrink, 2.0, image-&gt;draw_colored);</a>
+<a name="ln143"> </a>
+<a name="ln144">  return FALSE;</a>
+<a name="ln145">}</a>
+<a name="ln146"> </a>
+<a name="ln147">static void map_boundingbox_to_view(image_t *image, point_t *bb)</a>
+<a name="ln148">{</a>
+<a name="ln149">  for(int i = 0; i &lt; 4; i++) bb[i] = map_point_to_view(image, image-&gt;bb[i]);</a>
+<a name="ln150">}</a>
+<a name="ln151"> </a>
+<a name="ln152">static point_t map_point_to_view(image_t *image, point_t p)</a>
+<a name="ln153">{</a>
+<a name="ln154">  point_t result;</a>
+<a name="ln155"> </a>
+<a name="ln156">  result.x = p.x * image-&gt;width / image-&gt;scale;</a>
+<a name="ln157">  result.y = p.y * image-&gt;height / image-&gt;scale;</a>
+<a name="ln158"> </a>
+<a name="ln159">  return result;</a>
+<a name="ln160">}</a>
+<a name="ln161"> </a>
+<a name="ln162">static gboolean motion_notify_callback_source(GtkWidget *widget, GdkEventMotion *event, gpointer user_data)</a>
+<a name="ln163">{</a>
+<a name="ln164">  dt_lut_t *self = (dt_lut_t *)user_data;</a>
+<a name="ln165">  gboolean res = handle_motion(widget, event, self, &amp;self-&gt;source);</a>
+<a name="ln166">  collect_source_patches(self);</a>
+<a name="ln167">  update_table(self);</a>
+<a name="ln168">  return res;</a>
+<a name="ln169">}</a>
+<a name="ln170"> </a>
+<a name="ln171">static gboolean motion_notify_callback_reference(GtkWidget *widget, GdkEventMotion *event, gpointer user_data)</a>
+<a name="ln172">{</a>
+<a name="ln173">  dt_lut_t *self = (dt_lut_t *)user_data;</a>
+<a name="ln174">  gboolean res = handle_motion(widget, event, self, &amp;self-&gt;reference);</a>
+<a name="ln175">  collect_reference_patches(self);</a>
+<a name="ln176">  update_table(self);</a>
+<a name="ln177">  return res;</a>
+<a name="ln178">}</a>
+<a name="ln179"> </a>
+<a name="ln180">static gboolean handle_motion(GtkWidget *widget, GdkEventMotion *event, dt_lut_t *self, image_t *image)</a>
+<a name="ln181">{</a>
+<a name="ln182">  if(!(event-&gt;state &amp; GDK_BUTTON1_MASK) || !image-&gt;image) return FALSE;</a>
+<a name="ln183"> </a>
+<a name="ln184">  // mouse -&gt; 0..1</a>
+<a name="ln185">  float x, y;</a>
+<a name="ln186">  map_mouse_to_0_1(widget, event, image, &amp;x, &amp;y);</a>
+<a name="ln187"> </a>
+<a name="ln188">  // dragging the crosses is hard when they are not in a cornerof the bb but sprinkled over the chart</a>
+<a name="ln189">  int closest_corner = find_closest_corner(image-&gt;bb, x, y);</a>
+<a name="ln190"> </a>
+<a name="ln191">  update_corner(image, closest_corner, &amp;x, &amp;y);</a>
+<a name="ln192"> </a>
+<a name="ln193">  image-&gt;bb[closest_corner].x = x;</a>
+<a name="ln194">  image-&gt;bb[closest_corner].y = y;</a>
+<a name="ln195"> </a>
+<a name="ln196">  gtk_widget_queue_draw(widget);</a>
+<a name="ln197"> </a>
+<a name="ln198">  return TRUE;</a>
+<a name="ln199">}</a>
+<a name="ln200"> </a>
+<a name="ln201">static int find_closest_corner(point_t *bb, float x, float y)</a>
+<a name="ln202">{</a>
+<a name="ln203">  int closest_corner = 0;</a>
+<a name="ln204">  float distance = G_MAXFLOAT;</a>
+<a name="ln205">  for(int i = 0; i &lt; 4; i++)</a>
+<a name="ln206">  {</a>
+<a name="ln207">    const float d_x = (x - bb[i].x);</a>
+<a name="ln208">    const float d_y = (y - bb[i].y);</a>
+<a name="ln209">    float d = d_x * d_x + d_y * d_y;</a>
+<a name="ln210">    if(d &lt; distance)</a>
+<a name="ln211">    {</a>
+<a name="ln212">      distance = d;</a>
+<a name="ln213">      closest_corner = i;</a>
+<a name="ln214">    }</a>
+<a name="ln215">  }</a>
+<a name="ln216">  // TODO: only react when the distance &lt; some threshold?</a>
+<a name="ln217">  return closest_corner;</a>
+<a name="ln218">}</a>
+<a name="ln219"> </a>
+<a name="ln220">static void map_mouse_to_0_1(GtkWidget *widget, GdkEventMotion *event, image_t *image, float *x, float *y)</a>
+<a name="ln221">{</a>
+<a name="ln222">  guint width = gtk_widget_get_allocated_width(widget);</a>
+<a name="ln223">  guint height = gtk_widget_get_allocated_height(widget);</a>
+<a name="ln224"> </a>
+<a name="ln225">  *x = (event-&gt;x - image-&gt;offset_x) / (width - 2.0 * image-&gt;offset_x);</a>
+<a name="ln226">  *y = (event-&gt;y - image-&gt;offset_y) / (height - 2.0 * image-&gt;offset_y);</a>
+<a name="ln227">}</a>
+<a name="ln228"> </a>
+<a name="ln229">static void update_corner(image_t *image, int which, float *x, float *y)</a>
+<a name="ln230">{</a>
+<a name="ln231">  // keep the corners in clockwise order</a>
+<a name="ln232">  if(which == TOP_LEFT)</a>
+<a name="ln233">  {</a>
+<a name="ln234">    *x = CLAMP(*x, 0.0, image-&gt;bb[TOP_RIGHT].x);</a>
+<a name="ln235">    *y = CLAMP(*y, 0.0, image-&gt;bb[BOTTOM_LEFT].y);</a>
+<a name="ln236">  }</a>
+<a name="ln237">  else if(which == TOP_RIGHT)</a>
+<a name="ln238">  {</a>
+<a name="ln239">    *x = CLAMP(*x, image-&gt;bb[TOP_LEFT].x, 1.0);</a>
+<a name="ln240">    *y = CLAMP(*y, 0.0, image-&gt;bb[BOTTOM_RIGHT].y);</a>
+<a name="ln241">  }</a>
+<a name="ln242">  else if(which == BOTTOM_RIGHT)</a>
+<a name="ln243">  {</a>
+<a name="ln244">    *x = CLAMP(*x, image-&gt;bb[BOTTOM_LEFT].x, 1.0);</a>
+<a name="ln245">    *y = CLAMP(*y, image-&gt;bb[TOP_RIGHT].y, 1.0);</a>
+<a name="ln246">  }</a>
+<a name="ln247">  else if(which == BOTTOM_LEFT)</a>
+<a name="ln248">  {</a>
+<a name="ln249">    *x = CLAMP(*x, 0.0, image-&gt;bb[BOTTOM_RIGHT].x);</a>
+<a name="ln250">    *y = CLAMP(*y, image-&gt;bb[TOP_LEFT].y, 1.0);</a>
+<a name="ln251">  }</a>
+<a name="ln252">}</a>
+<a name="ln253"> </a>
+<a name="ln254">static void source_image_changed_callback(GtkFileChooserButton *widget, gpointer user_data)</a>
+<a name="ln255">{</a>
+<a name="ln256">  dt_lut_t *self = (dt_lut_t *)user_data;</a>
+<a name="ln257">  char *new_filename = gtk_file_chooser_get_filename(GTK_FILE_CHOOSER(widget));</a>
+<a name="ln258">  open_source_image(self, new_filename);</a>
+<a name="ln259">  g_free(new_filename);</a>
+<a name="ln260">}</a>
+<a name="ln261"> </a>
+<a name="ln262">static gboolean open_source_image(dt_lut_t *self, const char *filename)</a>
+<a name="ln263">{</a>
+<a name="ln264">  gboolean res = open_image(&amp;self-&gt;source, filename);</a>
+<a name="ln265">  gtk_widget_set_sensitive(self-&gt;cht_button, res);</a>
+<a name="ln266">  if(!res) gtk_file_chooser_unselect_all(GTK_FILE_CHOOSER(self-&gt;image_button));</a>
+<a name="ln267">  gtk_widget_queue_draw(self-&gt;source.drawing_area);</a>
+<a name="ln268"> </a>
+<a name="ln269">  return res;</a>
+<a name="ln270">}</a>
+<a name="ln271"> </a>
+<a name="ln272">static void ref_image_changed_callback(GtkFileChooserButton *widget, gpointer user_data)</a>
+<a name="ln273">{</a>
+<a name="ln274">  dt_lut_t *self = (dt_lut_t *)user_data;</a>
+<a name="ln275">  char *new_filename = gtk_file_chooser_get_filename(GTK_FILE_CHOOSER(widget));</a>
+<a name="ln276">  open_reference_image(self, new_filename);</a>
+<a name="ln277">  g_free(new_filename);</a>
+<a name="ln278">}</a>
+<a name="ln279"> </a>
+<a name="ln280">static char *get_filename_base(const char *filename)</a>
+<a name="ln281">{</a>
+<a name="ln282">  char *last_slash = g_strrstr(filename, &quot;/&quot;);</a>
+<a name="ln283">  if(last_slash)</a>
+<a name="ln284">    return g_strdup(last_slash + 1);</a>
+<a name="ln285">  else</a>
+<a name="ln286">    return g_strdup(filename);</a>
+<a name="ln287">}</a>
+<a name="ln288"> </a>
+<a name="ln289">static gboolean open_reference_image(dt_lut_t *self, const char *filename)</a>
+<a name="ln290">{</a>
+<a name="ln291">  gboolean res = open_image(&amp;self-&gt;reference, filename);</a>
+<a name="ln292">  gtk_widget_set_sensitive(self-&gt;process_button, res);</a>
+<a name="ln293">  gtk_widget_set_sensitive(self-&gt;export_button, FALSE);</a>
+<a name="ln294">  gtk_widget_set_sensitive(self-&gt;export_raw_button, FALSE);</a>
+<a name="ln295">  if(!res)</a>
+<a name="ln296">    gtk_file_chooser_unselect_all(GTK_FILE_CHOOSER(self-&gt;reference_image_button));</a>
+<a name="ln297">  else</a>
+<a name="ln298">  {</a>
+<a name="ln299">    collect_reference_patches(self);</a>
+<a name="ln300">    update_table(self);</a>
+<a name="ln301">    free(self-&gt;reference_filename);</a>
+<a name="ln302">    self-&gt;reference_filename = get_filename_base(filename);</a>
+<a name="ln303">  }</a>
+<a name="ln304">  gtk_widget_queue_draw(self-&gt;reference.drawing_area);</a>
+<a name="ln305">  return res;</a>
+<a name="ln306">}</a>
+<a name="ln307"> </a>
+<a name="ln308">static gboolean open_image(image_t *image, const char *filename)</a>
+<a name="ln309">{</a>
+<a name="ln310">  int width, height;</a>
+<a name="ln311"> </a>
+<a name="ln312">  free_image(image);</a>
+<a name="ln313"> </a>
+<a name="ln314">  if(!filename) return FALSE;</a>
+<a name="ln315"> </a>
+<a name="ln316">  float *pfm = read_pfm(filename, &amp;width, &amp;height);</a>
+<a name="ln317"> </a>
+<a name="ln318">  if(!pfm)</a>
+<a name="ln319">  {</a>
+<a name="ln320">    fprintf(stderr, &quot;error reading image `%s'\n&quot;, filename);</a>
+<a name="ln321">    return FALSE;</a>
+<a name="ln322">  }</a>
+<a name="ln323"> </a>
+<a name="ln324">  // we want the image in XYZ to average patches</a>
+<a name="ln325">  image_lab_to_xyz(pfm, width, height);</a>
+<a name="ln326"> </a>
+<a name="ln327">  cairo_surface_t *image_surface = cairo_surface_create_from_xyz_data(pfm, width, height);</a>
+<a name="ln328"> </a>
+<a name="ln329">  if(cairo_surface_status(image_surface) != CAIRO_STATUS_SUCCESS)</a>
+<a name="ln330">  {</a>
+<a name="ln331">    fprintf(stderr, &quot;error creating cairo surface from `%s'\n&quot;, filename);</a>
+<a name="ln332">    cairo_surface_destroy(image_surface);</a>
+<a name="ln333">    free(pfm);</a>
+<a name="ln334">    return FALSE;</a>
+<a name="ln335">  }</a>
+<a name="ln336">  image-&gt;surface = image_surface;</a>
+<a name="ln337">  image-&gt;image = cairo_pattern_create_for_surface(image_surface);</a>
+<a name="ln338">  image-&gt;width = width;</a>
+<a name="ln339">  image-&gt;height = height;</a>
+<a name="ln340">  image-&gt;xyz = pfm;</a>
+<a name="ln341"> </a>
+<a name="ln342">  // at init time this can fail once</a>
+<a name="ln343">  if(GTK_IS_WIDGET(image-&gt;drawing_area))</a>
+<a name="ln344">  {</a>
+<a name="ln345">    guint widget_width = gtk_widget_get_allocated_width(image-&gt;drawing_area);</a>
+<a name="ln346">    guint widget_height = gtk_widget_get_allocated_height(image-&gt;drawing_area);</a>
+<a name="ln347">    set_offset_and_scale(image, widget_width, widget_height);</a>
+<a name="ln348">  }</a>
+<a name="ln349"> </a>
+<a name="ln350">  return TRUE;</a>
+<a name="ln351">}</a>
+<a name="ln352"> </a>
+<a name="ln353">static void cht_changed_callback(GtkFileChooserButton *widget, gpointer user_data)</a>
+<a name="ln354">{</a>
+<a name="ln355">  dt_lut_t *self = (dt_lut_t *)user_data;</a>
+<a name="ln356">  char *new_filename = gtk_file_chooser_get_filename(GTK_FILE_CHOOSER(widget));</a>
+<a name="ln357">  open_cht(self, new_filename);</a>
+<a name="ln358">  g_free(new_filename);</a>
+<a name="ln359">}</a>
+<a name="ln360"> </a>
+<a name="ln361">static gboolean open_cht(dt_lut_t *self, const char *filename)</a>
+<a name="ln362">{</a>
+<a name="ln363">  if(self-&gt;chart) free_chart(self-&gt;chart);</a>
+<a name="ln364">  gboolean res = ((self-&gt;chart = parse_cht(filename)) != NULL);</a>
+<a name="ln365"> </a>
+<a name="ln366">  reset_bb(&amp;self-&gt;source);</a>
+<a name="ln367">  reset_bb(&amp;self-&gt;reference);</a>
+<a name="ln368"> </a>
+<a name="ln369">  g_hash_table_remove_all(self-&gt;picked_source_patches);</a>
+<a name="ln370">  if(res) collect_source_patches(self);</a>
+<a name="ln371">  init_table(self);</a>
+<a name="ln372"> </a>
+<a name="ln373">  // reset it8/reference entry</a>
+<a name="ln374">  if(!res) gtk_file_chooser_unselect_all(GTK_FILE_CHOOSER(self-&gt;cht_button));</a>
+<a name="ln375">  gtk_file_chooser_unselect_all(GTK_FILE_CHOOSER(self-&gt;it8_button));</a>
+<a name="ln376">  gtk_file_chooser_unselect_all(GTK_FILE_CHOOSER(self-&gt;reference_image_button));</a>
+<a name="ln377"> </a>
+<a name="ln378">  if(res)</a>
+<a name="ln379">  {</a>
+<a name="ln380">    self-&gt;source.shrink = self-&gt;chart-&gt;box_shrink;</a>
+<a name="ln381">    self-&gt;reference.shrink = self-&gt;chart-&gt;box_shrink;</a>
+<a name="ln382">    gtk_range_set_value(GTK_RANGE(self-&gt;source_shrink), 1.0);</a>
+<a name="ln383">    gtk_range_set_value(GTK_RANGE(self-&gt;reference_shrink), 1.0);</a>
+<a name="ln384">  }</a>
+<a name="ln385"> </a>
+<a name="ln386">  gtk_widget_set_sensitive(self-&gt;it8_button, res);</a>
+<a name="ln387">  gtk_widget_set_sensitive(self-&gt;reference_image_button, res);</a>
+<a name="ln388">  gtk_widget_set_sensitive(self-&gt;process_button, res);</a>
+<a name="ln389">  gtk_widget_set_sensitive(self-&gt;export_button, FALSE);</a>
+<a name="ln390">  gtk_widget_set_sensitive(self-&gt;export_raw_button, FALSE);</a>
+<a name="ln391"> </a>
+<a name="ln392">  gtk_widget_queue_draw(self-&gt;source.drawing_area);</a>
+<a name="ln393">  gtk_widget_queue_draw(self-&gt;reference.drawing_area);</a>
+<a name="ln394"> </a>
+<a name="ln395">  return res;</a>
+<a name="ln396">}</a>
+<a name="ln397"> </a>
+<a name="ln398">static void reference_mode_changed_callback(GtkComboBox *widget, gpointer user_data)</a>
+<a name="ln399">{</a>
+<a name="ln400">  dt_lut_t *self = (dt_lut_t *)user_data;</a>
+<a name="ln401">  int selected = gtk_combo_box_get_active(widget);</a>
+<a name="ln402">  if(selected == 0)</a>
+<a name="ln403">  {</a>
+<a name="ln404">    // it8</a>
+<a name="ln405">    gtk_widget_set_no_show_all(self-&gt;reference_it8_box, FALSE);</a>
+<a name="ln406">    gtk_widget_show_all(self-&gt;reference_it8_box);</a>
+<a name="ln407">    gtk_widget_hide(self-&gt;reference_image_box);</a>
+<a name="ln408">    gtk_widget_hide(self-&gt;reference.drawing_area);</a>
+<a name="ln409">    g_signal_emit_by_name(self-&gt;it8_button, &quot;file-set&quot;, user_data);</a>
+<a name="ln410">  }</a>
+<a name="ln411">  else</a>
+<a name="ln412">  {</a>
+<a name="ln413">    // image</a>
+<a name="ln414">    gtk_widget_set_no_show_all(self-&gt;reference_image_box, FALSE);</a>
+<a name="ln415">    gtk_widget_set_no_show_all(self-&gt;reference.drawing_area, FALSE);</a>
+<a name="ln416">    gtk_widget_show_all(self-&gt;reference_image_box);</a>
+<a name="ln417">    gtk_widget_show_all(self-&gt;reference.drawing_area);</a>
+<a name="ln418">    gtk_widget_hide(self-&gt;reference_it8_box);</a>
+<a name="ln419">    g_signal_emit_by_name(self-&gt;reference_image_button, &quot;file-set&quot;, user_data);</a>
+<a name="ln420">  }</a>
+<a name="ln421">}</a>
+<a name="ln422"> </a>
+<a name="ln423">static void it8_changed_callback(GtkFileChooserButton *widget, gpointer user_data)</a>
+<a name="ln424">{</a>
+<a name="ln425">  dt_lut_t *self = (dt_lut_t *)user_data;</a>
+<a name="ln426">  char *new_filename = gtk_file_chooser_get_filename(GTK_FILE_CHOOSER(widget));</a>
+<a name="ln427">  open_it8(self, new_filename);</a>
+<a name="ln428">  g_free(new_filename);</a>
+<a name="ln429">}</a>
+<a name="ln430"> </a>
+<a name="ln431">static gboolean open_it8(dt_lut_t *self, const char *filename)</a>
+<a name="ln432">{</a>
+<a name="ln433">  if(!self-&gt;chart || !filename) return FALSE;</a>
+<a name="ln434">  gboolean res = parse_it8(filename, self-&gt;chart);</a>
+<a name="ln435">  collect_source_patches(self);</a>
+<a name="ln436">  update_table(self);</a>
+<a name="ln437"> </a>
+<a name="ln438">  gtk_widget_set_sensitive(self-&gt;process_button, FALSE);</a>
+<a name="ln439">  gtk_widget_set_sensitive(self-&gt;export_button, FALSE);</a>
+<a name="ln440">  gtk_widget_set_sensitive(self-&gt;export_raw_button, FALSE);</a>
+<a name="ln441">  if(!res)</a>
+<a name="ln442">    gtk_file_chooser_unselect_all(GTK_FILE_CHOOSER(self-&gt;it8_button));</a>
+<a name="ln443">  else</a>
+<a name="ln444">  {</a>
+<a name="ln445">    free(self-&gt;reference_filename);</a>
+<a name="ln446">    self-&gt;reference_filename = get_filename_base(filename);</a>
+<a name="ln447">    gtk_widget_set_sensitive(self-&gt;process_button, TRUE);</a>
+<a name="ln448">  }</a>
+<a name="ln449">  gtk_widget_queue_draw(self-&gt;source.drawing_area);</a>
+<a name="ln450"> </a>
+<a name="ln451">  return res;</a>
+<a name="ln452">}</a>
+<a name="ln453"> </a>
+<a name="ln454">static char *get_export_filename(dt_lut_t *self, const char *extension, char **name, char **description)</a>
+<a name="ln455">{</a>
+<a name="ln456">  GtkWidget *name_entry = NULL, *description_entry = NULL;</a>
+<a name="ln457">  GtkWidget *dialog</a>
+<a name="ln458">      = gtk_file_chooser_dialog_new(&quot;save file&quot;, GTK_WINDOW(self-&gt;window), GTK_FILE_CHOOSER_ACTION_SAVE,</a>
+<a name="ln459">                                    _(&quot;_cancel&quot;), GTK_RESPONSE_CANCEL, _(&quot;_save&quot;), GTK_RESPONSE_ACCEPT, NULL);</a>
+<a name="ln460"> </a>
+<a name="ln461">  gtk_file_chooser_set_do_overwrite_confirmation(GTK_FILE_CHOOSER(dialog), TRUE);</a>
+<a name="ln462"> </a>
+<a name="ln463">  char *reference_filename = g_strdup(self-&gt;reference_filename);</a>
+<a name="ln464">  char *last_dot = g_strrstr(reference_filename, &quot;.&quot;);</a>
+<a name="ln465">  if(last_dot)</a>
+<a name="ln466">  {</a>
+<a name="ln467">    *last_dot = '\0';</a>
+<a name="ln468">    char *new_filename = g_strconcat(reference_filename, extension, NULL);</a>
+<a name="ln469">    gtk_file_chooser_set_current_name(GTK_FILE_CHOOSER(dialog), new_filename);</a>
+<a name="ln470">    g_free(new_filename);</a>
+<a name="ln471">  }</a>
+<a name="ln472">  g_free(reference_filename);</a>
+<a name="ln473"> </a>
+<a name="ln474">  GtkWidget *grid = gtk_grid_new();</a>
+<a name="ln475">  gtk_grid_set_row_spacing(GTK_GRID(grid), 10);</a>
+<a name="ln476">  gtk_grid_set_column_spacing(GTK_GRID(grid), 10);</a>
+<a name="ln477"> </a>
+<a name="ln478">  *name = g_strdup(self-&gt;reference_filename);</a>
+<a name="ln479">  *description = g_strdup_printf(&quot;fitted LUT style from %s&quot;, self-&gt;reference_filename);</a>
+<a name="ln480">  char *name_dot = g_strrstr(*name, &quot;.&quot;);</a>
+<a name="ln481">  if(name_dot) *name_dot = '\0';</a>
+<a name="ln482"> </a>
+<a name="ln483">  name_entry = gtk_entry_new();</a>
+<a name="ln484">  description_entry = gtk_entry_new();</a>
+<a name="ln485"> </a>
+<a name="ln486">  gtk_entry_set_text(GTK_ENTRY(name_entry), *name);</a>
+<a name="ln487">  gtk_entry_set_text(GTK_ENTRY(description_entry), *description);</a>
+<a name="ln488">  g_free(*name);</a>
+<a name="ln489">  g_free(*description);</a>
+<a name="ln490">  *name = NULL;</a>
+<a name="ln491">  *description = NULL;</a>
+<a name="ln492"> </a>
+<a name="ln493">  gtk_grid_attach(GTK_GRID(grid), gtk_label_new(&quot;style name&quot;), 0, 0, 1, 1);</a>
+<a name="ln494">  gtk_grid_attach(GTK_GRID(grid), name_entry, 1, 0, 1, 1);</a>
+<a name="ln495">  gtk_grid_attach(GTK_GRID(grid), gtk_label_new(&quot;style description&quot;), 0, 1, 1, 1);</a>
+<a name="ln496">  gtk_grid_attach(GTK_GRID(grid), description_entry, 1, 1, 1, 1);</a>
+<a name="ln497"> </a>
+<a name="ln498">  gtk_widget_show_all(grid);</a>
+<a name="ln499"> </a>
+<a name="ln500">  gtk_file_chooser_set_extra_widget(GTK_FILE_CHOOSER(dialog), grid);</a>
+<a name="ln501"> </a>
+<a name="ln502">  char *filename = NULL;</a>
+<a name="ln503">  int res = gtk_dialog_run(GTK_DIALOG(dialog));</a>
+<a name="ln504">  if(res == GTK_RESPONSE_ACCEPT)</a>
+<a name="ln505">  {</a>
+<a name="ln506">    filename = gtk_file_chooser_get_filename(GTK_FILE_CHOOSER(dialog));</a>
+<a name="ln507">    *name = g_strdup(gtk_entry_get_text(GTK_ENTRY(name_entry)));</a>
+<a name="ln508">    *description = g_strdup(gtk_entry_get_text(GTK_ENTRY(description_entry)));</a>
+<a name="ln509">  }</a>
+<a name="ln510">  gtk_widget_destroy(dialog);</a>
+<a name="ln511"> </a>
+<a name="ln512">  return filename;</a>
+<a name="ln513">}</a>
+<a name="ln514"> </a>
+<a name="ln515">static void print_patches(dt_lut_t *self, FILE *fd, GList *patch_names)</a>
+<a name="ln516">{</a>
+<a name="ln517">  for(GList *iter = patch_names; iter; iter = g_list_next(iter))</a>
+<a name="ln518">  {</a>
+<a name="ln519">    char s[64];</a>
+<a name="ln520">    char *key = (char *)iter-&gt;data;</a>
+<a name="ln521">    box_t *source_patch = (box_t *)g_hash_table_lookup(self-&gt;picked_source_patches, key);</a>
+<a name="ln522">    box_t *reference_patch = (box_t *)g_hash_table_lookup(self-&gt;chart-&gt;box_table, key);</a>
+<a name="ln523">    if(!source_patch || !reference_patch)</a>
+<a name="ln524">    {</a>
+<a name="ln525">      fprintf(stderr, &quot;error: missing patch `%s'\n&quot;, key);</a>
+<a name="ln526">      continue;</a>
+<a name="ln527">    }</a>
+<a name="ln528"> </a>
+<a name="ln529">    float source_Lab[3] = { 0.0 }, reference_Lab[3] = { 0.0 };</a>
+<a name="ln530">    get_Lab_from_box(source_patch, source_Lab);</a>
+<a name="ln531">    get_Lab_from_box(reference_patch, reference_Lab);</a>
+<a name="ln532"> </a>
+<a name="ln533">    fprintf(fd, &quot;%s&quot;, key);</a>
+<a name="ln534">    for(int i = 0; i &lt; 3; i++) fprintf(fd, &quot;;%s&quot;, g_ascii_dtostr(s, sizeof(s), source_Lab[i]));</a>
+<a name="ln535">    for(int i = 0; i &lt; 3; i++) fprintf(fd, &quot;;%s&quot;, g_ascii_dtostr(s, sizeof(s), reference_Lab[i]));</a>
+<a name="ln536">    fprintf(fd, &quot;\n&quot;);</a>
+<a name="ln537">  }</a>
+<a name="ln538">}</a>
+<a name="ln539"> </a>
+<a name="ln540">static void print_xml_plugin(FILE *fd, int num, int op_version, const char *operation, const char *op_params,</a>
+<a name="ln541">                             gboolean enabled)</a>
+<a name="ln542">{</a>
+<a name="ln543">  fprintf(fd, &quot;  &lt;plugin&gt;\n&quot;);</a>
+<a name="ln544">  fprintf(fd, &quot;    &lt;num&gt;%d&lt;/num&gt;\n&quot;, num);</a>
+<a name="ln545">  fprintf(fd, &quot;    &lt;module&gt;%d&lt;/module&gt;\n&quot;, op_version);</a>
+<a name="ln546">  fprintf(fd, &quot;    &lt;operation&gt;%s&lt;/operation&gt;\n&quot;, operation);</a>
+<a name="ln547">  fprintf(fd, &quot;    &lt;op_params&gt;%s&lt;/op_params&gt;\n&quot;, op_params);</a>
+<a name="ln548">  fprintf(fd, &quot;    &lt;enabled&gt;%d&lt;/enabled&gt;\n&quot;, enabled);</a>
+<a name="ln549">  fprintf(fd, &quot;    &lt;blendop_params&gt;gz12eJxjYGBgkGAAgRNODESDBnsIHll8ANNSGQM=&lt;/blendop_params&gt;\n&quot;);</a>
+<a name="ln550">  fprintf(fd, &quot;    &lt;blendop_version&gt;7&lt;/blendop_version&gt;\n&quot;);</a>
+<a name="ln551">  fprintf(fd, &quot;    &lt;multi_priority&gt;0&lt;/multi_priority&gt;\n&quot;);</a>
+<a name="ln552">  fprintf(fd, &quot;    &lt;multi_name&gt;&lt;/multi_name&gt;\n&quot;);</a>
+<a name="ln553">  fprintf(fd, &quot;  &lt;/plugin&gt;\n&quot;);</a>
+<a name="ln554">}</a>
+<a name="ln555"> </a>
+<a name="ln556">static void export_style(dt_lut_t *self, const char *filename, const char *name, const char *description)</a>
+<a name="ln557">{</a>
+<a name="ln558">  int num = 0;</a>
+<a name="ln559"> </a>
+<a name="ln560">  FILE *fd = g_fopen(filename, &quot;w&quot;);</a>
+<a name="ln561">  if(!fd) return;</a>
+<a name="ln562"> </a>
+<a name="ln563">  fprintf(fd, &quot;&lt;?xml version=\&quot;1.0\&quot; encoding=\&quot;UTF-8\&quot;?&gt;\n&quot;);</a>
+<a name="ln564">  fprintf(fd, &quot;&lt;darktable_style version=\&quot;1.0\&quot;&gt;\n&quot;);</a>
+<a name="ln565">  fprintf(fd, &quot;&lt;info&gt;\n&quot;);</a>
+<a name="ln566">  fprintf(fd, &quot;  &lt;name&gt;%s&lt;/name&gt;\n&quot;, name);</a>
+<a name="ln567">  fprintf(fd, &quot;  &lt;description&gt;%s&lt;/description&gt;\n&quot;, description);</a>
+<a name="ln568">  fprintf(fd, &quot;&lt;/info&gt;\n&quot;);</a>
+<a name="ln569">  fprintf(fd, &quot;&lt;style&gt;\n&quot;);</a>
+<a name="ln570"> </a>
+<a name="ln571">  // 0: disable basecurve</a>
+<a name="ln572">  print_xml_plugin(fd, num++, 2, &quot;basecurve&quot;,</a>
+<a name="ln573">                   &quot;gz09eJxjYIAAM6vnNnqyn22E9n235b6aa3cy6rVdRaK9/Y970fYf95bbMzA0QPEoGEqADYnNhMQGAO0WEJo=&quot;, FALSE);</a>
+<a name="ln574">  // 1: set colorin to standard matrix</a>
+<a name="ln575">  // print_xml_plugin(fd, num++, 4, &quot;colorin&quot;, &quot;gz10eJzjZqA/AAAFcAAM&quot;, TRUE); // no gamut clipping</a>
+<a name="ln576">  // and enable gamut clipping. the it8 knows nothing about colours outside</a>
+<a name="ln577">  // rec2020 (only reflectances, no neon lights for instance)</a>
+<a name="ln578">  print_xml_plugin(fd, num++, 4, &quot;colorin&quot;, &quot;gz09eJzjZqAfYIHSAAWQABA=&quot;, TRUE); // gamut clipping to rec2020</a>
+<a name="ln579">  // 2: add tonecurve</a>
+<a name="ln580">  print_xml_plugin(fd, num++, 4, &quot;tonecurve&quot;, self-&gt;tonecurve_encoded, TRUE);</a>
+<a name="ln581">  // 3: add lut</a>
+<a name="ln582">  print_xml_plugin(fd, num++, 2, &quot;colorchecker&quot;, self-&gt;colorchecker_encoded, TRUE);</a>
+<a name="ln583"> </a>
+<a name="ln584">  fprintf(fd, &quot;&lt;/style&gt;\n&quot;);</a>
+<a name="ln585">  fprintf(fd, &quot;&lt;/darktable_style&gt;\n&quot;);</a>
+<a name="ln586"> </a>
+<a name="ln587">  fclose(fd);</a>
+<a name="ln588">}</a>
+<a name="ln589"> </a>
+<a name="ln590">static void export_raw(dt_lut_t *self, char *filename, char *name, char *description)</a>
+<a name="ln591">{</a>
+<a name="ln592">  GHashTableIter table_iter;</a>
+<a name="ln593">  gpointer key, value;</a>
+<a name="ln594"> </a>
+<a name="ln595">  FILE *fd = g_fopen(filename, &quot;w&quot;);</a>
+<a name="ln596">  if(!fd) return;</a>
+<a name="ln597"> </a>
+<a name="ln598">  GList *patch_names = NULL;</a>
+<a name="ln599"> </a>
+<a name="ln600">  fprintf(fd, &quot;name;%s\n&quot;, name);</a>
+<a name="ln601">  fprintf(fd, &quot;description;%s\n&quot;, description);</a>
+<a name="ln602">  fprintf(fd, &quot;num_gray; 0\n&quot;);</a>
+<a name="ln603"> </a>
+<a name="ln604">  fprintf(fd, &quot;patch;L_source;a_source;b_source;L_reference;a_reference;b_reference\n&quot;);</a>
+<a name="ln605">  // iterate over all known patches in the chart</a>
+<a name="ln606">  g_hash_table_iter_init(&amp;table_iter, self-&gt;chart-&gt;patch_sets);</a>
+<a name="ln607">  while(g_hash_table_iter_next(&amp;table_iter, &amp;key, &amp;value))</a>
+<a name="ln608">  {</a>
+<a name="ln609">    patch_names = (GList *)value;</a>
+<a name="ln610">    print_patches(self, fd, patch_names);</a>
+<a name="ln611">  }</a>
+<a name="ln612">  fclose(fd);</a>
+<a name="ln613">}</a>
+<a name="ln614"> </a>
+<a name="ln615">static void export_raw_button_clicked_callback(GtkButton *button, gpointer user_data)</a>
+<a name="ln616">{</a>
+<a name="ln617">  dt_lut_t *self = (dt_lut_t *)user_data;</a>
+<a name="ln618">  if(!self-&gt;chart) return;</a>
+<a name="ln619"> </a>
+<a name="ln620">  char *name = NULL, *description = NULL;</a>
+<a name="ln621">  char *filename = get_export_filename(self, &quot;.csv&quot;, &amp;name, &amp;description);</a>
+<a name="ln622">  if(filename) export_raw(self, filename, name, description);</a>
+<a name="ln623">  g_free(name);</a>
+<a name="ln624">  g_free(description);</a>
+<a name="ln625">  g_free(filename);</a>
+<a name="ln626">}</a>
+<a name="ln627"> </a>
+<a name="ln628">static void export_button_clicked_callback(GtkButton *button, gpointer user_data)</a>
+<a name="ln629">{</a>
+<a name="ln630">  dt_lut_t *self = (dt_lut_t *)user_data;</a>
+<a name="ln631">  if(!self-&gt;tonecurve_encoded || !self-&gt;colorchecker_encoded) return;</a>
+<a name="ln632"> </a>
+<a name="ln633">  char *name = NULL, *description = NULL;</a>
+<a name="ln634">  char *filename = get_export_filename(self, &quot;.dtstyle&quot;, &amp;name, &amp;description);</a>
+<a name="ln635">  if(filename) export_style(self, filename, name, description);</a>
+<a name="ln636">  g_free(name);</a>
+<a name="ln637">  g_free(description);</a>
+<a name="ln638">  g_free(filename);</a>
+<a name="ln639">}</a>
+<a name="ln640"> </a>
+<a name="ln641">static void add_patches_to_array(dt_lut_t *self, GList *patch_names, int *N, int *i, double *target_L,</a>
+<a name="ln642">                                 double *target_a, double *target_b, double *colorchecker_Lab)</a>
+<a name="ln643">{</a>
+<a name="ln644"> </a>
+<a name="ln645">  for(GList *iter = patch_names; iter; iter = g_list_next(iter))</a>
+<a name="ln646">  {</a>
+<a name="ln647">    const char *key = (char *)iter-&gt;data;</a>
+<a name="ln648">    box_t *source_patch = (box_t *)g_hash_table_lookup(self-&gt;picked_source_patches, key);</a>
+<a name="ln649">    box_t *reference_patch = (box_t *)g_hash_table_lookup(self-&gt;chart-&gt;box_table, key);</a>
+<a name="ln650">    if(!source_patch || !reference_patch)</a>
+<a name="ln651">    {</a>
+<a name="ln652">      fprintf(stderr, &quot;error: missing patch `%s'\n&quot;, key);</a>
+<a name="ln653">      continue;</a>
+<a name="ln654">    }</a>
+<a name="ln655"> </a>
+<a name="ln656">    float source_Lab[3] = { 0.0 }, reference_Lab[3] = { 0.0 };</a>
+<a name="ln657">    get_Lab_from_box(source_patch, source_Lab);</a>
+<a name="ln658">    get_Lab_from_box(reference_patch, reference_Lab);</a>
+<a name="ln659"> </a>
+<a name="ln660">    for(int j = 0; j &lt; 3; j++) colorchecker_Lab[3 * (*i) + j] = source_Lab[j];</a>
+<a name="ln661">    target_L[*i] = reference_Lab[0];</a>
+<a name="ln662">    target_a[*i] = reference_Lab[1];</a>
+<a name="ln663">    target_b[*i] = reference_Lab[2];</a>
+<a name="ln664"> </a>
+<a name="ln665">    const double deltaE = dt_colorspaces_deltaE_1976(source_Lab, reference_Lab);</a>
+<a name="ln666">    if(deltaE &gt; thrs)</a>
+<a name="ln667">    {</a>
+<a name="ln668">      fprintf(stderr, &quot;warning: ignoring patch %s with large difference deltaE %g!\n&quot;, key, deltaE);</a>
+<a name="ln669">      fprintf(stderr, &quot;      %g %g %g -- %g %g %g\n&quot;, source_Lab[0], source_Lab[1], source_Lab[2],</a>
+<a name="ln670">              reference_Lab[0], reference_Lab[1], reference_Lab[2]);</a>
+<a name="ln671">      (*N)--; // ignore this patch.</a>
+<a name="ln672">      (*i)--;</a>
+<a name="ln673">    }</a>
+<a name="ln674">    (*i)++;</a>
+<a name="ln675">  }</a>
+<a name="ln676">}</a>
+<a name="ln677"> </a>
+<a name="ln678">static void add_hdr_patches(int *N, double **target_L, double **target_a, double **target_b,</a>
+<a name="ln679">                            double **colorchecker_Lab)</a>
+<a name="ln680">{</a>
+<a name="ln681">  gboolean need_hdr00 = TRUE, need_hdr01 = TRUE;</a>
+<a name="ln682">  int n_extra_patches = 0;</a>
+<a name="ln683">  double extra_target_L[2], extra_target_a[2], extra_target_b[2], extra_colorchecker_Lab[2 * 3];</a>
+<a name="ln684"> </a>
+<a name="ln685">  for(int j = 0; j &lt; *N; j++)</a>
+<a name="ln686">  {</a>
+<a name="ln687">    if((*target_L)[j] == 100.0 &amp;&amp; (*target_a)[j] == 0.0 &amp;&amp; (*target_b)[j] == 0.0 &amp;&amp; (*colorchecker_Lab)[j * 3] == 100.0</a>
+<a name="ln688">      &amp;&amp; (*colorchecker_Lab)[j * 3 + 1] == 0.0 &amp;&amp; (*colorchecker_Lab)[j * 3 + 2] == 0.0)</a>
+<a name="ln689">    {</a>
+<a name="ln690">      need_hdr00 = FALSE;</a>
+<a name="ln691">    }</a>
+<a name="ln692">    else if((*target_L)[j] == 200.0 &amp;&amp; (*target_a)[j] == 0.0 &amp;&amp; (*target_b)[j] == 0.0 &amp;&amp; (*colorchecker_Lab)[j * 3] == 200.0</a>
+<a name="ln693">      &amp;&amp; (*colorchecker_Lab)[j * 3 + 1] == 0.0 &amp;&amp; (*colorchecker_Lab)[j * 3 + 2] == 0.0)</a>
+<a name="ln694">    {</a>
+<a name="ln695">      need_hdr01 = FALSE;</a>
+<a name="ln696">    }</a>
+<a name="ln697">  }</a>
+<a name="ln698"> </a>
+<a name="ln699">  if(need_hdr00)</a>
+<a name="ln700">  {</a>
+<a name="ln701">    extra_target_L[n_extra_patches] = 100.0;</a>
+<a name="ln702">    extra_target_a[n_extra_patches] = 0.0;</a>
+<a name="ln703">    extra_target_b[n_extra_patches] = 0.0;</a>
+<a name="ln704">    extra_colorchecker_Lab[n_extra_patches * 3] = 100.0;</a>
+<a name="ln705">    extra_colorchecker_Lab[n_extra_patches * 3 + 1] = 0.0;</a>
+<a name="ln706">    extra_colorchecker_Lab[n_extra_patches * 3 + 2] = 0.0;</a>
+<a name="ln707">    n_extra_patches++;</a>
+<a name="ln708">  }</a>
+<a name="ln709"> </a>
+<a name="ln710">  if(need_hdr01)</a>
+<a name="ln711">  {</a>
+<a name="ln712">    extra_target_L[n_extra_patches] = 200.0;</a>
+<a name="ln713">    extra_target_a[n_extra_patches] = 0.0;</a>
+<a name="ln714">    extra_target_b[n_extra_patches] = 0.0;</a>
+<a name="ln715">    extra_colorchecker_Lab[n_extra_patches * 3] = 200.0;</a>
+<a name="ln716">    extra_colorchecker_Lab[n_extra_patches * 3 + 1] = 0.0;</a>
+<a name="ln717">    extra_colorchecker_Lab[n_extra_patches * 3 + 2] = 0.0;</a>
+<a name="ln718">    n_extra_patches++;</a>
+<a name="ln719">  }</a>
+<a name="ln720"> </a>
+<a name="ln721">  if(n_extra_patches &gt; 0)</a>
+<a name="ln722">  {</a>
+<a name="ln723">    *target_L = realloc(*target_L, (*N + n_extra_patches + 4) * sizeof(double));</a>
+<a name="ln724">    *target_a = realloc(*target_a, (*N + n_extra_patches + 4) * sizeof(double));</a>
+<a name="ln725">    *target_b = realloc(*target_b, (*N + n_extra_patches + 4) * sizeof(double));</a>
+<a name="ln726">    *colorchecker_Lab = realloc(*colorchecker_Lab, 3 * (*N + n_extra_patches) * sizeof(double));</a>
+<a name="ln727"> </a>
+<a name="ln728">    memmove(&amp;(*target_L)[n_extra_patches], *target_L, *N * sizeof(double));</a>
+<a name="ln729">    memmove(&amp;(*target_a)[n_extra_patches], *target_a, *N * sizeof(double));</a>
+<a name="ln730">    memmove(&amp;(*target_b)[n_extra_patches], *target_b, *N * sizeof(double));</a>
+<a name="ln731">    memmove(&amp;(*colorchecker_Lab)[3 * n_extra_patches], *colorchecker_Lab, 3 * *N * sizeof(double));</a>
+<a name="ln732"> </a>
+<a name="ln733">    memcpy(*target_L, extra_target_L, n_extra_patches * sizeof(double));</a>
+<a name="ln734">    memcpy(*target_a, extra_target_a, n_extra_patches * sizeof(double));</a>
+<a name="ln735">    memcpy(*target_b, extra_target_b, n_extra_patches * sizeof(double));</a>
+<a name="ln736">    memcpy(*colorchecker_Lab, extra_colorchecker_Lab, 3 * n_extra_patches * sizeof(double));</a>
+<a name="ln737"> </a>
+<a name="ln738">    *N += n_extra_patches;</a>
+<a name="ln739">  }</a>
+<a name="ln740">}</a>
+<a name="ln741"> </a>
+<a name="ln742">static char *encode_tonecurve(const tonecurve_t *c)</a>
+<a name="ln743">{</a>
+<a name="ln744">  // hardcoded params v4 from tonecurve:</a>
+<a name="ln745">  typedef struct dt_iop_tonecurve_node_t</a>
+<a name="ln746">  {</a>
+<a name="ln747">    float x;</a>
+<a name="ln748">    float y;</a>
+<a name="ln749">  } dt_iop_tonecurve_node_t;</a>
+<a name="ln750">  typedef struct dt_iop_tonecurve_params_t</a>
+<a name="ln751">  {</a>
+<a name="ln752">    dt_iop_tonecurve_node_t tonecurve[3][20]; // three curves (L, a, b) with max number</a>
+<a name="ln753">    // of nodes</a>
+<a name="ln754">    int tonecurve_nodes[3];</a>
+<a name="ln755">    int tonecurve_type[3];</a>
+<a name="ln756">    int tonecurve_autoscale_ab;</a>
+<a name="ln757">    int tonecurve_preset;</a>
+<a name="ln758">    int tonecurve_unbound_ab;</a>
+<a name="ln759">  } dt_iop_tonecurve_params_t;</a>
+<a name="ln760"> </a>
+<a name="ln761">  dt_iop_tonecurve_params_t params;</a>
+<a name="ln762">  memset(&amp;params, 0, sizeof(params));</a>
+<a name="ln763">  params.tonecurve_autoscale_ab = 3; // prophoto rgb</a>
+<a name="ln764"> </a>
+<a name="ln765">  params.tonecurve_type[0] = 2;      // MONOTONE_HERMITE</a>
+<a name="ln766">  params.tonecurve_nodes[0] = 20;</a>
+<a name="ln767">  for(int k = 0; k &lt; 20; k++)</a>
+<a name="ln768">  {</a>
+<a name="ln769">    const double x = (k / 19.0) * (k / 19.0);</a>
+<a name="ln770">    params.tonecurve[0][k].x = x;</a>
+<a name="ln771">    params.tonecurve[0][k].y = tonecurve_apply(c, 100.0 * x) / 100.0;</a>
+<a name="ln772">  }</a>
+<a name="ln773"> </a>
+<a name="ln774">  params.tonecurve_type[1] = 2;      // MONOTONE_HERMITE</a>
+<a name="ln775">  params.tonecurve_nodes[1] = 2;</a>
+<a name="ln776">  params.tonecurve[1][0].x = 0.0f;</a>
+<a name="ln777">  params.tonecurve[1][0].y = 0.0f;</a>
+<a name="ln778">  params.tonecurve[1][1].x = 1.0f;</a>
+<a name="ln779">  params.tonecurve[1][1].y = 1.0f;</a>
+<a name="ln780"> </a>
+<a name="ln781">  params.tonecurve_type[2] = 2;      // MONOTONE_HERMITE</a>
+<a name="ln782">  params.tonecurve_nodes[2] = 2;</a>
+<a name="ln783">  params.tonecurve[2][0].x = 0.0f;</a>
+<a name="ln784">  params.tonecurve[2][0].y = 0.0f;</a>
+<a name="ln785">  params.tonecurve[2][1].x = 1.0f;</a>
+<a name="ln786">  params.tonecurve[2][1].y = 1.0f;</a>
+<a name="ln787"> </a>
+<a name="ln788">  return dt_exif_xmp_encode_internal((uint8_t *)&amp;params, sizeof(params), NULL, FALSE);</a>
+<a name="ln789">}</a>
+<a name="ln790"> </a>
+<a name="ln791">static char *encode_colorchecker(int num, const double *point, const double **target, int *permutation)</a>
+<a name="ln792">{</a>
+<a name="ln793">// hardcoded v2 of the module</a>
+<a name="ln794">#define MAX_PATCHES 49</a>
+<a name="ln795">  typedef struct dt_iop_colorchecker_params_t</a>
+<a name="ln796">  {</a>
+<a name="ln797">    float source_L[MAX_PATCHES];</a>
+<a name="ln798">    float source_a[MAX_PATCHES];</a>
+<a name="ln799">    float source_b[MAX_PATCHES];</a>
+<a name="ln800">    float target_L[MAX_PATCHES];</a>
+<a name="ln801">    float target_a[MAX_PATCHES];</a>
+<a name="ln802">    float target_b[MAX_PATCHES];</a>
+<a name="ln803">    int32_t num_patches;</a>
+<a name="ln804">  } dt_iop_colorchecker_params_t;</a>
+<a name="ln805"> </a>
+<a name="ln806">  dt_iop_colorchecker_params_t params;</a>
+<a name="ln807">  memset(&amp;params, 0, sizeof(params));</a>
+<a name="ln808">  num = MIN(MAX_PATCHES, num);</a>
+<a name="ln809">  //   assert(num &lt;= MAX_PATCHES);</a>
+<a name="ln810">  params.num_patches = num;</a>
+<a name="ln811"> </a>
+<a name="ln812">  for(int k = 0; k &lt; num; k++)</a>
+<a name="ln813">  {</a>
+<a name="ln814">    params.source_L[k] = point[3 * permutation[k]];</a>
+<a name="ln815">    params.source_a[k] = point[3 * permutation[k] + 1];</a>
+<a name="ln816">    params.source_b[k] = point[3 * permutation[k] + 2];</a>
+<a name="ln817">    params.target_L[k] = target[0][permutation[k]];</a>
+<a name="ln818">    params.target_a[k] = target[1][permutation[k]];</a>
+<a name="ln819">    params.target_b[k] = target[2][permutation[k]];</a>
+<a name="ln820">  }</a>
+<a name="ln821"> </a>
+<a name="ln822">#define SWAP(a, b)                                                                                                \</a>
+<a name="ln823">  {                                                                                                               \</a>
+<a name="ln824">    const float tmp = (a);                                                                                        \</a>
+<a name="ln825">    (a) = (b);                                                                                                    \</a>
+<a name="ln826">    (b) = tmp;                                                                                                    \</a>
+<a name="ln827">  }</a>
+<a name="ln828">  // bubble sort by octant and brightness:</a>
+<a name="ln829">  for(int k = 0; k &lt; num - 1; k++)</a>
+<a name="ln830">    for(int j = 0; j &lt; num - k - 1; j++)</a>
+<a name="ln831">    {</a>
+<a name="ln832">      if(thinplate_color_pos(params.source_L[j], params.source_a[j], params.source_b[j])</a>
+<a name="ln833">         &lt; thinplate_color_pos(params.source_L[j + 1], params.source_a[j + 1], params.source_b[j + 1]))</a>
+<a name="ln834">      {</a>
+<a name="ln835">        SWAP(params.source_L[j], params.source_L[j + 1]);</a>
+<a name="ln836">        SWAP(params.source_a[j], params.source_a[j + 1]);</a>
+<a name="ln837">        SWAP(params.source_b[j], params.source_b[j + 1]);</a>
+<a name="ln838">        SWAP(params.target_L[j], params.target_L[j + 1]);</a>
+<a name="ln839">        SWAP(params.target_a[j], params.target_a[j + 1]);</a>
+<a name="ln840">        SWAP(params.target_b[j], params.target_b[j + 1]);</a>
+<a name="ln841">      }</a>
+<a name="ln842">    }</a>
+<a name="ln843">#undef SWAP</a>
+<a name="ln844">#undef MAX_PATCHES</a>
+<a name="ln845"> </a>
+<a name="ln846">  return dt_exif_xmp_encode_internal((uint8_t *)&amp;params, sizeof(params), NULL, FALSE);</a>
+<a name="ln847">}</a>
+<a name="ln848"> </a>
+<a name="ln849">static int compare_L_source(const void *x_, const void *y_)</a>
+<a name="ln850">{</a>
+<a name="ln851">  const double x = *(const double *)x_;</a>
+<a name="ln852">  const double y = *(const double *)y_;</a>
+<a name="ln853">  return x &lt; y ? -1 : (x &gt; y ? +1 : 0);</a>
+<a name="ln854">}</a>
+<a name="ln855"> </a>
+<a name="ln856">static void process_data(dt_lut_t *self, double *target_L, double *target_a, double *target_b,</a>
+<a name="ln857">                         double *colorchecker_Lab, int N, int sparsity)</a>
+<a name="ln858">{</a>
+<a name="ln859">  // get all the memory, just in case:</a>
+<a name="ln860">  double *cx = malloc(sizeof(double)*N);</a>
+<a name="ln861">  double *cy = malloc(sizeof(double)*N);</a>
+<a name="ln862">  double *grays = malloc(sizeof(double) * 6 * N);</a>
+<a name="ln863">  tonecurve_t tonecurve;</a>
+<a name="ln864">  int num_tonecurve = 0;</a>
+<a name="ln865">  {</a>
+<a name="ln866">    int cnt = 0;</a>
+<a name="ln867">    </a>
+<a name="ln868">    for(int i=0;i&lt;N;i++)</a>
+<a name="ln869">    {</a>
+<a name="ln870">      double sat_in =</a>
+<a name="ln871">        colorchecker_Lab[3*i+1] * colorchecker_Lab[3*i+1] +</a>
+<a name="ln872">        colorchecker_Lab[3*i+2] * colorchecker_Lab[3*i+2];</a>
+<a name="ln873">      double sat_out = </a>
+<a name="ln874">        target_a[i] * target_a[i] +</a>
+<a name="ln875">        target_b[i] * target_b[i];</a>
+<a name="ln876">      // we'll allow some artistic tint or one due to illuminants (note square scale)</a>
+<a name="ln877">      if(sat_in &lt; 15.0 &amp;&amp; sat_out &lt; 15.0)</a>
+<a name="ln878">      {</a>
+<a name="ln879">        cnt++; // store as gray patch:</a>
+<a name="ln880">        grays[6*cnt + 0] = colorchecker_Lab[3*i+0];</a>
+<a name="ln881">        grays[6*cnt + 1] = colorchecker_Lab[3*i+1];</a>
+<a name="ln882">        grays[6*cnt + 2] = colorchecker_Lab[3*i+2];</a>
+<a name="ln883">        grays[6*cnt + 3] = target_L[i];</a>
+<a name="ln884">        grays[6*cnt + 4] = target_a[i];</a>
+<a name="ln885">        grays[6*cnt + 5] = target_b[i];</a>
+<a name="ln886">      }</a>
+<a name="ln887">    }</a>
+<a name="ln888">    fprintf(stderr, &quot;detected %d/%d as gray patches for tonecurve computation\n&quot;, cnt, N);</a>
+<a name="ln889">    // sort entries by source L</a>
+<a name="ln890">    qsort(grays, cnt, sizeof(double) * 6, compare_L_source);</a>
+<a name="ln891"> </a>
+<a name="ln892">    // put entries with fixed black and white into cx, cy</a>
+<a name="ln893">    cx[0] = cy[0] = 0.0;           // fix black</a>
+<a name="ln894">    cx[cnt+1] = cy[cnt+1] = 100.0; // fix white</a>
+<a name="ln895"> </a>
+<a name="ln896">    // construct a tone curve from the grays plus pure black and pure white</a>
+<a name="ln897">    num_tonecurve = cnt + 2;</a>
+<a name="ln898">    for(int k = 0; k &lt; cnt; k++) cx[k + 1] = grays[6*k+0];</a>
+<a name="ln899">    for(int k = 0; k &lt; cnt; k++) cy[k + 1] = grays[6*k+3];</a>
+<a name="ln900">    tonecurve_create(&amp;tonecurve, cx, cy, num_tonecurve);</a>
+<a name="ln901">  }</a>
+<a name="ln902"> </a>
+<a name="ln903">#if 0 // quiet.</a>
+<a name="ln904">  for(int k = 0; k &lt; num_tonecurve; k++)</a>
+<a name="ln905">    fprintf(stderr, &quot;L[%g] = %g\n&quot;, 100.0 * k / (num_tonecurve - 1.0),</a>
+<a name="ln906">            tonecurve_apply(&amp;tonecurve, 100.0 * k / (num_tonecurve - 1.0)));</a>
+<a name="ln907">#endif</a>
+<a name="ln908"> </a>
+<a name="ln909">#if 0 // Lab tonecurve on L only</a>
+<a name="ln910">  // unapply from target data, we will apply it later in the pipe and want to match the colours only:</a>
+<a name="ln911">  for(int k = 0; k &lt; N; k++) target_L[k] = tonecurve_unapply(&amp;tonecurve, target_L[k]);</a>
+<a name="ln912">#else // rgb tonecurve affecting colours, too</a>
+<a name="ln913">  tonecurve_t rgbcurve;</a>
+<a name="ln914">  // ownership transferred to tonecurve object, so we just alloc without free here:</a>
+<a name="ln915">  cx = malloc(sizeof(double)*num_tonecurve);</a>
+<a name="ln916">  cy = malloc(sizeof(double)*num_tonecurve);</a>
+<a name="ln917">  cx[0] = cy[0] = 0.0;                           // fix black</a>
+<a name="ln918">  cx[num_tonecurve - 1] = cy[num_tonecurve - 1] = 100.0; // fix white</a>
+<a name="ln919">  for(int k = 1; k &lt; num_tonecurve-1; k++)</a>
+<a name="ln920">  {</a>
+<a name="ln921">    float rgb[3], Lab[3] = { 0.0f, 0.0f, 0.0f };</a>
+<a name="ln922">    Lab[0] = grays[6*k+0];</a>
+<a name="ln923">    dt_Lab_to_prophotorgb(Lab, rgb);</a>
+<a name="ln924">    cx[k] = rgb[0];</a>
+<a name="ln925">    Lab[0] = tonecurve_apply(&amp;tonecurve, Lab[0]);</a>
+<a name="ln926">    dt_Lab_to_prophotorgb(Lab, rgb);</a>
+<a name="ln927">    cy[k] = rgb[0];</a>
+<a name="ln928">  }</a>
+<a name="ln929">  tonecurve_create(&amp;rgbcurve, cx, cy, num_tonecurve);</a>
+<a name="ln930">  free(grays);</a>
+<a name="ln931"> </a>
+<a name="ln932">  // now unapply the curve:</a>
+<a name="ln933">  for(int k = 0; k &lt; N; k++)</a>
+<a name="ln934">  {</a>
+<a name="ln935">    float rgb[3], Lab[3] = { 0.0f, 0.0f, 0.0f };</a>
+<a name="ln936">    Lab[0] = target_L[k];</a>
+<a name="ln937">    Lab[1] = target_a[k];</a>
+<a name="ln938">    Lab[2] = target_b[k];</a>
+<a name="ln939">    dt_Lab_to_prophotorgb(Lab, rgb);</a>
+<a name="ln940">    rgb[0] = tonecurve_unapply(&amp;rgbcurve, rgb[0]);</a>
+<a name="ln941">    rgb[1] = tonecurve_unapply(&amp;rgbcurve, rgb[1]);</a>
+<a name="ln942">    rgb[2] = tonecurve_unapply(&amp;rgbcurve, rgb[2]);</a>
+<a name="ln943">    dt_prophotorgb_to_Lab(rgb, Lab);</a>
+<a name="ln944">    target_L[k] = Lab[0];</a>
+<a name="ln945">    target_a[k] = Lab[1];</a>
+<a name="ln946">    target_b[k] = Lab[2];</a>
+<a name="ln947">  }</a>
+<a name="ln948">  tonecurve_delete(&amp;rgbcurve);</a>
+<a name="ln949">#endif</a>
+<a name="ln950"> </a>
+<a name="ln951">  const double *target[3] = { target_L, target_a, target_b };</a>
+<a name="ln952">  double *coeff_L = malloc((N + 4) * sizeof(double));</a>
+<a name="ln953">  double *coeff_a = malloc((N + 4) * sizeof(double));</a>
+<a name="ln954">  double *coeff_b = malloc((N + 4) * sizeof(double));</a>
+<a name="ln955">  double *coeff[] = { coeff_L, coeff_a, coeff_b };</a>
+<a name="ln956">  int *perm = malloc((N + 4) * sizeof(int));</a>
+<a name="ln957">  double avgerr, maxerr;</a>
+<a name="ln958">  sparsity = thinplate_match(&amp;tonecurve, 3, N, colorchecker_Lab, target, sparsity, perm, coeff, &amp;avgerr, &amp;maxerr);</a>
+<a name="ln959"> </a>
+<a name="ln960">  if (self-&gt;result_label != NULL)</a>
+<a name="ln961">  {</a>
+<a name="ln962">    // TODO: is the rank interesting, too?</a>
+<a name="ln963">    char *result_string = g_strdup_printf(_(&quot;average dE: %.02f\nmax dE: %.02f&quot;), avgerr, maxerr);</a>
+<a name="ln964">    gtk_label_set_text(GTK_LABEL(self-&gt;result_label), result_string);</a>
+<a name="ln965">    g_free(result_string);</a>
+<a name="ln966">  }</a>
+<a name="ln967">  </a>
+<a name="ln968">  free(coeff_b);</a>
+<a name="ln969">  free(coeff_a);</a>
+<a name="ln970">  free(coeff_L);</a>
+<a name="ln971"> </a>
+<a name="ln972">  int sp = 0;</a>
+<a name="ln973">  int cperm[300] = { 0 };</a>
+<a name="ln974">  for(int k = 0; k &lt; sparsity; k++)</a>
+<a name="ln975">    if(perm[k] &lt; N) // skip polynomial parts</a>
+<a name="ln976">      cperm[sp++] = perm[k];</a>
+<a name="ln977"> </a>
+<a name="ln978">#if 0 // quiet.</a>
+<a name="ln979">  fprintf(stderr, &quot;found %d basis functions:\n&quot;, sp);</a>
+<a name="ln980">  for(int k = 0; k &lt; sp; k++)</a>
+<a name="ln981">    fprintf(stderr, &quot;perm[%d] = %d source %g %g %g\n&quot;, k, cperm[k], colorchecker_Lab[3 * cperm[k]],</a>
+<a name="ln982">            colorchecker_Lab[3 * cperm[k] + 1], colorchecker_Lab[3 * cperm[k] + 2]);</a>
+<a name="ln983">#endif</a>
+<a name="ln984"> </a>
+<a name="ln985">  free(perm);</a>
+<a name="ln986">  self-&gt;tonecurve_encoded = encode_tonecurve(&amp;tonecurve);</a>
+<a name="ln987">  self-&gt;colorchecker_encoded = encode_colorchecker(sp, colorchecker_Lab, target, cperm);</a>
+<a name="ln988"> </a>
+<a name="ln989">  tonecurve_delete(&amp;tonecurve);</a>
+<a name="ln990">}</a>
+<a name="ln991"> </a>
+<a name="ln992">static void process_button_clicked_callback(GtkButton *button, gpointer user_data)</a>
+<a name="ln993">{</a>
+<a name="ln994">  dt_lut_t *self = (dt_lut_t *)user_data;</a>
+<a name="ln995"> </a>
+<a name="ln996">  gtk_widget_set_sensitive(self-&gt;export_button, FALSE);</a>
+<a name="ln997">  free(self-&gt;tonecurve_encoded);</a>
+<a name="ln998">  free(self-&gt;colorchecker_encoded);</a>
+<a name="ln999">  self-&gt;tonecurve_encoded = NULL;</a>
+<a name="ln1000">  self-&gt;colorchecker_encoded = NULL;</a>
+<a name="ln1001"> </a>
+<a name="ln1002">  if(!self-&gt;chart) return;</a>
+<a name="ln1003"> </a>
+<a name="ln1004">  int i = 0;</a>
+<a name="ln1005">  int N = g_hash_table_size(self-&gt;chart-&gt;box_table);</a>
+<a name="ln1006"> </a>
+<a name="ln1007">  double *target_L = (double *)calloc(sizeof(double), (N + 4));</a>
+<a name="ln1008">  double *target_a = (double *)calloc(sizeof(double), (N + 4));</a>
+<a name="ln1009">  double *target_b = (double *)calloc(sizeof(double), (N + 4));</a>
+<a name="ln1010">  double *colorchecker_Lab = (double *)calloc(3 * sizeof(double), N);</a>
+<a name="ln1011"> </a>
+<a name="ln1012">  GHashTableIter table_iter;</a>
+<a name="ln1013">  gpointer set_key, value;</a>
+<a name="ln1014"> </a>
+<a name="ln1015">  g_hash_table_iter_init(&amp;table_iter, self-&gt;chart-&gt;patch_sets);</a>
+<a name="ln1016">  while(g_hash_table_iter_next(&amp;table_iter, &amp;set_key, &amp;value))</a>
+<a name="ln1017">  {</a>
+<a name="ln1018">    GList *patch_names = (GList *)value;</a>
+<a name="ln1019">    add_patches_to_array(self, patch_names, &amp;N, &amp;i, target_L, target_a, target_b, colorchecker_Lab);</a>
+<a name="ln1020">  }</a>
+<a name="ln1021"> </a>
+<a name="ln1022">  add_hdr_patches(&amp;N, &amp;target_L, &amp;target_a, &amp;target_b, &amp;colorchecker_Lab);</a>
+<a name="ln1023"> </a>
+<a name="ln1024">  int sparsity = gtk_spin_button_get_value_as_int(GTK_SPIN_BUTTON(self-&gt;number_patches)) + 4;</a>
+<a name="ln1025"> </a>
+<a name="ln1026">  process_data(self, target_L, target_a, target_b, colorchecker_Lab, N, sparsity);</a>
+<a name="ln1027"> </a>
+<a name="ln1028">  gtk_widget_set_sensitive(self-&gt;export_button, TRUE);</a>
+<a name="ln1029"> </a>
+<a name="ln1030">  free(target_L);</a>
+<a name="ln1031">  free(target_a);</a>
+<a name="ln1032">  free(target_b);</a>
+<a name="ln1033">  free(colorchecker_Lab);</a>
+<a name="ln1034">}</a>
+<a name="ln1035"> </a>
+<a name="ln1036">static void cht_state_callback(GtkWidget *widget, GtkStateFlags flags, gpointer user_data)</a>
+<a name="ln1037">{</a>
+<a name="ln1038">  dt_lut_t *self = (dt_lut_t *)user_data;</a>
+<a name="ln1039">  // cht not sensitive -&gt; no reference or export</a>
+<a name="ln1040">  if(flags &amp; GTK_STATE_FLAG_INSENSITIVE)</a>
+<a name="ln1041">  {</a>
+<a name="ln1042">    gtk_widget_set_sensitive(self-&gt;it8_button, FALSE);</a>
+<a name="ln1043">    gtk_widget_set_sensitive(self-&gt;reference_image_button, FALSE);</a>
+<a name="ln1044">    gtk_widget_set_sensitive(self-&gt;process_button, FALSE);</a>
+<a name="ln1045">    gtk_widget_set_sensitive(self-&gt;export_button, FALSE);</a>
+<a name="ln1046">    gtk_widget_set_sensitive(self-&gt;export_raw_button, FALSE);</a>
+<a name="ln1047">  }</a>
+<a name="ln1048">}</a>
+<a name="ln1049"> </a>
+<a name="ln1050">static void shrink_changed_callback(GtkRange *range, gpointer user_data)</a>
+<a name="ln1051">{</a>
+<a name="ln1052">  image_t *image = (image_t *)user_data;</a>
+<a name="ln1053">  image-&gt;shrink = gtk_range_get_value(range);</a>
+<a name="ln1054"> </a>
+<a name="ln1055">  gtk_widget_queue_draw(image-&gt;drawing_area);</a>
+<a name="ln1056">}</a>
+<a name="ln1057"> </a>
+<a name="ln1058">static GtkWidget *create_notebook_page_source(dt_lut_t *self)</a>
+<a name="ln1059">{</a>
+<a name="ln1060">  GtkWidget *page = gtk_box_new(GTK_ORIENTATION_VERTICAL, 10);</a>
+<a name="ln1061"> </a>
+<a name="ln1062">  GtkWidget *hbox = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 10);</a>
+<a name="ln1063">  gtk_box_pack_start(GTK_BOX(page), hbox, FALSE, TRUE, 0);</a>
+<a name="ln1064"> </a>
+<a name="ln1065">  GtkWidget *image_button = gtk_file_chooser_button_new(&quot;image of a color chart&quot;, GTK_FILE_CHOOSER_ACTION_OPEN);</a>
+<a name="ln1066">  g_signal_connect(image_button, &quot;file-set&quot;, G_CALLBACK(source_image_changed_callback), self);</a>
+<a name="ln1067"> </a>
+<a name="ln1068">  GtkWidget *cht_button</a>
+<a name="ln1069">      = gtk_file_chooser_button_new(&quot;description of a color chart&quot;, GTK_FILE_CHOOSER_ACTION_OPEN);</a>
+<a name="ln1070">  g_signal_connect(cht_button, &quot;file-set&quot;, G_CALLBACK(cht_changed_callback), self);</a>
+<a name="ln1071"> </a>
+<a name="ln1072">  GtkWidget *source_shrink = gtk_scale_new_with_range(GTK_ORIENTATION_HORIZONTAL, 0.5, 2.0, 0.01);</a>
+<a name="ln1073">  gtk_scale_set_value_pos(GTK_SCALE(source_shrink), GTK_POS_RIGHT);</a>
+<a name="ln1074">  g_signal_connect(source_shrink, &quot;value-changed&quot;, G_CALLBACK(shrink_changed_callback), &amp;self-&gt;source);</a>
+<a name="ln1075"> </a>
+<a name="ln1076">  gtk_box_pack_start(GTK_BOX(hbox), gtk_label_new(&quot;image:&quot;), FALSE, TRUE, 0);</a>
+<a name="ln1077">  gtk_box_pack_start(GTK_BOX(hbox), image_button, TRUE, TRUE, 0);</a>
+<a name="ln1078">  gtk_box_pack_start(GTK_BOX(hbox), gtk_label_new(&quot;chart:&quot;), FALSE, TRUE, 0);</a>
+<a name="ln1079">  gtk_box_pack_start(GTK_BOX(hbox), cht_button, TRUE, TRUE, 0);</a>
+<a name="ln1080">  gtk_box_pack_start(GTK_BOX(hbox), gtk_label_new(&quot;size:&quot;), FALSE, TRUE, 0);</a>
+<a name="ln1081">  gtk_box_pack_start(GTK_BOX(hbox), source_shrink, TRUE, TRUE, 0);</a>
+<a name="ln1082"> </a>
+<a name="ln1083">  init_image(self, &amp;self-&gt;source, G_CALLBACK(motion_notify_callback_source));</a>
+<a name="ln1084">  self-&gt;source.draw_colored = TRUE;</a>
+<a name="ln1085">  gtk_box_pack_start(GTK_BOX(page), self-&gt;source.drawing_area, TRUE, TRUE, 0);</a>
+<a name="ln1086"> </a>
+<a name="ln1087">  g_signal_connect(cht_button, &quot;state-flags-changed&quot;, G_CALLBACK(cht_state_callback), self);</a>
+<a name="ln1088"> </a>
+<a name="ln1089">  self-&gt;image_button = image_button;</a>
+<a name="ln1090">  self-&gt;cht_button = cht_button;</a>
+<a name="ln1091">  self-&gt;source_shrink = source_shrink;</a>
+<a name="ln1092"> </a>
+<a name="ln1093">  return page;</a>
+<a name="ln1094">}</a>
+<a name="ln1095"> </a>
+<a name="ln1096">static GtkWidget *create_notebook_page_reference(dt_lut_t *self)</a>
+<a name="ln1097">{</a>
+<a name="ln1098">  GtkWidget *page = gtk_box_new(GTK_ORIENTATION_VERTICAL, 10);</a>
+<a name="ln1099"> </a>
+<a name="ln1100">  GtkWidget *hbox = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 10);</a>
+<a name="ln1101">  gtk_box_pack_start(GTK_BOX(page), hbox, FALSE, TRUE, 0);</a>
+<a name="ln1102"> </a>
+<a name="ln1103">  GtkWidget *reference_mode = gtk_combo_box_text_new();</a>
+<a name="ln1104">  gtk_combo_box_text_append(GTK_COMBO_BOX_TEXT(reference_mode), NULL, &quot;cie/it8 file&quot;);</a>
+<a name="ln1105">  gtk_combo_box_text_append(GTK_COMBO_BOX_TEXT(reference_mode), NULL, &quot;color chart image&quot;);</a>
+<a name="ln1106">  gtk_combo_box_set_active(GTK_COMBO_BOX(reference_mode), 0);</a>
+<a name="ln1107">  g_signal_connect(reference_mode, &quot;changed&quot;, G_CALLBACK(reference_mode_changed_callback), self);</a>
+<a name="ln1108"> </a>
+<a name="ln1109">  GtkWidget *it8_button</a>
+<a name="ln1110">      = gtk_file_chooser_button_new(&quot;reference data of a color chart&quot;, GTK_FILE_CHOOSER_ACTION_OPEN);</a>
+<a name="ln1111">  g_signal_connect(it8_button, &quot;file-set&quot;, G_CALLBACK(it8_changed_callback), self);</a>
+<a name="ln1112"> </a>
+<a name="ln1113">  GtkWidget *reference_image_button</a>
+<a name="ln1114">      = gtk_file_chooser_button_new(&quot;image of a color chart&quot;, GTK_FILE_CHOOSER_ACTION_OPEN);</a>
+<a name="ln1115">  g_signal_connect(reference_image_button, &quot;file-set&quot;, G_CALLBACK(ref_image_changed_callback), self);</a>
+<a name="ln1116"> </a>
+<a name="ln1117">  GtkWidget *reference_shrink = gtk_scale_new_with_range(GTK_ORIENTATION_HORIZONTAL, 0.5, 2.0, 0.01);</a>
+<a name="ln1118">  gtk_scale_set_value_pos(GTK_SCALE(reference_shrink), GTK_POS_RIGHT);</a>
+<a name="ln1119">  g_signal_connect(reference_shrink, &quot;value-changed&quot;, G_CALLBACK(shrink_changed_callback), &amp;self-&gt;reference);</a>
+<a name="ln1120"> </a>
+<a name="ln1121">  gtk_box_pack_start(GTK_BOX(hbox), gtk_label_new(&quot;mode:&quot;), FALSE, TRUE, 0);</a>
+<a name="ln1122">  gtk_box_pack_start(GTK_BOX(hbox), reference_mode, TRUE, TRUE, 0);</a>
+<a name="ln1123"> </a>
+<a name="ln1124">  GtkWidget *reference_it8_box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 10);</a>
+<a name="ln1125">  gtk_box_pack_start(GTK_BOX(reference_it8_box), gtk_label_new(&quot;reference it8:&quot;), FALSE, TRUE, 0);</a>
+<a name="ln1126">  gtk_box_pack_start(GTK_BOX(reference_it8_box), it8_button, TRUE, TRUE, 0);</a>
+<a name="ln1127">  gtk_box_pack_start(GTK_BOX(hbox), reference_it8_box, TRUE, TRUE, 0);</a>
+<a name="ln1128"> </a>
+<a name="ln1129">  GtkWidget *reference_image_box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 10);</a>
+<a name="ln1130">  gtk_box_pack_start(GTK_BOX(reference_image_box), gtk_label_new(&quot;reference image:&quot;), FALSE, TRUE, 0);</a>
+<a name="ln1131">  gtk_box_pack_start(GTK_BOX(reference_image_box), reference_image_button, TRUE, TRUE, 0);</a>
+<a name="ln1132">  gtk_box_pack_start(GTK_BOX(reference_image_box), gtk_label_new(&quot;size:&quot;), FALSE, TRUE, 0);</a>
+<a name="ln1133">  gtk_box_pack_start(GTK_BOX(reference_image_box), reference_shrink, TRUE, TRUE, 0);</a>
+<a name="ln1134">  gtk_box_pack_start(GTK_BOX(hbox), reference_image_box, TRUE, TRUE, 0);</a>
+<a name="ln1135"> </a>
+<a name="ln1136">  init_image(self, &amp;self-&gt;reference, G_CALLBACK(motion_notify_callback_reference));</a>
+<a name="ln1137">  self-&gt;reference.draw_colored = FALSE;</a>
+<a name="ln1138">  gtk_box_pack_start(GTK_BOX(page), self-&gt;reference.drawing_area, TRUE, TRUE, 0);</a>
+<a name="ln1139"> </a>
+<a name="ln1140">  gtk_widget_show_all(reference_it8_box);</a>
+<a name="ln1141">  gtk_widget_show_all(reference_image_box);</a>
+<a name="ln1142">  gtk_widget_show_all(self-&gt;reference.drawing_area);</a>
+<a name="ln1143">  gtk_widget_hide(reference_image_box);</a>
+<a name="ln1144">  gtk_widget_hide(self-&gt;reference.drawing_area);</a>
+<a name="ln1145">  gtk_widget_set_no_show_all(reference_it8_box, TRUE);</a>
+<a name="ln1146">  gtk_widget_set_no_show_all(reference_image_box, TRUE);</a>
+<a name="ln1147">  gtk_widget_set_no_show_all(self-&gt;reference.drawing_area, TRUE);</a>
+<a name="ln1148"> </a>
+<a name="ln1149">  self-&gt;reference_mode = reference_mode;</a>
+<a name="ln1150">  self-&gt;it8_button = it8_button;</a>
+<a name="ln1151">  self-&gt;reference_image_button = reference_image_button;</a>
+<a name="ln1152">  self-&gt;reference_it8_box = reference_it8_box;</a>
+<a name="ln1153">  self-&gt;reference_image_box = reference_image_box;</a>
+<a name="ln1154">  self-&gt;reference_shrink = reference_shrink;</a>
+<a name="ln1155"> </a>
+<a name="ln1156">  return page;</a>
+<a name="ln1157">}</a>
+<a name="ln1158"> </a>
+<a name="ln1159">static GtkWidget *create_notebook_page_process(dt_lut_t *self)</a>
+<a name="ln1160">{</a>
+<a name="ln1161">  GtkWidget *page = gtk_grid_new();</a>
+<a name="ln1162">  gtk_grid_set_row_spacing(GTK_GRID(page), 10);</a>
+<a name="ln1163">  gtk_grid_set_column_spacing(GTK_GRID(page), 10);</a>
+<a name="ln1164"> </a>
+<a name="ln1165">  int line = 0;</a>
+<a name="ln1166"> </a>
+<a name="ln1167">  // TODO: it might make sense to limit this to a smaller range and/or use a slider</a>
+<a name="ln1168">  // 49 is the current max in the lut iop</a>
+<a name="ln1169">  GtkWidget *number_patches = gtk_spin_button_new_with_range(0, 49, 1);</a>
+<a name="ln1170">  gtk_spin_button_set_value(GTK_SPIN_BUTTON(number_patches), 24);</a>
+<a name="ln1171">  gtk_grid_attach(GTK_GRID(page), gtk_label_new(&quot;number of final patches&quot;), 0, line, 1, 1);</a>
+<a name="ln1172">  gtk_grid_attach(GTK_GRID(page), number_patches, 1, line++, 1, 1);</a>
+<a name="ln1173"> </a>
+<a name="ln1174">  GtkWidget *process_button = gtk_button_new_with_label(&quot;process&quot;);</a>
+<a name="ln1175">  GtkWidget *export_button = gtk_button_new_with_label(&quot;export&quot;);</a>
+<a name="ln1176">  GtkWidget *export_raw_button = gtk_button_new_with_label(&quot;export raw data as csv&quot;);</a>
+<a name="ln1177">  gtk_grid_attach(GTK_GRID(page), process_button, 1, line, 1, 1);</a>
+<a name="ln1178">  gtk_grid_attach(GTK_GRID(page), export_button, 2, line, 1, 1);</a>
+<a name="ln1179">  gtk_grid_attach(GTK_GRID(page), export_raw_button, 3, line++, 1, 1);</a>
+<a name="ln1180"> </a>
+<a name="ln1181">  self-&gt;result_label = gtk_label_new(NULL);</a>
+<a name="ln1182">  gtk_widget_set_halign(self-&gt;result_label, GTK_ALIGN_START);</a>
+<a name="ln1183">  gtk_grid_attach(GTK_GRID(page), self-&gt;result_label, 1, line++, 3, 1);</a>
+<a name="ln1184"> </a>
+<a name="ln1185">  g_signal_connect(process_button, &quot;clicked&quot;, G_CALLBACK(process_button_clicked_callback), self);</a>
+<a name="ln1186">  g_signal_connect(export_button, &quot;clicked&quot;, G_CALLBACK(export_button_clicked_callback), self);</a>
+<a name="ln1187">  g_signal_connect(export_raw_button, &quot;clicked&quot;, G_CALLBACK(export_raw_button_clicked_callback), self);</a>
+<a name="ln1188"> </a>
+<a name="ln1189">  self-&gt;number_patches = number_patches;</a>
+<a name="ln1190">  self-&gt;process_button = process_button;</a>
+<a name="ln1191">  self-&gt;export_button = export_button;</a>
+<a name="ln1192">  self-&gt;export_raw_button = export_raw_button;</a>
+<a name="ln1193"> </a>
+<a name="ln1194">  return page;</a>
+<a name="ln1195">}</a>
+<a name="ln1196"> </a>
+<a name="ln1197">static GtkWidget *create_notebook(dt_lut_t *self)</a>
+<a name="ln1198">{</a>
+<a name="ln1199">  // the notebook with 2 tabs for input</a>
+<a name="ln1200">  GtkWidget *notebook = gtk_notebook_new();</a>
+<a name="ln1201"> </a>
+<a name="ln1202">  // first tab: input image + cht file</a>
+<a name="ln1203">  gtk_notebook_append_page(GTK_NOTEBOOK(notebook), create_notebook_page_source(self),</a>
+<a name="ln1204">                           gtk_label_new(&quot;source image&quot;));</a>
+<a name="ln1205"> </a>
+<a name="ln1206">  // second tab: mode + either reference image or cie file</a>
+<a name="ln1207">  gtk_notebook_append_page(GTK_NOTEBOOK(notebook), create_notebook_page_reference(self),</a>
+<a name="ln1208">                           gtk_label_new(&quot;reference values&quot;));</a>
+<a name="ln1209"> </a>
+<a name="ln1210">  // third tab: analyze data and process it</a>
+<a name="ln1211">  gtk_notebook_append_page(GTK_NOTEBOOK(notebook), create_notebook_page_process(self), gtk_label_new(&quot;process&quot;));</a>
+<a name="ln1212"> </a>
+<a name="ln1213">  return notebook;</a>
+<a name="ln1214">}</a>
+<a name="ln1215"> </a>
+<a name="ln1216">static GtkWidget *create_table(dt_lut_t *self)</a>
+<a name="ln1217">{</a>
+<a name="ln1218">  GtkWidget *scrolled_window = gtk_scrolled_window_new(NULL, NULL);</a>
+<a name="ln1219">  gtk_widget_set_size_request(scrolled_window, -1, 15);</a>
+<a name="ln1220">  gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(scrolled_window), GTK_POLICY_AUTOMATIC, GTK_POLICY_AUTOMATIC);</a>
+<a name="ln1221">  gtk_scrolled_window_set_shadow_type(GTK_SCROLLED_WINDOW(scrolled_window), GTK_SHADOW_ETCHED_IN);</a>
+<a name="ln1222">  //   gtk_paned_pack2(GTK_PANED(vpaned), scrolled_window, TRUE, FALSE);</a>
+<a name="ln1223"> </a>
+<a name="ln1224">  self-&gt;model = GTK_TREE_MODEL(gtk_list_store_new(NUM_COLUMNS,</a>
+<a name="ln1225">                                                  G_TYPE_STRING, // COLUMN_NAME</a>
+<a name="ln1226">                                                  G_TYPE_STRING, // COLUMN_RGB_IN</a>
+<a name="ln1227">                                                  G_TYPE_STRING, // COLUMN_LAB_IN</a>
+<a name="ln1228">                                                  G_TYPE_STRING, // COLUMN_LAB_REF</a>
+<a name="ln1229">                                                  G_TYPE_STRING, // COLUMN_DE_1976</a>
+<a name="ln1230">                                                  G_TYPE_FLOAT,  // COLUMN_DE_1976_FLOAT</a>
+<a name="ln1231">                                                  G_TYPE_STRING, // COLUMN_DE_2000</a>
+<a name="ln1232">                                                  G_TYPE_FLOAT   // COLUMN_DE_2000_FLOAT</a>
+<a name="ln1233">                                                  ));</a>
+<a name="ln1234">  self-&gt;treeview = gtk_tree_view_new_with_model(self-&gt;model);</a>
+<a name="ln1235">  gtk_tree_view_set_search_column(GTK_TREE_VIEW(self-&gt;treeview), COLUMN_NAME);</a>
+<a name="ln1236">  gtk_container_add(GTK_CONTAINER(scrolled_window), self-&gt;treeview);</a>
+<a name="ln1237"> </a>
+<a name="ln1238">  add_column(GTK_TREE_VIEW(self-&gt;treeview), &quot;name&quot;, COLUMN_NAME, COLUMN_NAME);</a>
+<a name="ln1239">  add_column(GTK_TREE_VIEW(self-&gt;treeview), &quot;sRGB (image)&quot;, COLUMN_RGB_IN, COLUMN_RGB_IN);</a>
+<a name="ln1240">  add_column(GTK_TREE_VIEW(self-&gt;treeview), &quot;Lab (image)&quot;, COLUMN_LAB_IN, COLUMN_LAB_IN);</a>
+<a name="ln1241">  add_column(GTK_TREE_VIEW(self-&gt;treeview), &quot;Lab (reference)&quot;, COLUMN_LAB_REF, COLUMN_LAB_REF);</a>
+<a name="ln1242">  add_column(GTK_TREE_VIEW(self-&gt;treeview), &quot;deltaE (1976)&quot;, COLUMN_DE_1976, COLUMN_DE_1976_FLOAT);</a>
+<a name="ln1243">  add_column(GTK_TREE_VIEW(self-&gt;treeview), &quot;deltaE (2000)&quot;, COLUMN_DE_2000, COLUMN_DE_2000_FLOAT);</a>
+<a name="ln1244"> </a>
+<a name="ln1245">  return scrolled_window;</a>
+<a name="ln1246">}</a>
+<a name="ln1247"> </a>
+<a name="ln1248">static void add_column(GtkTreeView *treeview, const char *title, int column_id, int sort_column)</a>
+<a name="ln1249">{</a>
+<a name="ln1250">  GtkCellRenderer *renderer;</a>
+<a name="ln1251">  GtkTreeViewColumn *column;</a>
+<a name="ln1252">  renderer = gtk_cell_renderer_text_new();</a>
+<a name="ln1253">  column = gtk_tree_view_column_new_with_attributes(title, renderer, &quot;text&quot;, column_id, NULL);</a>
+<a name="ln1254">  gtk_tree_view_column_set_sort_column_id(column, sort_column);</a>
+<a name="ln1255">  gtk_tree_view_append_column(treeview, column);</a>
+<a name="ln1256">}</a>
+<a name="ln1257"> </a>
+<a name="ln1258">// only change the numbers, don't re-fill the table!</a>
+<a name="ln1259">static void update_table(dt_lut_t *self)</a>
+<a name="ln1260">{</a>
+<a name="ln1261">  GtkTreeIter iter;</a>
+<a name="ln1262">  gboolean valid = gtk_tree_model_get_iter_first(self-&gt;model, &amp;iter);</a>
+<a name="ln1263"> </a>
+<a name="ln1264">  while(valid)</a>
+<a name="ln1265">  {</a>
+<a name="ln1266">    char *name;</a>
+<a name="ln1267"> </a>
+<a name="ln1268">    gtk_tree_model_get(self-&gt;model, &amp;iter, COLUMN_NAME, &amp;name, -1);</a>
+<a name="ln1269"> </a>
+<a name="ln1270">    box_t *box = (box_t *)g_hash_table_lookup(self-&gt;chart-&gt;box_table, name);</a>
+<a name="ln1271">    if(box)</a>
+<a name="ln1272">    {</a>
+<a name="ln1273">      float Lab[3] = { 0.0 };</a>
+<a name="ln1274">      char *s_Lab_in, *s_RGB_in, *s_deltaE_1976, *s_deltaE_2000;</a>
+<a name="ln1275">      float deltaE_1976 = 0.0, deltaE_2000 = 0.0;</a>
+<a name="ln1276"> </a>
+<a name="ln1277">      get_Lab_from_box(box, Lab);</a>
+<a name="ln1278"> </a>
+<a name="ln1279">      box_t *patch = (box_t *)g_hash_table_lookup(self-&gt;picked_source_patches, name);</a>
+<a name="ln1280">      if(patch)</a>
+<a name="ln1281">      {</a>
+<a name="ln1282">        float in_Lab[3] = { 0.0 };</a>
+<a name="ln1283">        get_Lab_from_box(patch, in_Lab);</a>
+<a name="ln1284">        s_RGB_in = g_strdup_printf(&quot;%d; %d; %d&quot;, (int)(patch-&gt;rgb[0] * 255 + 0.5),</a>
+<a name="ln1285">                                   (int)(patch-&gt;rgb[1] * 255 + 0.5), (int)(patch-&gt;rgb[2] * 255 + 0.5));</a>
+<a name="ln1286">        s_Lab_in = g_strdup_printf(&quot;%.02f; %.02f; %.02f&quot;, in_Lab[0], in_Lab[1], in_Lab[2]);</a>
+<a name="ln1287">        deltaE_1976 = dt_colorspaces_deltaE_1976(in_Lab, Lab);</a>
+<a name="ln1288">        deltaE_2000 = dt_colorspaces_deltaE_2000(in_Lab, Lab);</a>
+<a name="ln1289">        s_deltaE_1976 = g_strdup_printf(&quot;%.02f&quot;, deltaE_1976);</a>
+<a name="ln1290">        s_deltaE_2000 = g_strdup_printf(&quot;%.02f&quot;, deltaE_2000);</a>
+<a name="ln1291">      }</a>
+<a name="ln1292">      else</a>
+<a name="ln1293">      {</a>
+<a name="ln1294">        s_Lab_in = g_strdup(&quot;?&quot;);</a>
+<a name="ln1295">        s_RGB_in = g_strdup(&quot;?&quot;);</a>
+<a name="ln1296">        s_deltaE_1976 = g_strdup(&quot;-&quot;);</a>
+<a name="ln1297">        s_deltaE_2000 = g_strdup(&quot;-&quot;);</a>
+<a name="ln1298">      }</a>
+<a name="ln1299">      char *s_Lab_ref = g_strdup_printf(&quot;%.02f; %.02f; %.02f&quot;, Lab[0], Lab[1], Lab[2]);</a>
+<a name="ln1300"> </a>
+<a name="ln1301">      gtk_list_store_set(GTK_LIST_STORE(self-&gt;model), &amp;iter, COLUMN_RGB_IN, s_RGB_in, COLUMN_LAB_IN, s_Lab_in,</a>
+<a name="ln1302">                         COLUMN_LAB_REF, s_Lab_ref, COLUMN_DE_1976, s_deltaE_1976, COLUMN_DE_1976_FLOAT,</a>
+<a name="ln1303">                         deltaE_1976, COLUMN_DE_2000, s_deltaE_2000, COLUMN_DE_2000_FLOAT, deltaE_2000, -1);</a>
+<a name="ln1304">      g_free(s_RGB_in);</a>
+<a name="ln1305">      g_free(s_Lab_in);</a>
+<a name="ln1306">      g_free(s_Lab_ref);</a>
+<a name="ln1307">      g_free(s_deltaE_1976);</a>
+<a name="ln1308">      g_free(s_deltaE_2000);</a>
+<a name="ln1309">    } // if(box)</a>
+<a name="ln1310"> </a>
+<a name="ln1311">    g_free(name);</a>
+<a name="ln1312">    valid = gtk_tree_model_iter_next(self-&gt;model, &amp;iter);</a>
+<a name="ln1313">  } // while(valid)</a>
+<a name="ln1314">}</a>
+<a name="ln1315"> </a>
+<a name="ln1316">static void get_Lab_from_box(box_t *box, float *Lab)</a>
+<a name="ln1317">{</a>
+<a name="ln1318">  switch(box-&gt;color_space)</a>
+<a name="ln1319">  {</a>
+<a name="ln1320">    case DT_COLORSPACE_XYZ:</a>
+<a name="ln1321">    {</a>
+<a name="ln1322">      float XYZ[3];</a>
+<a name="ln1323">      for(int i = 0; i &lt; 3; i++) XYZ[i] = box-&gt;color[i] * 0.01;</a>
+<a name="ln1324">      dt_XYZ_to_Lab(XYZ, Lab);</a>
+<a name="ln1325">      break;</a>
+<a name="ln1326">    }</a>
+<a name="ln1327">    case DT_COLORSPACE_LAB:</a>
+<a name="ln1328">      for(int i = 0; i &lt; 3; i++) Lab[i] = box-&gt;color[i];</a>
+<a name="ln1329">      break;</a>
+<a name="ln1330">    default:</a>
+<a name="ln1331">      break;</a>
+<a name="ln1332">  }</a>
+<a name="ln1333">}</a>
+<a name="ln1334"> </a>
+<a name="ln1335">static void init_table(dt_lut_t *self)</a>
+<a name="ln1336">{</a>
+<a name="ln1337">  GtkTreeIter iter;</a>
+<a name="ln1338"> </a>
+<a name="ln1339">  gtk_list_store_clear(GTK_LIST_STORE(self-&gt;model));</a>
+<a name="ln1340"> </a>
+<a name="ln1341">  if(!self-&gt;chart) return;</a>
+<a name="ln1342"> </a>
+<a name="ln1343">  GList *patch_names = g_hash_table_get_keys(self-&gt;chart-&gt;box_table);</a>
+<a name="ln1344">  patch_names = g_list_sort(patch_names, (GCompareFunc)g_strcmp0);</a>
+<a name="ln1345">  for(GList *name = patch_names; name; name = g_list_next(name))</a>
+<a name="ln1346">  {</a>
+<a name="ln1347">    gtk_list_store_append(GTK_LIST_STORE(self-&gt;model), &amp;iter);</a>
+<a name="ln1348">    gtk_list_store_set(GTK_LIST_STORE(self-&gt;model), &amp;iter, COLUMN_NAME, (char *)name-&gt;data, -1);</a>
+<a name="ln1349">  }</a>
+<a name="ln1350">  g_list_free(patch_names);</a>
+<a name="ln1351"> </a>
+<a name="ln1352">  update_table(self);</a>
+<a name="ln1353">}</a>
+<a name="ln1354"> </a>
+<a name="ln1355">static void collect_source_patches(dt_lut_t *self)</a>
+<a name="ln1356">{</a>
+<a name="ln1357">  if(self-&gt;chart) g_hash_table_foreach(self-&gt;chart-&gt;box_table, collect_source_patches_foreach, self);</a>
+<a name="ln1358">}</a>
+<a name="ln1359"> </a>
+<a name="ln1360">static void collect_reference_patches(dt_lut_t *self)</a>
+<a name="ln1361">{</a>
+<a name="ln1362">  if(self-&gt;chart) g_hash_table_foreach(self-&gt;chart-&gt;box_table, collect_reference_patches_foreach, self);</a>
+<a name="ln1363">}</a>
+<a name="ln1364"> </a>
+<a name="ln1365">static void collect_source_patches_foreach(gpointer key, gpointer value, gpointer user_data)</a>
+<a name="ln1366">{</a>
+<a name="ln1367">  dt_lut_t *self = (dt_lut_t *)user_data;</a>
+<a name="ln1368">  box_t *box = (box_t *)value;</a>
+<a name="ln1369">  float xyz[3] /*, lab[3], srgb[3]*/;</a>
+<a name="ln1370"> </a>
+<a name="ln1371">  box_t *patch = find_patch(self-&gt;picked_source_patches, key);</a>
+<a name="ln1372"> </a>
+<a name="ln1373">  get_xyz_sample_from_image(&amp;self-&gt;source, self-&gt;source.shrink, box, xyz);</a>
+<a name="ln1374"> </a>
+<a name="ln1375">  set_color(patch, DT_COLORSPACE_XYZ, xyz[0] * 100.0, xyz[1] * 100.0, xyz[2] * 100.0);</a>
+<a name="ln1376">}</a>
+<a name="ln1377"> </a>
+<a name="ln1378">static void collect_reference_patches_foreach(gpointer key, gpointer value, gpointer user_data)</a>
+<a name="ln1379">{</a>
+<a name="ln1380">  dt_lut_t *self = (dt_lut_t *)user_data;</a>
+<a name="ln1381">  box_t *patch = (box_t *)value;</a>
+<a name="ln1382">  float xyz[3];</a>
+<a name="ln1383"> </a>
+<a name="ln1384">  get_xyz_sample_from_image(&amp;self-&gt;reference, self-&gt;reference.shrink, patch, xyz);</a>
+<a name="ln1385"> </a>
+<a name="ln1386">  set_color(patch, DT_COLORSPACE_XYZ, xyz[0] * 100.0, xyz[1] * 100.0, xyz[2] * 100.0);</a>
+<a name="ln1387">}</a>
+<a name="ln1388"> </a>
+<a name="ln1389">static box_t *find_patch(GHashTable *table, gpointer key)</a>
+<a name="ln1390">{</a>
+<a name="ln1391">  box_t *patch = (box_t *)g_hash_table_lookup(table, key);</a>
+<a name="ln1392">  if(!patch)</a>
+<a name="ln1393">  {</a>
+<a name="ln1394">    // the patch won't be found in the first pass</a>
+<a name="ln1395">    patch = (box_t *)calloc(1, sizeof(box_t));</a>
+<a name="ln1396">    g_hash_table_insert(table, g_strdup(key), patch);</a>
+<a name="ln1397">  }</a>
+<a name="ln1398">  return patch;</a>
+<a name="ln1399">}</a>
+<a name="ln1400"> </a>
+<a name="ln1401">static void get_xyz_sample_from_image(const image_t *const image, float shrink, box_t *box, float *xyz)</a>
+<a name="ln1402">{</a>
+<a name="ln1403">  point_t bb[4];</a>
+<a name="ln1404">  point_t corners[4];</a>
+<a name="ln1405">  box_t inner_box;</a>
+<a name="ln1406">  int x_start, y_start, x_end, y_end;</a>
+<a name="ln1407"> </a>
+<a name="ln1408">  xyz[0] = xyz[1] = xyz[2] = 0.0;</a>
+<a name="ln1409"> </a>
+<a name="ln1410">  if(!box) return;</a>
+<a name="ln1411"> </a>
+<a name="ln1412">  get_boundingbox(image, bb);</a>
+<a name="ln1413">  inner_box = get_sample_box(*(image-&gt;chart), box, shrink);</a>
+<a name="ln1414">  get_corners(bb, &amp;inner_box, corners);</a>
+<a name="ln1415">  get_pixel_region(image, corners, &amp;x_start, &amp;y_start, &amp;x_end, &amp;y_end);</a>
+<a name="ln1416"> </a>
+<a name="ln1417">  float delta_x_top = corners[TOP_RIGHT].x - corners[TOP_LEFT].x;</a>
+<a name="ln1418">  float delta_y_top = corners[TOP_RIGHT].y - corners[TOP_LEFT].y;</a>
+<a name="ln1419">  float delta_x_bottom = corners[BOTTOM_RIGHT].x - corners[BOTTOM_LEFT].x;</a>
+<a name="ln1420">  float delta_y_bottom = corners[BOTTOM_RIGHT].y - corners[BOTTOM_LEFT].y;</a>
+<a name="ln1421">  float delta_x_left = corners[BOTTOM_LEFT].x - corners[TOP_LEFT].x;</a>
+<a name="ln1422">  float delta_y_left = corners[BOTTOM_LEFT].y - corners[TOP_LEFT].y;</a>
+<a name="ln1423">  float delta_x_right = corners[BOTTOM_RIGHT].x - corners[TOP_RIGHT].x;</a>
+<a name="ln1424">  float delta_y_right = corners[BOTTOM_RIGHT].y - corners[TOP_RIGHT].y;</a>
+<a name="ln1425"> </a>
+<a name="ln1426">  double sample_x = 0.0, sample_y = 0.0, sample_z = 0.0;</a>
+<a name="ln1427">  size_t n_samples = 0;</a>
+<a name="ln1428">#ifdef _OPENMP</a>
+<a name="ln1429">#pragma omp parallel for default(none) \</a>
+<a name="ln1430">  dt_omp_firstprivate(image) \</a>
+<a name="ln1431">  shared(corners, x_start, y_start, x_end, y_end, delta_x_top, delta_y_top, \</a>
+<a name="ln1432">         delta_x_bottom, delta_y_bottom, delta_x_left, delta_y_left, \</a>
+<a name="ln1433">         delta_x_right, delta_y_right) \</a>
+<a name="ln1434">  reduction(+ : n_samples, sample_x, sample_y, sample_z) \</a>
+<a name="ln1435">  schedule(static) </a>
+<a name="ln1436">#endif</a>
+<a name="ln1437">  for(int y = y_start; y &lt; y_end; y++)</a>
+<a name="ln1438">    for(int x = x_start; x &lt; x_end; x++)</a>
+<a name="ln1439">    {</a>
+<a name="ln1440">      if((x - corners[TOP_LEFT].x) / delta_x_top * delta_y_top + corners[TOP_LEFT].y &lt; y</a>
+<a name="ln1441">         &amp;&amp; (x - corners[BOTTOM_LEFT].x) / delta_x_bottom * delta_y_bottom + corners[BOTTOM_LEFT].y &gt; y</a>
+<a name="ln1442">         &amp;&amp; (y - corners[TOP_LEFT].y) / delta_y_left * delta_x_left + corners[TOP_LEFT].x &lt; x</a>
+<a name="ln1443">         &amp;&amp; (y - corners[TOP_RIGHT].y) / delta_y_right * delta_x_right + corners[TOP_RIGHT].x &gt; x)</a>
+<a name="ln1444">      {</a>
+<a name="ln1445">        float *pixel = &amp;image-&gt;xyz[(x + y * image-&gt;width) * 3];</a>
+<a name="ln1446">        sample_x += pixel[0];</a>
+<a name="ln1447">        sample_y += pixel[1];</a>
+<a name="ln1448">        sample_z += pixel[2];</a>
+<a name="ln1449">        n_samples++;</a>
+<a name="ln1450">      }</a>
+<a name="ln1451">    }</a>
+<a name="ln1452"> </a>
+<a name="ln1453">  xyz[0] = sample_x / n_samples;</a>
+<a name="ln1454">  xyz[1] = sample_y / n_samples;</a>
+<a name="ln1455">  xyz[2] = sample_z / n_samples;</a>
+<a name="ln1456">}</a>
+<a name="ln1457"> </a>
+<a name="ln1458">static void get_boundingbox(const image_t *const image, point_t *bb)</a>
+<a name="ln1459">{</a>
+<a name="ln1460">  for(int i = 0; i &lt; 4; i++)</a>
+<a name="ln1461">  {</a>
+<a name="ln1462">    bb[i].x = image-&gt;bb[i].x * image-&gt;width;</a>
+<a name="ln1463">    bb[i].y = image-&gt;bb[i].y * image-&gt;height;</a>
+<a name="ln1464">  }</a>
+<a name="ln1465">}</a>
+<a name="ln1466"> </a>
+<a name="ln1467">static box_t get_sample_box(chart_t *chart, box_t *outer_box, float shrink)</a>
+<a name="ln1468">{</a>
+<a name="ln1469">  box_t inner_box = *outer_box;</a>
+<a name="ln1470">  float x_shrink = shrink * chart-&gt;box_shrink / chart-&gt;bb_w, y_shrink = shrink * chart-&gt;box_shrink / chart-&gt;bb_h;</a>
+<a name="ln1471">  inner_box.p.x += x_shrink;</a>
+<a name="ln1472">  inner_box.p.y += y_shrink;</a>
+<a name="ln1473">  inner_box.w -= 2.0 * x_shrink;</a>
+<a name="ln1474">  inner_box.h -= 2.0 * y_shrink;</a>
+<a name="ln1475">  return inner_box;</a>
+<a name="ln1476">}</a>
+<a name="ln1477"> </a>
+<a name="ln1478">static void get_corners(point_t *bb, box_t *box, point_t *corners)</a>
+<a name="ln1479">{</a>
+<a name="ln1480">  corners[TOP_LEFT] = corners[TOP_RIGHT] = corners[BOTTOM_RIGHT] = corners[BOTTOM_LEFT] = box-&gt;p;</a>
+<a name="ln1481">  corners[TOP_RIGHT].x += box-&gt;w;</a>
+<a name="ln1482">  corners[BOTTOM_RIGHT].x += box-&gt;w;</a>
+<a name="ln1483">  corners[BOTTOM_RIGHT].y += box-&gt;h;</a>
+<a name="ln1484">  corners[BOTTOM_LEFT].y += box-&gt;h;</a>
+<a name="ln1485"> </a>
+<a name="ln1486">  for(int i = 0; i &lt; 4; i++) corners[i] = transform_coords(corners[i], bb);</a>
+<a name="ln1487">}</a>
+<a name="ln1488"> </a>
+<a name="ln1489">static void get_pixel_region(const image_t *const image, const point_t *const corners, int *x_start, int *y_start,</a>
+<a name="ln1490">                             int *x_end, int *y_end)</a>
+<a name="ln1491">{</a>
+<a name="ln1492">  *x_start = CLAMP((int)(MIN(corners[TOP_LEFT].x,</a>
+<a name="ln1493">                             MIN(corners[TOP_RIGHT].x, MIN(corners[BOTTOM_RIGHT].x, corners[BOTTOM_LEFT].x)))</a>
+<a name="ln1494">                         + 0.5),</a>
+<a name="ln1495">                   0, image-&gt;width);</a>
+<a name="ln1496">  *x_end = CLAMP((int)(MAX(corners[TOP_LEFT].x,</a>
+<a name="ln1497">                           MAX(corners[TOP_RIGHT].x, MAX(corners[BOTTOM_RIGHT].x, corners[BOTTOM_LEFT].x)))</a>
+<a name="ln1498">                       + 0.5),</a>
+<a name="ln1499">                 0, image-&gt;width);</a>
+<a name="ln1500">  *y_start = CLAMP((int)(MIN(corners[TOP_LEFT].y,</a>
+<a name="ln1501">                             MIN(corners[TOP_RIGHT].y, MIN(corners[BOTTOM_RIGHT].y, corners[BOTTOM_LEFT].y)))</a>
+<a name="ln1502">                         + 0.5),</a>
+<a name="ln1503">                   0, image-&gt;height);</a>
+<a name="ln1504">  *y_end = CLAMP((int)(MAX(corners[TOP_LEFT].y,</a>
+<a name="ln1505">                           MAX(corners[TOP_RIGHT].y, MAX(corners[BOTTOM_RIGHT].y, corners[BOTTOM_LEFT].y)))</a>
+<a name="ln1506">                       + 0.5),</a>
+<a name="ln1507">                 0, image-&gt;height);</a>
+<a name="ln1508">}</a>
+<a name="ln1509"> </a>
+<a name="ln1510">static void reset_bb(image_t *image)</a>
+<a name="ln1511">{</a>
+<a name="ln1512">  image-&gt;bb[TOP_LEFT].x = 0.05;</a>
+<a name="ln1513">  image-&gt;bb[TOP_LEFT].y = 0.05;</a>
+<a name="ln1514">  image-&gt;bb[TOP_RIGHT].x = 0.95;</a>
+<a name="ln1515">  image-&gt;bb[TOP_RIGHT].y = 0.05;</a>
+<a name="ln1516">  image-&gt;bb[BOTTOM_RIGHT].x = 0.95;</a>
+<a name="ln1517">  image-&gt;bb[BOTTOM_RIGHT].y = 0.95;</a>
+<a name="ln1518">  image-&gt;bb[BOTTOM_LEFT].x = 0.05;</a>
+<a name="ln1519">  image-&gt;bb[BOTTOM_LEFT].y = 0.95;</a>
+<a name="ln1520">}</a>
+<a name="ln1521"> </a>
+<a name="ln1522">static void init_image(dt_lut_t *self, image_t *image, GCallback motion_cb)</a>
+<a name="ln1523">{</a>
+<a name="ln1524">  memset(image, 0x00, sizeof(image_t));</a>
+<a name="ln1525">  image-&gt;chart = &amp;self-&gt;chart;</a>
+<a name="ln1526">  image-&gt;drawing_area = gtk_drawing_area_new();</a>
+<a name="ln1527">  gtk_widget_set_size_request(image-&gt;drawing_area, -1, 50);</a>
+<a name="ln1528">  gtk_widget_add_events(image-&gt;drawing_area,</a>
+<a name="ln1529">                        GDK_POINTER_MOTION_MASK | GDK_BUTTON_PRESS_MASK | GDK_BUTTON_RELEASE_MASK);</a>
+<a name="ln1530">  g_signal_connect(image-&gt;drawing_area, &quot;size-allocate&quot;, G_CALLBACK(size_allocate_callback), image);</a>
+<a name="ln1531">  g_signal_connect(image-&gt;drawing_area, &quot;draw&quot;, G_CALLBACK(draw_image_callback), image);</a>
+<a name="ln1532">  g_signal_connect(image-&gt;drawing_area, &quot;motion-notify-event&quot;, G_CALLBACK(motion_cb), self);</a>
+<a name="ln1533">}</a>
+<a name="ln1534"> </a>
+<a name="ln1535">static void free_image(image_t *image)</a>
+<a name="ln1536">{</a>
+<a name="ln1537">  if(!image) return;</a>
+<a name="ln1538">  reset_bb(image);</a>
+<a name="ln1539">  if(image-&gt;image) cairo_pattern_destroy(image-&gt;image);</a>
+<a name="ln1540">  if(image-&gt;surface) cairo_surface_destroy(image-&gt;surface);</a>
+<a name="ln1541">  free(image-&gt;xyz);</a>
+<a name="ln1542">  image-&gt;image = NULL;</a>
+<a name="ln1543">  image-&gt;surface = NULL;</a>
+<a name="ln1544">  image-&gt;xyz = NULL;</a>
+<a name="ln1545">}</a>
+<a name="ln1546"> </a>
+<a name="ln1547">static void image_lab_to_xyz(float *image, const int width, const int height)</a>
+<a name="ln1548">{</a>
+<a name="ln1549">#ifdef _OPENMP</a>
+<a name="ln1550">#pragma omp parallel for default(none) \</a>
+<a name="ln1551">  dt_omp_firstprivate(height, width) \</a>
+<a name="ln1552">  shared(image) \</a>
+<a name="ln1553">  schedule(static)</a>
+<a name="ln1554">#endif</a>
+<a name="ln1555">  for(int y = 0; y &lt; height; y++)</a>
+<a name="ln1556">    for(int x = 0; x &lt; width; x++)</a>
+<a name="ln1557">    {</a>
+<a name="ln1558">      float *pixel = &amp;image[(x + y * width) * 3];</a>
+<a name="ln1559">      dt_Lab_to_XYZ(pixel, pixel);</a>
+<a name="ln1560">    }</a>
+<a name="ln1561">}</a>
+<a name="ln1562"> </a>
+<a name="ln1563">static int main_gui(dt_lut_t *self, int argc, char *argv[])</a>
+<a name="ln1564">{</a>
+<a name="ln1565">  gtk_init(&amp;argc, &amp;argv);</a>
+<a name="ln1566"> </a>
+<a name="ln1567">  char *source_filename = argc &gt;= 2 ? argv[1] : NULL;</a>
+<a name="ln1568">  char *cht_filename = argc &gt;= 3 ? argv[2] : NULL;</a>
+<a name="ln1569">  char *it8_filename = NULL;</a>
+<a name="ln1570">  char *reference_filename = NULL;</a>
+<a name="ln1571">  if(argc &gt;= 4)</a>
+<a name="ln1572">  {</a>
+<a name="ln1573">    char *upper_string = g_ascii_strup(argv[3], -1);</a>
+<a name="ln1574">    if(g_str_has_suffix(upper_string, &quot;.PFM&quot;))</a>
+<a name="ln1575">      reference_filename = argv[3];</a>
+<a name="ln1576">    else</a>
+<a name="ln1577">      it8_filename = argv[3];</a>
+<a name="ln1578">    g_free(upper_string);</a>
+<a name="ln1579">  }</a>
+<a name="ln1580"> </a>
+<a name="ln1581">  // build the GUI</a>
+<a name="ln1582">  GtkWidget *window = gtk_window_new(GTK_WINDOW_TOPLEVEL);</a>
+<a name="ln1583">  self-&gt;window = window;</a>
+<a name="ln1584">  gtk_window_set_title(GTK_WINDOW(window), &quot;darktable LUT tool&quot;);</a>
+<a name="ln1585">  gtk_container_set_border_width(GTK_CONTAINER(window), 3);</a>
+<a name="ln1586">  gtk_window_set_default_size(GTK_WINDOW(window), 800, 600);</a>
+<a name="ln1587">  g_signal_connect(GTK_WINDOW(window), &quot;destroy&quot;, G_CALLBACK(gtk_main_quit), NULL);</a>
+<a name="ln1588"> </a>
+<a name="ln1589">  // resizable container</a>
+<a name="ln1590">  GtkWidget *vpaned = gtk_paned_new(GTK_ORIENTATION_VERTICAL);</a>
+<a name="ln1591">  gtk_container_add(GTK_CONTAINER(window), vpaned);</a>
+<a name="ln1592"> </a>
+<a name="ln1593">  // upper half</a>
+<a name="ln1594">  gtk_paned_pack1(GTK_PANED(vpaned), create_notebook(self), TRUE, FALSE);</a>
+<a name="ln1595"> </a>
+<a name="ln1596">  // lower half</a>
+<a name="ln1597">  gtk_paned_pack2(GTK_PANED(vpaned), create_table(self), TRUE, FALSE);</a>
+<a name="ln1598"> </a>
+<a name="ln1599">  gtk_widget_set_sensitive(self-&gt;cht_button, FALSE);</a>
+<a name="ln1600">  gtk_widget_set_sensitive(self-&gt;it8_button, FALSE);</a>
+<a name="ln1601">  gtk_widget_set_sensitive(self-&gt;reference_image_button, FALSE);</a>
+<a name="ln1602">  gtk_widget_set_sensitive(self-&gt;process_button, FALSE);</a>
+<a name="ln1603">  gtk_widget_set_sensitive(self-&gt;export_button, FALSE);</a>
+<a name="ln1604">  gtk_widget_set_sensitive(self-&gt;export_raw_button, FALSE);</a>
+<a name="ln1605"> </a>
+<a name="ln1606">  gtk_widget_show_all(window);</a>
+<a name="ln1607"> </a>
+<a name="ln1608">  // only load data now so it can fill widgets</a>
+<a name="ln1609">  if(source_filename &amp;&amp; open_source_image(self, source_filename))</a>
+<a name="ln1610">  {</a>
+<a name="ln1611">    gtk_file_chooser_set_filename(GTK_FILE_CHOOSER(self-&gt;image_button), source_filename);</a>
+<a name="ln1612">    if(cht_filename &amp;&amp; open_cht(self, cht_filename))</a>
+<a name="ln1613">    {</a>
+<a name="ln1614">      gtk_file_chooser_set_filename(GTK_FILE_CHOOSER(self-&gt;cht_button), cht_filename);</a>
+<a name="ln1615">      if(it8_filename &amp;&amp; open_it8(self, it8_filename))</a>
+<a name="ln1616">        gtk_file_chooser_set_filename(GTK_FILE_CHOOSER(self-&gt;it8_button), it8_filename);</a>
+<a name="ln1617">      if(reference_filename &amp;&amp; open_reference_image(self, reference_filename))</a>
+<a name="ln1618">      {</a>
+<a name="ln1619">        gtk_file_chooser_set_filename(GTK_FILE_CHOOSER(self-&gt;reference_image_button), reference_filename);</a>
+<a name="ln1620">        gtk_combo_box_set_active(GTK_COMBO_BOX(self-&gt;reference_mode), 1);</a>
+<a name="ln1621">      }</a>
+<a name="ln1622">    }</a>
+<a name="ln1623">  }</a>
+<a name="ln1624"> </a>
+<a name="ln1625">  gtk_main();</a>
+<a name="ln1626"> </a>
+<a name="ln1627">  return 0;</a>
+<a name="ln1628">}</a>
+<a name="ln1629"> </a>
+<a name="ln1630">static int parse_csv(dt_lut_t *self, const char *filename, double **target_L_ptr, double **target_a_ptr,</a>
+<a name="ln1631">                     double **target_b_ptr, double **source_Lab_ptr, int *num_gray, char **name, char **description)</a>
+<a name="ln1632">{</a>
+<a name="ln1633">  *target_L_ptr = NULL;</a>
+<a name="ln1634">  *target_a_ptr = NULL;</a>
+<a name="ln1635">  *target_b_ptr = NULL;</a>
+<a name="ln1636">  *source_Lab_ptr = NULL;</a>
+<a name="ln1637">  *name = NULL;</a>
+<a name="ln1638">  *description = NULL;</a>
+<a name="ln1639"> </a>
+<a name="ln1640">  FILE *f = g_fopen(filename, &quot;rb&quot;);</a>
+<a name="ln1641">  if(!f) return 0;</a>
+<a name="ln1642">  int N = 0;</a>
+<a name="ln1643">  while(fscanf(f, &quot;%*[^\n]\n&quot;) != EOF) N++;</a>
+<a name="ln1644">  fseek(f, 0, SEEK_SET);</a>
+<a name="ln1645"> </a>
+<a name="ln1646">  if(N &lt;= 1)</a>
+<a name="ln1647">  {</a>
+<a name="ln1648">    fclose(f);</a>
+<a name="ln1649">    return 0;</a>
+<a name="ln1650">  }</a>
+<a name="ln1651"> </a>
+<a name="ln1652">  // header lines</a>
+<a name="ln1653">  char key[16] = {0}, value[256] = {0};</a>
+<a name="ln1654">  int read_res = fscanf(f, &quot;%15[^;];%255[^\n]\n&quot;, key, value);</a>
+<a name="ln1655">  if(g_strcmp0(key, &quot;name&quot;) || read_res == EOF)</a>
+<a name="ln1656">  {</a>
+<a name="ln1657">    fprintf(stderr, &quot;error: expected `name' in the first line\n&quot;);</a>
+<a name="ln1658">    fclose(f);</a>
+<a name="ln1659">    return 0;</a>
+<a name="ln1660">  }</a>
+<a name="ln1661">  *name = g_strdup(value);</a>
+<a name="ln1662">  N--;</a>
+<a name="ln1663"> </a>
+<a name="ln1664">  read_res = fscanf(f, &quot;%15[^;];%255[^\n]\n&quot;, key, value);</a>
+<a name="ln1665">  if(g_strcmp0(key, &quot;description&quot;) || read_res == EOF)</a>
+<a name="ln1666">  {</a>
+<a name="ln1667">    fprintf(stderr, &quot;error: expected `description' in the second line\n&quot;);</a>
+<a name="ln1668">    fclose(f);</a>
+<a name="ln1669">    return 0;</a>
+<a name="ln1670">  }</a>
+<a name="ln1671">  *description = g_strdup(value);</a>
+<a name="ln1672">  N--;</a>
+<a name="ln1673"> </a>
+<a name="ln1674">  read_res = fscanf(f, &quot;%15[^;];%d\n&quot;, key, num_gray);</a>
+<a name="ln1675">  if(g_strcmp0(key, &quot;num_gray&quot;) || read_res == EOF)</a>
+<a name="ln1676">  {</a>
+<a name="ln1677">    fprintf(stderr, &quot;error: missing num_gray in csv\n&quot;);</a>
+<a name="ln1678">    fclose(f);</a>
+<a name="ln1679">    return 0;</a>
+<a name="ln1680">  }</a>
+<a name="ln1681">  N--;</a>
+<a name="ln1682"> </a>
+<a name="ln1683">  // skip the column title line</a>
+<a name="ln1684">  read_res = fscanf(f, &quot;%*[^\n]\n&quot;);</a>
+<a name="ln1685">  N--;</a>
+<a name="ln1686"> </a>
+<a name="ln1687">  double *target_L = (double *)calloc(sizeof(double), (N + 4));</a>
+<a name="ln1688">  double *target_a = (double *)calloc(sizeof(double), (N + 4));</a>
+<a name="ln1689">  double *target_b = (double *)calloc(sizeof(double), (N + 4));</a>
+<a name="ln1690">  double *source_Lab = (double *)calloc(3 * sizeof(double), N);</a>
+<a name="ln1691">  *target_L_ptr = target_L;</a>
+<a name="ln1692">  *target_a_ptr = target_a;</a>
+<a name="ln1693">  *target_b_ptr = target_b;</a>
+<a name="ln1694">  *source_Lab_ptr = source_Lab;</a>
+<a name="ln1695"> </a>
+<a name="ln1696">  char line[512];</a>
+<a name="ln1697">  for(int i = 0; i &lt; N; i++)</a>
+<a name="ln1698">  {</a>
+<a name="ln1699">    char *patchname = line, *iter = line, *endptr;</a>
+<a name="ln1700">    if(fgets(line, sizeof(line) / sizeof(*line), f) == 0) break;</a>
+<a name="ln1701">    while(*iter != ';') iter++;</a>
+<a name="ln1702">    *iter++ = '\0';</a>
+<a name="ln1703"> </a>
+<a name="ln1704">    source_Lab[3 * i] = g_ascii_strtod(iter, &amp;endptr);</a>
+<a name="ln1705">    if(iter == endptr || *endptr != ';') break;</a>
+<a name="ln1706">    iter = endptr + 1;</a>
+<a name="ln1707">    source_Lab[3 * i + 1] = g_ascii_strtod(iter, &amp;endptr);</a>
+<a name="ln1708">    if(iter == endptr || *endptr != ';') break;</a>
+<a name="ln1709">    iter = endptr + 1;</a>
+<a name="ln1710">    source_Lab[3 * i + 2] = g_ascii_strtod(iter, &amp;endptr);</a>
+<a name="ln1711">    if(iter == endptr || *endptr != ';') break;</a>
+<a name="ln1712">    iter = endptr + 1;</a>
+<a name="ln1713">    target_L[i] = g_ascii_strtod(iter, &amp;endptr);</a>
+<a name="ln1714">    if(iter == endptr || *endptr != ';') break;</a>
+<a name="ln1715">    iter = endptr + 1;</a>
+<a name="ln1716">    target_a[i] = g_ascii_strtod(iter, &amp;endptr);</a>
+<a name="ln1717">    if(iter == endptr || *endptr != ';') break;</a>
+<a name="ln1718">    iter = endptr + 1;</a>
+<a name="ln1719">    target_b[i] = g_ascii_strtod(iter, &amp;endptr);</a>
+<a name="ln1720">    if(iter == endptr || *endptr != '\n') break;</a>
+<a name="ln1721"> </a>
+<a name="ln1722">    double d[3] = { target_L[i], target_a[i], target_b[i] };</a>
+<a name="ln1723">    if(sqrt(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]) &gt; thrs)</a>
+<a name="ln1724">    {</a>
+<a name="ln1725">      fprintf(stderr, &quot;warning: ignoring patch %s with large difference deltaE %g!\n&quot;, patchname,</a>
+<a name="ln1726">              sqrt(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]));</a>
+<a name="ln1727">      fprintf(stderr, &quot;      %g %g %g -- %g %g %g\n&quot;, source_Lab[3 * i + 0], source_Lab[3 * i + 1],</a>
+<a name="ln1728">              source_Lab[3 * i + 2], target_L[i], target_a[i], target_b[i]);</a>
+<a name="ln1729">      N--; // ignore this patch.</a>
+<a name="ln1730">      i--;</a>
+<a name="ln1731">    }</a>
+<a name="ln1732">  }</a>
+<a name="ln1733"> </a>
+<a name="ln1734">  fclose(f);</a>
+<a name="ln1735">  return N;</a>
+<a name="ln1736">}</a>
+<a name="ln1737"> </a>
+<a name="ln1738">static int main_csv(dt_lut_t *self, int argc, char *argv[])</a>
+<a name="ln1739">{</a>
+<a name="ln1740">  const char *filename_csv = argv[2];</a>
+<a name="ln1741">  const int num_patches = atoi(argv[3]);</a>
+<a name="ln1742">  const char *filename_style = argv[4];</a>
+<a name="ln1743"> </a>
+<a name="ln1744">  int sparsity = num_patches + 4;</a>
+<a name="ln1745"> </a>
+<a name="ln1746">  // parse the csv</a>
+<a name="ln1747">  double *target_L, *target_a, *target_b, *colorchecker_Lab;</a>
+<a name="ln1748">  int num_tonecurve;</a>
+<a name="ln1749">  char *name, *description;</a>
+<a name="ln1750">  int N = parse_csv(self, filename_csv, &amp;target_L, &amp;target_a, &amp;target_b, &amp;colorchecker_Lab, &amp;num_tonecurve, &amp;name,</a>
+<a name="ln1751">                    &amp;description);</a>
+<a name="ln1752"> </a>
+<a name="ln1753">  if(N == 0)</a>
+<a name="ln1754">  {</a>
+<a name="ln1755">    fprintf(stderr, &quot;error parsing `%s', giving up\n&quot;, filename_csv);</a>
+<a name="ln1756"> </a>
+<a name="ln1757">    free(target_L);</a>
+<a name="ln1758">    free(target_a);</a>
+<a name="ln1759">    free(target_b);</a>
+<a name="ln1760">    free(colorchecker_Lab);</a>
+<a name="ln1761"> </a>
+<a name="ln1762">    return 1;</a>
+<a name="ln1763">  }</a>
+<a name="ln1764"> </a>
+<a name="ln1765">  add_hdr_patches(&amp;N, &amp;target_L, &amp;target_a, &amp;target_b, &amp;colorchecker_Lab);</a>
+<a name="ln1766"> </a>
+<a name="ln1767">  process_data(self, target_L, target_a, target_b, colorchecker_Lab, N, sparsity);</a>
+<a name="ln1768"> </a>
+<a name="ln1769">  export_style(self, filename_style, name, description);</a>
+<a name="ln1770"> </a>
+<a name="ln1771">  free(target_L);</a>
+<a name="ln1772">  free(target_a);</a>
+<a name="ln1773">  free(target_b);</a>
+<a name="ln1774">  free(colorchecker_Lab);</a>
+<a name="ln1775">  free(name);</a>
+<a name="ln1776">  free(description);</a>
+<a name="ln1777"> </a>
+<a name="ln1778">  return 0;</a>
+<a name="ln1779">}</a>
+<a name="ln1780"> </a>
+<a name="ln1781">static void show_usage(const char *exe)</a>
+<a name="ln1782">{</a>
+<a name="ln1783">  fprintf(stderr, &quot;Usage: %1$s [&lt;input Lab pfm file&gt;] [&lt;cht file&gt;] [&lt;reference cgats/it8 or Lab pfm file&gt;]\n&quot;</a>
+<a name="ln1784">                  &quot;       %1$s --csv &lt;csv file&gt; &lt;number patches&gt; &lt;output dtstyle file&gt;\n&quot;,</a>
+<a name="ln1785">          exe);</a>
+<a name="ln1786">}</a>
+<a name="ln1787"> </a>
+<a name="ln1788">int main(int argc, char *argv[])</a>
+<a name="ln1789">{</a>
+<a name="ln1790">#ifdef _WIN32</a>
+<a name="ln1791">  SetErrorMode(SEM_FAILCRITICALERRORS);</a>
+<a name="ln1792">#endif</a>
+<a name="ln1793"> </a>
+<a name="ln1794">#ifdef _OPENMP</a>
+<a name="ln1795">  omp_set_num_threads(omp_get_num_procs());</a>
+<a name="ln1796">#endif</a>
+<a name="ln1797"> </a>
+<a name="ln1798">  int res = 1;</a>
+<a name="ln1799">  dt_lut_t *self = (dt_lut_t *)calloc(1, sizeof(dt_lut_t));</a>
+<a name="ln1800">  self-&gt;picked_source_patches = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, free);</a>
+<a name="ln1801"> </a>
+<a name="ln1802">  if(argc &gt;= 2 &amp;&amp; !strcmp(argv[1], &quot;--help&quot;))</a>
+<a name="ln1803">    show_usage(argv[0]);</a>
+<a name="ln1804">  else if(argc &gt;= 2 &amp;&amp; !g_strcmp0(argv[1], &quot;--csv&quot;))</a>
+<a name="ln1805">  {</a>
+<a name="ln1806">    if(argc != 5)</a>
+<a name="ln1807">      show_usage(argv[0]);</a>
+<a name="ln1808">    else</a>
+<a name="ln1809">      res = main_csv(self, argc, argv);</a>
+<a name="ln1810">  }</a>
+<a name="ln1811">  else if(argc &lt;= 4)</a>
+<a name="ln1812">    res = main_gui(self, argc, argv);</a>
+<a name="ln1813">  else</a>
+<a name="ln1814">    show_usage(argv[0]);</a>
+<a name="ln1815"> </a>
+<a name="ln1816">  if(self-&gt;model) g_object_unref(self-&gt;model);</a>
+<a name="ln1817">  if(self-&gt;picked_source_patches) g_hash_table_unref(self-&gt;picked_source_patches);</a>
+<a name="ln1818">  free_image(&amp;self-&gt;source);</a>
+<a name="ln1819">  free_image(&amp;self-&gt;reference);</a>
+<a name="ln1820">  free_chart(self-&gt;chart);</a>
+<a name="ln1821">  free(self-&gt;tonecurve_encoded);</a>
+<a name="ln1822">  free(self-&gt;colorchecker_encoded);</a>
+<a name="ln1823">  free(self);</a>
+<a name="ln1824"> </a>
+<a name="ln1825">  return res;</a>
+<a name="ln1826">}</a>
+<a name="ln1827"> </a>
+<a name="ln1828">// modelines: These editor modelines have been set for all relevant files by tools/update_modelines.sh</a>
+<a name="ln1829">// vim: shiftwidth=2 expandtab tabstop=2 cindent</a>
+<a name="ln1830">// kate: tab-indents: off; indent-width 2; replace-tabs on; indent-mode cstyle; remove-trailing-spaces modified;</a>
+
+</code></pre>
+<div class="balloon" rel="723"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v701/" target="_blank">V701</a> realloc() possible leak: when realloc() fails in allocating memory, original pointer '* target_L' is lost. Consider assigning realloc() to a temporary pointer.</p></div>
+<div class="balloon" rel="724"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v701/" target="_blank">V701</a> realloc() possible leak: when realloc() fails in allocating memory, original pointer '* target_a' is lost. Consider assigning realloc() to a temporary pointer.</p></div>
+<div class="balloon" rel="725"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v701/" target="_blank">V701</a> realloc() possible leak: when realloc() fails in allocating memory, original pointer '* target_b' is lost. Consider assigning realloc() to a temporary pointer.</p></div>
+<div class="balloon" rel="726"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v701/" target="_blank">V701</a> realloc() possible leak: when realloc() fails in allocating memory, original pointer '* colorchecker_Lab' is lost. Consider assigning realloc() to a temporary pointer.</p></div>
+<div class="balloon" rel="880"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v522/" target="_blank">V522</a> There might be dereferencing of a potential null pointer 'grays'. Check lines: 880, 862.</p></div>
+<div class="balloon" rel="893"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v522/" target="_blank">V522</a> There might be dereferencing of a potential null pointer 'cx'. Check lines: 893, 860.</p></div>
+<div class="balloon" rel="893"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v522/" target="_blank">V522</a> There might be dereferencing of a potential null pointer 'cy'. Check lines: 893, 861.</p></div>
+<div class="balloon" rel="975"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v522/" target="_blank">V522</a> There might be dereferencing of a potential null pointer 'perm'. Check lines: 975, 956.</p></div>
+<div class="balloon" rel="1704"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v522/" target="_blank">V522</a> There might be dereferencing of a potential null pointer 'source_Lab'. Check lines: 1704, 1690.</p></div>
+<div class="balloon" rel="1713"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v522/" target="_blank">V522</a> There might be dereferencing of a potential null pointer 'target_L'. Check lines: 1713, 1687.</p></div>
+<div class="balloon" rel="1716"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v522/" target="_blank">V522</a> There might be dereferencing of a potential null pointer 'target_a'. Check lines: 1716, 1688.</p></div>
+<div class="balloon" rel="1719"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v522/" target="_blank">V522</a> There might be dereferencing of a potential null pointer 'target_b'. Check lines: 1719, 1689.</p></div>
+<div class="balloon" rel="1800"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v522/" target="_blank">V522</a> There might be dereferencing of a potential null pointer 'self'. Check lines: 1800, 1799.</p></div>
+
+<link rel="stylesheet" href="highlight.css">
+<script src="highlight.pack.js"></script>
+<script src="highlightjs-line-numbers.js"></script>
+<script>hljs.initHighlightingOnLoad();</script>
+<script>hljs.initLineNumbersOnLoad();</script>
+<script>
+  $(document).ready(function() {
+      $('.balloon').each(function () {
+          var bl = $(this);
+          var line = bl.attr('rel');
+          var text = $('a[name="ln'+line+'"]').text();
+
+          var space_count = 0;
+          for(var i = 0; i<text.length; i++){
+              var char = text[i];
+              if((char !== ' ')&&(char !== '\t'))break;
+              if(char === '\t')space_count++;
+              space_count++;
+          }
+
+          bl.css('margin-left', space_count*8);
+          $('a[name="ln'+line+'"]').after(bl);
+      });
+
+      window.location = window.location;
+  });
+</script>
+</body>
+</html>

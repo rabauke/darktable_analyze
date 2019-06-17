@@ -1,0 +1,1146 @@
+
+<html>
+<head>
+  <link rel="stylesheet" href="../style.css"/>
+  <script src="../jquery-3.2.1.min.js"></script>
+</head>
+<body>
+<pre><code class = "cpp">
+<a name="ln1">/*</a>
+<a name="ln2">   This file is part of darktable,</a>
+<a name="ln3">   copyright (c) 2009--2010 johannes hanika.</a>
+<a name="ln4"> </a>
+<a name="ln5">   darktable is free software: you can redistribute it and/or modify</a>
+<a name="ln6">   it under the terms of the GNU General Public License as published by</a>
+<a name="ln7">   the Free Software Foundation, either version 3 of the License, or</a>
+<a name="ln8">   (at your option) any later version.</a>
+<a name="ln9"> </a>
+<a name="ln10">   darktable is distributed in the hope that it will be useful,</a>
+<a name="ln11">   but WITHOUT ANY WARRANTY; without even the implied warranty of</a>
+<a name="ln12">   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the</a>
+<a name="ln13">   GNU General Public License for more details.</a>
+<a name="ln14"> </a>
+<a name="ln15">   You should have received a copy of the GNU General Public License</a>
+<a name="ln16">   along with darktable.  If not, see &lt;http://www.gnu.org/licenses/&gt;.</a>
+<a name="ln17"> */</a>
+<a name="ln18">#ifdef HAVE_CONFIG_H</a>
+<a name="ln19">#include &quot;config.h&quot;</a>
+<a name="ln20">#endif</a>
+<a name="ln21">#include &lt;assert.h&gt;</a>
+<a name="ln22">#include &lt;math.h&gt;</a>
+<a name="ln23">#include &lt;stdlib.h&gt;</a>
+<a name="ln24">#include &lt;string.h&gt;</a>
+<a name="ln25">#if defined(__SSE__)</a>
+<a name="ln26">#include &lt;xmmintrin.h&gt;</a>
+<a name="ln27">#endif</a>
+<a name="ln28">#include &quot;bauhaus/bauhaus.h&quot;</a>
+<a name="ln29">#include &quot;common/opencl.h&quot;</a>
+<a name="ln30">#include &quot;control/control.h&quot;</a>
+<a name="ln31">#include &quot;develop/develop.h&quot;</a>
+<a name="ln32">#include &quot;develop/imageop.h&quot;</a>
+<a name="ln33">#include &quot;develop/imageop_math.h&quot;</a>
+<a name="ln34">#include &quot;develop/tiling.h&quot;</a>
+<a name="ln35">#include &quot;gui/accelerators.h&quot;</a>
+<a name="ln36">#include &quot;gui/gtk.h&quot;</a>
+<a name="ln37">#include &quot;iop/iop_api.h&quot;</a>
+<a name="ln38"> </a>
+<a name="ln39">#include &lt;gtk/gtk.h&gt;</a>
+<a name="ln40">#include &lt;inttypes.h&gt;</a>
+<a name="ln41"> </a>
+<a name="ln42"> </a>
+<a name="ln43">DT_MODULE_INTROSPECTION(2, dt_iop_highlights_params_t)</a>
+<a name="ln44"> </a>
+<a name="ln45">typedef enum dt_iop_highlights_mode_t</a>
+<a name="ln46">{</a>
+<a name="ln47">  DT_IOP_HIGHLIGHTS_CLIP = 0,</a>
+<a name="ln48">  DT_IOP_HIGHLIGHTS_LCH = 1,</a>
+<a name="ln49">  DT_IOP_HIGHLIGHTS_INPAINT = 2,</a>
+<a name="ln50">} dt_iop_highlights_mode_t;</a>
+<a name="ln51"> </a>
+<a name="ln52">typedef struct dt_iop_highlights_params_t</a>
+<a name="ln53">{</a>
+<a name="ln54">  dt_iop_highlights_mode_t mode;</a>
+<a name="ln55">  float blendL, blendC, blendh; // unused</a>
+<a name="ln56">  float clip;</a>
+<a name="ln57">} dt_iop_highlights_params_t;</a>
+<a name="ln58"> </a>
+<a name="ln59">typedef struct dt_iop_highlights_gui_data_t</a>
+<a name="ln60">{</a>
+<a name="ln61">  GtkWidget *clip;</a>
+<a name="ln62">  GtkWidget *mode;</a>
+<a name="ln63">} dt_iop_highlights_gui_data_t;</a>
+<a name="ln64"> </a>
+<a name="ln65">typedef dt_iop_highlights_params_t dt_iop_highlights_data_t;</a>
+<a name="ln66"> </a>
+<a name="ln67">typedef struct dt_iop_highlights_global_data_t</a>
+<a name="ln68">{</a>
+<a name="ln69">  int kernel_highlights_1f_clip;</a>
+<a name="ln70">  int kernel_highlights_1f_lch_bayer;</a>
+<a name="ln71">  int kernel_highlights_1f_lch_xtrans;</a>
+<a name="ln72">  int kernel_highlights_4f_clip;</a>
+<a name="ln73">} dt_iop_highlights_global_data_t;</a>
+<a name="ln74"> </a>
+<a name="ln75"> </a>
+<a name="ln76">const char *name()</a>
+<a name="ln77">{</a>
+<a name="ln78">  return _(&quot;highlight reconstruction&quot;);</a>
+<a name="ln79">}</a>
+<a name="ln80"> </a>
+<a name="ln81">int default_group()</a>
+<a name="ln82">{</a>
+<a name="ln83">  return IOP_GROUP_BASIC;</a>
+<a name="ln84">}</a>
+<a name="ln85"> </a>
+<a name="ln86">int flags()</a>
+<a name="ln87">{</a>
+<a name="ln88">  return IOP_FLAGS_SUPPORTS_BLENDING | IOP_FLAGS_ALLOW_TILING | IOP_FLAGS_ONE_INSTANCE;</a>
+<a name="ln89">}</a>
+<a name="ln90"> </a>
+<a name="ln91">int default_colorspace(dt_iop_module_t *self, dt_dev_pixelpipe_t *pipe, dt_dev_pixelpipe_iop_t *piece)</a>
+<a name="ln92">{</a>
+<a name="ln93">  return iop_cs_RAW;</a>
+<a name="ln94">}</a>
+<a name="ln95"> </a>
+<a name="ln96">int legacy_params(dt_iop_module_t *self, const void *const old_params, const int old_version,</a>
+<a name="ln97">                  void *new_params, const int new_version)</a>
+<a name="ln98">{</a>
+<a name="ln99">  if(old_version == 1 &amp;&amp; new_version == 2)</a>
+<a name="ln100">  {</a>
+<a name="ln101">    memcpy(new_params, old_params, sizeof(dt_iop_highlights_params_t) - sizeof(float));</a>
+<a name="ln102">    dt_iop_highlights_params_t *n = (dt_iop_highlights_params_t *)new_params;</a>
+<a name="ln103">    n-&gt;clip = 1.0f;</a>
+<a name="ln104">    return 0;</a>
+<a name="ln105">  }</a>
+<a name="ln106">  return 1;</a>
+<a name="ln107">}</a>
+<a name="ln108"> </a>
+<a name="ln109">#ifdef HAVE_OPENCL</a>
+<a name="ln110">int process_cl(struct dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, cl_mem dev_in, cl_mem dev_out,</a>
+<a name="ln111">               const dt_iop_roi_t *const roi_in, const dt_iop_roi_t *const roi_out)</a>
+<a name="ln112">{</a>
+<a name="ln113">  dt_iop_highlights_data_t *d = (dt_iop_highlights_data_t *)piece-&gt;data;</a>
+<a name="ln114">  dt_iop_highlights_global_data_t *gd = (dt_iop_highlights_global_data_t *)self-&gt;data;</a>
+<a name="ln115"> </a>
+<a name="ln116">  cl_int err = -999;</a>
+<a name="ln117">  cl_mem dev_xtrans = NULL;</a>
+<a name="ln118"> </a>
+<a name="ln119">  const int devid = piece-&gt;pipe-&gt;devid;</a>
+<a name="ln120">  const int width = roi_in-&gt;width;</a>
+<a name="ln121">  const int height = roi_in-&gt;height;</a>
+<a name="ln122"> </a>
+<a name="ln123">  const float clip = d-&gt;clip</a>
+<a name="ln124">                     * fminf(piece-&gt;pipe-&gt;dsc.processed_maximum[0],</a>
+<a name="ln125">                             fminf(piece-&gt;pipe-&gt;dsc.processed_maximum[1], piece-&gt;pipe-&gt;dsc.processed_maximum[2]));</a>
+<a name="ln126"> </a>
+<a name="ln127">  const uint32_t filters = piece-&gt;pipe-&gt;dsc.filters;</a>
+<a name="ln128"> </a>
+<a name="ln129">  if(!filters)</a>
+<a name="ln130">  {</a>
+<a name="ln131">    // non-raw images use dedicated kernel which just clips</a>
+<a name="ln132">    size_t sizes[] = { ROUNDUPWD(width), ROUNDUPHT(height), 1 };</a>
+<a name="ln133">    dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_highlights_4f_clip, 0, sizeof(cl_mem), (void *)&amp;dev_in);</a>
+<a name="ln134">    dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_highlights_4f_clip, 1, sizeof(cl_mem), (void *)&amp;dev_out);</a>
+<a name="ln135">    dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_highlights_4f_clip, 2, sizeof(int), (void *)&amp;width);</a>
+<a name="ln136">    dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_highlights_4f_clip, 3, sizeof(int), (void *)&amp;height);</a>
+<a name="ln137">    dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_highlights_4f_clip, 4, sizeof(int), (void *)&amp;d-&gt;mode);</a>
+<a name="ln138">    dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_highlights_4f_clip, 5, sizeof(float), (void *)&amp;clip);</a>
+<a name="ln139">    err = dt_opencl_enqueue_kernel_2d(devid, gd-&gt;kernel_highlights_4f_clip, sizes);</a>
+<a name="ln140">    if(err != CL_SUCCESS) goto error;</a>
+<a name="ln141">  }</a>
+<a name="ln142">  else if(d-&gt;mode == DT_IOP_HIGHLIGHTS_CLIP)</a>
+<a name="ln143">  {</a>
+<a name="ln144">    // raw images with clip mode (both bayer and xtrans)</a>
+<a name="ln145">    size_t sizes[] = { ROUNDUPWD(width), ROUNDUPHT(height), 1 };</a>
+<a name="ln146">    dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_highlights_1f_clip, 0, sizeof(cl_mem), (void *)&amp;dev_in);</a>
+<a name="ln147">    dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_highlights_1f_clip, 1, sizeof(cl_mem), (void *)&amp;dev_out);</a>
+<a name="ln148">    dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_highlights_1f_clip, 2, sizeof(int), (void *)&amp;width);</a>
+<a name="ln149">    dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_highlights_1f_clip, 3, sizeof(int), (void *)&amp;height);</a>
+<a name="ln150">    dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_highlights_1f_clip, 4, sizeof(float), (void *)&amp;clip);</a>
+<a name="ln151">    dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_highlights_1f_clip, 5, sizeof(int), (void *)&amp;roi_out-&gt;x);</a>
+<a name="ln152">    dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_highlights_1f_clip, 6, sizeof(int), (void *)&amp;roi_out-&gt;y);</a>
+<a name="ln153">    dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_highlights_1f_clip, 7, sizeof(int), (void *)&amp;filters);</a>
+<a name="ln154">    err = dt_opencl_enqueue_kernel_2d(devid, gd-&gt;kernel_highlights_1f_clip, sizes);</a>
+<a name="ln155">    if(err != CL_SUCCESS) goto error;</a>
+<a name="ln156">  }</a>
+<a name="ln157">  else if(d-&gt;mode == DT_IOP_HIGHLIGHTS_LCH &amp;&amp; filters != 9u)</a>
+<a name="ln158">  {</a>
+<a name="ln159">    // bayer sensor raws with LCH mode</a>
+<a name="ln160">    size_t sizes[] = { ROUNDUPWD(width), ROUNDUPHT(height), 1 };</a>
+<a name="ln161">    dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_highlights_1f_lch_bayer, 0, sizeof(cl_mem), (void *)&amp;dev_in);</a>
+<a name="ln162">    dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_highlights_1f_lch_bayer, 1, sizeof(cl_mem), (void *)&amp;dev_out);</a>
+<a name="ln163">    dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_highlights_1f_lch_bayer, 2, sizeof(int), (void *)&amp;width);</a>
+<a name="ln164">    dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_highlights_1f_lch_bayer, 3, sizeof(int), (void *)&amp;height);</a>
+<a name="ln165">    dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_highlights_1f_lch_bayer, 4, sizeof(float), (void *)&amp;clip);</a>
+<a name="ln166">    dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_highlights_1f_lch_bayer, 5, sizeof(int), (void *)&amp;roi_out-&gt;x);</a>
+<a name="ln167">    dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_highlights_1f_lch_bayer, 6, sizeof(int), (void *)&amp;roi_out-&gt;y);</a>
+<a name="ln168">    dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_highlights_1f_lch_bayer, 7, sizeof(int), (void *)&amp;filters);</a>
+<a name="ln169">    err = dt_opencl_enqueue_kernel_2d(devid, gd-&gt;kernel_highlights_1f_lch_bayer, sizes);</a>
+<a name="ln170">    if(err != CL_SUCCESS) goto error;</a>
+<a name="ln171">  }</a>
+<a name="ln172">  else if(d-&gt;mode == DT_IOP_HIGHLIGHTS_LCH &amp;&amp; filters == 9u)</a>
+<a name="ln173">  {</a>
+<a name="ln174">    // xtrans sensor raws with LCH mode</a>
+<a name="ln175">    int blocksizex, blocksizey;</a>
+<a name="ln176"> </a>
+<a name="ln177">    dt_opencl_local_buffer_t locopt</a>
+<a name="ln178">      = (dt_opencl_local_buffer_t){ .xoffset = 2 * 2, .xfactor = 1, .yoffset = 2 * 2, .yfactor = 1,</a>
+<a name="ln179">                                    .cellsize = sizeof(float), .overhead = 0,</a>
+<a name="ln180">                                    .sizex = 1 &lt;&lt; 8, .sizey = 1 &lt;&lt; 8 };</a>
+<a name="ln181"> </a>
+<a name="ln182">    if(dt_opencl_local_buffer_opt(devid, gd-&gt;kernel_highlights_1f_lch_xtrans, &amp;locopt))</a>
+<a name="ln183">    {</a>
+<a name="ln184">      blocksizex = locopt.sizex;</a>
+<a name="ln185">      blocksizey = locopt.sizey;</a>
+<a name="ln186">    }</a>
+<a name="ln187">    else</a>
+<a name="ln188">      blocksizex = blocksizey = 1;</a>
+<a name="ln189"> </a>
+<a name="ln190">    dev_xtrans</a>
+<a name="ln191">        = dt_opencl_copy_host_to_device_constant(devid, sizeof(piece-&gt;pipe-&gt;dsc.xtrans), piece-&gt;pipe-&gt;dsc.xtrans);</a>
+<a name="ln192">    if(dev_xtrans == NULL) goto error;</a>
+<a name="ln193"> </a>
+<a name="ln194">    size_t sizes[] = { ROUNDUP(width, blocksizex), ROUNDUP(height, blocksizey), 1 };</a>
+<a name="ln195">    size_t local[] = { blocksizex, blocksizey, 1 };</a>
+<a name="ln196">    dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_highlights_1f_lch_xtrans, 0, sizeof(cl_mem), (void *)&amp;dev_in);</a>
+<a name="ln197">    dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_highlights_1f_lch_xtrans, 1, sizeof(cl_mem), (void *)&amp;dev_out);</a>
+<a name="ln198">    dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_highlights_1f_lch_xtrans, 2, sizeof(int), (void *)&amp;width);</a>
+<a name="ln199">    dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_highlights_1f_lch_xtrans, 3, sizeof(int), (void *)&amp;height);</a>
+<a name="ln200">    dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_highlights_1f_lch_xtrans, 4, sizeof(float), (void *)&amp;clip);</a>
+<a name="ln201">    dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_highlights_1f_lch_xtrans, 5, sizeof(int), (void *)&amp;roi_out-&gt;x);</a>
+<a name="ln202">    dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_highlights_1f_lch_xtrans, 6, sizeof(int), (void *)&amp;roi_out-&gt;y);</a>
+<a name="ln203">    dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_highlights_1f_lch_xtrans, 7, sizeof(cl_mem), (void *)&amp;dev_xtrans);</a>
+<a name="ln204">    dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_highlights_1f_lch_xtrans, 8,</a>
+<a name="ln205">                               (blocksizex + 4) * (blocksizey + 4) * sizeof(float), NULL);</a>
+<a name="ln206"> </a>
+<a name="ln207">    err = dt_opencl_enqueue_kernel_2d_with_local(devid, gd-&gt;kernel_highlights_1f_lch_xtrans, sizes, local);</a>
+<a name="ln208">    if(err != CL_SUCCESS) goto error;</a>
+<a name="ln209">  }</a>
+<a name="ln210"> </a>
+<a name="ln211">  // update processed maximum</a>
+<a name="ln212">  const float m = fmaxf(fmaxf(piece-&gt;pipe-&gt;dsc.processed_maximum[0], piece-&gt;pipe-&gt;dsc.processed_maximum[1]),</a>
+<a name="ln213">                        piece-&gt;pipe-&gt;dsc.processed_maximum[2]);</a>
+<a name="ln214">  for(int k = 0; k &lt; 3; k++) piece-&gt;pipe-&gt;dsc.processed_maximum[k] = m;</a>
+<a name="ln215"> </a>
+<a name="ln216">  dt_opencl_release_mem_object(dev_xtrans);</a>
+<a name="ln217">  return TRUE;</a>
+<a name="ln218"> </a>
+<a name="ln219">error:</a>
+<a name="ln220">  dt_opencl_release_mem_object(dev_xtrans);</a>
+<a name="ln221">  dt_print(DT_DEBUG_OPENCL, &quot;[opencl_highlights] couldn't enqueue kernel! %d\n&quot;, err);</a>
+<a name="ln222">  return FALSE;</a>
+<a name="ln223">}</a>
+<a name="ln224">#endif</a>
+<a name="ln225"> </a>
+<a name="ln226">void tiling_callback(struct dt_iop_module_t *self, struct dt_dev_pixelpipe_iop_t *piece,</a>
+<a name="ln227">              const dt_iop_roi_t *roi_in, const dt_iop_roi_t *roi_out,</a>
+<a name="ln228">              struct dt_develop_tiling_t *tiling)</a>
+<a name="ln229">{</a>
+<a name="ln230">  dt_iop_highlights_data_t *d = (dt_iop_highlights_data_t *)piece-&gt;data;</a>
+<a name="ln231">  const uint32_t filters = piece-&gt;pipe-&gt;dsc.filters;</a>
+<a name="ln232"> </a>
+<a name="ln233">  tiling-&gt;factor = 2.0f;  // in + out</a>
+<a name="ln234">  tiling-&gt;maxbuf = 1.0f;</a>
+<a name="ln235">  tiling-&gt;overhead = 0;</a>
+<a name="ln236"> </a>
+<a name="ln237">  if(filters == 9u)</a>
+<a name="ln238">  {</a>
+<a name="ln239">    // xtrans</a>
+<a name="ln240">    tiling-&gt;xalign = 6;</a>
+<a name="ln241">    tiling-&gt;yalign = 6;</a>
+<a name="ln242">    tiling-&gt;overlap = (d-&gt;mode == DT_IOP_HIGHLIGHTS_LCH) ? 2 : 0;</a>
+<a name="ln243">  }</a>
+<a name="ln244">  else if(filters)</a>
+<a name="ln245">  {</a>
+<a name="ln246">    // bayer</a>
+<a name="ln247">    tiling-&gt;xalign = 2;</a>
+<a name="ln248">    tiling-&gt;yalign = 2;</a>
+<a name="ln249">    tiling-&gt;overlap = (d-&gt;mode == DT_IOP_HIGHLIGHTS_LCH) ? 1 : 0;</a>
+<a name="ln250">  }</a>
+<a name="ln251">  else</a>
+<a name="ln252">  {</a>
+<a name="ln253">    // non-raw</a>
+<a name="ln254">    tiling-&gt;xalign = 1;</a>
+<a name="ln255">    tiling-&gt;yalign = 1;</a>
+<a name="ln256">    tiling-&gt;overlap = 0;</a>
+<a name="ln257">  }</a>
+<a name="ln258">}</a>
+<a name="ln259"> </a>
+<a name="ln260">/* interpolate value for a pixel, ideal via ratio to nearby pixel */</a>
+<a name="ln261">static inline float interp_pix_xtrans(const int ratio_next,</a>
+<a name="ln262">                                      const ssize_t offset_next,</a>
+<a name="ln263">                                      const float clip0, const float clip_next,</a>
+<a name="ln264">                                      const float *const in,</a>
+<a name="ln265">                                      const float *const ratios)</a>
+<a name="ln266">{</a>
+<a name="ln267">  assert(ratio_next != 0);</a>
+<a name="ln268">  // it's OK to exceed clipping of current pixel's color based on a</a>
+<a name="ln269">  // neighbor -- that is the purpose of interpolating highlight</a>
+<a name="ln270">  // colors</a>
+<a name="ln271">  const float clip_val = fmaxf(clip0, clip_next);</a>
+<a name="ln272">  if(in[offset_next] &gt;= clip_next - 1e-5f)</a>
+<a name="ln273">  {</a>
+<a name="ln274">    // next pixel is also clipped</a>
+<a name="ln275">    return clip_val;</a>
+<a name="ln276">  }</a>
+<a name="ln277">  else</a>
+<a name="ln278">  {</a>
+<a name="ln279">    // set this pixel in ratio to the next</a>
+<a name="ln280">    assert(ratio_next != 0);</a>
+<a name="ln281">    if (ratio_next &gt; 0)</a>
+<a name="ln282">      return fminf(in[offset_next] / ratios[ratio_next], clip_val);</a>
+<a name="ln283">    else</a>
+<a name="ln284">      return fminf(in[offset_next] * ratios[-ratio_next], clip_val);</a>
+<a name="ln285">  }</a>
+<a name="ln286">}</a>
+<a name="ln287"> </a>
+<a name="ln288">static inline void interpolate_color_xtrans(const void *const ivoid, void *const ovoid,</a>
+<a name="ln289">                                            const dt_iop_roi_t *const roi_in,</a>
+<a name="ln290">                                            const dt_iop_roi_t *const roi_out,</a>
+<a name="ln291">                                            int dim, int dir, int other,</a>
+<a name="ln292">                                            const float *const clip,</a>
+<a name="ln293">                                            const uint8_t (*const xtrans)[6],</a>
+<a name="ln294">                                            const int pass)</a>
+<a name="ln295">{</a>
+<a name="ln296">  // In Bayer each row/col has only green/red or green/blue</a>
+<a name="ln297">  // transitions, hence can reconstruct color by single ratio per</a>
+<a name="ln298">  // row. In x-trans there can be transitions between arbitrary colors</a>
+<a name="ln299">  // in a row/col (and 2x2 green blocks which provide no color</a>
+<a name="ln300">  // transition information). Hence calculate multiple color ratios</a>
+<a name="ln301">  // for each row/col.</a>
+<a name="ln302"> </a>
+<a name="ln303">  // Lookup for color ratios, e.g. red -&gt; blue is roff[0][2] and blue</a>
+<a name="ln304">  // -&gt; red is roff[2][0]. Returned value is an index into ratios. If</a>
+<a name="ln305">  // negative, then need to invert the ratio. Identity color</a>
+<a name="ln306">  // transitions aren't used.</a>
+<a name="ln307">  const int roff[3][3] = {{ 0, -1, -2},</a>
+<a name="ln308">                          { 1,  0, -3},</a>
+<a name="ln309">                          { 2,  3,  0}};</a>
+<a name="ln310">  // record ratios of color transitions 0:unused, 1:RG, 2:RB, and 3:GB</a>
+<a name="ln311">  float ratios[4] = {1.0f, 1.0f, 1.0f, 1.0f};</a>
+<a name="ln312"> </a>
+<a name="ln313">  // passes are 0:+x, 1:-x, 2:+y, 3:-y</a>
+<a name="ln314">  // dims are 0:traverse a row, 1:traverse a column</a>
+<a name="ln315">  // dir is 1:left to right, -1: right to left</a>
+<a name="ln316">  int i = (dim == 0) ? 0 : other;</a>
+<a name="ln317">  int j = (dim == 0) ? other : 0;</a>
+<a name="ln318">  const ssize_t offs = (dim ? roi_out-&gt;width : 1) * ((dir &lt; 0) ? -1 : 1);</a>
+<a name="ln319">  const ssize_t offl = offs - (dim ? 1 : roi_out-&gt;width);</a>
+<a name="ln320">  const ssize_t offr = offs + (dim ? 1 : roi_out-&gt;width);</a>
+<a name="ln321">  int beg, end;</a>
+<a name="ln322">  if(dir == 1)</a>
+<a name="ln323">  {</a>
+<a name="ln324">    beg = 0;</a>
+<a name="ln325">    end = (dim == 0) ? roi_out-&gt;width : roi_out-&gt;height;</a>
+<a name="ln326">  }</a>
+<a name="ln327">  else</a>
+<a name="ln328">  {</a>
+<a name="ln329">    beg = ((dim == 0) ? roi_out-&gt;width : roi_out-&gt;height) - 1;</a>
+<a name="ln330">    end = -1;</a>
+<a name="ln331">  }</a>
+<a name="ln332"> </a>
+<a name="ln333">  float *in, *out;</a>
+<a name="ln334">  if(dim == 1)</a>
+<a name="ln335">  {</a>
+<a name="ln336">    out = (float *)ovoid + (size_t)i + (size_t)beg * roi_out-&gt;width;</a>
+<a name="ln337">    in = (float *)ivoid + (size_t)i + (size_t)beg * roi_in-&gt;width;</a>
+<a name="ln338">  }</a>
+<a name="ln339">  else</a>
+<a name="ln340">  {</a>
+<a name="ln341">    out = (float *)ovoid + (size_t)beg + (size_t)j * roi_out-&gt;width;</a>
+<a name="ln342">    in = (float *)ivoid + (size_t)beg + (size_t)j * roi_in-&gt;width;</a>
+<a name="ln343">  }</a>
+<a name="ln344"> </a>
+<a name="ln345">  for(int k = beg; k != end; k += dir)</a>
+<a name="ln346">  {</a>
+<a name="ln347">    if(dim == 1)</a>
+<a name="ln348">      j = k;</a>
+<a name="ln349">    else</a>
+<a name="ln350">      i = k;</a>
+<a name="ln351"> </a>
+<a name="ln352">    const uint8_t f0 = FCxtrans(j, i, roi_in, xtrans);</a>
+<a name="ln353">    const uint8_t f1 = FCxtrans(dim ? (j + dir) : j, dim ? i : (i + dir), roi_in, xtrans);</a>
+<a name="ln354">    const uint8_t fl = FCxtrans(dim ? (j + dir) : (j - 1), dim ? (i - 1) : (i + dir), roi_in, xtrans);</a>
+<a name="ln355">    const uint8_t fr = FCxtrans(dim ? (j + dir) : (j + 1), dim ? (i + 1) : (i + dir), roi_in, xtrans);</a>
+<a name="ln356">    const float clip0 = clip[f0];</a>
+<a name="ln357">    const float clip1 = clip[f1];</a>
+<a name="ln358">    const float clipl = clip[fl];</a>
+<a name="ln359">    const float clipr = clip[fr];</a>
+<a name="ln360">    const float clip_max = fmaxf(fmaxf(clip[0], clip[1]), clip[2]);</a>
+<a name="ln361"> </a>
+<a name="ln362">    if(i == 0 || i == roi_out-&gt;width - 1 || j == 0 || j == roi_out-&gt;height - 1)</a>
+<a name="ln363">    {</a>
+<a name="ln364">      if(pass == 3) out[0] = fminf(clip_max, in[0]);</a>
+<a name="ln365">    }</a>
+<a name="ln366">    else</a>
+<a name="ln367">    {</a>
+<a name="ln368">      // ratio to next pixel if this &amp; next are unclamped and not in</a>
+<a name="ln369">      // 2x2 green block</a>
+<a name="ln370">      if ((f0 != f1) &amp;&amp;</a>
+<a name="ln371">          (in[0] &lt; clip0 &amp;&amp; in[0] &gt; 1e-5f) &amp;&amp;</a>
+<a name="ln372">          (in[offs] &lt; clip1 &amp;&amp; in[offs] &gt; 1e-5f))</a>
+<a name="ln373">      {</a>
+<a name="ln374">        const int r = roff[f0][f1];</a>
+<a name="ln375">        assert(r != 0);</a>
+<a name="ln376">        if (r &gt; 0)</a>
+<a name="ln377">          ratios[r] = (3.f * ratios[r] + (in[offs] / in[0])) / 4.f;</a>
+<a name="ln378">        else</a>
+<a name="ln379">          ratios[-r] = (3.f * ratios[-r] + (in[0] / in[offs])) / 4.f;</a>
+<a name="ln380">      }</a>
+<a name="ln381"> </a>
+<a name="ln382">      if(in[0] &gt;= clip0 - 1e-5f)</a>
+<a name="ln383">      {</a>
+<a name="ln384">        // interplate color for clipped pixel</a>
+<a name="ln385">        float add;</a>
+<a name="ln386">        if(f0 != f1)</a>
+<a name="ln387">          // next pixel is different color</a>
+<a name="ln388">          add =</a>
+<a name="ln389">            interp_pix_xtrans(roff[f0][f1], offs, clip0, clip1, in, ratios);</a>
+<a name="ln390">        else</a>
+<a name="ln391">          // at start of 2x2 green block, look diagonally</a>
+<a name="ln392">          add = (fl != f0) ?</a>
+<a name="ln393">            interp_pix_xtrans(roff[f0][fl], offl, clip0, clipl, in, ratios) :</a>
+<a name="ln394">            interp_pix_xtrans(roff[f0][fr], offr, clip0, clipr, in, ratios);</a>
+<a name="ln395"> </a>
+<a name="ln396">        if(pass == 0)</a>
+<a name="ln397">          out[0] = add;</a>
+<a name="ln398">        else if(pass == 3)</a>
+<a name="ln399">          out[0] = fminf(clip_max, (out[0] + add) / 4.0f);</a>
+<a name="ln400">        else</a>
+<a name="ln401">          out[0] += add;</a>
+<a name="ln402">      }</a>
+<a name="ln403">      else</a>
+<a name="ln404">      {</a>
+<a name="ln405">        // pixel is not clipped</a>
+<a name="ln406">        if(pass == 3) out[0] = in[0];</a>
+<a name="ln407">      }</a>
+<a name="ln408">    }</a>
+<a name="ln409">    out += offs;</a>
+<a name="ln410">    in += offs;</a>
+<a name="ln411">  }</a>
+<a name="ln412">}</a>
+<a name="ln413"> </a>
+<a name="ln414">static inline void interpolate_color(const void *const ivoid, void *const ovoid,</a>
+<a name="ln415">                                     const dt_iop_roi_t *const roi_out, int dim, int dir, int other,</a>
+<a name="ln416">                                     const float *clip, const uint32_t filters, const int pass)</a>
+<a name="ln417">{</a>
+<a name="ln418">  float ratio = 1.0f;</a>
+<a name="ln419">  float *in, *out;</a>
+<a name="ln420"> </a>
+<a name="ln421">  int i = 0, j = 0;</a>
+<a name="ln422">  if(dim == 0)</a>
+<a name="ln423">    j = other;</a>
+<a name="ln424">  else</a>
+<a name="ln425">    i = other;</a>
+<a name="ln426">  ssize_t offs = dim ? roi_out-&gt;width : 1;</a>
+<a name="ln427">  if(dir &lt; 0) offs = -offs;</a>
+<a name="ln428">  int beg, end;</a>
+<a name="ln429">  if(dim == 0 &amp;&amp; dir == 1)</a>
+<a name="ln430">  {</a>
+<a name="ln431">    beg = 0;</a>
+<a name="ln432">    end = roi_out-&gt;width;</a>
+<a name="ln433">  }</a>
+<a name="ln434">  else if(dim == 0 &amp;&amp; dir == -1)</a>
+<a name="ln435">  {</a>
+<a name="ln436">    beg = roi_out-&gt;width - 1;</a>
+<a name="ln437">    end = -1;</a>
+<a name="ln438">  }</a>
+<a name="ln439">  else if(dim == 1 &amp;&amp; dir == 1)</a>
+<a name="ln440">  {</a>
+<a name="ln441">    beg = 0;</a>
+<a name="ln442">    end = roi_out-&gt;height;</a>
+<a name="ln443">  }</a>
+<a name="ln444">  else if(dim == 1 &amp;&amp; dir == -1)</a>
+<a name="ln445">  {</a>
+<a name="ln446">    beg = roi_out-&gt;height - 1;</a>
+<a name="ln447">    end = -1;</a>
+<a name="ln448">  }</a>
+<a name="ln449">  else</a>
+<a name="ln450">    return;</a>
+<a name="ln451"> </a>
+<a name="ln452">  if(dim == 1)</a>
+<a name="ln453">  {</a>
+<a name="ln454">    out = (float *)ovoid + i + (size_t)beg * roi_out-&gt;width;</a>
+<a name="ln455">    in = (float *)ivoid + i + (size_t)beg * roi_out-&gt;width;</a>
+<a name="ln456">  }</a>
+<a name="ln457">  else</a>
+<a name="ln458">  {</a>
+<a name="ln459">    out = (float *)ovoid + beg + (size_t)j * roi_out-&gt;width;</a>
+<a name="ln460">    in = (float *)ivoid + beg + (size_t)j * roi_out-&gt;width;</a>
+<a name="ln461">  }</a>
+<a name="ln462">  for(int k = beg; k != end; k += dir)</a>
+<a name="ln463">  {</a>
+<a name="ln464">    if(dim == 1)</a>
+<a name="ln465">      j = k;</a>
+<a name="ln466">    else</a>
+<a name="ln467">      i = k;</a>
+<a name="ln468">    const float clip0 = clip[FC(j, i, filters)];</a>
+<a name="ln469">    const float clip1 = clip[FC(dim ? (j + 1) : j, dim ? i : (i + 1), filters)];</a>
+<a name="ln470">    if(i == 0 || i == roi_out-&gt;width - 1 || j == 0 || j == roi_out-&gt;height - 1)</a>
+<a name="ln471">    {</a>
+<a name="ln472">      if(pass == 3) out[0] = in[0];</a>
+<a name="ln473">    }</a>
+<a name="ln474">    else</a>
+<a name="ln475">    {</a>
+<a name="ln476">      if(in[0] &lt; clip0 &amp;&amp; in[0] &gt; 1e-5f)</a>
+<a name="ln477">      { // both are not clipped</a>
+<a name="ln478">        if(in[offs] &lt; clip1 &amp;&amp; in[offs] &gt; 1e-5f)</a>
+<a name="ln479">        { // update ratio, exponential decay. ratio = in[odd]/in[even]</a>
+<a name="ln480">          if(k &amp; 1)</a>
+<a name="ln481">            ratio = (3.0f * ratio + in[0] / in[offs]) / 4.0f;</a>
+<a name="ln482">          else</a>
+<a name="ln483">            ratio = (3.0f * ratio + in[offs] / in[0]) / 4.0f;</a>
+<a name="ln484">        }</a>
+<a name="ln485">      }</a>
+<a name="ln486"> </a>
+<a name="ln487">      if(in[0] &gt;= clip0 - 1e-5f)</a>
+<a name="ln488">      { // in[0] is clipped, restore it as in[1] adjusted according to ratio</a>
+<a name="ln489">        float add = 0.0f;</a>
+<a name="ln490">        if(in[offs] &gt;= clip1 - 1e-5f)</a>
+<a name="ln491">          add = fmaxf(clip0, clip1);</a>
+<a name="ln492">        else if(k &amp; 1)</a>
+<a name="ln493">          add = in[offs] * ratio;</a>
+<a name="ln494">        else</a>
+<a name="ln495">          add = in[offs] / ratio;</a>
+<a name="ln496"> </a>
+<a name="ln497">        if(pass == 0)</a>
+<a name="ln498">          out[0] = add;</a>
+<a name="ln499">        else if(pass == 3)</a>
+<a name="ln500">          out[0] = (out[0] + add) / 4.0f;</a>
+<a name="ln501">        else</a>
+<a name="ln502">          out[0] += add;</a>
+<a name="ln503">      }</a>
+<a name="ln504">      else</a>
+<a name="ln505">      {</a>
+<a name="ln506">        if(pass == 3) out[0] = in[0];</a>
+<a name="ln507">      }</a>
+<a name="ln508">    }</a>
+<a name="ln509">    out += offs;</a>
+<a name="ln510">    in += offs;</a>
+<a name="ln511">  }</a>
+<a name="ln512">}</a>
+<a name="ln513"> </a>
+<a name="ln514">/*</a>
+<a name="ln515"> * these 2 constants were computed using following Sage code:</a>
+<a name="ln516"> *</a>
+<a name="ln517"> * sqrt3 = sqrt(3)</a>
+<a name="ln518"> * sqrt12 = sqrt(12) # 2*sqrt(3)</a>
+<a name="ln519"> *</a>
+<a name="ln520"> * print 'sqrt3 = ', sqrt3, ' ~= ', RealField(128)(sqrt3)</a>
+<a name="ln521"> * print 'sqrt12 = ', sqrt12, ' ~= ', RealField(128)(sqrt12)</a>
+<a name="ln522"> */</a>
+<a name="ln523">#define SQRT3 1.7320508075688772935274463415058723669L</a>
+<a name="ln524">#define SQRT12 3.4641016151377545870548926830117447339L // 2*SQRT3</a>
+<a name="ln525"> </a>
+<a name="ln526">static void process_lch_bayer(dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, const void *const ivoid,</a>
+<a name="ln527">                              void *const ovoid, const dt_iop_roi_t *const roi_in,</a>
+<a name="ln528">                              const dt_iop_roi_t *const roi_out, const float clip)</a>
+<a name="ln529">{</a>
+<a name="ln530">  const uint32_t filters = piece-&gt;pipe-&gt;dsc.filters;</a>
+<a name="ln531"> </a>
+<a name="ln532">#ifdef _OPENMP</a>
+<a name="ln533">#pragma omp parallel for default(none) \</a>
+<a name="ln534">  dt_omp_firstprivate(clip, filters, ivoid, ovoid, roi_out) \</a>
+<a name="ln535">  schedule(dynamic)</a>
+<a name="ln536">#endif</a>
+<a name="ln537">  for(int j = 0; j &lt; roi_out-&gt;height; j++)</a>
+<a name="ln538">  {</a>
+<a name="ln539">    float *out = (float *)ovoid + (size_t)roi_out-&gt;width * j;</a>
+<a name="ln540">    float *in = (float *)ivoid + (size_t)roi_out-&gt;width * j;</a>
+<a name="ln541"> </a>
+<a name="ln542">    for(int i = 0; i &lt; roi_out-&gt;width; i++, in++, out++)</a>
+<a name="ln543">    {</a>
+<a name="ln544">      if(i == roi_out-&gt;width - 1 || j == roi_out-&gt;height - 1)</a>
+<a name="ln545">      {</a>
+<a name="ln546">        // fast path for border</a>
+<a name="ln547">        out[0] = MIN(clip, in[0]);</a>
+<a name="ln548">      }</a>
+<a name="ln549">      else</a>
+<a name="ln550">      {</a>
+<a name="ln551">        int clipped = 0;</a>
+<a name="ln552"> </a>
+<a name="ln553">        // sample 1 bayer block. thus we will have 2 green values.</a>
+<a name="ln554">        float R = 0.0f, Gmin = FLT_MAX, Gmax = -FLT_MAX, B = 0.0f;</a>
+<a name="ln555">        for(int jj = 0; jj &lt;= 1; jj++)</a>
+<a name="ln556">        {</a>
+<a name="ln557">          for(int ii = 0; ii &lt;= 1; ii++)</a>
+<a name="ln558">          {</a>
+<a name="ln559">            const float val = in[(size_t)jj * roi_out-&gt;width + ii];</a>
+<a name="ln560"> </a>
+<a name="ln561">            clipped = (clipped || (val &gt; clip));</a>
+<a name="ln562"> </a>
+<a name="ln563">            const int c = FC(j + jj + roi_out-&gt;y, i + ii + roi_out-&gt;x, filters);</a>
+<a name="ln564">            switch(c)</a>
+<a name="ln565">            {</a>
+<a name="ln566">              case 0:</a>
+<a name="ln567">                R = val;</a>
+<a name="ln568">                break;</a>
+<a name="ln569">              case 1:</a>
+<a name="ln570">                Gmin = MIN(Gmin, val);</a>
+<a name="ln571">                Gmax = MAX(Gmax, val);</a>
+<a name="ln572">                break;</a>
+<a name="ln573">              case 2:</a>
+<a name="ln574">                B = val;</a>
+<a name="ln575">                break;</a>
+<a name="ln576">            }</a>
+<a name="ln577">          }</a>
+<a name="ln578">        }</a>
+<a name="ln579"> </a>
+<a name="ln580">        if(clipped)</a>
+<a name="ln581">        {</a>
+<a name="ln582">          const float Ro = MIN(R, clip);</a>
+<a name="ln583">          const float Go = MIN(Gmin, clip);</a>
+<a name="ln584">          const float Bo = MIN(B, clip);</a>
+<a name="ln585"> </a>
+<a name="ln586">          const float L = (R + Gmax + B) / 3.0f;</a>
+<a name="ln587"> </a>
+<a name="ln588">          float C = SQRT3 * (R - Gmax);</a>
+<a name="ln589">          float H = 2.0f * B - Gmax - R;</a>
+<a name="ln590"> </a>
+<a name="ln591">          const float Co = SQRT3 * (Ro - Go);</a>
+<a name="ln592">          const float Ho = 2.0f * Bo - Go - Ro;</a>
+<a name="ln593"> </a>
+<a name="ln594">          if(R != Gmax &amp;&amp; Gmax != B)</a>
+<a name="ln595">          {</a>
+<a name="ln596">            const float ratio = sqrtf((Co * Co + Ho * Ho) / (C * C + H * H));</a>
+<a name="ln597">            C *= ratio;</a>
+<a name="ln598">            H *= ratio;</a>
+<a name="ln599">          }</a>
+<a name="ln600"> </a>
+<a name="ln601">          float RGB[3] = { 0.0f, 0.0f, 0.0f };</a>
+<a name="ln602"> </a>
+<a name="ln603">          /*</a>
+<a name="ln604">           * backtransform proof, sage:</a>
+<a name="ln605">           *</a>
+<a name="ln606">           * R,G,B,L,C,H = var('R,G,B,L,C,H')</a>
+<a name="ln607">           * solve([L==(R+G+B)/3, C==sqrt(3)*(R-G), H==2*B-G-R], R, G, B)</a>
+<a name="ln608">           *</a>
+<a name="ln609">           * result:</a>
+<a name="ln610">           * [[R == 1/6*sqrt(3)*C - 1/6*H + L, G == -1/6*sqrt(3)*C - 1/6*H + L, B == 1/3*H + L]]</a>
+<a name="ln611">           */</a>
+<a name="ln612">          RGB[0] = L - H / 6.0f + C / SQRT12;</a>
+<a name="ln613">          RGB[1] = L - H / 6.0f - C / SQRT12;</a>
+<a name="ln614">          RGB[2] = L + H / 3.0f;</a>
+<a name="ln615"> </a>
+<a name="ln616">          out[0] = RGB[FC(j + roi_out-&gt;y, i + roi_out-&gt;x, filters)];</a>
+<a name="ln617">        }</a>
+<a name="ln618">        else</a>
+<a name="ln619">        {</a>
+<a name="ln620">          out[0] = in[0];</a>
+<a name="ln621">        }</a>
+<a name="ln622">      }</a>
+<a name="ln623">    }</a>
+<a name="ln624">  }</a>
+<a name="ln625">}</a>
+<a name="ln626"> </a>
+<a name="ln627">static void process_lch_xtrans(dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, const void *const ivoid,</a>
+<a name="ln628">                               void *const ovoid, const dt_iop_roi_t *const roi_in,</a>
+<a name="ln629">                               const dt_iop_roi_t *const roi_out, const float clip)</a>
+<a name="ln630">{</a>
+<a name="ln631">  const uint8_t(*const xtrans)[6] = (const uint8_t(*const)[6])piece-&gt;pipe-&gt;dsc.xtrans;</a>
+<a name="ln632"> </a>
+<a name="ln633">#ifdef _OPENMP</a>
+<a name="ln634">#pragma omp parallel for default(none) \</a>
+<a name="ln635">  dt_omp_firstprivate(clip, ivoid, ovoid, roi_in, roi_out, xtrans) \</a>
+<a name="ln636">  schedule(dynamic)</a>
+<a name="ln637">#endif</a>
+<a name="ln638">  for(int j = 0; j &lt; roi_out-&gt;height; j++)</a>
+<a name="ln639">  {</a>
+<a name="ln640">    float *out = (float *)ovoid + (size_t)roi_out-&gt;width * j;</a>
+<a name="ln641">    float *in = (float *)ivoid + (size_t)roi_in-&gt;width * j;</a>
+<a name="ln642"> </a>
+<a name="ln643">    // bit vector used as ring buffer to remember clipping of current</a>
+<a name="ln644">    // and last two columns, checking current pixel and its vertical</a>
+<a name="ln645">    // neighbors</a>
+<a name="ln646">    int cl = 0;</a>
+<a name="ln647"> </a>
+<a name="ln648">    for(int i = 0; i &lt; roi_out-&gt;width; i++)</a>
+<a name="ln649">    {</a>
+<a name="ln650">      // update clipping ring buffer</a>
+<a name="ln651">      cl = (cl &lt;&lt; 1) &amp; 6;</a>
+<a name="ln652">      if(j &gt;= 2 &amp;&amp; j &lt;= roi_out-&gt;height - 3)</a>
+<a name="ln653">      {</a>
+<a name="ln654">        cl |= (in[-roi_in-&gt;width] &gt; clip) | (in[0] &gt; clip) | (in[roi_in-&gt;width] &gt; clip);</a>
+<a name="ln655">      }</a>
+<a name="ln656"> </a>
+<a name="ln657">      if(i &lt; 2 || i &gt; roi_out-&gt;width - 3 || j &lt; 2 || j &gt; roi_out-&gt;height - 3)</a>
+<a name="ln658">      {</a>
+<a name="ln659">        // fast path for border</a>
+<a name="ln660">        out[0] = MIN(clip, in[0]);</a>
+<a name="ln661">      }</a>
+<a name="ln662">      else</a>
+<a name="ln663">      {</a>
+<a name="ln664">        // if current pixel is clipped, always reconstruct</a>
+<a name="ln665">        int clipped = (in[0] &gt; clip);</a>
+<a name="ln666">        if(!clipped)</a>
+<a name="ln667">        {</a>
+<a name="ln668">          clipped = cl;</a>
+<a name="ln669">          if(clipped)</a>
+<a name="ln670">          {</a>
+<a name="ln671">            // If the ring buffer can't show we are in an obviously</a>
+<a name="ln672">            // unclipped region, this is the slow case: check if there</a>
+<a name="ln673">            // is any 3x3 block touching the current pixel which has</a>
+<a name="ln674">            // no clipping, as then don't need to reconstruct the</a>
+<a name="ln675">            // current pixel. This avoids zippering in edge</a>
+<a name="ln676">            // transitions from clipped to unclipped areas. The</a>
+<a name="ln677">            // X-Trans sensor seems prone to this, unlike Bayer, due</a>
+<a name="ln678">            // to its irregular pattern.</a>
+<a name="ln679">            for(int offset_j = -2; offset_j &lt;= 0; offset_j++)</a>
+<a name="ln680">            {</a>
+<a name="ln681">              for(int offset_i = -2; offset_i &lt;= 0; offset_i++)</a>
+<a name="ln682">              {</a>
+<a name="ln683">                if(clipped)</a>
+<a name="ln684">                {</a>
+<a name="ln685">                  clipped = 0;</a>
+<a name="ln686">                  for(int jj = offset_j; jj &lt;= offset_j + 2; jj++)</a>
+<a name="ln687">                  {</a>
+<a name="ln688">                    for(int ii = offset_i; ii &lt;= offset_i + 2; ii++)</a>
+<a name="ln689">                    {</a>
+<a name="ln690">                      const float val = in[(ssize_t)jj * roi_in-&gt;width + ii];</a>
+<a name="ln691">                      clipped = (clipped || (val &gt; clip));</a>
+<a name="ln692">                    }</a>
+<a name="ln693">                  }</a>
+<a name="ln694">                }</a>
+<a name="ln695">              }</a>
+<a name="ln696">            }</a>
+<a name="ln697">          }</a>
+<a name="ln698">        }</a>
+<a name="ln699"> </a>
+<a name="ln700">        if(clipped)</a>
+<a name="ln701">        {</a>
+<a name="ln702">          float mean[3] = { 0.0f, 0.0f, 0.0f };</a>
+<a name="ln703">          int cnt[3] = { 0, 0, 0 };</a>
+<a name="ln704">          float RGBmax[3] = { -FLT_MAX, -FLT_MAX, -FLT_MAX };</a>
+<a name="ln705"> </a>
+<a name="ln706">          for(int jj = -1; jj &lt;= 1; jj++)</a>
+<a name="ln707">          {</a>
+<a name="ln708">            for(int ii = -1; ii &lt;= 1; ii++)</a>
+<a name="ln709">            {</a>
+<a name="ln710">              const float val = in[(ssize_t)jj * roi_in-&gt;width + ii];</a>
+<a name="ln711">              const int c = FCxtrans(j+jj, i+ii, roi_in, xtrans);</a>
+<a name="ln712">              mean[c] += val;</a>
+<a name="ln713">              cnt[c]++;</a>
+<a name="ln714">              RGBmax[c] = MAX(RGBmax[c], val);</a>
+<a name="ln715">            }</a>
+<a name="ln716">          }</a>
+<a name="ln717"> </a>
+<a name="ln718">          const float Ro = MIN(mean[0]/cnt[0], clip);</a>
+<a name="ln719">          const float Go = MIN(mean[1]/cnt[1], clip);</a>
+<a name="ln720">          const float Bo = MIN(mean[2]/cnt[2], clip);</a>
+<a name="ln721"> </a>
+<a name="ln722">          const float R = RGBmax[0];</a>
+<a name="ln723">          const float G = RGBmax[1];</a>
+<a name="ln724">          const float B = RGBmax[2];</a>
+<a name="ln725"> </a>
+<a name="ln726">          const float L = (R + G + B) / 3.0f;</a>
+<a name="ln727"> </a>
+<a name="ln728">          float C = SQRT3 * (R - G);</a>
+<a name="ln729">          float H = 2.0f * B - G - R;</a>
+<a name="ln730"> </a>
+<a name="ln731">          const float Co = SQRT3 * (Ro - Go);</a>
+<a name="ln732">          const float Ho = 2.0f * Bo - Go - Ro;</a>
+<a name="ln733"> </a>
+<a name="ln734">          if(R != G &amp;&amp; G != B)</a>
+<a name="ln735">          {</a>
+<a name="ln736">            const float ratio = sqrtf((Co * Co + Ho * Ho) / (C * C + H * H));</a>
+<a name="ln737">            C *= ratio;</a>
+<a name="ln738">            H *= ratio;</a>
+<a name="ln739">          }</a>
+<a name="ln740"> </a>
+<a name="ln741">          float RGB[3] = { 0.0f, 0.0f, 0.0f };</a>
+<a name="ln742"> </a>
+<a name="ln743">          RGB[0] = L - H / 6.0f + C / SQRT12;</a>
+<a name="ln744">          RGB[1] = L - H / 6.0f - C / SQRT12;</a>
+<a name="ln745">          RGB[2] = L + H / 3.0f;</a>
+<a name="ln746"> </a>
+<a name="ln747">          out[0] = RGB[FCxtrans(j, i, roi_out, xtrans)];</a>
+<a name="ln748">        }</a>
+<a name="ln749">        else</a>
+<a name="ln750">          out[0] = in[0];</a>
+<a name="ln751">      }</a>
+<a name="ln752">      out++;</a>
+<a name="ln753">      in++;</a>
+<a name="ln754">    }</a>
+<a name="ln755">  }</a>
+<a name="ln756">}</a>
+<a name="ln757"> </a>
+<a name="ln758">#undef SQRT3</a>
+<a name="ln759">#undef SQRT12</a>
+<a name="ln760"> </a>
+<a name="ln761">static void process_clip_plain(dt_dev_pixelpipe_iop_t *piece, const void *const ivoid, void *const ovoid,</a>
+<a name="ln762">                               const dt_iop_roi_t *const roi_in, const dt_iop_roi_t *const roi_out,</a>
+<a name="ln763">                               const float clip)</a>
+<a name="ln764">{</a>
+<a name="ln765">  const float *const in = (const float *const)ivoid;</a>
+<a name="ln766">  float *const out = (float *const)ovoid;</a>
+<a name="ln767"> </a>
+<a name="ln768">  if(piece-&gt;pipe-&gt;dsc.filters)</a>
+<a name="ln769">  { // raw mosaic</a>
+<a name="ln770">#ifdef _OPENMP</a>
+<a name="ln771">#pragma omp parallel for SIMD() default(none) \</a>
+<a name="ln772">    dt_omp_firstprivate(clip, in, out, roi_out) \</a>
+<a name="ln773">    schedule(static)</a>
+<a name="ln774">#endif</a>
+<a name="ln775">    for(size_t k = 0; k &lt; (size_t)roi_out-&gt;width * roi_out-&gt;height; k++)</a>
+<a name="ln776">    {</a>
+<a name="ln777">      out[k] = MIN(clip, in[k]);</a>
+<a name="ln778">    }</a>
+<a name="ln779">  }</a>
+<a name="ln780">  else</a>
+<a name="ln781">  {</a>
+<a name="ln782">    const int ch = piece-&gt;colors;</a>
+<a name="ln783"> </a>
+<a name="ln784">#ifdef _OPENMP</a>
+<a name="ln785">#pragma omp parallel for SIMD() default(none) \</a>
+<a name="ln786">    dt_omp_firstprivate(ch, clip, in, out, roi_out) \</a>
+<a name="ln787">    schedule(static)</a>
+<a name="ln788">#endif</a>
+<a name="ln789">    for(size_t k = 0; k &lt; (size_t)ch * roi_out-&gt;width * roi_out-&gt;height; k++)</a>
+<a name="ln790">    {</a>
+<a name="ln791">      out[k] = MIN(clip, in[k]);</a>
+<a name="ln792">    }</a>
+<a name="ln793">  }</a>
+<a name="ln794">}</a>
+<a name="ln795"> </a>
+<a name="ln796">#if defined(__SSE__)</a>
+<a name="ln797">static void process_clip_sse2(dt_dev_pixelpipe_iop_t *piece, const void *const ivoid, void *const ovoid,</a>
+<a name="ln798">                              const dt_iop_roi_t *const roi_in, const dt_iop_roi_t *const roi_out,</a>
+<a name="ln799">                              const float clip)</a>
+<a name="ln800">{</a>
+<a name="ln801">  if(piece-&gt;pipe-&gt;dsc.filters)</a>
+<a name="ln802">  { // raw mosaic</a>
+<a name="ln803">    const __m128 clipm = _mm_set1_ps(clip);</a>
+<a name="ln804">    const size_t n = (size_t)roi_out-&gt;height * roi_out-&gt;width;</a>
+<a name="ln805">    float *const out = (float *)ovoid;</a>
+<a name="ln806">    float *const in = (float *)ivoid;</a>
+<a name="ln807">#ifdef _OPENMP</a>
+<a name="ln808">#pragma omp parallel for default(none) \</a>
+<a name="ln809">    dt_omp_firstprivate(clipm, in, n, out) \</a>
+<a name="ln810">    schedule(static)</a>
+<a name="ln811">#endif</a>
+<a name="ln812">    for(size_t j = 0; j &lt; (n &amp; ~3u); j += 4) _mm_stream_ps(out + j, _mm_min_ps(clipm, _mm_load_ps(in + j)));</a>
+<a name="ln813">    _mm_sfence();</a>
+<a name="ln814">    // lets see if there's a non-multiple of four rest to process:</a>
+<a name="ln815">    if(n &amp; 3)</a>
+<a name="ln816">      for(size_t j = n &amp; ~3u; j &lt; n; j++) out[j] = MIN(clip, in[j]);</a>
+<a name="ln817">  }</a>
+<a name="ln818">  else</a>
+<a name="ln819">  {</a>
+<a name="ln820">    const __m128 clipm = _mm_set1_ps(clip);</a>
+<a name="ln821">    const int ch = piece-&gt;colors;</a>
+<a name="ln822"> </a>
+<a name="ln823">#ifdef _OPENMP</a>
+<a name="ln824">#pragma omp parallel for default(none) \</a>
+<a name="ln825">    dt_omp_firstprivate(ch, clipm, ivoid, ovoid, roi_in, roi_out) \</a>
+<a name="ln826">    schedule(static)</a>
+<a name="ln827">#endif</a>
+<a name="ln828">    for(int j = 0; j &lt; roi_out-&gt;height; j++)</a>
+<a name="ln829">    {</a>
+<a name="ln830">      float *out = (float *)ovoid + (size_t)ch * roi_out-&gt;width * j;</a>
+<a name="ln831">      float *in = (float *)ivoid + (size_t)ch * roi_in-&gt;width * j;</a>
+<a name="ln832">      for(int i = 0; i &lt; roi_out-&gt;width; i++, in += ch, out += ch)</a>
+<a name="ln833">      {</a>
+<a name="ln834">        _mm_stream_ps(out, _mm_min_ps(clipm, _mm_set_ps(in[3], in[2], in[1], in[0])));</a>
+<a name="ln835">      }</a>
+<a name="ln836">    }</a>
+<a name="ln837">    _mm_sfence();</a>
+<a name="ln838">  }</a>
+<a name="ln839">}</a>
+<a name="ln840">#endif</a>
+<a name="ln841"> </a>
+<a name="ln842">static void process_clip(dt_dev_pixelpipe_iop_t *piece, const void *const ivoid, void *const ovoid,</a>
+<a name="ln843">                         const dt_iop_roi_t *const roi_in, const dt_iop_roi_t *const roi_out,</a>
+<a name="ln844">                         const float clip)</a>
+<a name="ln845">{</a>
+<a name="ln846">  if(darktable.codepath.OPENMP_SIMD) process_clip_plain(piece, ivoid, ovoid, roi_in, roi_out, clip);</a>
+<a name="ln847">#if defined(__SSE__)</a>
+<a name="ln848">  else if(darktable.codepath.SSE2)</a>
+<a name="ln849">    process_clip_sse2(piece, ivoid, ovoid, roi_in, roi_out, clip);</a>
+<a name="ln850">#endif</a>
+<a name="ln851">  else</a>
+<a name="ln852">    dt_unreachable_codepath();</a>
+<a name="ln853">}</a>
+<a name="ln854"> </a>
+<a name="ln855">void process(struct dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, const void *const ivoid,</a>
+<a name="ln856">             void *const ovoid, const dt_iop_roi_t *const roi_in, const dt_iop_roi_t *const roi_out)</a>
+<a name="ln857">{</a>
+<a name="ln858">  const uint32_t filters = piece-&gt;pipe-&gt;dsc.filters;</a>
+<a name="ln859">  dt_iop_highlights_data_t *data = (dt_iop_highlights_data_t *)piece-&gt;data;</a>
+<a name="ln860"> </a>
+<a name="ln861">  const float clip</a>
+<a name="ln862">      = data-&gt;clip * fminf(piece-&gt;pipe-&gt;dsc.processed_maximum[0],</a>
+<a name="ln863">                           fminf(piece-&gt;pipe-&gt;dsc.processed_maximum[1], piece-&gt;pipe-&gt;dsc.processed_maximum[2]));</a>
+<a name="ln864">  // const int ch = piece-&gt;colors;</a>
+<a name="ln865">  if(!filters)</a>
+<a name="ln866">  {</a>
+<a name="ln867">    process_clip(piece, ivoid, ovoid, roi_in, roi_out, clip);</a>
+<a name="ln868">    for(int k=0;k&lt;3;k++)</a>
+<a name="ln869">      piece-&gt;pipe-&gt;dsc.processed_maximum[k]</a>
+<a name="ln870">          = fminf(piece-&gt;pipe-&gt;dsc.processed_maximum[0],</a>
+<a name="ln871">                  fminf(piece-&gt;pipe-&gt;dsc.processed_maximum[1], piece-&gt;pipe-&gt;dsc.processed_maximum[2]));</a>
+<a name="ln872">    return;</a>
+<a name="ln873">  }</a>
+<a name="ln874"> </a>
+<a name="ln875">  switch(data-&gt;mode)</a>
+<a name="ln876">  {</a>
+<a name="ln877">    case DT_IOP_HIGHLIGHTS_INPAINT: // a1ex's (magiclantern) idea of color inpainting:</a>
+<a name="ln878">    {</a>
+<a name="ln879">      const float clips[4] = { 0.987 * data-&gt;clip * piece-&gt;pipe-&gt;dsc.processed_maximum[0],</a>
+<a name="ln880">                               0.987 * data-&gt;clip * piece-&gt;pipe-&gt;dsc.processed_maximum[1],</a>
+<a name="ln881">                               0.987 * data-&gt;clip * piece-&gt;pipe-&gt;dsc.processed_maximum[2], clip };</a>
+<a name="ln882"> </a>
+<a name="ln883">      if(filters == 9u)</a>
+<a name="ln884">      {</a>
+<a name="ln885">        const uint8_t(*const xtrans)[6] = (const uint8_t(*const)[6])piece-&gt;pipe-&gt;dsc.xtrans;</a>
+<a name="ln886">#ifdef _OPENMP</a>
+<a name="ln887">#pragma omp parallel for default(none) \</a>
+<a name="ln888">        dt_omp_firstprivate(clips, filters, ivoid, ovoid, roi_in, roi_out, \</a>
+<a name="ln889">                            xtrans) \</a>
+<a name="ln890">        schedule(dynamic)</a>
+<a name="ln891">#endif</a>
+<a name="ln892">        for(int j = 0; j &lt; roi_out-&gt;height; j++)</a>
+<a name="ln893">        {</a>
+<a name="ln894">          interpolate_color_xtrans(ivoid, ovoid, roi_in, roi_out, 0, 1, j, clips, xtrans, 0);</a>
+<a name="ln895">          interpolate_color_xtrans(ivoid, ovoid, roi_in, roi_out, 0, -1, j, clips, xtrans, 1);</a>
+<a name="ln896">        }</a>
+<a name="ln897">#ifdef _OPENMP</a>
+<a name="ln898">#pragma omp parallel for default(none) \</a>
+<a name="ln899">        dt_omp_firstprivate(clips, filters, ivoid, ovoid, roi_in, roi_out, \</a>
+<a name="ln900">                            xtrans) \</a>
+<a name="ln901">        schedule(dynamic)</a>
+<a name="ln902">#endif</a>
+<a name="ln903">        for(int i = 0; i &lt; roi_out-&gt;width; i++)</a>
+<a name="ln904">        {</a>
+<a name="ln905">          interpolate_color_xtrans(ivoid, ovoid, roi_in, roi_out, 1, 1, i, clips, xtrans, 2);</a>
+<a name="ln906">          interpolate_color_xtrans(ivoid, ovoid, roi_in, roi_out, 1, -1, i, clips, xtrans, 3);</a>
+<a name="ln907">        }</a>
+<a name="ln908">      }</a>
+<a name="ln909">      else</a>
+<a name="ln910">      {</a>
+<a name="ln911">#ifdef _OPENMP</a>
+<a name="ln912">#pragma omp parallel for default(none) \</a>
+<a name="ln913">        dt_omp_firstprivate(clips, filters, ivoid, ovoid, roi_out) \</a>
+<a name="ln914">        shared(data, piece) \</a>
+<a name="ln915">        schedule(dynamic)</a>
+<a name="ln916">#endif</a>
+<a name="ln917">        for(int j = 0; j &lt; roi_out-&gt;height; j++)</a>
+<a name="ln918">        {</a>
+<a name="ln919">          interpolate_color(ivoid, ovoid, roi_out, 0, 1, j, clips, filters, 0);</a>
+<a name="ln920">          interpolate_color(ivoid, ovoid, roi_out, 0, -1, j, clips, filters, 1);</a>
+<a name="ln921">        }</a>
+<a name="ln922"> </a>
+<a name="ln923">// up/down directions</a>
+<a name="ln924">#ifdef _OPENMP</a>
+<a name="ln925">#pragma omp parallel for default(none) \</a>
+<a name="ln926">        dt_omp_firstprivate(clips, filters, ivoid, ovoid, roi_out) \</a>
+<a name="ln927">        shared(data, piece) \</a>
+<a name="ln928">        schedule(dynamic)</a>
+<a name="ln929">#endif</a>
+<a name="ln930">        for(int i = 0; i &lt; roi_out-&gt;width; i++)</a>
+<a name="ln931">        {</a>
+<a name="ln932">          interpolate_color(ivoid, ovoid, roi_out, 1, 1, i, clips, filters, 2);</a>
+<a name="ln933">          interpolate_color(ivoid, ovoid, roi_out, 1, -1, i, clips, filters, 3);</a>
+<a name="ln934">        }</a>
+<a name="ln935">      }</a>
+<a name="ln936">      break;</a>
+<a name="ln937">    }</a>
+<a name="ln938">    case DT_IOP_HIGHLIGHTS_LCH:</a>
+<a name="ln939">      if(filters == 9u)</a>
+<a name="ln940">        process_lch_xtrans(self, piece, ivoid, ovoid, roi_in, roi_out, clip);</a>
+<a name="ln941">      else</a>
+<a name="ln942">        process_lch_bayer(self, piece, ivoid, ovoid, roi_in, roi_out, clip);</a>
+<a name="ln943">      break;</a>
+<a name="ln944">    default:</a>
+<a name="ln945">    case DT_IOP_HIGHLIGHTS_CLIP:</a>
+<a name="ln946">      process_clip(piece, ivoid, ovoid, roi_in, roi_out, clip);</a>
+<a name="ln947">      break;</a>
+<a name="ln948">  }</a>
+<a name="ln949"> </a>
+<a name="ln950">  // update processed maximum</a>
+<a name="ln951">  const float m = fmaxf(fmaxf(piece-&gt;pipe-&gt;dsc.processed_maximum[0], piece-&gt;pipe-&gt;dsc.processed_maximum[1]),</a>
+<a name="ln952">                        piece-&gt;pipe-&gt;dsc.processed_maximum[2]);</a>
+<a name="ln953">  for(int k = 0; k &lt; 3; k++) piece-&gt;pipe-&gt;dsc.processed_maximum[k] = m;</a>
+<a name="ln954"> </a>
+<a name="ln955">  if(piece-&gt;pipe-&gt;mask_display &amp; DT_DEV_PIXELPIPE_DISPLAY_MASK) dt_iop_alpha_copy(ivoid, ovoid, roi_out-&gt;width, roi_out-&gt;height);</a>
+<a name="ln956">}</a>
+<a name="ln957"> </a>
+<a name="ln958">static void clip_callback(GtkWidget *slider, dt_iop_module_t *self)</a>
+<a name="ln959">{</a>
+<a name="ln960">  if(self-&gt;dt-&gt;gui-&gt;reset) return;</a>
+<a name="ln961">  dt_iop_highlights_params_t *p = (dt_iop_highlights_params_t *)self-&gt;params;</a>
+<a name="ln962">  p-&gt;clip = dt_bauhaus_slider_get(slider);</a>
+<a name="ln963">  dt_dev_add_history_item(darktable.develop, self, TRUE);</a>
+<a name="ln964">}</a>
+<a name="ln965"> </a>
+<a name="ln966">static void mode_changed(GtkWidget *combo, dt_iop_module_t *self)</a>
+<a name="ln967">{</a>
+<a name="ln968">  dt_iop_highlights_params_t *p = (dt_iop_highlights_params_t *)self-&gt;params;</a>
+<a name="ln969">  p-&gt;mode = dt_bauhaus_combobox_get(combo);</a>
+<a name="ln970">  if(p-&gt;mode &gt; DT_IOP_HIGHLIGHTS_INPAINT) p-&gt;mode = DT_IOP_HIGHLIGHTS_INPAINT;</a>
+<a name="ln971">  dt_dev_add_history_item(darktable.develop, self, TRUE);</a>
+<a name="ln972">}</a>
+<a name="ln973"> </a>
+<a name="ln974">void commit_params(struct dt_iop_module_t *self, dt_iop_params_t *p1, dt_dev_pixelpipe_t *pipe,</a>
+<a name="ln975">                   dt_dev_pixelpipe_iop_t *piece)</a>
+<a name="ln976">{</a>
+<a name="ln977">  dt_iop_highlights_params_t *p = (dt_iop_highlights_params_t *)p1;</a>
+<a name="ln978">  dt_iop_highlights_data_t *d = (dt_iop_highlights_data_t *)piece-&gt;data;</a>
+<a name="ln979">  memcpy(d, p, sizeof(*p));</a>
+<a name="ln980"> </a>
+<a name="ln981">  piece-&gt;process_cl_ready = 1;</a>
+<a name="ln982"> </a>
+<a name="ln983">  // no OpenCL for DT_IOP_HIGHLIGHTS_INPAINT yet.</a>
+<a name="ln984">  if(d-&gt;mode == DT_IOP_HIGHLIGHTS_INPAINT) piece-&gt;process_cl_ready = 0;</a>
+<a name="ln985">}</a>
+<a name="ln986"> </a>
+<a name="ln987">void init_global(dt_iop_module_so_t *module)</a>
+<a name="ln988">{</a>
+<a name="ln989">  const int program = 2; // basic.cl, from programs.conf</a>
+<a name="ln990">  dt_iop_highlights_global_data_t *gd</a>
+<a name="ln991">      = (dt_iop_highlights_global_data_t *)malloc(sizeof(dt_iop_highlights_global_data_t));</a>
+<a name="ln992">  module-&gt;data = gd;</a>
+<a name="ln993">  gd-&gt;kernel_highlights_1f_clip = dt_opencl_create_kernel(program, &quot;highlights_1f_clip&quot;);</a>
+<a name="ln994">  gd-&gt;kernel_highlights_1f_lch_bayer = dt_opencl_create_kernel(program, &quot;highlights_1f_lch_bayer&quot;);</a>
+<a name="ln995">  gd-&gt;kernel_highlights_1f_lch_xtrans = dt_opencl_create_kernel(program, &quot;highlights_1f_lch_xtrans&quot;);</a>
+<a name="ln996">  gd-&gt;kernel_highlights_4f_clip = dt_opencl_create_kernel(program, &quot;highlights_4f_clip&quot;);</a>
+<a name="ln997">}</a>
+<a name="ln998"> </a>
+<a name="ln999">void cleanup_global(dt_iop_module_so_t *module)</a>
+<a name="ln1000">{</a>
+<a name="ln1001">  dt_iop_highlights_global_data_t *gd = (dt_iop_highlights_global_data_t *)module-&gt;data;</a>
+<a name="ln1002">  dt_opencl_free_kernel(gd-&gt;kernel_highlights_4f_clip);</a>
+<a name="ln1003">  dt_opencl_free_kernel(gd-&gt;kernel_highlights_1f_lch_bayer);</a>
+<a name="ln1004">  dt_opencl_free_kernel(gd-&gt;kernel_highlights_1f_lch_xtrans);</a>
+<a name="ln1005">  dt_opencl_free_kernel(gd-&gt;kernel_highlights_1f_clip);</a>
+<a name="ln1006">  free(module-&gt;data);</a>
+<a name="ln1007">  module-&gt;data = NULL;</a>
+<a name="ln1008">}</a>
+<a name="ln1009"> </a>
+<a name="ln1010">void init_pipe(struct dt_iop_module_t *self, dt_dev_pixelpipe_t *pipe, dt_dev_pixelpipe_iop_t *piece)</a>
+<a name="ln1011">{</a>
+<a name="ln1012">  piece-&gt;data = malloc(sizeof(dt_iop_highlights_data_t));</a>
+<a name="ln1013">  self-&gt;commit_params(self, self-&gt;default_params, pipe, piece);</a>
+<a name="ln1014">}</a>
+<a name="ln1015"> </a>
+<a name="ln1016">void cleanup_pipe(struct dt_iop_module_t *self, dt_dev_pixelpipe_t *pipe, dt_dev_pixelpipe_iop_t *piece)</a>
+<a name="ln1017">{</a>
+<a name="ln1018">  free(piece-&gt;data);</a>
+<a name="ln1019">  piece-&gt;data = NULL;</a>
+<a name="ln1020">}</a>
+<a name="ln1021"> </a>
+<a name="ln1022">void gui_update(struct dt_iop_module_t *self)</a>
+<a name="ln1023">{</a>
+<a name="ln1024">  dt_iop_module_t *module = (dt_iop_module_t *)self;</a>
+<a name="ln1025">  dt_iop_highlights_gui_data_t *g = (dt_iop_highlights_gui_data_t *)self-&gt;gui_data;</a>
+<a name="ln1026">  dt_iop_highlights_params_t *p = (dt_iop_highlights_params_t *)module-&gt;params;</a>
+<a name="ln1027">  dt_bauhaus_slider_set(g-&gt;clip, p-&gt;clip);</a>
+<a name="ln1028">  dt_bauhaus_combobox_set(g-&gt;mode, p-&gt;mode);</a>
+<a name="ln1029">}</a>
+<a name="ln1030"> </a>
+<a name="ln1031">void reload_defaults(dt_iop_module_t *module)</a>
+<a name="ln1032">{</a>
+<a name="ln1033">  dt_iop_highlights_params_t tmp = (dt_iop_highlights_params_t){</a>
+<a name="ln1034">    .mode = DT_IOP_HIGHLIGHTS_CLIP, .blendL = 1.0, .blendC = 0.0, .blendh = 0.0, .clip = 1.0</a>
+<a name="ln1035">  };</a>
+<a name="ln1036"> </a>
+<a name="ln1037">  // we might be called from presets update infrastructure =&gt; there is no image</a>
+<a name="ln1038">  if(!module-&gt;dev) goto end;</a>
+<a name="ln1039"> </a>
+<a name="ln1040">  // only on for raw images:</a>
+<a name="ln1041">  if(dt_image_is_raw(&amp;module-&gt;dev-&gt;image_storage))</a>
+<a name="ln1042">    module-&gt;default_enabled = 1;</a>
+<a name="ln1043">  else</a>
+<a name="ln1044">    module-&gt;default_enabled = 0;</a>
+<a name="ln1045"> </a>
+<a name="ln1046">end:</a>
+<a name="ln1047">  memcpy(module-&gt;params, &amp;tmp, sizeof(dt_iop_highlights_params_t));</a>
+<a name="ln1048">  memcpy(module-&gt;default_params, &amp;tmp, sizeof(dt_iop_highlights_params_t));</a>
+<a name="ln1049">}</a>
+<a name="ln1050"> </a>
+<a name="ln1051">void init(dt_iop_module_t *module)</a>
+<a name="ln1052">{</a>
+<a name="ln1053">  // module-&gt;data = malloc(sizeof(dt_iop_highlights_data_t));</a>
+<a name="ln1054">  module-&gt;params = calloc(1, sizeof(dt_iop_highlights_params_t));</a>
+<a name="ln1055">  module-&gt;default_params = calloc(1, sizeof(dt_iop_highlights_params_t));</a>
+<a name="ln1056">  module-&gt;default_enabled = 1;</a>
+<a name="ln1057">  module-&gt;params_size = sizeof(dt_iop_highlights_params_t);</a>
+<a name="ln1058">  module-&gt;gui_data = NULL;</a>
+<a name="ln1059">}</a>
+<a name="ln1060"> </a>
+<a name="ln1061">void cleanup(dt_iop_module_t *module)</a>
+<a name="ln1062">{</a>
+<a name="ln1063">  free(module-&gt;params);</a>
+<a name="ln1064">  module-&gt;params = NULL;</a>
+<a name="ln1065">}</a>
+<a name="ln1066"> </a>
+<a name="ln1067">void gui_init(struct dt_iop_module_t *self)</a>
+<a name="ln1068">{</a>
+<a name="ln1069">  self-&gt;gui_data = malloc(sizeof(dt_iop_highlights_gui_data_t));</a>
+<a name="ln1070">  dt_iop_highlights_gui_data_t *g = (dt_iop_highlights_gui_data_t *)self-&gt;gui_data;</a>
+<a name="ln1071">  dt_iop_highlights_params_t *p = (dt_iop_highlights_params_t *)self-&gt;params;</a>
+<a name="ln1072"> </a>
+<a name="ln1073">  self-&gt;widget = gtk_box_new(GTK_ORIENTATION_VERTICAL, DT_BAUHAUS_SPACE);</a>
+<a name="ln1074">  dt_gui_add_help_link(self-&gt;widget, dt_get_help_url(self-&gt;op));</a>
+<a name="ln1075"> </a>
+<a name="ln1076">  g-&gt;mode = dt_bauhaus_combobox_new(self);</a>
+<a name="ln1077">  gtk_box_pack_start(GTK_BOX(self-&gt;widget), g-&gt;mode, TRUE, TRUE, 0);</a>
+<a name="ln1078">  dt_bauhaus_widget_set_label(g-&gt;mode, NULL, _(&quot;method&quot;));</a>
+<a name="ln1079">  dt_bauhaus_combobox_add(g-&gt;mode, _(&quot;clip highlights&quot;));</a>
+<a name="ln1080">  dt_bauhaus_combobox_add(g-&gt;mode, _(&quot;reconstruct in LCh&quot;));</a>
+<a name="ln1081">  dt_bauhaus_combobox_add(g-&gt;mode, _(&quot;reconstruct color&quot;));</a>
+<a name="ln1082">  gtk_widget_set_tooltip_text(g-&gt;mode, _(&quot;highlight reconstruction method&quot;));</a>
+<a name="ln1083"> </a>
+<a name="ln1084">  g-&gt;clip = dt_bauhaus_slider_new_with_range(self, 0.0, 2.0, 0.01, p-&gt;clip, 3);</a>
+<a name="ln1085">  gtk_widget_set_tooltip_text(g-&gt;clip, _(&quot;manually adjust the clipping threshold against &quot;</a>
+<a name="ln1086">                                         &quot;magenta highlights (you shouldn't ever need to touch this)&quot;));</a>
+<a name="ln1087">  dt_bauhaus_widget_set_label(g-&gt;clip, NULL, _(&quot;clipping threshold&quot;));</a>
+<a name="ln1088">  gtk_box_pack_start(GTK_BOX(self-&gt;widget), g-&gt;clip, TRUE, TRUE, 0);</a>
+<a name="ln1089"> </a>
+<a name="ln1090"> </a>
+<a name="ln1091">  g_signal_connect(G_OBJECT(g-&gt;clip), &quot;value-changed&quot;, G_CALLBACK(clip_callback), self);</a>
+<a name="ln1092">  g_signal_connect(G_OBJECT(g-&gt;mode), &quot;value-changed&quot;, G_CALLBACK(mode_changed), self);</a>
+<a name="ln1093">}</a>
+<a name="ln1094"> </a>
+<a name="ln1095">void gui_cleanup(struct dt_iop_module_t *self)</a>
+<a name="ln1096">{</a>
+<a name="ln1097">  free(self-&gt;gui_data);</a>
+<a name="ln1098">  self-&gt;gui_data = NULL;</a>
+<a name="ln1099">}</a>
+<a name="ln1100"> </a>
+<a name="ln1101">// modelines: These editor modelines have been set for all relevant files by tools/update_modelines.sh</a>
+<a name="ln1102">// vim: shiftwidth=2 expandtab tabstop=2 cindent</a>
+<a name="ln1103">// kate: tab-indents: off; indent-width 2; replace-tabs on; indent-mode cstyle; remove-trailing-spaces modified;</a>
+
+</code></pre>
+<div class="balloon" rel="970"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v1016/" target="_blank">V1016</a> Expression 'p->mode > DT_IOP_HIGHLIGHTS_INPAINT' is always false.</p></div>
+<div class="balloon" rel="993"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v522/" target="_blank">V522</a> There might be dereferencing of a potential null pointer 'gd'. Check lines: 993, 991.</p></div>
+<div class="balloon" rel="1076"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v522/" target="_blank">V522</a> There might be dereferencing of a potential null pointer 'g'. Check lines: 1076, 1069.</p></div>
+
+<link rel="stylesheet" href="highlight.css">
+<script src="highlight.pack.js"></script>
+<script src="highlightjs-line-numbers.js"></script>
+<script>hljs.initHighlightingOnLoad();</script>
+<script>hljs.initLineNumbersOnLoad();</script>
+<script>
+  $(document).ready(function() {
+      $('.balloon').each(function () {
+          var bl = $(this);
+          var line = bl.attr('rel');
+          var text = $('a[name="ln'+line+'"]').text();
+
+          var space_count = 0;
+          for(var i = 0; i<text.length; i++){
+              var char = text[i];
+              if((char !== ' ')&&(char !== '\t'))break;
+              if(char === '\t')space_count++;
+              space_count++;
+          }
+
+          bl.css('margin-left', space_count*8);
+          $('a[name="ln'+line+'"]').after(bl);
+      });
+
+      window.location = window.location;
+  });
+</script>
+</body>
+</html>

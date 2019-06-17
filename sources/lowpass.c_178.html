@@ -1,0 +1,769 @@
+
+<html>
+<head>
+  <link rel="stylesheet" href="../style.css"/>
+  <script src="../jquery-3.2.1.min.js"></script>
+</head>
+<body>
+<pre><code class = "cpp">
+<a name="ln1">/*</a>
+<a name="ln2">  This file is part of darktable,</a>
+<a name="ln3">  copyright (c) 2011--2013 ulrich pegelow.</a>
+<a name="ln4"> </a>
+<a name="ln5">  darktable is free software: you can redistribute it and/or modify</a>
+<a name="ln6">  it under the terms of the GNU General Public License as published by</a>
+<a name="ln7">  the Free Software Foundation, either version 3 of the License, or</a>
+<a name="ln8">  (at your option) any later version.</a>
+<a name="ln9"> </a>
+<a name="ln10">  darktable is distributed in the hope that it will be useful,</a>
+<a name="ln11">  but WITHOUT ANY WARRANTY; without even the implied warranty of</a>
+<a name="ln12">  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the</a>
+<a name="ln13">  GNU General Public License for more details.</a>
+<a name="ln14"> </a>
+<a name="ln15">  You should have received a copy of the GNU General Public License</a>
+<a name="ln16">  along with darktable.  If not, see &lt;http://www.gnu.org/licenses/&gt;.</a>
+<a name="ln17">*/</a>
+<a name="ln18"> </a>
+<a name="ln19">#ifdef HAVE_CONFIG_H</a>
+<a name="ln20">#include &quot;config.h&quot;</a>
+<a name="ln21">#endif</a>
+<a name="ln22">#include &quot;bauhaus/bauhaus.h&quot;</a>
+<a name="ln23">#include &quot;common/bilateral.h&quot;</a>
+<a name="ln24">#include &quot;common/bilateralcl.h&quot;</a>
+<a name="ln25">#include &quot;common/debug.h&quot;</a>
+<a name="ln26">#include &quot;common/gaussian.h&quot;</a>
+<a name="ln27">#include &quot;common/opencl.h&quot;</a>
+<a name="ln28">#include &quot;control/control.h&quot;</a>
+<a name="ln29">#include &quot;develop/develop.h&quot;</a>
+<a name="ln30">#include &quot;develop/imageop.h&quot;</a>
+<a name="ln31">#include &quot;develop/imageop_math.h&quot;</a>
+<a name="ln32">#include &quot;develop/tiling.h&quot;</a>
+<a name="ln33">#include &quot;gui/accelerators.h&quot;</a>
+<a name="ln34">#include &quot;gui/gtk.h&quot;</a>
+<a name="ln35">#include &quot;gui/presets.h&quot;</a>
+<a name="ln36">#include &quot;iop/iop_api.h&quot;</a>
+<a name="ln37">#include &lt;assert.h&gt;</a>
+<a name="ln38">#include &lt;gtk/gtk.h&gt;</a>
+<a name="ln39">#include &lt;math.h&gt;</a>
+<a name="ln40">#include &lt;stdlib.h&gt;</a>
+<a name="ln41">#include &lt;string.h&gt;</a>
+<a name="ln42"> </a>
+<a name="ln43">#include &lt;inttypes.h&gt;</a>
+<a name="ln44"> </a>
+<a name="ln45">#define CLAMPF(a, mn, mx) ((a) &lt; (mn) ? (mn) : ((a) &gt; (mx) ? (mx) : (a)))</a>
+<a name="ln46"> </a>
+<a name="ln47">DT_MODULE_INTROSPECTION(4, dt_iop_lowpass_params_t)</a>
+<a name="ln48"> </a>
+<a name="ln49">typedef enum dt_iop_lowpass_algo_t</a>
+<a name="ln50">{</a>
+<a name="ln51">  LOWPASS_ALGO_GAUSSIAN,</a>
+<a name="ln52">  LOWPASS_ALGO_BILATERAL</a>
+<a name="ln53">} dt_iop_lowpass_algo_t;</a>
+<a name="ln54"> </a>
+<a name="ln55">/* legacy version 1 params */</a>
+<a name="ln56">typedef struct dt_iop_lowpass_params1_t</a>
+<a name="ln57">{</a>
+<a name="ln58">  dt_gaussian_order_t order;</a>
+<a name="ln59">  float radius;</a>
+<a name="ln60">  float contrast;</a>
+<a name="ln61">  float saturation;</a>
+<a name="ln62">} dt_iop_lowpass_params1_t;</a>
+<a name="ln63"> </a>
+<a name="ln64">typedef struct dt_iop_lowpass_params2_t</a>
+<a name="ln65">{</a>
+<a name="ln66">  dt_gaussian_order_t order;</a>
+<a name="ln67">  float radius;</a>
+<a name="ln68">  float contrast;</a>
+<a name="ln69">  float brightness;</a>
+<a name="ln70">  float saturation;</a>
+<a name="ln71">} dt_iop_lowpass_params2_t;</a>
+<a name="ln72"> </a>
+<a name="ln73">typedef struct dt_iop_lowpass_params3_t</a>
+<a name="ln74">{</a>
+<a name="ln75">  dt_gaussian_order_t order;</a>
+<a name="ln76">  float radius;</a>
+<a name="ln77">  float contrast;</a>
+<a name="ln78">  float brightness;</a>
+<a name="ln79">  float saturation;</a>
+<a name="ln80">  int unbound;</a>
+<a name="ln81">} dt_iop_lowpass_params3_t;</a>
+<a name="ln82"> </a>
+<a name="ln83">typedef struct dt_iop_lowpass_params_t</a>
+<a name="ln84">{</a>
+<a name="ln85">  dt_gaussian_order_t order;</a>
+<a name="ln86">  float radius;</a>
+<a name="ln87">  float contrast;</a>
+<a name="ln88">  float brightness;</a>
+<a name="ln89">  float saturation;</a>
+<a name="ln90">  dt_iop_lowpass_algo_t lowpass_algo;</a>
+<a name="ln91">  int unbound;</a>
+<a name="ln92">} dt_iop_lowpass_params_t;</a>
+<a name="ln93"> </a>
+<a name="ln94"> </a>
+<a name="ln95">typedef struct dt_iop_lowpass_gui_data_t</a>
+<a name="ln96">{</a>
+<a name="ln97">  GtkWidget *radius;</a>
+<a name="ln98">  GtkWidget *contrast;</a>
+<a name="ln99">  GtkWidget *brightness;</a>
+<a name="ln100">  GtkWidget *saturation;</a>
+<a name="ln101">  GtkWidget *order;</a>
+<a name="ln102">  GtkWidget *lowpass_algo;</a>
+<a name="ln103">} dt_iop_lowpass_gui_data_t;</a>
+<a name="ln104"> </a>
+<a name="ln105">typedef struct dt_iop_lowpass_data_t</a>
+<a name="ln106">{</a>
+<a name="ln107">  dt_gaussian_order_t order;</a>
+<a name="ln108">  float radius;</a>
+<a name="ln109">  float contrast;</a>
+<a name="ln110">  float brightness;</a>
+<a name="ln111">  float saturation;</a>
+<a name="ln112">  dt_iop_lowpass_algo_t lowpass_algo;</a>
+<a name="ln113">  int unbound;</a>
+<a name="ln114">  float ctable[0x10000];      // precomputed look-up table for contrast curve</a>
+<a name="ln115">  float cunbounded_coeffs[3]; // approximation for extrapolation of contrast curve</a>
+<a name="ln116">  float ltable[0x10000];      // precomputed look-up table for brightness curve</a>
+<a name="ln117">  float lunbounded_coeffs[3]; // approximation for extrapolation of brightness curve</a>
+<a name="ln118">} dt_iop_lowpass_data_t;</a>
+<a name="ln119"> </a>
+<a name="ln120">typedef struct dt_iop_lowpass_global_data_t</a>
+<a name="ln121">{</a>
+<a name="ln122">  int kernel_lowpass_mix;</a>
+<a name="ln123">} dt_iop_lowpass_global_data_t;</a>
+<a name="ln124"> </a>
+<a name="ln125"> </a>
+<a name="ln126">const char *name()</a>
+<a name="ln127">{</a>
+<a name="ln128">  return _(&quot;lowpass&quot;);</a>
+<a name="ln129">}</a>
+<a name="ln130"> </a>
+<a name="ln131">int flags()</a>
+<a name="ln132">{</a>
+<a name="ln133">  return IOP_FLAGS_INCLUDE_IN_STYLES | IOP_FLAGS_SUPPORTS_BLENDING | IOP_FLAGS_ALLOW_TILING;</a>
+<a name="ln134">}</a>
+<a name="ln135"> </a>
+<a name="ln136">int default_group()</a>
+<a name="ln137">{</a>
+<a name="ln138">  return IOP_GROUP_EFFECT;</a>
+<a name="ln139">}</a>
+<a name="ln140"> </a>
+<a name="ln141">int default_colorspace(dt_iop_module_t *self, dt_dev_pixelpipe_t *pipe, dt_dev_pixelpipe_iop_t *piece)</a>
+<a name="ln142">{</a>
+<a name="ln143">  return iop_cs_Lab;</a>
+<a name="ln144">}</a>
+<a name="ln145"> </a>
+<a name="ln146">int legacy_params(dt_iop_module_t *self, const void *const old_params, const int old_version,</a>
+<a name="ln147">                  void *new_params, const int new_version)</a>
+<a name="ln148">{</a>
+<a name="ln149">  if(old_version == 1 &amp;&amp; new_version == 4)</a>
+<a name="ln150">  {</a>
+<a name="ln151">    const dt_iop_lowpass_params1_t *old = old_params;</a>
+<a name="ln152">    dt_iop_lowpass_params_t *new = new_params;</a>
+<a name="ln153">    new-&gt;order = old-&gt;order;</a>
+<a name="ln154">    new-&gt;radius = fabs(old-&gt;radius);</a>
+<a name="ln155">    new-&gt;contrast = old-&gt;contrast;</a>
+<a name="ln156">    new-&gt;saturation = old-&gt;saturation;</a>
+<a name="ln157">    new-&gt;brightness = 0.0f;</a>
+<a name="ln158">    new-&gt;lowpass_algo = old-&gt;radius &lt; 0.0f ? LOWPASS_ALGO_BILATERAL : LOWPASS_ALGO_GAUSSIAN;</a>
+<a name="ln159">    new-&gt;unbound = 0;</a>
+<a name="ln160"> </a>
+<a name="ln161">    return 0;</a>
+<a name="ln162">  }</a>
+<a name="ln163">  if(old_version == 2 &amp;&amp; new_version == 4)</a>
+<a name="ln164">  {</a>
+<a name="ln165">    const dt_iop_lowpass_params2_t *old = old_params;</a>
+<a name="ln166">    dt_iop_lowpass_params_t *new = new_params;</a>
+<a name="ln167">    new-&gt;order = old-&gt;order;</a>
+<a name="ln168">    new-&gt;radius = fabs(old-&gt;radius);</a>
+<a name="ln169">    new-&gt;contrast = old-&gt;contrast;</a>
+<a name="ln170">    new-&gt;saturation = old-&gt;saturation;</a>
+<a name="ln171">    new-&gt;brightness = old-&gt;brightness;</a>
+<a name="ln172">    new-&gt;lowpass_algo = old-&gt;radius &lt; 0.0f ? LOWPASS_ALGO_BILATERAL : LOWPASS_ALGO_GAUSSIAN;</a>
+<a name="ln173">    new-&gt;unbound = 0;</a>
+<a name="ln174"> </a>
+<a name="ln175">    return 0;</a>
+<a name="ln176">  }</a>
+<a name="ln177">  if(old_version == 3 &amp;&amp; new_version == 4)</a>
+<a name="ln178">  {</a>
+<a name="ln179">    const dt_iop_lowpass_params3_t *old = old_params;</a>
+<a name="ln180">    dt_iop_lowpass_params_t *new = new_params;</a>
+<a name="ln181">    new-&gt;order = old-&gt;order;</a>
+<a name="ln182">    new-&gt;radius = fabs(old-&gt;radius);</a>
+<a name="ln183">    new-&gt;contrast = old-&gt;contrast;</a>
+<a name="ln184">    new-&gt;saturation = old-&gt;saturation;</a>
+<a name="ln185">    new-&gt;brightness = old-&gt;brightness;</a>
+<a name="ln186">    new-&gt;lowpass_algo = old-&gt;radius &lt; 0.0f ? LOWPASS_ALGO_BILATERAL : LOWPASS_ALGO_GAUSSIAN;</a>
+<a name="ln187">    new-&gt;unbound = old-&gt;unbound;</a>
+<a name="ln188"> </a>
+<a name="ln189">    return 0;</a>
+<a name="ln190">  }</a>
+<a name="ln191">  return 1;</a>
+<a name="ln192">}</a>
+<a name="ln193"> </a>
+<a name="ln194">void init_key_accels(dt_iop_module_so_t *self)</a>
+<a name="ln195">{</a>
+<a name="ln196">  dt_accel_register_slider_iop(self, FALSE, NC_(&quot;accel&quot;, &quot;radius&quot;));</a>
+<a name="ln197">  dt_accel_register_slider_iop(self, FALSE, NC_(&quot;accel&quot;, &quot;contrast&quot;));</a>
+<a name="ln198">  dt_accel_register_slider_iop(self, FALSE, NC_(&quot;accel&quot;, &quot;brightness&quot;));</a>
+<a name="ln199">  dt_accel_register_slider_iop(self, FALSE, NC_(&quot;accel&quot;, &quot;saturation&quot;));</a>
+<a name="ln200">}</a>
+<a name="ln201"> </a>
+<a name="ln202">void connect_key_accels(dt_iop_module_t *self)</a>
+<a name="ln203">{</a>
+<a name="ln204">  dt_iop_lowpass_gui_data_t *g = (dt_iop_lowpass_gui_data_t *)self-&gt;gui_data;</a>
+<a name="ln205"> </a>
+<a name="ln206">  dt_accel_connect_slider_iop(self, &quot;radius&quot;, GTK_WIDGET(g-&gt;radius));</a>
+<a name="ln207">  dt_accel_connect_slider_iop(self, &quot;contrast&quot;, GTK_WIDGET(g-&gt;contrast));</a>
+<a name="ln208">  dt_accel_connect_slider_iop(self, &quot;brightness&quot;, GTK_WIDGET(g-&gt;brightness));</a>
+<a name="ln209">  dt_accel_connect_slider_iop(self, &quot;saturation&quot;, GTK_WIDGET(g-&gt;saturation));</a>
+<a name="ln210">}</a>
+<a name="ln211"> </a>
+<a name="ln212"> </a>
+<a name="ln213">#ifdef HAVE_OPENCL</a>
+<a name="ln214">int process_cl(struct dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, cl_mem dev_in, cl_mem dev_out,</a>
+<a name="ln215">               const dt_iop_roi_t *const roi_in, const dt_iop_roi_t *const roi_out)</a>
+<a name="ln216">{</a>
+<a name="ln217">  dt_iop_lowpass_data_t *d = (dt_iop_lowpass_data_t *)piece-&gt;data;</a>
+<a name="ln218">  dt_iop_lowpass_global_data_t *gd = (dt_iop_lowpass_global_data_t *)self-&gt;data;</a>
+<a name="ln219"> </a>
+<a name="ln220">  cl_int err = -999;</a>
+<a name="ln221">  const int devid = piece-&gt;pipe-&gt;devid;</a>
+<a name="ln222"> </a>
+<a name="ln223">  const int width = roi_in-&gt;width;</a>
+<a name="ln224">  const int height = roi_in-&gt;height;</a>
+<a name="ln225">  const int channels = piece-&gt;colors;</a>
+<a name="ln226"> </a>
+<a name="ln227">  const float radius = fmax(0.1f, d-&gt;radius);</a>
+<a name="ln228">  const float sigma = radius * roi_in-&gt;scale / piece-&gt;iscale;</a>
+<a name="ln229">  const float saturation = d-&gt;saturation;</a>
+<a name="ln230">  const int order = d-&gt;order;</a>
+<a name="ln231">  const int unbound = d-&gt;unbound;</a>
+<a name="ln232"> </a>
+<a name="ln233">  size_t sizes[3];</a>
+<a name="ln234"> </a>
+<a name="ln235">  cl_mem dev_cm = NULL;</a>
+<a name="ln236">  cl_mem dev_ccoeffs = NULL;</a>
+<a name="ln237">  cl_mem dev_lm = NULL;</a>
+<a name="ln238">  cl_mem dev_lcoeffs = NULL;</a>
+<a name="ln239">  cl_mem dev_tmp = NULL;</a>
+<a name="ln240"> </a>
+<a name="ln241">  dt_gaussian_cl_t *g = NULL;</a>
+<a name="ln242">  dt_bilateral_cl_t *b = NULL;</a>
+<a name="ln243"> </a>
+<a name="ln244">  float Labmax[] = { 100.0f, 128.0f, 128.0f, 1.0f };</a>
+<a name="ln245">  float Labmin[] = { 0.0f, -128.0f, -128.0f, 0.0f };</a>
+<a name="ln246"> </a>
+<a name="ln247">  if(unbound)</a>
+<a name="ln248">  {</a>
+<a name="ln249">    for(int k = 0; k &lt; 4; k++) Labmax[k] = INFINITY;</a>
+<a name="ln250">    for(int k = 0; k &lt; 4; k++) Labmin[k] = -INFINITY;</a>
+<a name="ln251">  }</a>
+<a name="ln252"> </a>
+<a name="ln253">  if(d-&gt;lowpass_algo == LOWPASS_ALGO_GAUSSIAN)</a>
+<a name="ln254">  {</a>
+<a name="ln255">    g = dt_gaussian_init_cl(devid, width, height, channels, Labmax, Labmin, sigma, order);</a>
+<a name="ln256">    if(!g) goto error;</a>
+<a name="ln257">    err = dt_gaussian_blur_cl(g, dev_in, dev_out);</a>
+<a name="ln258">    if(err != CL_SUCCESS) goto error;</a>
+<a name="ln259">    dt_gaussian_free_cl(g);</a>
+<a name="ln260">    g = NULL;</a>
+<a name="ln261">  }</a>
+<a name="ln262">  else</a>
+<a name="ln263">  {</a>
+<a name="ln264">    const float sigma_r = 100.0f; // does not depend on scale</a>
+<a name="ln265">    const float sigma_s = sigma;</a>
+<a name="ln266">    const float detail = -1.0f; // we want the bilateral base layer</a>
+<a name="ln267"> </a>
+<a name="ln268">    b = dt_bilateral_init_cl(devid, width, height, sigma_s, sigma_r);</a>
+<a name="ln269">    if(!b) goto error;</a>
+<a name="ln270">    err = dt_bilateral_splat_cl(b, dev_in);</a>
+<a name="ln271">    if(err != CL_SUCCESS) goto error;</a>
+<a name="ln272">    err = dt_bilateral_blur_cl(b);</a>
+<a name="ln273">    if(err != CL_SUCCESS) goto error;</a>
+<a name="ln274">    err = dt_bilateral_slice_cl(b, dev_in, dev_out, detail);</a>
+<a name="ln275">    if(err != CL_SUCCESS) goto error;</a>
+<a name="ln276">    dt_bilateral_free_cl(b);</a>
+<a name="ln277">    b = NULL; // make sure we don't clean it up twice</a>
+<a name="ln278">  }</a>
+<a name="ln279"> </a>
+<a name="ln280">  dev_tmp = dt_opencl_alloc_device(devid, width, height, 4 * sizeof(float));</a>
+<a name="ln281">  if(dev_tmp == NULL) goto error;</a>
+<a name="ln282"> </a>
+<a name="ln283">  dev_cm = dt_opencl_copy_host_to_device(devid, d-&gt;ctable, 256, 256, sizeof(float));</a>
+<a name="ln284">  if(dev_cm == NULL) goto error;</a>
+<a name="ln285"> </a>
+<a name="ln286">  dev_ccoeffs = dt_opencl_copy_host_to_device_constant(devid, sizeof(float) * 3, d-&gt;cunbounded_coeffs);</a>
+<a name="ln287">  if(dev_ccoeffs == NULL) goto error;</a>
+<a name="ln288"> </a>
+<a name="ln289">  dev_lm = dt_opencl_copy_host_to_device(devid, d-&gt;ltable, 256, 256, sizeof(float));</a>
+<a name="ln290">  if(dev_lm == NULL) goto error;</a>
+<a name="ln291"> </a>
+<a name="ln292">  dev_lcoeffs = dt_opencl_copy_host_to_device_constant(devid, sizeof(float) * 3, d-&gt;lunbounded_coeffs);</a>
+<a name="ln293">  if(dev_lcoeffs == NULL) goto error;</a>
+<a name="ln294"> </a>
+<a name="ln295">  size_t origin[] = { 0, 0, 0 };</a>
+<a name="ln296">  size_t region[] = { width, height, 1 };</a>
+<a name="ln297">  err = dt_opencl_enqueue_copy_image(devid, dev_out, dev_tmp, origin, origin, region);</a>
+<a name="ln298">  if(err != CL_SUCCESS) goto error;</a>
+<a name="ln299"> </a>
+<a name="ln300">  sizes[0] = ROUNDUPWD(width);</a>
+<a name="ln301">  sizes[1] = ROUNDUPWD(height);</a>
+<a name="ln302">  sizes[2] = 1;</a>
+<a name="ln303">  dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_lowpass_mix, 0, sizeof(cl_mem), (void *)&amp;dev_tmp);</a>
+<a name="ln304">  dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_lowpass_mix, 1, sizeof(cl_mem), (void *)&amp;dev_out);</a>
+<a name="ln305">  dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_lowpass_mix, 2, sizeof(int), (void *)&amp;width);</a>
+<a name="ln306">  dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_lowpass_mix, 3, sizeof(int), (void *)&amp;height);</a>
+<a name="ln307">  dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_lowpass_mix, 4, sizeof(float), (void *)&amp;saturation);</a>
+<a name="ln308">  dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_lowpass_mix, 5, sizeof(cl_mem), (void *)&amp;dev_cm);</a>
+<a name="ln309">  dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_lowpass_mix, 6, sizeof(cl_mem), (void *)&amp;dev_ccoeffs);</a>
+<a name="ln310">  dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_lowpass_mix, 7, sizeof(cl_mem), (void *)&amp;dev_lm);</a>
+<a name="ln311">  dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_lowpass_mix, 8, sizeof(cl_mem), (void *)&amp;dev_lcoeffs);</a>
+<a name="ln312">  dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_lowpass_mix, 9, sizeof(int), (void *)&amp;unbound);</a>
+<a name="ln313"> </a>
+<a name="ln314">  err = dt_opencl_enqueue_kernel_2d(devid, gd-&gt;kernel_lowpass_mix, sizes);</a>
+<a name="ln315">  if(err != CL_SUCCESS) goto error;</a>
+<a name="ln316"> </a>
+<a name="ln317">  dt_opencl_release_mem_object(dev_tmp);</a>
+<a name="ln318">  dt_opencl_release_mem_object(dev_lcoeffs);</a>
+<a name="ln319">  dt_opencl_release_mem_object(dev_lm);</a>
+<a name="ln320">  dt_opencl_release_mem_object(dev_ccoeffs);</a>
+<a name="ln321">  dt_opencl_release_mem_object(dev_cm);</a>
+<a name="ln322"> </a>
+<a name="ln323">  return TRUE;</a>
+<a name="ln324"> </a>
+<a name="ln325">error:</a>
+<a name="ln326">  if(g) dt_gaussian_free_cl(g);</a>
+<a name="ln327">  if(b) dt_bilateral_free_cl(b);</a>
+<a name="ln328"> </a>
+<a name="ln329">  dt_opencl_release_mem_object(dev_tmp);</a>
+<a name="ln330">  dt_opencl_release_mem_object(dev_lcoeffs);</a>
+<a name="ln331">  dt_opencl_release_mem_object(dev_lm);</a>
+<a name="ln332">  dt_opencl_release_mem_object(dev_ccoeffs);</a>
+<a name="ln333">  dt_opencl_release_mem_object(dev_cm);</a>
+<a name="ln334">  dt_print(DT_DEBUG_OPENCL, &quot;[opencl_lowpass] couldn't enqueue kernel! %d\n&quot;, err);</a>
+<a name="ln335">  return FALSE;</a>
+<a name="ln336">}</a>
+<a name="ln337">#endif</a>
+<a name="ln338"> </a>
+<a name="ln339">void tiling_callback(struct dt_iop_module_t *self, struct dt_dev_pixelpipe_iop_t *piece,</a>
+<a name="ln340">                     const dt_iop_roi_t *roi_in, const dt_iop_roi_t *roi_out,</a>
+<a name="ln341">                     struct dt_develop_tiling_t *tiling)</a>
+<a name="ln342">{</a>
+<a name="ln343">  dt_iop_lowpass_data_t *d = (dt_iop_lowpass_data_t *)piece-&gt;data;</a>
+<a name="ln344"> </a>
+<a name="ln345">  const float radius = fmax(0.1f, d-&gt;radius);</a>
+<a name="ln346">  const float sigma = radius * roi_in-&gt;scale / piece-&gt;iscale;</a>
+<a name="ln347">  const float sigma_r = 100.0f; // does not depend on scale</a>
+<a name="ln348">  const float sigma_s = sigma;</a>
+<a name="ln349"> </a>
+<a name="ln350">  const int width = roi_in-&gt;width;</a>
+<a name="ln351">  const int height = roi_in-&gt;height;</a>
+<a name="ln352">  const int channels = piece-&gt;colors;</a>
+<a name="ln353"> </a>
+<a name="ln354">  const size_t basebuffer = width * height * channels * sizeof(float);</a>
+<a name="ln355"> </a>
+<a name="ln356">  if(d-&gt;lowpass_algo == LOWPASS_ALGO_BILATERAL)</a>
+<a name="ln357">  {</a>
+<a name="ln358">    // bilateral filter</a>
+<a name="ln359">    tiling-&gt;factor = 2.0f + fmax(1.0f, (float)dt_bilateral_memory_use(width, height, sigma_s, sigma_r) / basebuffer);</a>
+<a name="ln360">    tiling-&gt;maxbuf</a>
+<a name="ln361">        = fmax(1.0f, (float)dt_bilateral_singlebuffer_size(width, height, sigma_s, sigma_r) / basebuffer);</a>
+<a name="ln362">  }</a>
+<a name="ln363">  else</a>
+<a name="ln364">  {</a>
+<a name="ln365">    // gaussian blur</a>
+<a name="ln366">    tiling-&gt;factor = 2.0f + fmax(1.0f, (float)dt_gaussian_memory_use(width, height, channels) / basebuffer);</a>
+<a name="ln367">    tiling-&gt;maxbuf = fmax(1.0f, (float)dt_gaussian_singlebuffer_size(width, height, channels) / basebuffer);</a>
+<a name="ln368">  }</a>
+<a name="ln369">  tiling-&gt;overhead = 0;</a>
+<a name="ln370">  tiling-&gt;overlap = ceilf(4 * sigma);</a>
+<a name="ln371">  tiling-&gt;xalign = 1;</a>
+<a name="ln372">  tiling-&gt;yalign = 1;</a>
+<a name="ln373">  return;</a>
+<a name="ln374">}</a>
+<a name="ln375"> </a>
+<a name="ln376">void process(struct dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, const void *const ivoid,</a>
+<a name="ln377">             void *const ovoid, const dt_iop_roi_t *const roi_in, const dt_iop_roi_t *const roi_out)</a>
+<a name="ln378">{</a>
+<a name="ln379">  dt_iop_lowpass_data_t *data = (dt_iop_lowpass_data_t *)piece-&gt;data;</a>
+<a name="ln380">  float *in = (float *)ivoid;</a>
+<a name="ln381">  float *out = (float *)ovoid;</a>
+<a name="ln382"> </a>
+<a name="ln383"> </a>
+<a name="ln384">  const int width = roi_in-&gt;width;</a>
+<a name="ln385">  const int height = roi_in-&gt;height;</a>
+<a name="ln386">  const int ch = piece-&gt;colors;</a>
+<a name="ln387"> </a>
+<a name="ln388">  const float radius = fmax(0.1f, data-&gt;radius);</a>
+<a name="ln389">  const float sigma = radius * roi_in-&gt;scale / piece-&gt;iscale;</a>
+<a name="ln390">  const int order = data-&gt;order;</a>
+<a name="ln391">  const int unbound = data-&gt;unbound;</a>
+<a name="ln392"> </a>
+<a name="ln393">  float Labmax[] = { 100.0f, 128.0f, 128.0f, 1.0f };</a>
+<a name="ln394">  float Labmin[] = { 0.0f, -128.0f, -128.0f, 0.0f };</a>
+<a name="ln395"> </a>
+<a name="ln396">  if(unbound)</a>
+<a name="ln397">  {</a>
+<a name="ln398">    for(int k = 0; k &lt; 4; k++) Labmax[k] = INFINITY;</a>
+<a name="ln399">    for(int k = 0; k &lt; 4; k++) Labmin[k] = -INFINITY;</a>
+<a name="ln400">  }</a>
+<a name="ln401"> </a>
+<a name="ln402">  if(data-&gt;lowpass_algo == LOWPASS_ALGO_GAUSSIAN)</a>
+<a name="ln403">  {</a>
+<a name="ln404">    dt_gaussian_t *g = dt_gaussian_init(width, height, ch, Labmax, Labmin, sigma, order);</a>
+<a name="ln405">    if(!g) return;</a>
+<a name="ln406">    dt_gaussian_blur_4c(g, in, out);</a>
+<a name="ln407">    dt_gaussian_free(g);</a>
+<a name="ln408">  }</a>
+<a name="ln409">  else</a>
+<a name="ln410">  {</a>
+<a name="ln411">    const float sigma_r = 100.0f; // d-&gt;sigma_r; // does not depend on scale</a>
+<a name="ln412">    const float sigma_s = sigma;</a>
+<a name="ln413">    const float detail = -1.0f; // we want the bilateral base layer</a>
+<a name="ln414"> </a>
+<a name="ln415">    dt_bilateral_t *b = dt_bilateral_init(width, height, sigma_s, sigma_r);</a>
+<a name="ln416">    if(!b) return;</a>
+<a name="ln417">    dt_bilateral_splat(b, in);</a>
+<a name="ln418">    dt_bilateral_blur(b);</a>
+<a name="ln419">    dt_bilateral_slice(b, in, out, detail);</a>
+<a name="ln420">    dt_bilateral_free(b);</a>
+<a name="ln421">  }</a>
+<a name="ln422"> </a>
+<a name="ln423">  // some aliased pointers for compilers that don't yet understand operators on __m128</a>
+<a name="ln424">  const float *const Labminf = (float *)&amp;Labmin;</a>
+<a name="ln425">  const float *const Labmaxf = (float *)&amp;Labmax;</a>
+<a name="ln426">#ifdef _OPENMP</a>
+<a name="ln427">#pragma omp parallel for default(none) \</a>
+<a name="ln428">  dt_omp_firstprivate(ch, Labmaxf, Labminf, roi_out) \</a>
+<a name="ln429">  shared(in, out, data) \</a>
+<a name="ln430">  schedule(static)</a>
+<a name="ln431">#endif</a>
+<a name="ln432">  for(size_t k = 0; k &lt; (size_t)roi_out-&gt;width * roi_out-&gt;height; k++)</a>
+<a name="ln433">  {</a>
+<a name="ln434">    out[k * ch + 0] = (out[k * ch + 0] &lt; 100.0f)</a>
+<a name="ln435">                          ? data-&gt;ctable[CLAMP((int)(out[k * ch + 0] / 100.0f * 0x10000ul), 0, 0xffff)]</a>
+<a name="ln436">                          : dt_iop_eval_exp(data-&gt;cunbounded_coeffs, out[k * ch + 0] / 100.0f);</a>
+<a name="ln437">    out[k * ch + 0] = (out[k * ch + 0] &lt; 100.0f)</a>
+<a name="ln438">                          ? data-&gt;ltable[CLAMP((int)(out[k * ch + 0] / 100.0f * 0x10000ul), 0, 0xffff)]</a>
+<a name="ln439">                          : dt_iop_eval_exp(data-&gt;lunbounded_coeffs, out[k * ch + 0] / 100.0f);</a>
+<a name="ln440">    out[k * ch + 1] = CLAMPF(out[k * ch + 1] * data-&gt;saturation, Labminf[1],</a>
+<a name="ln441">                             Labmaxf[1]); // will not clip in unbound case (see definition of Labmax/Labmin)</a>
+<a name="ln442">    out[k * ch + 2]</a>
+<a name="ln443">        = CLAMPF(out[k * ch + 2] * data-&gt;saturation, Labminf[2], Labmaxf[2]); //                         - &quot; -</a>
+<a name="ln444">    out[k * ch + 3] = in[k * ch + 3];</a>
+<a name="ln445">  }</a>
+<a name="ln446">}</a>
+<a name="ln447"> </a>
+<a name="ln448"> </a>
+<a name="ln449">static void radius_callback(GtkWidget *slider, gpointer user_data)</a>
+<a name="ln450">{</a>
+<a name="ln451">  dt_iop_module_t *self = (dt_iop_module_t *)user_data;</a>
+<a name="ln452">  if(self-&gt;dt-&gt;gui-&gt;reset) return;</a>
+<a name="ln453">  dt_iop_lowpass_params_t *p = (dt_iop_lowpass_params_t *)self-&gt;params;</a>
+<a name="ln454">  p-&gt;radius = dt_bauhaus_slider_get(slider);</a>
+<a name="ln455">  dt_dev_add_history_item(darktable.develop, self, TRUE);</a>
+<a name="ln456">}</a>
+<a name="ln457"> </a>
+<a name="ln458">static void lowpass_algo_callback(GtkWidget *widget, gpointer user_data)</a>
+<a name="ln459">{</a>
+<a name="ln460">  dt_iop_module_t *self = (dt_iop_module_t *)user_data;</a>
+<a name="ln461">  if(self-&gt;dt-&gt;gui-&gt;reset) return;</a>
+<a name="ln462">  dt_iop_lowpass_params_t *p = (dt_iop_lowpass_params_t *)self-&gt;params;</a>
+<a name="ln463">  p-&gt;lowpass_algo = dt_bauhaus_combobox_get(widget);</a>
+<a name="ln464">  dt_dev_add_history_item(darktable.develop, self, TRUE);</a>
+<a name="ln465">}</a>
+<a name="ln466"> </a>
+<a name="ln467">static void contrast_callback(GtkWidget *slider, gpointer user_data)</a>
+<a name="ln468">{</a>
+<a name="ln469">  dt_iop_module_t *self = (dt_iop_module_t *)user_data;</a>
+<a name="ln470">  if(self-&gt;dt-&gt;gui-&gt;reset) return;</a>
+<a name="ln471">  dt_iop_lowpass_params_t *p = (dt_iop_lowpass_params_t *)self-&gt;params;</a>
+<a name="ln472">  p-&gt;contrast = dt_bauhaus_slider_get(slider);</a>
+<a name="ln473">  dt_dev_add_history_item(darktable.develop, self, TRUE);</a>
+<a name="ln474">}</a>
+<a name="ln475"> </a>
+<a name="ln476">static void brightness_callback(GtkWidget *slider, gpointer user_data)</a>
+<a name="ln477">{</a>
+<a name="ln478">  dt_iop_module_t *self = (dt_iop_module_t *)user_data;</a>
+<a name="ln479">  if(self-&gt;dt-&gt;gui-&gt;reset) return;</a>
+<a name="ln480">  dt_iop_lowpass_params_t *p = (dt_iop_lowpass_params_t *)self-&gt;params;</a>
+<a name="ln481">  p-&gt;brightness = dt_bauhaus_slider_get(slider);</a>
+<a name="ln482">  dt_dev_add_history_item(darktable.develop, self, TRUE);</a>
+<a name="ln483">}</a>
+<a name="ln484"> </a>
+<a name="ln485">static void saturation_callback(GtkWidget *slider, gpointer user_data)</a>
+<a name="ln486">{</a>
+<a name="ln487">  dt_iop_module_t *self = (dt_iop_module_t *)user_data;</a>
+<a name="ln488">  if(self-&gt;dt-&gt;gui-&gt;reset) return;</a>
+<a name="ln489">  dt_iop_lowpass_params_t *p = (dt_iop_lowpass_params_t *)self-&gt;params;</a>
+<a name="ln490">  p-&gt;saturation = dt_bauhaus_slider_get(slider);</a>
+<a name="ln491">  dt_dev_add_history_item(darktable.develop, self, TRUE);</a>
+<a name="ln492">}</a>
+<a name="ln493"> </a>
+<a name="ln494">#if 0 // gaussian order not user selectable</a>
+<a name="ln495">static void</a>
+<a name="ln496">order_changed (GtkComboBox *combo, gpointer user_data)</a>
+<a name="ln497">{</a>
+<a name="ln498">  dt_iop_module_t *self = (dt_iop_module_t *)user_data;</a>
+<a name="ln499">  if(self-&gt;dt-&gt;gui-&gt;reset) return;</a>
+<a name="ln500">  dt_iop_lowpass_params_t *p = (dt_iop_lowpass_params_t *)self-&gt;params;</a>
+<a name="ln501">  p-&gt;order = gtk_combo_box_get_active(combo);</a>
+<a name="ln502">  dt_dev_add_history_item(darktable.develop, self, TRUE);</a>
+<a name="ln503">}</a>
+<a name="ln504">#endif</a>
+<a name="ln505"> </a>
+<a name="ln506">void commit_params(struct dt_iop_module_t *self, dt_iop_params_t *p1, dt_dev_pixelpipe_t *pipe,</a>
+<a name="ln507">                   dt_dev_pixelpipe_iop_t *piece)</a>
+<a name="ln508">{</a>
+<a name="ln509">  dt_iop_lowpass_params_t *p = (dt_iop_lowpass_params_t *)p1;</a>
+<a name="ln510">  dt_iop_lowpass_data_t *d = (dt_iop_lowpass_data_t *)piece-&gt;data;</a>
+<a name="ln511">  d-&gt;order = p-&gt;order;</a>
+<a name="ln512">  d-&gt;radius = p-&gt;radius;</a>
+<a name="ln513">  d-&gt;contrast = p-&gt;contrast;</a>
+<a name="ln514">  d-&gt;brightness = p-&gt;brightness;</a>
+<a name="ln515">  d-&gt;saturation = p-&gt;saturation;</a>
+<a name="ln516">  d-&gt;lowpass_algo = p-&gt;lowpass_algo;</a>
+<a name="ln517">  d-&gt;unbound = p-&gt;unbound;</a>
+<a name="ln518"> </a>
+<a name="ln519">#ifdef HAVE_OPENCL</a>
+<a name="ln520">  if(d-&gt;lowpass_algo == LOWPASS_ALGO_BILATERAL)</a>
+<a name="ln521">    piece-&gt;process_cl_ready = (piece-&gt;process_cl_ready &amp;&amp; !(darktable.opencl-&gt;avoid_atomics));</a>
+<a name="ln522">#endif</a>
+<a name="ln523"> </a>
+<a name="ln524"> </a>
+<a name="ln525">  // generate precomputed contrast curve</a>
+<a name="ln526">  if(fabs(d-&gt;contrast) &lt;= 1.0f)</a>
+<a name="ln527">  {</a>
+<a name="ln528">    // linear curve for contrast up to +/- 1</a>
+<a name="ln529">    for(int k = 0; k &lt; 0x10000; k++) d-&gt;ctable[k] = d-&gt;contrast * (100.0f * k / 0x10000 - 50.0f) + 50.0f;</a>
+<a name="ln530">  }</a>
+<a name="ln531">  else</a>
+<a name="ln532">  {</a>
+<a name="ln533">    // sigmoidal curve for contrast above +/-1 1</a>
+<a name="ln534">    // going from (0,0) to (1,100) or (0,100) to (1,0), respectively</a>
+<a name="ln535">    const float boost = 5.0f;</a>
+<a name="ln536">    const float contrastm1sq = boost * (fabs(d-&gt;contrast) - 1.0f) * (fabs(d-&gt;contrast) - 1.0f);</a>
+<a name="ln537">    const float contrastscale = copysign(sqrt(1.0f + contrastm1sq), d-&gt;contrast);</a>
+<a name="ln538">#ifdef _OPENMP</a>
+<a name="ln539">#pragma omp parallel for default(none) \</a>
+<a name="ln540">    dt_omp_firstprivate(contrastm1sq, contrastscale) \</a>
+<a name="ln541">    shared(d) \</a>
+<a name="ln542">    schedule(static)</a>
+<a name="ln543">#endif</a>
+<a name="ln544">    for(int k = 0; k &lt; 0x10000; k++)</a>
+<a name="ln545">    {</a>
+<a name="ln546">      float kx2m1 = 2.0f * (float)k / 0x10000 - 1.0f;</a>
+<a name="ln547">      d-&gt;ctable[k] = 50.0f * (contrastscale * kx2m1 / sqrtf(1.0f + contrastm1sq * kx2m1 * kx2m1) + 1.0f);</a>
+<a name="ln548">    }</a>
+<a name="ln549">  }</a>
+<a name="ln550"> </a>
+<a name="ln551">  // now the extrapolation stuff for the contrast curve:</a>
+<a name="ln552">  const float xc[4] = { 0.7f, 0.8f, 0.9f, 1.0f };</a>
+<a name="ln553">  const float yc[4] = { d-&gt;ctable[CLAMP((int)(xc[0] * 0x10000ul), 0, 0xffff)],</a>
+<a name="ln554">                        d-&gt;ctable[CLAMP((int)(xc[1] * 0x10000ul), 0, 0xffff)],</a>
+<a name="ln555">                        d-&gt;ctable[CLAMP((int)(xc[2] * 0x10000ul), 0, 0xffff)],</a>
+<a name="ln556">                        d-&gt;ctable[CLAMP((int)(xc[3] * 0x10000ul), 0, 0xffff)] };</a>
+<a name="ln557">  dt_iop_estimate_exp(xc, yc, 4, d-&gt;cunbounded_coeffs);</a>
+<a name="ln558"> </a>
+<a name="ln559"> </a>
+<a name="ln560">  // generate precomputed brightness curve</a>
+<a name="ln561">  const float gamma = (d-&gt;brightness &gt;= 0.0f) ? 1.0f / (1.0f + d-&gt;brightness) : (1.0f - d-&gt;brightness);</a>
+<a name="ln562"> </a>
+<a name="ln563">#ifdef _OPENMP</a>
+<a name="ln564">#pragma omp parallel for default(none) \</a>
+<a name="ln565">  dt_omp_firstprivate(gamma) \</a>
+<a name="ln566">  shared(d) \</a>
+<a name="ln567">  schedule(static)</a>
+<a name="ln568">#endif</a>
+<a name="ln569">  for(int k = 0; k &lt; 0x10000; k++)</a>
+<a name="ln570">  {</a>
+<a name="ln571">    d-&gt;ltable[k] = 100.0f * powf((float)k / 0x10000, gamma);</a>
+<a name="ln572">  }</a>
+<a name="ln573"> </a>
+<a name="ln574">  // now the extrapolation stuff for the brightness curve:</a>
+<a name="ln575">  const float xl[4] = { 0.7f, 0.8f, 0.9f, 1.0f };</a>
+<a name="ln576">  const float yl[4] = { d-&gt;ltable[CLAMP((int)(xl[0] * 0x10000ul), 0, 0xffff)],</a>
+<a name="ln577">                        d-&gt;ltable[CLAMP((int)(xl[1] * 0x10000ul), 0, 0xffff)],</a>
+<a name="ln578">                        d-&gt;ltable[CLAMP((int)(xl[2] * 0x10000ul), 0, 0xffff)],</a>
+<a name="ln579">                        d-&gt;ltable[CLAMP((int)(xl[3] * 0x10000ul), 0, 0xffff)] };</a>
+<a name="ln580">  dt_iop_estimate_exp(xl, yl, 4, d-&gt;lunbounded_coeffs);</a>
+<a name="ln581">}</a>
+<a name="ln582"> </a>
+<a name="ln583">void init_pipe(struct dt_iop_module_t *self, dt_dev_pixelpipe_t *pipe, dt_dev_pixelpipe_iop_t *piece)</a>
+<a name="ln584">{</a>
+<a name="ln585">  dt_iop_lowpass_data_t *d = (dt_iop_lowpass_data_t *)calloc(1, sizeof(dt_iop_lowpass_data_t));</a>
+<a name="ln586">  piece-&gt;data = (void *)d;</a>
+<a name="ln587">  self-&gt;commit_params(self, self-&gt;default_params, pipe, piece);</a>
+<a name="ln588">  for(int k = 0; k &lt; 0x10000; k++) d-&gt;ctable[k] = d-&gt;ltable[k] = 100.0f * k / 0x10000; // identity</a>
+<a name="ln589">}</a>
+<a name="ln590"> </a>
+<a name="ln591">void cleanup_pipe(struct dt_iop_module_t *self, dt_dev_pixelpipe_t *pipe, dt_dev_pixelpipe_iop_t *piece)</a>
+<a name="ln592">{</a>
+<a name="ln593">  free(piece-&gt;data);</a>
+<a name="ln594">  piece-&gt;data = NULL;</a>
+<a name="ln595">}</a>
+<a name="ln596"> </a>
+<a name="ln597">void gui_update(struct dt_iop_module_t *self)</a>
+<a name="ln598">{</a>
+<a name="ln599">  dt_iop_module_t *module = (dt_iop_module_t *)self;</a>
+<a name="ln600">  dt_iop_lowpass_gui_data_t *g = (dt_iop_lowpass_gui_data_t *)self-&gt;gui_data;</a>
+<a name="ln601">  dt_iop_lowpass_params_t *p = (dt_iop_lowpass_params_t *)module-&gt;params;</a>
+<a name="ln602">  dt_bauhaus_slider_set(g-&gt;radius, p-&gt;radius);</a>
+<a name="ln603">  dt_bauhaus_combobox_set(g-&gt;lowpass_algo, p-&gt;lowpass_algo);</a>
+<a name="ln604">  dt_bauhaus_slider_set(g-&gt;contrast, p-&gt;contrast);</a>
+<a name="ln605">  dt_bauhaus_slider_set(g-&gt;brightness, p-&gt;brightness);</a>
+<a name="ln606">  dt_bauhaus_slider_set(g-&gt;saturation, p-&gt;saturation);</a>
+<a name="ln607">  // gtk_combo_box_set_active(g-&gt;order, p-&gt;order);</a>
+<a name="ln608">}</a>
+<a name="ln609"> </a>
+<a name="ln610">void init(dt_iop_module_t *module)</a>
+<a name="ln611">{</a>
+<a name="ln612">  module-&gt;params = calloc(1, sizeof(dt_iop_lowpass_params_t));</a>
+<a name="ln613">  module-&gt;default_params = calloc(1, sizeof(dt_iop_lowpass_params_t));</a>
+<a name="ln614">  module-&gt;default_enabled = 0;</a>
+<a name="ln615">  module-&gt;params_size = sizeof(dt_iop_lowpass_params_t);</a>
+<a name="ln616">  module-&gt;gui_data = NULL;</a>
+<a name="ln617">  dt_iop_lowpass_params_t tmp = (dt_iop_lowpass_params_t){ 0, 10.0f, 1.0f, 0.0f, 1.0f, LOWPASS_ALGO_GAUSSIAN, 1 };</a>
+<a name="ln618">  memcpy(module-&gt;params, &amp;tmp, sizeof(dt_iop_lowpass_params_t));</a>
+<a name="ln619">  memcpy(module-&gt;default_params, &amp;tmp, sizeof(dt_iop_lowpass_params_t));</a>
+<a name="ln620">}</a>
+<a name="ln621"> </a>
+<a name="ln622">void init_global(dt_iop_module_so_t *module)</a>
+<a name="ln623">{</a>
+<a name="ln624">  const int program = 6; // gaussian.cl, from programs.conf</a>
+<a name="ln625">  dt_iop_lowpass_global_data_t *gd</a>
+<a name="ln626">      = (dt_iop_lowpass_global_data_t *)malloc(sizeof(dt_iop_lowpass_global_data_t));</a>
+<a name="ln627">  module-&gt;data = gd;</a>
+<a name="ln628">  gd-&gt;kernel_lowpass_mix = dt_opencl_create_kernel(program, &quot;lowpass_mix&quot;);</a>
+<a name="ln629">}</a>
+<a name="ln630"> </a>
+<a name="ln631">void init_presets(dt_iop_module_so_t *self)</a>
+<a name="ln632">{</a>
+<a name="ln633">  DT_DEBUG_SQLITE3_EXEC(dt_database_get(darktable.db), &quot;BEGIN&quot;, NULL, NULL, NULL);</a>
+<a name="ln634"> </a>
+<a name="ln635">  dt_gui_presets_add_generic(_(&quot;local contrast mask&quot;), self-&gt;op, self-&gt;version(),</a>
+<a name="ln636">                             &amp;(dt_iop_lowpass_params_t){ 0, 50.0f, -1.0f, 0.0f, 0.0f, LOWPASS_ALGO_GAUSSIAN, 1 },</a>
+<a name="ln637">                             sizeof(dt_iop_lowpass_params_t), 1);</a>
+<a name="ln638"> </a>
+<a name="ln639">  DT_DEBUG_SQLITE3_EXEC(dt_database_get(darktable.db), &quot;COMMIT&quot;, NULL, NULL, NULL);</a>
+<a name="ln640">}</a>
+<a name="ln641"> </a>
+<a name="ln642">void cleanup(dt_iop_module_t *module)</a>
+<a name="ln643">{</a>
+<a name="ln644">  free(module-&gt;params);</a>
+<a name="ln645">  module-&gt;params = NULL;</a>
+<a name="ln646">}</a>
+<a name="ln647"> </a>
+<a name="ln648">void cleanup_global(dt_iop_module_so_t *module)</a>
+<a name="ln649">{</a>
+<a name="ln650">  dt_iop_lowpass_global_data_t *gd = (dt_iop_lowpass_global_data_t *)module-&gt;data;</a>
+<a name="ln651">  dt_opencl_free_kernel(gd-&gt;kernel_lowpass_mix);</a>
+<a name="ln652">  free(module-&gt;data);</a>
+<a name="ln653">  module-&gt;data = NULL;</a>
+<a name="ln654">}</a>
+<a name="ln655"> </a>
+<a name="ln656"> </a>
+<a name="ln657">void gui_init(struct dt_iop_module_t *self)</a>
+<a name="ln658">{</a>
+<a name="ln659">  self-&gt;gui_data = malloc(sizeof(dt_iop_lowpass_gui_data_t));</a>
+<a name="ln660">  dt_iop_lowpass_gui_data_t *g = (dt_iop_lowpass_gui_data_t *)self-&gt;gui_data;</a>
+<a name="ln661">  dt_iop_lowpass_params_t *p = (dt_iop_lowpass_params_t *)self-&gt;params;</a>
+<a name="ln662"> </a>
+<a name="ln663">  self-&gt;widget = gtk_box_new(GTK_ORIENTATION_VERTICAL, DT_BAUHAUS_SPACE);</a>
+<a name="ln664">  dt_gui_add_help_link(self-&gt;widget, dt_get_help_url(self-&gt;op));</a>
+<a name="ln665"> </a>
+<a name="ln666">#if 0 // gaussian is order not user selectable here, as it does not make much sense for a lowpass filter</a>
+<a name="ln667">  GtkBox *hbox  = GTK_BOX(gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0));</a>
+<a name="ln668">  gtk_box_pack_start(GTK_BOX(self-&gt;widget), GTK_WIDGET(hbox), FALSE, FALSE, 0);</a>
+<a name="ln669">  GtkWidget *label = dtgtk_reset_label_new(_(&quot;filter order&quot;), self, &amp;p-&gt;order, sizeof(float));</a>
+<a name="ln670">  gtk_box_pack_start(hbox, label, FALSE, FALSE, 0);</a>
+<a name="ln671">  g-&gt;order = GTK_COMBO_BOX(gtk_combo_box_text_new());</a>
+<a name="ln672">  gtk_combo_box_text_append_text(g-&gt;order, _(&quot;0th order&quot;));</a>
+<a name="ln673">  gtk_combo_box_text_append_text(g-&gt;order, _(&quot;1st order&quot;));</a>
+<a name="ln674">  gtk_combo_box_text_append_text(g-&gt;order, _(&quot;2nd order&quot;));</a>
+<a name="ln675">  gtk_widget_set_tooltip_text(g-&gt;order, _(&quot;filter order of gaussian blur&quot;));</a>
+<a name="ln676">  gtk_box_pack_start(hbox, GTK_WIDGET(g-&gt;order), TRUE, TRUE, 0);</a>
+<a name="ln677">#endif</a>
+<a name="ln678"> </a>
+<a name="ln679">  g-&gt;radius = dt_bauhaus_slider_new_with_range(self, 0.1, 500.0, 0.1, p-&gt;radius, 2);</a>
+<a name="ln680">  g-&gt;contrast = dt_bauhaus_slider_new_with_range(self, -3.0, 3.0, 0.01, p-&gt;contrast, 2);</a>
+<a name="ln681">  g-&gt;brightness = dt_bauhaus_slider_new_with_range(self, -3.0, 3.0, 0.01, p-&gt;brightness, 2);</a>
+<a name="ln682">  g-&gt;saturation = dt_bauhaus_slider_new_with_range(self, -3.0, 3.0, 0.01, p-&gt;saturation, 2);</a>
+<a name="ln683"> </a>
+<a name="ln684">  dt_bauhaus_widget_set_label(g-&gt;radius, NULL, _(&quot;radius&quot;));</a>
+<a name="ln685">  dt_bauhaus_widget_set_label(g-&gt;contrast, NULL, _(&quot;contrast&quot;));</a>
+<a name="ln686">  dt_bauhaus_widget_set_label(g-&gt;brightness, NULL, C_(&quot;lowpass&quot;, &quot;brightness&quot;));</a>
+<a name="ln687">  dt_bauhaus_widget_set_label(g-&gt;saturation, NULL, _(&quot;saturation&quot;));</a>
+<a name="ln688"> </a>
+<a name="ln689">  g-&gt;lowpass_algo = dt_bauhaus_combobox_new(self);</a>
+<a name="ln690">  dt_bauhaus_widget_set_label(g-&gt;lowpass_algo, NULL, _(&quot;soften with&quot;));</a>
+<a name="ln691">  dt_bauhaus_combobox_add(g-&gt;lowpass_algo, _(&quot;gaussian&quot;));</a>
+<a name="ln692">  dt_bauhaus_combobox_add(g-&gt;lowpass_algo, _(&quot;bilateral filter&quot;));</a>
+<a name="ln693"> </a>
+<a name="ln694">  gtk_box_pack_start(GTK_BOX(self-&gt;widget), g-&gt;radius, TRUE, TRUE, 0);</a>
+<a name="ln695">  gtk_box_pack_start(GTK_BOX(self-&gt;widget), g-&gt;lowpass_algo, TRUE, TRUE, 0);</a>
+<a name="ln696">  gtk_box_pack_start(GTK_BOX(self-&gt;widget), g-&gt;contrast, TRUE, TRUE, 0);</a>
+<a name="ln697">  gtk_box_pack_start(GTK_BOX(self-&gt;widget), g-&gt;brightness, TRUE, TRUE, 0);</a>
+<a name="ln698">  gtk_box_pack_start(GTK_BOX(self-&gt;widget), g-&gt;saturation, TRUE, TRUE, 0);</a>
+<a name="ln699">  gtk_widget_set_tooltip_text(g-&gt;radius, _(&quot;radius of gaussian/bilateral blur&quot;));</a>
+<a name="ln700">  gtk_widget_set_tooltip_text(g-&gt;contrast, _(&quot;contrast of lowpass filter&quot;));</a>
+<a name="ln701">  gtk_widget_set_tooltip_text(g-&gt;brightness, _(&quot;brightness adjustment of lowpass filter&quot;));</a>
+<a name="ln702">  gtk_widget_set_tooltip_text(g-&gt;saturation, _(&quot;color saturation of lowpass filter&quot;));</a>
+<a name="ln703">  gtk_widget_set_tooltip_text(g-&gt;lowpass_algo, _(&quot;which filter to use for blurring&quot;));</a>
+<a name="ln704"> </a>
+<a name="ln705">  g_signal_connect(G_OBJECT(g-&gt;radius), &quot;value-changed&quot;, G_CALLBACK(radius_callback), self);</a>
+<a name="ln706">  g_signal_connect(G_OBJECT(g-&gt;lowpass_algo), &quot;value-changed&quot;, G_CALLBACK(lowpass_algo_callback), self);</a>
+<a name="ln707">  g_signal_connect(G_OBJECT(g-&gt;contrast), &quot;value-changed&quot;, G_CALLBACK(contrast_callback), self);</a>
+<a name="ln708">  g_signal_connect(G_OBJECT(g-&gt;brightness), &quot;value-changed&quot;, G_CALLBACK(brightness_callback), self);</a>
+<a name="ln709">  g_signal_connect(G_OBJECT(g-&gt;saturation), &quot;value-changed&quot;, G_CALLBACK(saturation_callback), self);</a>
+<a name="ln710">#if 0 // gaussian order not user selectable</a>
+<a name="ln711">  g_signal_connect (G_OBJECT (g-&gt;order), &quot;changed&quot;,</a>
+<a name="ln712">                    G_CALLBACK (order_changed), self);</a>
+<a name="ln713">#endif</a>
+<a name="ln714">}</a>
+<a name="ln715"> </a>
+<a name="ln716">void gui_cleanup(struct dt_iop_module_t *self)</a>
+<a name="ln717">{</a>
+<a name="ln718">  free(self-&gt;gui_data);</a>
+<a name="ln719">  self-&gt;gui_data = NULL;</a>
+<a name="ln720">}</a>
+<a name="ln721"> </a>
+<a name="ln722">// modelines: These editor modelines have been set for all relevant files by tools/update_modelines.sh</a>
+<a name="ln723">// vim: shiftwidth=2 expandtab tabstop=2 cindent</a>
+<a name="ln724">// kate: tab-indents: off; indent-width 2; replace-tabs on; indent-mode cstyle; remove-trailing-spaces modified;</a>
+
+</code></pre>
+<div class="balloon" rel="588"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v522/" target="_blank">V522</a> There might be dereferencing of a potential null pointer 'd'. Check lines: 588, 585.</p></div>
+<div class="balloon" rel="618"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v575/" target="_blank">V575</a> The potential null pointer is passed into 'memcpy' function. Inspect the first argument. Check lines: 618, 612.</p></div>
+<div class="balloon" rel="619"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v575/" target="_blank">V575</a> The potential null pointer is passed into 'memcpy' function. Inspect the first argument. Check lines: 619, 613.</p></div>
+<div class="balloon" rel="628"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v522/" target="_blank">V522</a> There might be dereferencing of a potential null pointer 'gd'. Check lines: 628, 626.</p></div>
+<div class="balloon" rel="679"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v522/" target="_blank">V522</a> There might be dereferencing of a potential null pointer 'g'. Check lines: 679, 659.</p></div>
+
+<link rel="stylesheet" href="highlight.css">
+<script src="highlight.pack.js"></script>
+<script src="highlightjs-line-numbers.js"></script>
+<script>hljs.initHighlightingOnLoad();</script>
+<script>hljs.initLineNumbersOnLoad();</script>
+<script>
+  $(document).ready(function() {
+      $('.balloon').each(function () {
+          var bl = $(this);
+          var line = bl.attr('rel');
+          var text = $('a[name="ln'+line+'"]').text();
+
+          var space_count = 0;
+          for(var i = 0; i<text.length; i++){
+              var char = text[i];
+              if((char !== ' ')&&(char !== '\t'))break;
+              if(char === '\t')space_count++;
+              space_count++;
+          }
+
+          bl.css('margin-left', space_count*8);
+          $('a[name="ln'+line+'"]').after(bl);
+      });
+
+      window.location = window.location;
+  });
+</script>
+</body>
+</html>

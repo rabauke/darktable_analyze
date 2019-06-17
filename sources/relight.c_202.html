@@ -1,0 +1,457 @@
+
+<html>
+<head>
+  <link rel="stylesheet" href="../style.css"/>
+  <script src="../jquery-3.2.1.min.js"></script>
+</head>
+<body>
+<pre><code class = "cpp">
+<a name="ln1">/*</a>
+<a name="ln2">    This file is part of darktable,</a>
+<a name="ln3">    copyright (c) 2010-2012 Henrik Andersson.</a>
+<a name="ln4"> </a>
+<a name="ln5">    darktable is free software: you can redistribute it and/or modify</a>
+<a name="ln6">    it under the terms of the GNU General Public License as published by</a>
+<a name="ln7">    the Free Software Foundation, either version 3 of the License, or</a>
+<a name="ln8">    (at your option) any later version.</a>
+<a name="ln9"> </a>
+<a name="ln10">    darktable is distributed in the hope that it will be useful,</a>
+<a name="ln11">    but WITHOUT ANY WARRANTY; without even the implied warranty of</a>
+<a name="ln12">    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the</a>
+<a name="ln13">    GNU General Public License for more details.</a>
+<a name="ln14"> </a>
+<a name="ln15">    You should have received a copy of the GNU General Public License</a>
+<a name="ln16">    along with darktable.  If not, see &lt;http://www.gnu.org/licenses/&gt;.</a>
+<a name="ln17">*/</a>
+<a name="ln18">#ifdef HAVE_CONFIG_H</a>
+<a name="ln19">#include &quot;config.h&quot;</a>
+<a name="ln20">#endif</a>
+<a name="ln21">#include &lt;assert.h&gt;</a>
+<a name="ln22">#include &lt;math.h&gt;</a>
+<a name="ln23">#include &lt;stdlib.h&gt;</a>
+<a name="ln24">#include &lt;string.h&gt;</a>
+<a name="ln25"> </a>
+<a name="ln26">#include &quot;bauhaus/bauhaus.h&quot;</a>
+<a name="ln27">#include &quot;common/debug.h&quot;</a>
+<a name="ln28">#include &quot;common/opencl.h&quot;</a>
+<a name="ln29">#include &quot;control/control.h&quot;</a>
+<a name="ln30">#include &quot;develop/develop.h&quot;</a>
+<a name="ln31">#include &quot;develop/imageop.h&quot;</a>
+<a name="ln32">#include &quot;dtgtk/gradientslider.h&quot;</a>
+<a name="ln33">#include &quot;dtgtk/togglebutton.h&quot;</a>
+<a name="ln34">#include &quot;gui/color_picker_proxy.h&quot;</a>
+<a name="ln35">#include &quot;gui/accelerators.h&quot;</a>
+<a name="ln36">#include &quot;gui/gtk.h&quot;</a>
+<a name="ln37">#include &quot;gui/presets.h&quot;</a>
+<a name="ln38">#include &quot;iop/iop_api.h&quot;</a>
+<a name="ln39"> </a>
+<a name="ln40">#define CLIP(x) ((x &lt; 0) ? 0.0 : (x &gt; 1.0) ? 1.0 : x)</a>
+<a name="ln41"> </a>
+<a name="ln42">DT_MODULE_INTROSPECTION(1, dt_iop_relight_params_t)</a>
+<a name="ln43"> </a>
+<a name="ln44">typedef struct dt_iop_relight_params_t</a>
+<a name="ln45">{</a>
+<a name="ln46">  float ev;</a>
+<a name="ln47">  float center;</a>
+<a name="ln48">  float width;</a>
+<a name="ln49">} dt_iop_relight_params_t;</a>
+<a name="ln50"> </a>
+<a name="ln51">void init_presets(dt_iop_module_so_t *self)</a>
+<a name="ln52">{</a>
+<a name="ln53">  DT_DEBUG_SQLITE3_EXEC(dt_database_get(darktable.db), &quot;BEGIN&quot;, NULL, NULL, NULL);</a>
+<a name="ln54"> </a>
+<a name="ln55">  dt_gui_presets_add_generic(_(&quot;fill-light 0.25EV with 4 zones&quot;), self-&gt;op, self-&gt;version(),</a>
+<a name="ln56">                             &amp;(dt_iop_relight_params_t){ 0.25, 0.25, 4.0 }, sizeof(dt_iop_relight_params_t),</a>
+<a name="ln57">                             1);</a>
+<a name="ln58">  dt_gui_presets_add_generic(_(&quot;fill-shadow -0.25EV with 4 zones&quot;), self-&gt;op, self-&gt;version(),</a>
+<a name="ln59">                             &amp;(dt_iop_relight_params_t){ -0.25, 0.25, 4.0 }, sizeof(dt_iop_relight_params_t),</a>
+<a name="ln60">                             1);</a>
+<a name="ln61"> </a>
+<a name="ln62">  DT_DEBUG_SQLITE3_EXEC(dt_database_get(darktable.db), &quot;COMMIT&quot;, NULL, NULL, NULL);</a>
+<a name="ln63">}</a>
+<a name="ln64"> </a>
+<a name="ln65">typedef struct dt_iop_relight_gui_data_t</a>
+<a name="ln66">{</a>
+<a name="ln67">  GtkBox *vbox1, *vbox2;                // left and right controlboxes</a>
+<a name="ln68">  GtkLabel *label1, *label2, *label3;   // ev, center, width</a>
+<a name="ln69">  GtkWidget *scale1, *scale2;           // ev,width</a>
+<a name="ln70">  GtkDarktableGradientSlider *gslider1; // center</a>
+<a name="ln71">  GtkDarktableToggleButton *tbutton1;   // Pick median lightness</a>
+<a name="ln72">  dt_iop_color_picker_t color_picker;</a>
+<a name="ln73">} dt_iop_relight_gui_data_t;</a>
+<a name="ln74"> </a>
+<a name="ln75">typedef struct dt_iop_relight_data_t</a>
+<a name="ln76">{</a>
+<a name="ln77">  float ev;     // The ev of relight -4 - +4 EV</a>
+<a name="ln78">  float center; // the center light value for relight</a>
+<a name="ln79">  float width;  // the width expressed in zones</a>
+<a name="ln80">} dt_iop_relight_data_t;</a>
+<a name="ln81"> </a>
+<a name="ln82">typedef struct dt_iop_relight_global_data_t</a>
+<a name="ln83">{</a>
+<a name="ln84">  int kernel_relight;</a>
+<a name="ln85">} dt_iop_relight_global_data_t;</a>
+<a name="ln86"> </a>
+<a name="ln87"> </a>
+<a name="ln88">const char *name()</a>
+<a name="ln89">{</a>
+<a name="ln90">  return _(&quot;fill light&quot;);</a>
+<a name="ln91">}</a>
+<a name="ln92"> </a>
+<a name="ln93">int flags()</a>
+<a name="ln94">{</a>
+<a name="ln95">  return IOP_FLAGS_INCLUDE_IN_STYLES | IOP_FLAGS_SUPPORTS_BLENDING | IOP_FLAGS_ALLOW_TILING;</a>
+<a name="ln96">}</a>
+<a name="ln97"> </a>
+<a name="ln98">int default_group()</a>
+<a name="ln99">{</a>
+<a name="ln100">  return IOP_GROUP_TONE;</a>
+<a name="ln101">}</a>
+<a name="ln102"> </a>
+<a name="ln103">int default_colorspace(dt_iop_module_t *self, dt_dev_pixelpipe_t *pipe, dt_dev_pixelpipe_iop_t *piece)</a>
+<a name="ln104">{</a>
+<a name="ln105">  return iop_cs_Lab;</a>
+<a name="ln106">}</a>
+<a name="ln107"> </a>
+<a name="ln108">void init_key_accels(dt_iop_module_so_t *self)</a>
+<a name="ln109">{</a>
+<a name="ln110">  dt_accel_register_slider_iop(self, FALSE, NC_(&quot;accel&quot;, &quot;exposure&quot;));</a>
+<a name="ln111">  dt_accel_register_slider_iop(self, FALSE, NC_(&quot;accel&quot;, &quot;width&quot;));</a>
+<a name="ln112">}</a>
+<a name="ln113"> </a>
+<a name="ln114">void connect_key_accels(dt_iop_module_t *self)</a>
+<a name="ln115">{</a>
+<a name="ln116">  dt_iop_relight_gui_data_t *g = (dt_iop_relight_gui_data_t *)self-&gt;gui_data;</a>
+<a name="ln117"> </a>
+<a name="ln118">  dt_accel_connect_slider_iop(self, &quot;exposure&quot;, GTK_WIDGET(g-&gt;scale1));</a>
+<a name="ln119">  dt_accel_connect_slider_iop(self, &quot;width&quot;, GTK_WIDGET(g-&gt;scale2));</a>
+<a name="ln120">}</a>
+<a name="ln121"> </a>
+<a name="ln122"> </a>
+<a name="ln123">#define GAUSS(a, b, c, x) (a * pow(2.718281828, (-pow((x - b), 2) / (pow(c, 2)))))</a>
+<a name="ln124"> </a>
+<a name="ln125">void process(struct dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, const void *const ivoid,</a>
+<a name="ln126">             void *const ovoid, const dt_iop_roi_t *const roi_in, const dt_iop_roi_t *const roi_out)</a>
+<a name="ln127">{</a>
+<a name="ln128">  dt_iop_relight_data_t *data = (dt_iop_relight_data_t *)piece-&gt;data;</a>
+<a name="ln129">  const int ch = piece-&gt;colors;</a>
+<a name="ln130"> </a>
+<a name="ln131">  // Precalculate parameters for gauss function</a>
+<a name="ln132">  const float a = 1.0;                        // Height of top</a>
+<a name="ln133">  const float b = -1.0 + (data-&gt;center * 2);  // Center of top</a>
+<a name="ln134">  const float c = (data-&gt;width / 10.0) / 2.0; // Width</a>
+<a name="ln135"> </a>
+<a name="ln136">#ifdef _OPENMP</a>
+<a name="ln137">#pragma omp parallel for default(none) dt_omp_firstprivate(a, b, c, ch, ivoid, ovoid, roi_out) shared(data)       \</a>
+<a name="ln138">    schedule(static)</a>
+<a name="ln139">#endif</a>
+<a name="ln140">  for(int k = 0; k &lt; roi_out-&gt;height; k++)</a>
+<a name="ln141">  {</a>
+<a name="ln142">    float *in = ((float *)ivoid) + (size_t)ch * k * roi_out-&gt;width;</a>
+<a name="ln143">    float *out = ((float *)ovoid) + (size_t)ch * k * roi_out-&gt;width;</a>
+<a name="ln144">    for(int j = 0; j &lt; roi_out-&gt;width; j++, in += ch, out += ch)</a>
+<a name="ln145">    {</a>
+<a name="ln146">      const float lightness = in[0] / 100.0;</a>
+<a name="ln147">      const float x = -1.0 + (lightness * 2.0);</a>
+<a name="ln148">      float gauss = GAUSS(a, b, c, x);</a>
+<a name="ln149"> </a>
+<a name="ln150">      if(isnan(gauss) || isinf(gauss)) gauss = 0.0;</a>
+<a name="ln151"> </a>
+<a name="ln152">      float relight = 1.0 / exp2f(-data-&gt;ev * CLIP(gauss));</a>
+<a name="ln153"> </a>
+<a name="ln154">      if(isnan(relight) || isinf(relight)) relight = 1.0;</a>
+<a name="ln155"> </a>
+<a name="ln156">      out[0] = 100.0 * CLIP(lightness * relight);</a>
+<a name="ln157">      out[1] = in[1];</a>
+<a name="ln158">      out[2] = in[2];</a>
+<a name="ln159">      out[3] = in[3];</a>
+<a name="ln160">    }</a>
+<a name="ln161">  }</a>
+<a name="ln162">}</a>
+<a name="ln163"> </a>
+<a name="ln164"> </a>
+<a name="ln165">#ifdef HAVE_OPENCL</a>
+<a name="ln166">int process_cl(struct dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, cl_mem dev_in, cl_mem dev_out,</a>
+<a name="ln167">               const dt_iop_roi_t *const roi_in, const dt_iop_roi_t *const roi_out)</a>
+<a name="ln168">{</a>
+<a name="ln169">  dt_iop_relight_data_t *data = (dt_iop_relight_data_t *)piece-&gt;data;</a>
+<a name="ln170">  dt_iop_relight_global_data_t *gd = (dt_iop_relight_global_data_t *)self-&gt;data;</a>
+<a name="ln171"> </a>
+<a name="ln172">  cl_int err = -999;</a>
+<a name="ln173">  const int devid = piece-&gt;pipe-&gt;devid;</a>
+<a name="ln174">  const int width = roi_in-&gt;width;</a>
+<a name="ln175">  const int height = roi_in-&gt;height;</a>
+<a name="ln176"> </a>
+<a name="ln177">  const float center = data-&gt;center;</a>
+<a name="ln178">  const float wings = data-&gt;width;</a>
+<a name="ln179">  const float ev = data-&gt;ev;</a>
+<a name="ln180"> </a>
+<a name="ln181">  size_t sizes[] = { ROUNDUPWD(width), ROUNDUPHT(height), 1 };</a>
+<a name="ln182"> </a>
+<a name="ln183">  dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_relight, 0, sizeof(cl_mem), (void *)&amp;dev_in);</a>
+<a name="ln184">  dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_relight, 1, sizeof(cl_mem), (void *)&amp;dev_out);</a>
+<a name="ln185">  dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_relight, 2, sizeof(int), (void *)&amp;width);</a>
+<a name="ln186">  dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_relight, 3, sizeof(int), (void *)&amp;height);</a>
+<a name="ln187">  dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_relight, 4, sizeof(float), (void *)&amp;center);</a>
+<a name="ln188">  dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_relight, 5, sizeof(float), (void *)&amp;wings);</a>
+<a name="ln189">  dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_relight, 6, sizeof(float), (void *)&amp;ev);</a>
+<a name="ln190">  err = dt_opencl_enqueue_kernel_2d(devid, gd-&gt;kernel_relight, sizes);</a>
+<a name="ln191">  if(err != CL_SUCCESS) goto error;</a>
+<a name="ln192">  return TRUE;</a>
+<a name="ln193"> </a>
+<a name="ln194">error:</a>
+<a name="ln195">  dt_print(DT_DEBUG_OPENCL, &quot;[opencl_relight] couldn't enqueue kernel! %d\n&quot;, err);</a>
+<a name="ln196">  return FALSE;</a>
+<a name="ln197">}</a>
+<a name="ln198">#endif</a>
+<a name="ln199"> </a>
+<a name="ln200">void init_global(dt_iop_module_so_t *module)</a>
+<a name="ln201">{</a>
+<a name="ln202">  const int program = 8; // extended.cl, from programs.conf</a>
+<a name="ln203">  dt_iop_relight_global_data_t *gd</a>
+<a name="ln204">      = (dt_iop_relight_global_data_t *)malloc(sizeof(dt_iop_relight_global_data_t));</a>
+<a name="ln205">  module-&gt;data = gd;</a>
+<a name="ln206">  gd-&gt;kernel_relight = dt_opencl_create_kernel(program, &quot;relight&quot;);</a>
+<a name="ln207">}</a>
+<a name="ln208"> </a>
+<a name="ln209">void cleanup_global(dt_iop_module_so_t *module)</a>
+<a name="ln210">{</a>
+<a name="ln211">  dt_iop_relight_global_data_t *gd = (dt_iop_relight_global_data_t *)module-&gt;data;</a>
+<a name="ln212">  dt_opencl_free_kernel(gd-&gt;kernel_relight);</a>
+<a name="ln213">  free(module-&gt;data);</a>
+<a name="ln214">  module-&gt;data = NULL;</a>
+<a name="ln215">}</a>
+<a name="ln216"> </a>
+<a name="ln217">static void ev_callback(GtkWidget *slider, gpointer user_data)</a>
+<a name="ln218">{</a>
+<a name="ln219">  dt_iop_module_t *self = (dt_iop_module_t *)user_data;</a>
+<a name="ln220">  if(self-&gt;dt-&gt;gui-&gt;reset) return;</a>
+<a name="ln221">  dt_iop_relight_params_t *p = (dt_iop_relight_params_t *)self-&gt;params;</a>
+<a name="ln222">  p-&gt;ev = dt_bauhaus_slider_get(slider);</a>
+<a name="ln223">  dt_iop_color_picker_reset(self, TRUE);</a>
+<a name="ln224">  dt_dev_add_history_item(darktable.develop, self, TRUE);</a>
+<a name="ln225">}</a>
+<a name="ln226"> </a>
+<a name="ln227">static void width_callback(GtkWidget *slider, gpointer user_data)</a>
+<a name="ln228">{</a>
+<a name="ln229">  dt_iop_module_t *self = (dt_iop_module_t *)user_data;</a>
+<a name="ln230">  if(self-&gt;dt-&gt;gui-&gt;reset) return;</a>
+<a name="ln231">  dt_iop_relight_params_t *p = (dt_iop_relight_params_t *)self-&gt;params;</a>
+<a name="ln232">  p-&gt;width = dt_bauhaus_slider_get(slider);</a>
+<a name="ln233">  dt_iop_color_picker_reset(self, TRUE);</a>
+<a name="ln234">  dt_dev_add_history_item(darktable.develop, self, TRUE);</a>
+<a name="ln235">}</a>
+<a name="ln236"> </a>
+<a name="ln237">static void center_callback(GtkDarktableGradientSlider *slider, gpointer user_data)</a>
+<a name="ln238">{</a>
+<a name="ln239">  dt_iop_module_t *self = (dt_iop_module_t *)user_data;</a>
+<a name="ln240">  if(self-&gt;dt-&gt;gui-&gt;reset) return;</a>
+<a name="ln241">  dt_iop_relight_params_t *p = (dt_iop_relight_params_t *)self-&gt;params;</a>
+<a name="ln242">  dt_iop_color_picker_reset(self, TRUE);</a>
+<a name="ln243"> </a>
+<a name="ln244">  {</a>
+<a name="ln245">    p-&gt;center = dtgtk_gradient_slider_get_value(slider);</a>
+<a name="ln246">    dt_dev_add_history_item(darktable.develop, self, TRUE);</a>
+<a name="ln247">  }</a>
+<a name="ln248">}</a>
+<a name="ln249"> </a>
+<a name="ln250">void commit_params(struct dt_iop_module_t *self, dt_iop_params_t *p1, dt_dev_pixelpipe_t *pipe,</a>
+<a name="ln251">                   dt_dev_pixelpipe_iop_t *piece)</a>
+<a name="ln252">{</a>
+<a name="ln253">  dt_iop_relight_params_t *p = (dt_iop_relight_params_t *)p1;</a>
+<a name="ln254">  dt_iop_relight_data_t *d = (dt_iop_relight_data_t *)piece-&gt;data;</a>
+<a name="ln255"> </a>
+<a name="ln256">  d-&gt;ev = p-&gt;ev;</a>
+<a name="ln257">  d-&gt;width = p-&gt;width;</a>
+<a name="ln258">  d-&gt;center = p-&gt;center;</a>
+<a name="ln259">}</a>
+<a name="ln260"> </a>
+<a name="ln261">void init_pipe(struct dt_iop_module_t *self, dt_dev_pixelpipe_t *pipe, dt_dev_pixelpipe_iop_t *piece)</a>
+<a name="ln262">{</a>
+<a name="ln263">  piece-&gt;data = calloc(1, sizeof(dt_iop_relight_data_t));</a>
+<a name="ln264">  self-&gt;commit_params(self, self-&gt;default_params, pipe, piece);</a>
+<a name="ln265">}</a>
+<a name="ln266"> </a>
+<a name="ln267">void cleanup_pipe(struct dt_iop_module_t *self, dt_dev_pixelpipe_t *pipe, dt_dev_pixelpipe_iop_t *piece)</a>
+<a name="ln268">{</a>
+<a name="ln269">  free(piece-&gt;data);</a>
+<a name="ln270">  piece-&gt;data = NULL;</a>
+<a name="ln271">}</a>
+<a name="ln272"> </a>
+<a name="ln273">void gui_update(struct dt_iop_module_t *self)</a>
+<a name="ln274">{</a>
+<a name="ln275">  dt_iop_module_t *module = (dt_iop_module_t *)self;</a>
+<a name="ln276"> </a>
+<a name="ln277">  dt_iop_relight_gui_data_t *g = (dt_iop_relight_gui_data_t *)self-&gt;gui_data;</a>
+<a name="ln278">  dt_iop_relight_params_t *p = (dt_iop_relight_params_t *)module-&gt;params;</a>
+<a name="ln279">  dt_bauhaus_slider_set(g-&gt;scale1, p-&gt;ev);</a>
+<a name="ln280">  dt_bauhaus_slider_set(g-&gt;scale2, p-&gt;width);</a>
+<a name="ln281">  dtgtk_gradient_slider_set_value(g-&gt;gslider1, p-&gt;center);</a>
+<a name="ln282">}</a>
+<a name="ln283"> </a>
+<a name="ln284">void init(dt_iop_module_t *module)</a>
+<a name="ln285">{</a>
+<a name="ln286">  module-&gt;params = calloc(1, sizeof(dt_iop_relight_params_t));</a>
+<a name="ln287">  module-&gt;default_params = calloc(1, sizeof(dt_iop_relight_params_t));</a>
+<a name="ln288">  module-&gt;default_enabled = 0;</a>
+<a name="ln289">  module-&gt;params_size = sizeof(dt_iop_relight_params_t);</a>
+<a name="ln290">  module-&gt;gui_data = NULL;</a>
+<a name="ln291">  dt_iop_relight_params_t tmp = (dt_iop_relight_params_t){ 0.33, 0, 4 };</a>
+<a name="ln292">  memcpy(module-&gt;params, &amp;tmp, sizeof(dt_iop_relight_params_t));</a>
+<a name="ln293">  memcpy(module-&gt;default_params, &amp;tmp, sizeof(dt_iop_relight_params_t));</a>
+<a name="ln294">}</a>
+<a name="ln295"> </a>
+<a name="ln296">void cleanup(dt_iop_module_t *module)</a>
+<a name="ln297">{</a>
+<a name="ln298">  free(module-&gt;params);</a>
+<a name="ln299">  module-&gt;params = NULL;</a>
+<a name="ln300">}</a>
+<a name="ln301"> </a>
+<a name="ln302"> </a>
+<a name="ln303">static void _iop_color_picker_apply(dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece)</a>
+<a name="ln304">{</a>
+<a name="ln305">  dt_iop_relight_gui_data_t *g = (dt_iop_relight_gui_data_t *)self-&gt;gui_data;</a>
+<a name="ln306">  float mean, min, max;</a>
+<a name="ln307"> </a>
+<a name="ln308">  if(self-&gt;picked_color_max[0] &gt;= 0.0f)</a>
+<a name="ln309">  {</a>
+<a name="ln310">    mean = fmin(fmax(self-&gt;picked_color[0] / 100.0f, 0.0f), 1.0f);</a>
+<a name="ln311">    min = fmin(fmax(self-&gt;picked_color_min[0] / 100.0f, 0.0f), 1.0f);</a>
+<a name="ln312">    max = fmin(fmax(self-&gt;picked_color_max[0] / 100.0f, 0.0f), 1.0f);</a>
+<a name="ln313">  }</a>
+<a name="ln314">  else</a>
+<a name="ln315">  {</a>
+<a name="ln316">    mean = min = max = NAN;</a>
+<a name="ln317">  }</a>
+<a name="ln318"> </a>
+<a name="ln319">  dtgtk_gradient_slider_set_picker_meanminmax(DTGTK_GRADIENT_SLIDER(g-&gt;gslider1), mean, min, max);</a>
+<a name="ln320">}</a>
+<a name="ln321"> </a>
+<a name="ln322">static int _iop_color_picker_get_set(dt_iop_module_t *self, GtkWidget *button)</a>
+<a name="ln323">{</a>
+<a name="ln324">  dt_iop_color_picker_t *picker = self-&gt;picker;</a>
+<a name="ln325">  const int current_picker = picker-&gt;current_picker;</a>
+<a name="ln326"> </a>
+<a name="ln327">  picker-&gt;current_picker = 1;</a>
+<a name="ln328"> </a>
+<a name="ln329">  if(current_picker == picker-&gt;current_picker)</a>
+<a name="ln330">    return DT_COLOR_PICKER_ALREADY_SELECTED;</a>
+<a name="ln331">  else</a>
+<a name="ln332">    return picker-&gt;current_picker;</a>
+<a name="ln333">}</a>
+<a name="ln334"> </a>
+<a name="ln335">static void _iop_color_picker_update(dt_iop_module_t *self)</a>
+<a name="ln336">{</a>
+<a name="ln337">  dt_iop_relight_gui_data_t *g = (dt_iop_relight_gui_data_t *)self-&gt;gui_data;</a>
+<a name="ln338">  const int old_reset = darktable.gui-&gt;reset;</a>
+<a name="ln339">  darktable.gui-&gt;reset = 1;</a>
+<a name="ln340"> </a>
+<a name="ln341">  gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(g-&gt;tbutton1), g-&gt;color_picker.current_picker == 1);</a>
+<a name="ln342"> </a>
+<a name="ln343">  darktable.gui-&gt;reset = old_reset;</a>
+<a name="ln344"> </a>
+<a name="ln345">  if(g-&gt;color_picker.current_picker != 1)</a>
+<a name="ln346">    dtgtk_gradient_slider_multivalue_set_picker(DTGTK_GRADIENT_SLIDER(g-&gt;gslider1), NAN);</a>
+<a name="ln347">}</a>
+<a name="ln348"> </a>
+<a name="ln349">void gui_init(struct dt_iop_module_t *self)</a>
+<a name="ln350">{</a>
+<a name="ln351">  self-&gt;gui_data = malloc(sizeof(dt_iop_relight_gui_data_t));</a>
+<a name="ln352">  dt_iop_relight_gui_data_t *g = (dt_iop_relight_gui_data_t *)self-&gt;gui_data;</a>
+<a name="ln353">  dt_iop_relight_params_t *p = (dt_iop_relight_params_t *)self-&gt;params;</a>
+<a name="ln354"> </a>
+<a name="ln355">  self-&gt;widget = gtk_box_new(GTK_ORIENTATION_VERTICAL, DT_BAUHAUS_SPACE);</a>
+<a name="ln356">  dt_gui_add_help_link(self-&gt;widget, dt_get_help_url(self-&gt;op));</a>
+<a name="ln357"> </a>
+<a name="ln358">  /* exposure */</a>
+<a name="ln359">  g-&gt;scale1 = dt_bauhaus_slider_new_with_range(self, -2.0, 2.0, 0.05, p-&gt;ev, 2);</a>
+<a name="ln360">  dt_bauhaus_slider_set_format(g-&gt;scale1, &quot;%.2fEV&quot;);</a>
+<a name="ln361">  dt_bauhaus_widget_set_label(g-&gt;scale1, NULL, _(&quot;exposure&quot;));</a>
+<a name="ln362">  gtk_widget_set_tooltip_text(g-&gt;scale1, _(&quot;the fill-light in EV&quot;));</a>
+<a name="ln363">  g_signal_connect(G_OBJECT(g-&gt;scale1), &quot;value-changed&quot;, G_CALLBACK(ev_callback), self);</a>
+<a name="ln364">  /* width*/</a>
+<a name="ln365">  g-&gt;scale2 = dt_bauhaus_slider_new_with_range(self, 2, 10, 0.5, p-&gt;width, 1);</a>
+<a name="ln366">  dt_bauhaus_slider_set_format(g-&gt;scale2, &quot;%.1f&quot;);</a>
+<a name="ln367">  dt_bauhaus_widget_set_label(g-&gt;scale2, NULL, _(&quot;width&quot;));</a>
+<a name="ln368">  /* xgettext:no-c-format */</a>
+<a name="ln369">  gtk_widget_set_tooltip_text(g-&gt;scale2, _(&quot;width of fill-light area defined in zones&quot;));</a>
+<a name="ln370">  g_signal_connect(G_OBJECT(g-&gt;scale2), &quot;value-changed&quot;, G_CALLBACK(width_callback), self);</a>
+<a name="ln371"> </a>
+<a name="ln372">  /* lightnessslider */</a>
+<a name="ln373">  GtkBox *hbox = GTK_BOX(gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0));</a>
+<a name="ln374"> </a>
+<a name="ln375">#define NEUTRAL_GRAY 0.5</a>
+<a name="ln376">  static const GdkRGBA _gradient_L[]</a>
+<a name="ln377">      = { { 0, 0, 0, 1.0 }, { NEUTRAL_GRAY, NEUTRAL_GRAY, NEUTRAL_GRAY, 1.0 } };</a>
+<a name="ln378">  g-&gt;gslider1 = DTGTK_GRADIENT_SLIDER(dtgtk_gradient_slider_new_with_color(_gradient_L[0], _gradient_L[1]));</a>
+<a name="ln379"> </a>
+<a name="ln380">  gtk_widget_set_tooltip_text(GTK_WIDGET(g-&gt;gslider1), _(&quot;select the center of fill-light\nctrl+click to select an area&quot;));</a>
+<a name="ln381">  g_signal_connect(G_OBJECT(g-&gt;gslider1), &quot;value-changed&quot;, G_CALLBACK(center_callback), self);</a>
+<a name="ln382">  g-&gt;tbutton1 = DTGTK_TOGGLEBUTTON(dtgtk_togglebutton_new(dtgtk_cairo_paint_colorpicker, CPF_STYLE_FLAT, NULL));</a>
+<a name="ln383"> </a>
+<a name="ln384">  g_signal_connect(G_OBJECT(g-&gt;tbutton1), &quot;button-press-event&quot;, G_CALLBACK(dt_iop_color_picker_callback_button_press), &amp;g-&gt;color_picker);</a>
+<a name="ln385"> </a>
+<a name="ln386">  gtk_box_pack_start(hbox, GTK_WIDGET(g-&gt;gslider1), TRUE, TRUE, 0);</a>
+<a name="ln387">  gtk_box_pack_start(hbox, GTK_WIDGET(g-&gt;tbutton1), FALSE, FALSE, 0);</a>
+<a name="ln388"> </a>
+<a name="ln389">  /* add controls to widget ui */</a>
+<a name="ln390">  gtk_box_pack_start(GTK_BOX(self-&gt;widget), GTK_WIDGET(g-&gt;scale1), TRUE, FALSE, 0);</a>
+<a name="ln391">  gtk_box_pack_start(GTK_BOX(self-&gt;widget), GTK_WIDGET(hbox), TRUE, FALSE, 0);</a>
+<a name="ln392">  gtk_box_pack_start(GTK_BOX(self-&gt;widget), GTK_WIDGET(g-&gt;scale2), TRUE, FALSE, 0);</a>
+<a name="ln393"> </a>
+<a name="ln394"> </a>
+<a name="ln395">  gtk_widget_set_tooltip_text(GTK_WIDGET(g-&gt;tbutton1), _(&quot;toggle tool for picking median lightness in image&quot;));</a>
+<a name="ln396"> </a>
+<a name="ln397">  dt_iop_init_picker(&amp;g-&gt;color_picker,</a>
+<a name="ln398">              self,</a>
+<a name="ln399">              DT_COLOR_PICKER_POINT_AREA,</a>
+<a name="ln400">              _iop_color_picker_get_set,</a>
+<a name="ln401">              _iop_color_picker_apply,</a>
+<a name="ln402">              _iop_color_picker_update);</a>
+<a name="ln403">}</a>
+<a name="ln404"> </a>
+<a name="ln405">void gui_cleanup(struct dt_iop_module_t *self)</a>
+<a name="ln406">{</a>
+<a name="ln407">  free(self-&gt;gui_data);</a>
+<a name="ln408">  self-&gt;gui_data = NULL;</a>
+<a name="ln409">}</a>
+<a name="ln410"> </a>
+<a name="ln411">// modelines: These editor modelines have been set for all relevant files by tools/update_modelines.sh</a>
+<a name="ln412">// vim: shiftwidth=2 expandtab tabstop=2 cindent</a>
+<a name="ln413">// kate: tab-indents: off; indent-width 2; replace-tabs on; indent-mode cstyle; remove-trailing-spaces modified;</a>
+
+</code></pre>
+<div class="balloon" rel="206"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v522/" target="_blank">V522</a> There might be dereferencing of a potential null pointer 'gd'. Check lines: 206, 204.</p></div>
+<div class="balloon" rel="292"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v575/" target="_blank">V575</a> The potential null pointer is passed into 'memcpy' function. Inspect the first argument. Check lines: 292, 286.</p></div>
+<div class="balloon" rel="293"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v575/" target="_blank">V575</a> The potential null pointer is passed into 'memcpy' function. Inspect the first argument. Check lines: 293, 287.</p></div>
+<div class="balloon" rel="359"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v522/" target="_blank">V522</a> There might be dereferencing of a potential null pointer 'g'. Check lines: 359, 351.</p></div>
+
+<link rel="stylesheet" href="highlight.css">
+<script src="highlight.pack.js"></script>
+<script src="highlightjs-line-numbers.js"></script>
+<script>hljs.initHighlightingOnLoad();</script>
+<script>hljs.initLineNumbersOnLoad();</script>
+<script>
+  $(document).ready(function() {
+      $('.balloon').each(function () {
+          var bl = $(this);
+          var line = bl.attr('rel');
+          var text = $('a[name="ln'+line+'"]').text();
+
+          var space_count = 0;
+          for(var i = 0; i<text.length; i++){
+              var char = text[i];
+              if((char !== ' ')&&(char !== '\t'))break;
+              if(char === '\t')space_count++;
+              space_count++;
+          }
+
+          bl.css('margin-left', space_count*8);
+          $('a[name="ln'+line+'"]').after(bl);
+      });
+
+      window.location = window.location;
+  });
+</script>
+</body>
+</html>

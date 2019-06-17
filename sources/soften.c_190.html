@@ -1,0 +1,823 @@
+
+<html>
+<head>
+  <link rel="stylesheet" href="../style.css"/>
+  <script src="../jquery-3.2.1.min.js"></script>
+</head>
+<body>
+<pre><code class = "cpp">
+<a name="ln1">/*</a>
+<a name="ln2">    This file is part of darktable,</a>
+<a name="ln3">    copyright (c) 2011-2012 Henrik Andersson.</a>
+<a name="ln4"> </a>
+<a name="ln5">    darktable is free software: you can redistribute it and/or modify</a>
+<a name="ln6">    it under the terms of the GNU General Public License as published by</a>
+<a name="ln7">    the Free Software Foundation, either version 3 of the License, or</a>
+<a name="ln8">    (at your option) any later version.</a>
+<a name="ln9"> </a>
+<a name="ln10">    darktable is distributed in the hope that it will be useful,</a>
+<a name="ln11">    but WITHOUT ANY WARRANTY; without even the implied warranty of</a>
+<a name="ln12">    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the</a>
+<a name="ln13">    GNU General Public License for more details.</a>
+<a name="ln14"> </a>
+<a name="ln15">    You should have received a copy of the GNU General Public License</a>
+<a name="ln16">    along with darktable.  If not, see &lt;http://www.gnu.org/licenses/&gt;.</a>
+<a name="ln17">*/</a>
+<a name="ln18">#ifdef HAVE_CONFIG_H</a>
+<a name="ln19">#include &quot;config.h&quot;</a>
+<a name="ln20">#endif</a>
+<a name="ln21">#include &lt;assert.h&gt;</a>
+<a name="ln22">#include &lt;math.h&gt;</a>
+<a name="ln23">#include &lt;stdlib.h&gt;</a>
+<a name="ln24">#include &lt;string.h&gt;</a>
+<a name="ln25"> </a>
+<a name="ln26">#include &quot;bauhaus/bauhaus.h&quot;</a>
+<a name="ln27">#include &quot;common/colorspaces.h&quot;</a>
+<a name="ln28">#include &quot;common/opencl.h&quot;</a>
+<a name="ln29">#include &quot;control/control.h&quot;</a>
+<a name="ln30">#include &quot;develop/develop.h&quot;</a>
+<a name="ln31">#include &quot;develop/imageop.h&quot;</a>
+<a name="ln32">#include &quot;develop/tiling.h&quot;</a>
+<a name="ln33">#include &quot;dtgtk/resetlabel.h&quot;</a>
+<a name="ln34">#include &quot;gui/accelerators.h&quot;</a>
+<a name="ln35">#include &quot;gui/gtk.h&quot;</a>
+<a name="ln36">#include &quot;iop/iop_api.h&quot;</a>
+<a name="ln37">#include &lt;gtk/gtk.h&gt;</a>
+<a name="ln38">#include &lt;inttypes.h&gt;</a>
+<a name="ln39"> </a>
+<a name="ln40">#if defined(__SSE__)</a>
+<a name="ln41">#include &lt;xmmintrin.h&gt;</a>
+<a name="ln42">#endif</a>
+<a name="ln43"> </a>
+<a name="ln44">#define MAX_RADIUS 32</a>
+<a name="ln45">#define BOX_ITERATIONS 8</a>
+<a name="ln46"> </a>
+<a name="ln47">#define CLIP(x) ((x &lt; 0) ? 0.0 : (x &gt; 1.0) ? 1.0 : x)</a>
+<a name="ln48">#define MM_CLIP_PS(X) (_mm_min_ps(_mm_max_ps((X), _mm_setzero_ps()), _mm_set1_ps(1.0)))</a>
+<a name="ln49"> </a>
+<a name="ln50">DT_MODULE_INTROSPECTION(1, dt_iop_soften_params_t)</a>
+<a name="ln51"> </a>
+<a name="ln52">typedef struct dt_iop_soften_params_t</a>
+<a name="ln53">{</a>
+<a name="ln54">  float size;</a>
+<a name="ln55">  float saturation;</a>
+<a name="ln56">  float brightness;</a>
+<a name="ln57">  float amount;</a>
+<a name="ln58">} dt_iop_soften_params_t;</a>
+<a name="ln59"> </a>
+<a name="ln60">typedef struct dt_iop_soften_gui_data_t</a>
+<a name="ln61">{</a>
+<a name="ln62">  GtkBox *vbox1, *vbox2;</a>
+<a name="ln63">  GtkWidget *scale1, *scale2, *scale3, *scale4; // size,saturation,brightness,amount</a>
+<a name="ln64">} dt_iop_soften_gui_data_t;</a>
+<a name="ln65"> </a>
+<a name="ln66">typedef struct dt_iop_soften_data_t</a>
+<a name="ln67">{</a>
+<a name="ln68">  float size;</a>
+<a name="ln69">  float saturation;</a>
+<a name="ln70">  float brightness;</a>
+<a name="ln71">  float amount;</a>
+<a name="ln72">} dt_iop_soften_data_t;</a>
+<a name="ln73"> </a>
+<a name="ln74">typedef struct dt_iop_soften_global_data_t</a>
+<a name="ln75">{</a>
+<a name="ln76">  int kernel_soften_overexposed;</a>
+<a name="ln77">  int kernel_soften_hblur;</a>
+<a name="ln78">  int kernel_soften_vblur;</a>
+<a name="ln79">  int kernel_soften_mix;</a>
+<a name="ln80">} dt_iop_soften_global_data_t;</a>
+<a name="ln81"> </a>
+<a name="ln82"> </a>
+<a name="ln83">const char *name()</a>
+<a name="ln84">{</a>
+<a name="ln85">  return _(&quot;soften&quot;);</a>
+<a name="ln86">}</a>
+<a name="ln87"> </a>
+<a name="ln88">int flags()</a>
+<a name="ln89">{</a>
+<a name="ln90">  return IOP_FLAGS_INCLUDE_IN_STYLES | IOP_FLAGS_SUPPORTS_BLENDING | IOP_FLAGS_ALLOW_TILING;</a>
+<a name="ln91">}</a>
+<a name="ln92"> </a>
+<a name="ln93">int default_group()</a>
+<a name="ln94">{</a>
+<a name="ln95">  return IOP_GROUP_EFFECT;</a>
+<a name="ln96">}</a>
+<a name="ln97"> </a>
+<a name="ln98">int default_colorspace(dt_iop_module_t *self, dt_dev_pixelpipe_t *pipe, dt_dev_pixelpipe_iop_t *piece)</a>
+<a name="ln99">{</a>
+<a name="ln100">  return iop_cs_rgb;</a>
+<a name="ln101">}</a>
+<a name="ln102"> </a>
+<a name="ln103">void init_key_accels(dt_iop_module_so_t *self)</a>
+<a name="ln104">{</a>
+<a name="ln105">  dt_accel_register_slider_iop(self, FALSE, NC_(&quot;accel&quot;, &quot;size&quot;));</a>
+<a name="ln106">  dt_accel_register_slider_iop(self, FALSE, NC_(&quot;accel&quot;, &quot;saturation&quot;));</a>
+<a name="ln107">  dt_accel_register_slider_iop(self, FALSE, NC_(&quot;accel&quot;, &quot;brightness&quot;));</a>
+<a name="ln108">  dt_accel_register_slider_iop(self, FALSE, NC_(&quot;accel&quot;, &quot;mix&quot;));</a>
+<a name="ln109">}</a>
+<a name="ln110"> </a>
+<a name="ln111">void connect_key_accels(dt_iop_module_t *self)</a>
+<a name="ln112">{</a>
+<a name="ln113">  dt_iop_soften_gui_data_t *g = (dt_iop_soften_gui_data_t *)self-&gt;gui_data;</a>
+<a name="ln114"> </a>
+<a name="ln115">  dt_accel_connect_slider_iop(self, &quot;size&quot;, GTK_WIDGET(g-&gt;scale1));</a>
+<a name="ln116">  dt_accel_connect_slider_iop(self, &quot;saturation&quot;, GTK_WIDGET(g-&gt;scale2));</a>
+<a name="ln117">  dt_accel_connect_slider_iop(self, &quot;brightness&quot;, GTK_WIDGET(g-&gt;scale3));</a>
+<a name="ln118">  dt_accel_connect_slider_iop(self, &quot;mix&quot;, GTK_WIDGET(g-&gt;scale4));</a>
+<a name="ln119">}</a>
+<a name="ln120"> </a>
+<a name="ln121">void process(struct dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, const void *const ivoid,</a>
+<a name="ln122">             void *const ovoid, const dt_iop_roi_t *const roi_in, const dt_iop_roi_t *const roi_out)</a>
+<a name="ln123">{</a>
+<a name="ln124">  const dt_iop_soften_data_t *const d = (const dt_iop_soften_data_t *const)piece-&gt;data;</a>
+<a name="ln125"> </a>
+<a name="ln126">  const int ch = piece-&gt;colors;</a>
+<a name="ln127"> </a>
+<a name="ln128">  const float brightness = 1.0 / exp2f(-d-&gt;brightness);</a>
+<a name="ln129">  const float saturation = d-&gt;saturation / 100.0;</a>
+<a name="ln130"> </a>
+<a name="ln131">  const float *const in = (const float *const)ivoid;</a>
+<a name="ln132">  float *const out = (float *const)ovoid;</a>
+<a name="ln133"> </a>
+<a name="ln134">/* create overexpose image and then blur */</a>
+<a name="ln135">#ifdef _OPENMP</a>
+<a name="ln136">#pragma omp parallel for default(none) \</a>
+<a name="ln137">  dt_omp_firstprivate(brightness, ch, in, out, roi_out, saturation) \</a>
+<a name="ln138">  schedule(static)</a>
+<a name="ln139">#endif</a>
+<a name="ln140">  for(size_t k = 0; k &lt; (size_t)ch * roi_out-&gt;width * roi_out-&gt;height; k += ch)</a>
+<a name="ln141">  {</a>
+<a name="ln142">    float h, s, l;</a>
+<a name="ln143">    rgb2hsl(&amp;in[k], &amp;h, &amp;s, &amp;l);</a>
+<a name="ln144">    s *= saturation;</a>
+<a name="ln145">    l *= brightness;</a>
+<a name="ln146">    hsl2rgb(&amp;out[k], h, CLIP(s), CLIP(l));</a>
+<a name="ln147">  }</a>
+<a name="ln148"> </a>
+<a name="ln149">  const float w = piece-&gt;iwidth * piece-&gt;iscale;</a>
+<a name="ln150">  const float h = piece-&gt;iheight * piece-&gt;iscale;</a>
+<a name="ln151">  int mrad = sqrt(w * w + h * h) * 0.01;</a>
+<a name="ln152">  int rad = mrad * (fmin(100.0, d-&gt;size + 1) / 100.0);</a>
+<a name="ln153">  const int radius = MIN(mrad, ceilf(rad * roi_in-&gt;scale / piece-&gt;iscale));</a>
+<a name="ln154"> </a>
+<a name="ln155">  const int size = roi_out-&gt;width &gt; roi_out-&gt;height ? roi_out-&gt;width : roi_out-&gt;height;</a>
+<a name="ln156"> </a>
+<a name="ln157">  const size_t scanline_size = (size_t)4 * size;</a>
+<a name="ln158">  float *const scanline_buf = dt_alloc_align(64, scanline_size * dt_get_num_threads() * sizeof(float));</a>
+<a name="ln159"> </a>
+<a name="ln160">  for(int iteration = 0; iteration &lt; BOX_ITERATIONS; iteration++)</a>
+<a name="ln161">  {</a>
+<a name="ln162">#ifdef _OPENMP</a>
+<a name="ln163">#pragma omp parallel for default(none) \</a>
+<a name="ln164">    dt_omp_firstprivate(ch, radius, out, roi_out, scanline_buf, scanline_size) \</a>
+<a name="ln165">    schedule(static)</a>
+<a name="ln166">#endif</a>
+<a name="ln167">    /* horizontal blur out into out */</a>
+<a name="ln168">    for(int y = 0; y &lt; roi_out-&gt;height; y++)</a>
+<a name="ln169">    {</a>
+<a name="ln170">      float *scanline = scanline_buf + scanline_size * dt_get_thread_num();</a>
+<a name="ln171">      __attribute__((aligned(64))) float L[4] = { 0.0f, 0.0f, 0.0f, 0.0f };</a>
+<a name="ln172"> </a>
+<a name="ln173">      size_t index = (size_t)y * roi_out-&gt;width;</a>
+<a name="ln174">      int hits = 0;</a>
+<a name="ln175">      for(int x = -radius; x &lt; roi_out-&gt;width; x++)</a>
+<a name="ln176">      {</a>
+<a name="ln177">        int op = x - radius - 1;</a>
+<a name="ln178">        int np = x + radius;</a>
+<a name="ln179">        if(op &gt;= 0)</a>
+<a name="ln180">        {</a>
+<a name="ln181">          for(int c = 0; c &lt; 4; c++)</a>
+<a name="ln182">          {</a>
+<a name="ln183">            L[c] -= out[((index + op) * ch) + c];</a>
+<a name="ln184">          }</a>
+<a name="ln185">          hits--;</a>
+<a name="ln186">        }</a>
+<a name="ln187">        if(np &lt; roi_out-&gt;width)</a>
+<a name="ln188">        {</a>
+<a name="ln189">          for(int c = 0; c &lt; 4; c++)</a>
+<a name="ln190">          {</a>
+<a name="ln191">            L[c] += out[((index + np) * ch) + c];</a>
+<a name="ln192">          }</a>
+<a name="ln193">          hits++;</a>
+<a name="ln194">        }</a>
+<a name="ln195">        if(x &gt;= 0)</a>
+<a name="ln196">        {</a>
+<a name="ln197">          for(int c = 0; c &lt; 4; c++)</a>
+<a name="ln198">          {</a>
+<a name="ln199">            scanline[4 * x + c] = L[c] / hits;</a>
+<a name="ln200">          }</a>
+<a name="ln201">        }</a>
+<a name="ln202">      }</a>
+<a name="ln203"> </a>
+<a name="ln204">      for(int x = 0; x &lt; roi_out-&gt;width; x++)</a>
+<a name="ln205">      {</a>
+<a name="ln206">        for(int c = 0; c &lt; 4; c++)</a>
+<a name="ln207">        {</a>
+<a name="ln208">          out[(index + x) * ch + c] = scanline[4 * x + c];</a>
+<a name="ln209">        }</a>
+<a name="ln210">      }</a>
+<a name="ln211">    }</a>
+<a name="ln212"> </a>
+<a name="ln213">    /* vertical pass on blurlightness */</a>
+<a name="ln214">    const int opoffs = -(radius + 1) * roi_out-&gt;width;</a>
+<a name="ln215">    const int npoffs = (radius)*roi_out-&gt;width;</a>
+<a name="ln216">#ifdef _OPENMP</a>
+<a name="ln217">#pragma omp parallel for default(none) \</a>
+<a name="ln218">    dt_omp_firstprivate(ch, npoffs, opoffs, radius, out, roi_out, \</a>
+<a name="ln219">                        scanline_buf, scanline_size) \</a>
+<a name="ln220">    schedule(static)</a>
+<a name="ln221">#endif</a>
+<a name="ln222">    for(int x = 0; x &lt; roi_out-&gt;width; x++)</a>
+<a name="ln223">    {</a>
+<a name="ln224">      float *scanline = scanline_buf + scanline_size * dt_get_thread_num();</a>
+<a name="ln225">      __attribute__((aligned(64))) float L[4] = { 0.0f, 0.0f, 0.0f, 0.0f };</a>
+<a name="ln226"> </a>
+<a name="ln227">      int hits = 0;</a>
+<a name="ln228">      size_t index = (size_t)x - radius * roi_out-&gt;width;</a>
+<a name="ln229">      for(int y = -radius; y &lt; roi_out-&gt;height; y++)</a>
+<a name="ln230">      {</a>
+<a name="ln231">        int op = y - radius - 1;</a>
+<a name="ln232">        int np = y + radius;</a>
+<a name="ln233"> </a>
+<a name="ln234">        if(op &gt;= 0)</a>
+<a name="ln235">        {</a>
+<a name="ln236">          for(int c = 0; c &lt; 4; c++)</a>
+<a name="ln237">          {</a>
+<a name="ln238">            L[c] -= out[((index + opoffs) * ch) + c];</a>
+<a name="ln239">          }</a>
+<a name="ln240">          hits--;</a>
+<a name="ln241">        }</a>
+<a name="ln242">        if(np &lt; roi_out-&gt;height)</a>
+<a name="ln243">        {</a>
+<a name="ln244">          for(int c = 0; c &lt; 4; c++)</a>
+<a name="ln245">          {</a>
+<a name="ln246">            L[c] += out[((index + npoffs) * ch) + c];</a>
+<a name="ln247">          }</a>
+<a name="ln248">          hits++;</a>
+<a name="ln249">        }</a>
+<a name="ln250">        if(y &gt;= 0)</a>
+<a name="ln251">        {</a>
+<a name="ln252">          for(int c = 0; c &lt; 4; c++)</a>
+<a name="ln253">          {</a>
+<a name="ln254">            scanline[4 * y + c] = L[c] / hits;</a>
+<a name="ln255">          }</a>
+<a name="ln256">        }</a>
+<a name="ln257">        index += roi_out-&gt;width;</a>
+<a name="ln258">      }</a>
+<a name="ln259"> </a>
+<a name="ln260">      for(int y = 0; y &lt; roi_out-&gt;height; y++)</a>
+<a name="ln261">      {</a>
+<a name="ln262">        for(int c = 0; c &lt; 4; c++)</a>
+<a name="ln263">        {</a>
+<a name="ln264">          out[((size_t)y * roi_out-&gt;width + x) * ch + c] = scanline[ch * y + c];</a>
+<a name="ln265">        }</a>
+<a name="ln266">      }</a>
+<a name="ln267">    }</a>
+<a name="ln268">  }</a>
+<a name="ln269"> </a>
+<a name="ln270">  dt_free_align(scanline_buf);</a>
+<a name="ln271"> </a>
+<a name="ln272">  const float amount = (d-&gt;amount / 100.0);</a>
+<a name="ln273">  const float amount_1 = (1 - (d-&gt;amount) / 100.0);</a>
+<a name="ln274"> </a>
+<a name="ln275">#ifdef _OPENMP</a>
+<a name="ln276">#pragma omp parallel for SIMD() default(none) \</a>
+<a name="ln277">  dt_omp_firstprivate(amount, amount_1, ch, in, out, roi_out) \</a>
+<a name="ln278">  schedule(static) \</a>
+<a name="ln279">  collapse(2)</a>
+<a name="ln280">#endif</a>
+<a name="ln281">  for(size_t k = 0; k &lt; (size_t)ch * roi_out-&gt;width * roi_out-&gt;height; k += ch)</a>
+<a name="ln282">  {</a>
+<a name="ln283">    for(int c = 0; c &lt; 4; c++)</a>
+<a name="ln284">    {</a>
+<a name="ln285">      out[k + c] = ((in[k + c] * amount_1) + (CLIP(out[k + c]) * amount));</a>
+<a name="ln286">    }</a>
+<a name="ln287">  }</a>
+<a name="ln288">}</a>
+<a name="ln289"> </a>
+<a name="ln290">#if defined(__SSE__)</a>
+<a name="ln291">void process_sse2(struct dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, const void *const ivoid,</a>
+<a name="ln292">                  void *const ovoid, const dt_iop_roi_t *const roi_in, const dt_iop_roi_t *const roi_out)</a>
+<a name="ln293">{</a>
+<a name="ln294">  dt_iop_soften_data_t *data = (dt_iop_soften_data_t *)piece-&gt;data;</a>
+<a name="ln295">  float *in = (float *)ivoid;</a>
+<a name="ln296">  float *out = (float *)ovoid;</a>
+<a name="ln297">  const int ch = piece-&gt;colors;</a>
+<a name="ln298"> </a>
+<a name="ln299">  const float brightness = 1.0 / exp2f(-data-&gt;brightness);</a>
+<a name="ln300">  const float saturation = data-&gt;saturation / 100.0;</a>
+<a name="ln301">/* create overexpose image and then blur */</a>
+<a name="ln302">#ifdef _OPENMP</a>
+<a name="ln303">#pragma omp parallel for default(none) \</a>
+<a name="ln304">  dt_omp_firstprivate(ch, brightness, roi_out, saturation) \</a>
+<a name="ln305">  shared(in, out) \</a>
+<a name="ln306">  schedule(static)</a>
+<a name="ln307">#endif</a>
+<a name="ln308">  for(size_t k = 0; k &lt; (size_t)roi_out-&gt;width * roi_out-&gt;height; k++)</a>
+<a name="ln309">  {</a>
+<a name="ln310">    size_t index = ch * k;</a>
+<a name="ln311">    float h, s, l;</a>
+<a name="ln312">    rgb2hsl(&amp;in[index], &amp;h, &amp;s, &amp;l);</a>
+<a name="ln313">    s *= saturation;</a>
+<a name="ln314">    l *= brightness;</a>
+<a name="ln315">    hsl2rgb(&amp;out[index], h, CLIP(s), CLIP(l));</a>
+<a name="ln316">  }</a>
+<a name="ln317"> </a>
+<a name="ln318">  const float w = piece-&gt;iwidth * piece-&gt;iscale;</a>
+<a name="ln319">  const float h = piece-&gt;iheight * piece-&gt;iscale;</a>
+<a name="ln320">  int mrad = sqrt(w * w + h * h) * 0.01;</a>
+<a name="ln321">  int rad = mrad * (fmin(100.0, data-&gt;size + 1) / 100.0);</a>
+<a name="ln322">  const int radius = MIN(mrad, ceilf(rad * roi_in-&gt;scale / piece-&gt;iscale));</a>
+<a name="ln323"> </a>
+<a name="ln324">  const int size = roi_out-&gt;width &gt; roi_out-&gt;height ? roi_out-&gt;width : roi_out-&gt;height;</a>
+<a name="ln325"> </a>
+<a name="ln326">  __m128 *const scanline_buf = dt_alloc_align(64, size * dt_get_num_threads() * sizeof(__m128));</a>
+<a name="ln327"> </a>
+<a name="ln328">  for(int iteration = 0; iteration &lt; BOX_ITERATIONS; iteration++)</a>
+<a name="ln329">  {</a>
+<a name="ln330">#ifdef _OPENMP</a>
+<a name="ln331">#pragma omp parallel for default(none) \</a>
+<a name="ln332">    dt_omp_firstprivate(ch, radius, roi_out, scanline_buf, size) \</a>
+<a name="ln333">    shared(out) \</a>
+<a name="ln334">    schedule(static)</a>
+<a name="ln335">#endif</a>
+<a name="ln336">    /* horizontal blur out into out */</a>
+<a name="ln337">    for(int y = 0; y &lt; roi_out-&gt;height; y++)</a>
+<a name="ln338">    {</a>
+<a name="ln339">      __m128 *scanline = scanline_buf + size * dt_get_thread_num();</a>
+<a name="ln340">      size_t index = (size_t)y * roi_out-&gt;width;</a>
+<a name="ln341">      __m128 L = _mm_setzero_ps();</a>
+<a name="ln342">      int hits = 0;</a>
+<a name="ln343">      for(int x = -radius; x &lt; roi_out-&gt;width; x++)</a>
+<a name="ln344">      {</a>
+<a name="ln345">        int op = x - radius - 1;</a>
+<a name="ln346">        int np = x + radius;</a>
+<a name="ln347">        if(op &gt;= 0)</a>
+<a name="ln348">        {</a>
+<a name="ln349">          L = _mm_sub_ps(L, _mm_load_ps(&amp;out[(index + op) * ch]));</a>
+<a name="ln350">          hits--;</a>
+<a name="ln351">        }</a>
+<a name="ln352">        if(np &lt; roi_out-&gt;width)</a>
+<a name="ln353">        {</a>
+<a name="ln354">          L = _mm_add_ps(L, _mm_load_ps(&amp;out[(index + np) * ch]));</a>
+<a name="ln355">          hits++;</a>
+<a name="ln356">        }</a>
+<a name="ln357">        if(x &gt;= 0) scanline[x] = _mm_div_ps(L, _mm_set_ps1(hits));</a>
+<a name="ln358">      }</a>
+<a name="ln359"> </a>
+<a name="ln360">      for(int x = 0; x &lt; roi_out-&gt;width; x++) _mm_store_ps(&amp;out[(index + x) * ch], scanline[x]);</a>
+<a name="ln361">    }</a>
+<a name="ln362"> </a>
+<a name="ln363">    /* vertical pass on blurlightness */</a>
+<a name="ln364">    const int opoffs = -(radius + 1) * roi_out-&gt;width;</a>
+<a name="ln365">    const int npoffs = (radius)*roi_out-&gt;width;</a>
+<a name="ln366">#ifdef _OPENMP</a>
+<a name="ln367">#pragma omp parallel for default(none) \</a>
+<a name="ln368">    dt_omp_firstprivate(ch, npoffs, opoffs, radius, roi_out, scanline_buf, size) \</a>
+<a name="ln369">    shared(out) \</a>
+<a name="ln370">    schedule(static)</a>
+<a name="ln371">#endif</a>
+<a name="ln372">    for(int x = 0; x &lt; roi_out-&gt;width; x++)</a>
+<a name="ln373">    {</a>
+<a name="ln374">      __m128 *scanline = scanline_buf + size * dt_get_thread_num();</a>
+<a name="ln375">      __m128 L = _mm_setzero_ps();</a>
+<a name="ln376">      int hits = 0;</a>
+<a name="ln377">      size_t index = (size_t)x - radius * roi_out-&gt;width;</a>
+<a name="ln378">      for(int y = -radius; y &lt; roi_out-&gt;height; y++)</a>
+<a name="ln379">      {</a>
+<a name="ln380">        int op = y - radius - 1;</a>
+<a name="ln381">        int np = y + radius;</a>
+<a name="ln382"> </a>
+<a name="ln383">        if(op &gt;= 0)</a>
+<a name="ln384">        {</a>
+<a name="ln385">          L = _mm_sub_ps(L, _mm_load_ps(&amp;out[(index + opoffs) * ch]));</a>
+<a name="ln386">          hits--;</a>
+<a name="ln387">        }</a>
+<a name="ln388">        if(np &lt; roi_out-&gt;height)</a>
+<a name="ln389">        {</a>
+<a name="ln390">          L = _mm_add_ps(L, _mm_load_ps(&amp;out[(index + npoffs) * ch]));</a>
+<a name="ln391">          hits++;</a>
+<a name="ln392">        }</a>
+<a name="ln393">        if(y &gt;= 0) scanline[y] = _mm_div_ps(L, _mm_set_ps1(hits));</a>
+<a name="ln394">        index += roi_out-&gt;width;</a>
+<a name="ln395">      }</a>
+<a name="ln396"> </a>
+<a name="ln397">      for(int y = 0; y &lt; roi_out-&gt;height; y++)</a>
+<a name="ln398">        _mm_store_ps(&amp;out[((size_t)y * roi_out-&gt;width + x) * ch], scanline[y]);</a>
+<a name="ln399">    }</a>
+<a name="ln400">  }</a>
+<a name="ln401"> </a>
+<a name="ln402">  dt_free_align(scanline_buf);</a>
+<a name="ln403"> </a>
+<a name="ln404">  const __m128 amount = _mm_set1_ps(data-&gt;amount / 100.0);</a>
+<a name="ln405">  const __m128 amount_1 = _mm_set1_ps(1 - (data-&gt;amount) / 100.0);</a>
+<a name="ln406">#ifdef _OPENMP</a>
+<a name="ln407">#pragma omp parallel for default(none) \</a>
+<a name="ln408">  dt_omp_firstprivate(ch, amount, amount_1, roi_out) \</a>
+<a name="ln409">  shared(in, out, data) \</a>
+<a name="ln410">  schedule(static)</a>
+<a name="ln411">#endif</a>
+<a name="ln412">  for(size_t k = 0; k &lt; (size_t)roi_out-&gt;width * roi_out-&gt;height; k++)</a>
+<a name="ln413">  {</a>
+<a name="ln414">    int index = ch * k;</a>
+<a name="ln415">    _mm_store_ps(&amp;out[index], _mm_add_ps(_mm_mul_ps(_mm_load_ps(&amp;in[index]), amount_1),</a>
+<a name="ln416">                                         _mm_mul_ps(MM_CLIP_PS(_mm_load_ps(&amp;out[index])), amount)));</a>
+<a name="ln417">  }</a>
+<a name="ln418">}</a>
+<a name="ln419">#endif</a>
+<a name="ln420"> </a>
+<a name="ln421">#ifdef HAVE_OPENCL</a>
+<a name="ln422">int process_cl(struct dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, cl_mem dev_in, cl_mem dev_out,</a>
+<a name="ln423">               const dt_iop_roi_t *const roi_in, const dt_iop_roi_t *const roi_out)</a>
+<a name="ln424">{</a>
+<a name="ln425">  dt_iop_soften_data_t *d = (dt_iop_soften_data_t *)piece-&gt;data;</a>
+<a name="ln426">  dt_iop_soften_global_data_t *gd = (dt_iop_soften_global_data_t *)self-&gt;data;</a>
+<a name="ln427"> </a>
+<a name="ln428">  cl_int err = -999;</a>
+<a name="ln429">  cl_mem dev_tmp = NULL;</a>
+<a name="ln430">  cl_mem dev_m = NULL;</a>
+<a name="ln431"> </a>
+<a name="ln432">  const int devid = piece-&gt;pipe-&gt;devid;</a>
+<a name="ln433">  const int width = roi_in-&gt;width;</a>
+<a name="ln434">  const int height = roi_in-&gt;height;</a>
+<a name="ln435"> </a>
+<a name="ln436">  const float brightness = 1.0f / exp2f(-d-&gt;brightness);</a>
+<a name="ln437">  const float saturation = d-&gt;saturation / 100.0f;</a>
+<a name="ln438">  const float amount = d-&gt;amount / 100.0f;</a>
+<a name="ln439"> </a>
+<a name="ln440">  const float w = piece-&gt;iwidth * piece-&gt;iscale;</a>
+<a name="ln441">  const float h = piece-&gt;iheight * piece-&gt;iscale;</a>
+<a name="ln442">  int mrad = sqrt(w * w + h * h) * 0.01f;</a>
+<a name="ln443"> </a>
+<a name="ln444">  int rad = mrad * (fmin(100.0f, d-&gt;size + 1) / 100.0f);</a>
+<a name="ln445">  const int radius = MIN(mrad, ceilf(rad * roi_in-&gt;scale / piece-&gt;iscale));</a>
+<a name="ln446"> </a>
+<a name="ln447">  /* sigma-radius correlation to match opencl vs. non-opencl. identified by numerical experiments but</a>
+<a name="ln448">   * unproven. ask me if you need details. ulrich */</a>
+<a name="ln449">  const float sigma = sqrt((radius * (radius + 1) * BOX_ITERATIONS + 2) / 3.0f);</a>
+<a name="ln450">  const int wdh = ceilf(3.0f * sigma);</a>
+<a name="ln451">  const int wd = 2 * wdh + 1;</a>
+<a name="ln452">  const size_t mat_size = sizeof(float) * wd;</a>
+<a name="ln453">  float *mat = malloc(mat_size);</a>
+<a name="ln454">  float *m = mat + wdh;</a>
+<a name="ln455">  float weight = 0.0f;</a>
+<a name="ln456"> </a>
+<a name="ln457">  // init gaussian kernel</a>
+<a name="ln458">  for(int l = -wdh; l &lt;= wdh; l++) weight += m[l] = expf(-(l * l) / (2.f * sigma * sigma));</a>
+<a name="ln459">  for(int l = -wdh; l &lt;= wdh; l++) m[l] /= weight;</a>
+<a name="ln460"> </a>
+<a name="ln461">  // for(int l=-wdh; l&lt;=wdh; l++) printf(&quot;%.6f &quot;, (double)m[l]);</a>
+<a name="ln462">  // printf(&quot;\n&quot;);</a>
+<a name="ln463"> </a>
+<a name="ln464">  int hblocksize;</a>
+<a name="ln465">  dt_opencl_local_buffer_t hlocopt</a>
+<a name="ln466">    = (dt_opencl_local_buffer_t){ .xoffset = 2 * wdh, .xfactor = 1, .yoffset = 0, .yfactor = 1,</a>
+<a name="ln467">                                  .cellsize = 4 * sizeof(float), .overhead = 0,</a>
+<a name="ln468">                                  .sizex = 1 &lt;&lt; 16, .sizey = 1 };</a>
+<a name="ln469"> </a>
+<a name="ln470">  if(dt_opencl_local_buffer_opt(devid, gd-&gt;kernel_soften_hblur, &amp;hlocopt))</a>
+<a name="ln471">    hblocksize = hlocopt.sizex;</a>
+<a name="ln472">  else</a>
+<a name="ln473">    hblocksize = 1;</a>
+<a name="ln474"> </a>
+<a name="ln475">  int vblocksize;</a>
+<a name="ln476">  dt_opencl_local_buffer_t vlocopt</a>
+<a name="ln477">    = (dt_opencl_local_buffer_t){ .xoffset = 1, .xfactor = 1, .yoffset = 2 * wdh, .yfactor = 1,</a>
+<a name="ln478">                                  .cellsize = 4 * sizeof(float), .overhead = 0,</a>
+<a name="ln479">                                  .sizex = 1, .sizey = 1 &lt;&lt; 16 };</a>
+<a name="ln480"> </a>
+<a name="ln481">  if(dt_opencl_local_buffer_opt(devid, gd-&gt;kernel_soften_vblur, &amp;vlocopt))</a>
+<a name="ln482">    vblocksize = vlocopt.sizey;</a>
+<a name="ln483">  else</a>
+<a name="ln484">    vblocksize = 1;</a>
+<a name="ln485"> </a>
+<a name="ln486"> </a>
+<a name="ln487">  const size_t bwidth = ROUNDUP(width, hblocksize);</a>
+<a name="ln488">  const size_t bheight = ROUNDUP(height, vblocksize);</a>
+<a name="ln489"> </a>
+<a name="ln490">  size_t sizes[3];</a>
+<a name="ln491">  size_t local[3];</a>
+<a name="ln492"> </a>
+<a name="ln493">  dev_tmp = dt_opencl_alloc_device(devid, width, height, 4 * sizeof(float));</a>
+<a name="ln494">  if(dev_tmp == NULL) goto error;</a>
+<a name="ln495"> </a>
+<a name="ln496">  dev_m = dt_opencl_copy_host_to_device_constant(devid, mat_size, mat);</a>
+<a name="ln497">  if(dev_m == NULL) goto error;</a>
+<a name="ln498"> </a>
+<a name="ln499">  /* overexpose image */</a>
+<a name="ln500">  sizes[0] = ROUNDUPWD(width);</a>
+<a name="ln501">  sizes[1] = ROUNDUPHT(height);</a>
+<a name="ln502">  sizes[2] = 1;</a>
+<a name="ln503">  dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_soften_overexposed, 0, sizeof(cl_mem), (void *)&amp;dev_in);</a>
+<a name="ln504">  dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_soften_overexposed, 1, sizeof(cl_mem), (void *)&amp;dev_tmp);</a>
+<a name="ln505">  dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_soften_overexposed, 2, sizeof(int), (void *)&amp;width);</a>
+<a name="ln506">  dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_soften_overexposed, 3, sizeof(int), (void *)&amp;height);</a>
+<a name="ln507">  dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_soften_overexposed, 4, sizeof(float), (void *)&amp;saturation);</a>
+<a name="ln508">  dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_soften_overexposed, 5, sizeof(float), (void *)&amp;brightness);</a>
+<a name="ln509">  err = dt_opencl_enqueue_kernel_2d(devid, gd-&gt;kernel_soften_overexposed, sizes);</a>
+<a name="ln510">  if(err != CL_SUCCESS) goto error;</a>
+<a name="ln511"> </a>
+<a name="ln512">  if(rad != 0)</a>
+<a name="ln513">  {</a>
+<a name="ln514">    /* horizontal blur */</a>
+<a name="ln515">    sizes[0] = bwidth;</a>
+<a name="ln516">    sizes[1] = ROUNDUPHT(height);</a>
+<a name="ln517">    sizes[2] = 1;</a>
+<a name="ln518">    local[0] = hblocksize;</a>
+<a name="ln519">    local[1] = 1;</a>
+<a name="ln520">    local[2] = 1;</a>
+<a name="ln521">    dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_soften_hblur, 0, sizeof(cl_mem), (void *)&amp;dev_tmp);</a>
+<a name="ln522">    dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_soften_hblur, 1, sizeof(cl_mem), (void *)&amp;dev_out);</a>
+<a name="ln523">    dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_soften_hblur, 2, sizeof(cl_mem), (void *)&amp;dev_m);</a>
+<a name="ln524">    dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_soften_hblur, 3, sizeof(int), (void *)&amp;wdh);</a>
+<a name="ln525">    dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_soften_hblur, 4, sizeof(int), (void *)&amp;width);</a>
+<a name="ln526">    dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_soften_hblur, 5, sizeof(int), (void *)&amp;height);</a>
+<a name="ln527">    dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_soften_hblur, 6, sizeof(int), (void *)&amp;hblocksize);</a>
+<a name="ln528">    dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_soften_hblur, 7, (hblocksize + 2 * wdh) * 4 * sizeof(float),</a>
+<a name="ln529">                             NULL);</a>
+<a name="ln530">    err = dt_opencl_enqueue_kernel_2d_with_local(devid, gd-&gt;kernel_soften_hblur, sizes, local);</a>
+<a name="ln531">    if(err != CL_SUCCESS) goto error;</a>
+<a name="ln532"> </a>
+<a name="ln533"> </a>
+<a name="ln534">    /* vertical blur */</a>
+<a name="ln535">    sizes[0] = ROUNDUPWD(width);</a>
+<a name="ln536">    sizes[1] = bheight;</a>
+<a name="ln537">    sizes[2] = 1;</a>
+<a name="ln538">    local[0] = 1;</a>
+<a name="ln539">    local[1] = vblocksize;</a>
+<a name="ln540">    local[2] = 1;</a>
+<a name="ln541">    dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_soften_vblur, 0, sizeof(cl_mem), (void *)&amp;dev_out);</a>
+<a name="ln542">    dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_soften_vblur, 1, sizeof(cl_mem), (void *)&amp;dev_tmp);</a>
+<a name="ln543">    dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_soften_vblur, 2, sizeof(cl_mem), (void *)&amp;dev_m);</a>
+<a name="ln544">    dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_soften_vblur, 3, sizeof(int), (void *)&amp;wdh);</a>
+<a name="ln545">    dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_soften_vblur, 4, sizeof(int), (void *)&amp;width);</a>
+<a name="ln546">    dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_soften_vblur, 5, sizeof(int), (void *)&amp;height);</a>
+<a name="ln547">    dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_soften_vblur, 6, sizeof(int), (void *)&amp;vblocksize);</a>
+<a name="ln548">    dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_soften_vblur, 7, (vblocksize + 2 * wdh) * 4 * sizeof(float),</a>
+<a name="ln549">                             NULL);</a>
+<a name="ln550">    err = dt_opencl_enqueue_kernel_2d_with_local(devid, gd-&gt;kernel_soften_vblur, sizes, local);</a>
+<a name="ln551">    if(err != CL_SUCCESS) goto error;</a>
+<a name="ln552">  }</a>
+<a name="ln553"> </a>
+<a name="ln554">  /* mixing tmp and in -&gt; out */</a>
+<a name="ln555">  sizes[0] = ROUNDUPWD(width);</a>
+<a name="ln556">  sizes[1] = ROUNDUPHT(height);</a>
+<a name="ln557">  sizes[2] = 1;</a>
+<a name="ln558">  dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_soften_mix, 0, sizeof(cl_mem), (void *)&amp;dev_in);</a>
+<a name="ln559">  dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_soften_mix, 1, sizeof(cl_mem), (void *)&amp;dev_tmp);</a>
+<a name="ln560">  dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_soften_mix, 2, sizeof(cl_mem), (void *)&amp;dev_out);</a>
+<a name="ln561">  dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_soften_mix, 3, sizeof(int), (void *)&amp;width);</a>
+<a name="ln562">  dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_soften_mix, 4, sizeof(int), (void *)&amp;height);</a>
+<a name="ln563">  dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_soften_mix, 5, sizeof(float), (void *)&amp;amount);</a>
+<a name="ln564">  err = dt_opencl_enqueue_kernel_2d(devid, gd-&gt;kernel_soften_mix, sizes);</a>
+<a name="ln565">  if(err != CL_SUCCESS) goto error;</a>
+<a name="ln566"> </a>
+<a name="ln567">  dt_opencl_release_mem_object(dev_m);</a>
+<a name="ln568">  dt_opencl_release_mem_object(dev_tmp);</a>
+<a name="ln569">  free(mat);</a>
+<a name="ln570">  return TRUE;</a>
+<a name="ln571"> </a>
+<a name="ln572">error:</a>
+<a name="ln573">  dt_opencl_release_mem_object(dev_m);</a>
+<a name="ln574">  dt_opencl_release_mem_object(dev_tmp);</a>
+<a name="ln575">  free(mat);</a>
+<a name="ln576">  dt_print(DT_DEBUG_OPENCL, &quot;[opencl_soften] couldn't enqueue kernel! %d\n&quot;, err);</a>
+<a name="ln577">  return FALSE;</a>
+<a name="ln578">}</a>
+<a name="ln579">#endif</a>
+<a name="ln580"> </a>
+<a name="ln581">void tiling_callback(struct dt_iop_module_t *self, struct dt_dev_pixelpipe_iop_t *piece,</a>
+<a name="ln582">                     const dt_iop_roi_t *roi_in, const dt_iop_roi_t *roi_out,</a>
+<a name="ln583">                     struct dt_develop_tiling_t *tiling)</a>
+<a name="ln584">{</a>
+<a name="ln585">  dt_iop_soften_data_t *d = (dt_iop_soften_data_t *)piece-&gt;data;</a>
+<a name="ln586"> </a>
+<a name="ln587">  const float w = piece-&gt;iwidth * piece-&gt;iscale;</a>
+<a name="ln588">  const float h = piece-&gt;iheight * piece-&gt;iscale;</a>
+<a name="ln589">  int mrad = sqrt(w * w + h * h) * 0.01f;</a>
+<a name="ln590"> </a>
+<a name="ln591">  int rad = mrad * (fmin(100.0f, d-&gt;size + 1) / 100.0f);</a>
+<a name="ln592">  const int radius = MIN(mrad, ceilf(rad * roi_in-&gt;scale / piece-&gt;iscale));</a>
+<a name="ln593"> </a>
+<a name="ln594">  /* sigma-radius correlation to match opencl vs. non-opencl. identified by numerical experiments but</a>
+<a name="ln595">   * unproven. ask me if you need details. ulrich */</a>
+<a name="ln596">  const float sigma = sqrt((radius * (radius + 1) * BOX_ITERATIONS + 2) / 3.0f);</a>
+<a name="ln597">  const int wdh = ceilf(3.0f * sigma);</a>
+<a name="ln598"> </a>
+<a name="ln599">  tiling-&gt;factor = 3.0f; // in + out + tmp</a>
+<a name="ln600">  tiling-&gt;maxbuf = 1.0f;</a>
+<a name="ln601">  tiling-&gt;overhead = 0;</a>
+<a name="ln602">  tiling-&gt;overlap = wdh;</a>
+<a name="ln603">  tiling-&gt;xalign = 1;</a>
+<a name="ln604">  tiling-&gt;yalign = 1;</a>
+<a name="ln605">  return;</a>
+<a name="ln606">}</a>
+<a name="ln607"> </a>
+<a name="ln608">void init_global(dt_iop_module_so_t *module)</a>
+<a name="ln609">{</a>
+<a name="ln610">  const int program = 9; // soften.cl, from programs.conf</a>
+<a name="ln611">  dt_iop_soften_global_data_t *gd</a>
+<a name="ln612">      = (dt_iop_soften_global_data_t *)malloc(sizeof(dt_iop_soften_global_data_t));</a>
+<a name="ln613">  module-&gt;data = gd;</a>
+<a name="ln614">  gd-&gt;kernel_soften_overexposed = dt_opencl_create_kernel(program, &quot;soften_overexposed&quot;);</a>
+<a name="ln615">  gd-&gt;kernel_soften_hblur = dt_opencl_create_kernel(program, &quot;soften_hblur&quot;);</a>
+<a name="ln616">  gd-&gt;kernel_soften_vblur = dt_opencl_create_kernel(program, &quot;soften_vblur&quot;);</a>
+<a name="ln617">  gd-&gt;kernel_soften_mix = dt_opencl_create_kernel(program, &quot;soften_mix&quot;);</a>
+<a name="ln618">}</a>
+<a name="ln619"> </a>
+<a name="ln620">void cleanup_global(dt_iop_module_so_t *module)</a>
+<a name="ln621">{</a>
+<a name="ln622">  dt_iop_soften_global_data_t *gd = (dt_iop_soften_global_data_t *)module-&gt;data;</a>
+<a name="ln623">  dt_opencl_free_kernel(gd-&gt;kernel_soften_overexposed);</a>
+<a name="ln624">  dt_opencl_free_kernel(gd-&gt;kernel_soften_hblur);</a>
+<a name="ln625">  dt_opencl_free_kernel(gd-&gt;kernel_soften_vblur);</a>
+<a name="ln626">  dt_opencl_free_kernel(gd-&gt;kernel_soften_mix);</a>
+<a name="ln627">  free(module-&gt;data);</a>
+<a name="ln628">  module-&gt;data = NULL;</a>
+<a name="ln629">}</a>
+<a name="ln630"> </a>
+<a name="ln631"> </a>
+<a name="ln632">static void size_callback(GtkWidget *slider, gpointer user_data)</a>
+<a name="ln633">{</a>
+<a name="ln634">  dt_iop_module_t *self = (dt_iop_module_t *)user_data;</a>
+<a name="ln635">  if(self-&gt;dt-&gt;gui-&gt;reset) return;</a>
+<a name="ln636">  dt_iop_soften_params_t *p = (dt_iop_soften_params_t *)self-&gt;params;</a>
+<a name="ln637">  p-&gt;size = dt_bauhaus_slider_get(slider);</a>
+<a name="ln638">  dt_dev_add_history_item(darktable.develop, self, TRUE);</a>
+<a name="ln639">}</a>
+<a name="ln640"> </a>
+<a name="ln641">static void saturation_callback(GtkWidget *slider, gpointer user_data)</a>
+<a name="ln642">{</a>
+<a name="ln643">  dt_iop_module_t *self = (dt_iop_module_t *)user_data;</a>
+<a name="ln644">  if(self-&gt;dt-&gt;gui-&gt;reset) return;</a>
+<a name="ln645">  dt_iop_soften_params_t *p = (dt_iop_soften_params_t *)self-&gt;params;</a>
+<a name="ln646">  p-&gt;saturation = dt_bauhaus_slider_get(slider);</a>
+<a name="ln647">  dt_dev_add_history_item(darktable.develop, self, TRUE);</a>
+<a name="ln648">}</a>
+<a name="ln649"> </a>
+<a name="ln650">static void brightness_callback(GtkWidget *slider, gpointer user_data)</a>
+<a name="ln651">{</a>
+<a name="ln652">  dt_iop_module_t *self = (dt_iop_module_t *)user_data;</a>
+<a name="ln653">  if(self-&gt;dt-&gt;gui-&gt;reset) return;</a>
+<a name="ln654">  dt_iop_soften_params_t *p = (dt_iop_soften_params_t *)self-&gt;params;</a>
+<a name="ln655">  p-&gt;brightness = dt_bauhaus_slider_get(slider);</a>
+<a name="ln656">  dt_dev_add_history_item(darktable.develop, self, TRUE);</a>
+<a name="ln657">}</a>
+<a name="ln658"> </a>
+<a name="ln659">static void amount_callback(GtkWidget *slider, gpointer user_data)</a>
+<a name="ln660">{</a>
+<a name="ln661">  dt_iop_module_t *self = (dt_iop_module_t *)user_data;</a>
+<a name="ln662">  if(self-&gt;dt-&gt;gui-&gt;reset) return;</a>
+<a name="ln663">  dt_iop_soften_params_t *p = (dt_iop_soften_params_t *)self-&gt;params;</a>
+<a name="ln664">  p-&gt;amount = dt_bauhaus_slider_get(slider);</a>
+<a name="ln665">  dt_dev_add_history_item(darktable.develop, self, TRUE);</a>
+<a name="ln666">}</a>
+<a name="ln667"> </a>
+<a name="ln668"> </a>
+<a name="ln669">void commit_params(struct dt_iop_module_t *self, dt_iop_params_t *p1, dt_dev_pixelpipe_t *pipe,</a>
+<a name="ln670">                   dt_dev_pixelpipe_iop_t *piece)</a>
+<a name="ln671">{</a>
+<a name="ln672">  dt_iop_soften_params_t *p = (dt_iop_soften_params_t *)p1;</a>
+<a name="ln673">  dt_iop_soften_data_t *d = (dt_iop_soften_data_t *)piece-&gt;data;</a>
+<a name="ln674"> </a>
+<a name="ln675">  d-&gt;size = p-&gt;size;</a>
+<a name="ln676">  d-&gt;saturation = p-&gt;saturation;</a>
+<a name="ln677">  d-&gt;brightness = p-&gt;brightness;</a>
+<a name="ln678">  d-&gt;amount = p-&gt;amount;</a>
+<a name="ln679">}</a>
+<a name="ln680"> </a>
+<a name="ln681">void init_pipe(struct dt_iop_module_t *self, dt_dev_pixelpipe_t *pipe, dt_dev_pixelpipe_iop_t *piece)</a>
+<a name="ln682">{</a>
+<a name="ln683">  piece-&gt;data = calloc(1, sizeof(dt_iop_soften_data_t));</a>
+<a name="ln684">  self-&gt;commit_params(self, self-&gt;default_params, pipe, piece);</a>
+<a name="ln685">}</a>
+<a name="ln686"> </a>
+<a name="ln687">void cleanup_pipe(struct dt_iop_module_t *self, dt_dev_pixelpipe_t *pipe, dt_dev_pixelpipe_iop_t *piece)</a>
+<a name="ln688">{</a>
+<a name="ln689">  free(piece-&gt;data);</a>
+<a name="ln690">  piece-&gt;data = NULL;</a>
+<a name="ln691">}</a>
+<a name="ln692"> </a>
+<a name="ln693">void gui_update(struct dt_iop_module_t *self)</a>
+<a name="ln694">{</a>
+<a name="ln695">  dt_iop_module_t *module = (dt_iop_module_t *)self;</a>
+<a name="ln696">  dt_iop_soften_gui_data_t *g = (dt_iop_soften_gui_data_t *)self-&gt;gui_data;</a>
+<a name="ln697">  dt_iop_soften_params_t *p = (dt_iop_soften_params_t *)module-&gt;params;</a>
+<a name="ln698">  dt_bauhaus_slider_set(g-&gt;scale1, p-&gt;size);</a>
+<a name="ln699">  dt_bauhaus_slider_set(g-&gt;scale2, p-&gt;saturation);</a>
+<a name="ln700">  dt_bauhaus_slider_set(g-&gt;scale3, p-&gt;brightness);</a>
+<a name="ln701">  dt_bauhaus_slider_set(g-&gt;scale4, p-&gt;amount);</a>
+<a name="ln702">}</a>
+<a name="ln703"> </a>
+<a name="ln704">void init(dt_iop_module_t *module)</a>
+<a name="ln705">{</a>
+<a name="ln706">  module-&gt;params = calloc(1, sizeof(dt_iop_soften_params_t));</a>
+<a name="ln707">  module-&gt;default_params = calloc(1, sizeof(dt_iop_soften_params_t));</a>
+<a name="ln708">  module-&gt;default_enabled = 0;</a>
+<a name="ln709">  module-&gt;params_size = sizeof(dt_iop_soften_params_t);</a>
+<a name="ln710">  module-&gt;gui_data = NULL;</a>
+<a name="ln711">  dt_iop_soften_params_t tmp = (dt_iop_soften_params_t){ 50, 100.0, 0.33, 50 };</a>
+<a name="ln712">  memcpy(module-&gt;params, &amp;tmp, sizeof(dt_iop_soften_params_t));</a>
+<a name="ln713">  memcpy(module-&gt;default_params, &amp;tmp, sizeof(dt_iop_soften_params_t));</a>
+<a name="ln714">}</a>
+<a name="ln715"> </a>
+<a name="ln716">void cleanup(dt_iop_module_t *module)</a>
+<a name="ln717">{</a>
+<a name="ln718">  free(module-&gt;params);</a>
+<a name="ln719">  module-&gt;params = NULL;</a>
+<a name="ln720">}</a>
+<a name="ln721"> </a>
+<a name="ln722">void gui_init(struct dt_iop_module_t *self)</a>
+<a name="ln723">{</a>
+<a name="ln724">  self-&gt;gui_data = malloc(sizeof(dt_iop_soften_gui_data_t));</a>
+<a name="ln725">  dt_iop_soften_gui_data_t *g = (dt_iop_soften_gui_data_t *)self-&gt;gui_data;</a>
+<a name="ln726">  dt_iop_soften_params_t *p = (dt_iop_soften_params_t *)self-&gt;params;</a>
+<a name="ln727"> </a>
+<a name="ln728">  self-&gt;widget = gtk_box_new(GTK_ORIENTATION_VERTICAL, DT_BAUHAUS_SPACE);</a>
+<a name="ln729">  dt_gui_add_help_link(self-&gt;widget, dt_get_help_url(self-&gt;op));</a>
+<a name="ln730"> </a>
+<a name="ln731">  /* size */</a>
+<a name="ln732">  g-&gt;scale1 = dt_bauhaus_slider_new_with_range(self, 0.0, 100.0, 2, p-&gt;size, 2);</a>
+<a name="ln733">  dt_bauhaus_slider_set_format(g-&gt;scale1, &quot;%.0f%%&quot;);</a>
+<a name="ln734">  dt_bauhaus_widget_set_label(g-&gt;scale1, NULL, _(&quot;size&quot;));</a>
+<a name="ln735">  gtk_widget_set_tooltip_text(g-&gt;scale1, _(&quot;the size of blur&quot;));</a>
+<a name="ln736">  g_signal_connect(G_OBJECT(g-&gt;scale1), &quot;value-changed&quot;, G_CALLBACK(size_callback), self);</a>
+<a name="ln737"> </a>
+<a name="ln738">  /* saturation */</a>
+<a name="ln739">  g-&gt;scale2 = dt_bauhaus_slider_new_with_range(self, 0.0, 100.0, 2, p-&gt;saturation, 2);</a>
+<a name="ln740">  dt_bauhaus_slider_set_format(g-&gt;scale2, &quot;%.0f%%&quot;);</a>
+<a name="ln741">  dt_bauhaus_widget_set_label(g-&gt;scale2, NULL, _(&quot;saturation&quot;));</a>
+<a name="ln742">  gtk_widget_set_tooltip_text(g-&gt;scale2, _(&quot;the saturation of blur&quot;));</a>
+<a name="ln743">  g_signal_connect(G_OBJECT(g-&gt;scale2), &quot;value-changed&quot;, G_CALLBACK(saturation_callback), self);</a>
+<a name="ln744"> </a>
+<a name="ln745">  /* brightness */</a>
+<a name="ln746">  g-&gt;scale3 = dt_bauhaus_slider_new_with_range(self, -2.0, 2.0, 0.01, p-&gt;brightness, 2);</a>
+<a name="ln747">  dt_bauhaus_slider_set_format(g-&gt;scale3, &quot;%.2fEV&quot;);</a>
+<a name="ln748">  dt_bauhaus_widget_set_label(g-&gt;scale3, NULL, _(&quot;brightness&quot;));</a>
+<a name="ln749">  gtk_widget_set_tooltip_text(g-&gt;scale3, _(&quot;the brightness of blur&quot;));</a>
+<a name="ln750">  g_signal_connect(G_OBJECT(g-&gt;scale3), &quot;value-changed&quot;, G_CALLBACK(brightness_callback), self);</a>
+<a name="ln751"> </a>
+<a name="ln752">  /* amount */</a>
+<a name="ln753">  // TODO: deprecate this function in favor for blending</a>
+<a name="ln754">  g-&gt;scale4 = dt_bauhaus_slider_new_with_range(self, 0.0, 100.0, 2, p-&gt;amount, 2);</a>
+<a name="ln755">  dt_bauhaus_slider_set_format(g-&gt;scale4, &quot;%.0f%%&quot;);</a>
+<a name="ln756">  dt_bauhaus_widget_set_label(g-&gt;scale4, NULL, _(&quot;mix&quot;));</a>
+<a name="ln757">  gtk_widget_set_tooltip_text(g-&gt;scale4, _(&quot;the mix of effect&quot;));</a>
+<a name="ln758">  g_signal_connect(G_OBJECT(g-&gt;scale4), &quot;value-changed&quot;, G_CALLBACK(amount_callback), self);</a>
+<a name="ln759"> </a>
+<a name="ln760"> </a>
+<a name="ln761"> </a>
+<a name="ln762">  gtk_box_pack_start(GTK_BOX(self-&gt;widget), GTK_WIDGET(g-&gt;scale1), TRUE, TRUE, 0);</a>
+<a name="ln763">  gtk_box_pack_start(GTK_BOX(self-&gt;widget), GTK_WIDGET(g-&gt;scale2), TRUE, TRUE, 0);</a>
+<a name="ln764">  gtk_box_pack_start(GTK_BOX(self-&gt;widget), GTK_WIDGET(g-&gt;scale3), TRUE, TRUE, 0);</a>
+<a name="ln765">  gtk_box_pack_start(GTK_BOX(self-&gt;widget), GTK_WIDGET(g-&gt;scale4), TRUE, TRUE, 0);</a>
+<a name="ln766">}</a>
+<a name="ln767"> </a>
+<a name="ln768">void gui_cleanup(struct dt_iop_module_t *self)</a>
+<a name="ln769">{</a>
+<a name="ln770">  free(self-&gt;gui_data);</a>
+<a name="ln771">  self-&gt;gui_data = NULL;</a>
+<a name="ln772">}</a>
+<a name="ln773"> </a>
+<a name="ln774">// modelines: These editor modelines have been set for all relevant files by tools/update_modelines.sh</a>
+<a name="ln775">// vim: shiftwidth=2 expandtab tabstop=2 cindent</a>
+<a name="ln776">// kate: tab-indents: off; indent-width 2; replace-tabs on; indent-mode cstyle; remove-trailing-spaces modified;</a>
+
+</code></pre>
+<div class="balloon" rel="199"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v609/" target="_blank">V609</a> Divide by zero. Denominator range [-1..1].</p></div>
+<div class="balloon" rel="254"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v609/" target="_blank">V609</a> Divide by zero. Denominator range [-1..1].</p></div>
+<div class="balloon" rel="454"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v769/" target="_blank">V769</a> The 'mat' pointer in the 'mat + wdh' expression could be nullptr. In such case, resulting value will be senseless and it should not be used. Check lines: 454, 453.</p></div>
+<div class="balloon" rel="614"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v522/" target="_blank">V522</a> There might be dereferencing of a potential null pointer 'gd'. Check lines: 614, 612.</p></div>
+<div class="balloon" rel="712"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v575/" target="_blank">V575</a> The potential null pointer is passed into 'memcpy' function. Inspect the first argument. Check lines: 712, 706.</p></div>
+<div class="balloon" rel="713"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v575/" target="_blank">V575</a> The potential null pointer is passed into 'memcpy' function. Inspect the first argument. Check lines: 713, 707.</p></div>
+<div class="balloon" rel="732"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v522/" target="_blank">V522</a> There might be dereferencing of a potential null pointer 'g'. Check lines: 732, 724.</p></div>
+
+<link rel="stylesheet" href="highlight.css">
+<script src="highlight.pack.js"></script>
+<script src="highlightjs-line-numbers.js"></script>
+<script>hljs.initHighlightingOnLoad();</script>
+<script>hljs.initLineNumbersOnLoad();</script>
+<script>
+  $(document).ready(function() {
+      $('.balloon').each(function () {
+          var bl = $(this);
+          var line = bl.attr('rel');
+          var text = $('a[name="ln'+line+'"]').text();
+
+          var space_count = 0;
+          for(var i = 0; i<text.length; i++){
+              var char = text[i];
+              if((char !== ' ')&&(char !== '\t'))break;
+              if(char === '\t')space_count++;
+              space_count++;
+          }
+
+          bl.css('margin-left', space_count*8);
+          $('a[name="ln'+line+'"]').after(bl);
+      });
+
+      window.location = window.location;
+  });
+</script>
+</body>
+</html>
