@@ -1,0 +1,2167 @@
+
+<html>
+<head>
+  <link rel="stylesheet" href="../style.css"/>
+  <script src="../jquery-3.2.1.min.js"></script>
+</head>
+<body>
+<pre><code class = "cpp">
+<a name="ln1">/*</a>
+<a name="ln2">    This file is part of darktable,</a>
+<a name="ln3">    copyright (c) 2009--2011 johannes hanika.</a>
+<a name="ln4"> </a>
+<a name="ln5">    darktable is free software: you can redistribute it and/or modify</a>
+<a name="ln6">    it under the terms of the GNU General Public License as published by</a>
+<a name="ln7">    the Free Software Foundation, either version 3 of the License, or</a>
+<a name="ln8">    (at your option) any later version.</a>
+<a name="ln9"> </a>
+<a name="ln10">    darktable is distributed in the hope that it will be useful,</a>
+<a name="ln11">    but WITHOUT ANY WARRANTY; without even the implied warranty of</a>
+<a name="ln12">    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the</a>
+<a name="ln13">    GNU General Public License for more details.</a>
+<a name="ln14"> </a>
+<a name="ln15">    You should have received a copy of the GNU General Public License</a>
+<a name="ln16">    along with darktable.  If not, see &lt;http://www.gnu.org/licenses/&gt;.</a>
+<a name="ln17">*/</a>
+<a name="ln18"> </a>
+<a name="ln19">#include &quot;common/image.h&quot;</a>
+<a name="ln20">#include &quot;common/collection.h&quot;</a>
+<a name="ln21">#include &quot;common/darktable.h&quot;</a>
+<a name="ln22">#include &quot;common/debug.h&quot;</a>
+<a name="ln23">#include &quot;common/exif.h&quot;</a>
+<a name="ln24">#include &quot;common/file_location.h&quot;</a>
+<a name="ln25">#include &quot;common/grouping.h&quot;</a>
+<a name="ln26">#include &quot;common/history.h&quot;</a>
+<a name="ln27">#include &quot;common/image_cache.h&quot;</a>
+<a name="ln28">#include &quot;common/imageio.h&quot;</a>
+<a name="ln29">#include &quot;common/imageio_rawspeed.h&quot;</a>
+<a name="ln30">#include &quot;common/mipmap_cache.h&quot;</a>
+<a name="ln31">#include &quot;common/tags.h&quot;</a>
+<a name="ln32">#include &quot;control/conf.h&quot;</a>
+<a name="ln33">#include &quot;control/control.h&quot;</a>
+<a name="ln34">#include &quot;control/jobs.h&quot;</a>
+<a name="ln35">#include &quot;develop/lightroom.h&quot;</a>
+<a name="ln36">#ifdef USE_LUA</a>
+<a name="ln37">#include &quot;lua/image.h&quot;</a>
+<a name="ln38">#endif</a>
+<a name="ln39">#include &lt;assert.h&gt;</a>
+<a name="ln40">#include &lt;math.h&gt;</a>
+<a name="ln41">#include &lt;sqlite3.h&gt;</a>
+<a name="ln42">#include &lt;stdlib.h&gt;</a>
+<a name="ln43">#include &lt;string.h&gt;</a>
+<a name="ln44">#include &lt;strings.h&gt;</a>
+<a name="ln45">#ifndef _WIN32</a>
+<a name="ln46">#include &lt;glob.h&gt;</a>
+<a name="ln47">#endif</a>
+<a name="ln48">#include &lt;glib/gstdio.h&gt;</a>
+<a name="ln49"> </a>
+<a name="ln50">static int64_t max_image_position()</a>
+<a name="ln51">{</a>
+<a name="ln52">  sqlite3_stmt *stmt = NULL;</a>
+<a name="ln53"> </a>
+<a name="ln54">  // get last position</a>
+<a name="ln55">  int64_t max_position = 0;</a>
+<a name="ln56"> </a>
+<a name="ln57">  gchar *max_position_query = &quot;SELECT MAX(position) FROM main.images&quot;;</a>
+<a name="ln58">  DT_DEBUG_SQLITE3_PREPARE_V2(dt_database_get(darktable.db), max_position_query, -1, &amp;stmt, NULL);</a>
+<a name="ln59"> </a>
+<a name="ln60">  if (sqlite3_step(stmt) == SQLITE_ROW)</a>
+<a name="ln61">  {</a>
+<a name="ln62">    max_position = sqlite3_column_int64(stmt, 0);</a>
+<a name="ln63">  }</a>
+<a name="ln64"> </a>
+<a name="ln65">  sqlite3_finalize(stmt);</a>
+<a name="ln66">  return max_position;</a>
+<a name="ln67">}</a>
+<a name="ln68"> </a>
+<a name="ln69">static int64_t create_next_image_position()</a>
+<a name="ln70">{</a>
+<a name="ln71">  /* The sequence pictures come in (import) define the initial sequence.</a>
+<a name="ln72">   *</a>
+<a name="ln73">   * The upper int32_t of the last image position is increased by one</a>
+<a name="ln74">   * while the lower 32 bits are masked out.</a>
+<a name="ln75">   *</a>
+<a name="ln76">   * Example:</a>
+<a name="ln77">   * last image position: (Hex)</a>
+<a name="ln78">   * 0000 0002 0000 0001</a>
+<a name="ln79">   *</a>
+<a name="ln80">   * next image position</a>
+<a name="ln81">   * 0000 0003 0000 0000</a>
+<a name="ln82">   */</a>
+<a name="ln83">  return (max_image_position() &amp; 0xFFFFFFFF00000000) + (1ll &lt;&lt; 32);</a>
+<a name="ln84">}</a>
+<a name="ln85"> </a>
+<a name="ln86">static void _image_local_copy_full_path(const int imgid, char *pathname, size_t pathname_len);</a>
+<a name="ln87"> </a>
+<a name="ln88">int dt_image_is_ldr(const dt_image_t *img)</a>
+<a name="ln89">{</a>
+<a name="ln90">  const char *c = img-&gt;filename + strlen(img-&gt;filename);</a>
+<a name="ln91">  while(*c != '.' &amp;&amp; c &gt; img-&gt;filename) c--;</a>
+<a name="ln92">  if((img-&gt;flags &amp; DT_IMAGE_LDR) || !strcasecmp(c, &quot;.jpg&quot;) || !strcasecmp(c, &quot;.png&quot;)</a>
+<a name="ln93">     || !strcasecmp(c, &quot;.ppm&quot;))</a>
+<a name="ln94">    return 1;</a>
+<a name="ln95">  else</a>
+<a name="ln96">    return 0;</a>
+<a name="ln97">}</a>
+<a name="ln98"> </a>
+<a name="ln99">int dt_image_is_hdr(const dt_image_t *img)</a>
+<a name="ln100">{</a>
+<a name="ln101">  const char *c = img-&gt;filename + strlen(img-&gt;filename);</a>
+<a name="ln102">  while(*c != '.' &amp;&amp; c &gt; img-&gt;filename) c--;</a>
+<a name="ln103">  if((img-&gt;flags &amp; DT_IMAGE_HDR) || !strcasecmp(c, &quot;.exr&quot;) || !strcasecmp(c, &quot;.hdr&quot;)</a>
+<a name="ln104">     || !strcasecmp(c, &quot;.pfm&quot;))</a>
+<a name="ln105">    return 1;</a>
+<a name="ln106">  else</a>
+<a name="ln107">    return 0;</a>
+<a name="ln108">}</a>
+<a name="ln109"> </a>
+<a name="ln110">int dt_image_is_raw(const dt_image_t *img)</a>
+<a name="ln111">{</a>
+<a name="ln112">  // NULL terminated list of supported non-RAW extensions</a>
+<a name="ln113">  const char *dt_non_raw_extensions[]</a>
+<a name="ln114">      = { &quot;.jpeg&quot;, &quot;.jpg&quot;,  &quot;.pfm&quot;, &quot;.hdr&quot;, &quot;.exr&quot;, &quot;.pxn&quot;, &quot;.tif&quot;, &quot;.tiff&quot;, &quot;.png&quot;,</a>
+<a name="ln115">          &quot;.j2c&quot;,  &quot;.j2k&quot;,  &quot;.jp2&quot;, &quot;.jpc&quot;, &quot;.gif&quot;, &quot;.jpc&quot;, &quot;.jp2&quot;, &quot;.bmp&quot;,  &quot;.dcm&quot;,</a>
+<a name="ln116">          &quot;.jng&quot;,  &quot;.miff&quot;, &quot;.mng&quot;, &quot;.pbm&quot;, &quot;.pnm&quot;, &quot;.ppm&quot;, &quot;.pgm&quot;, NULL };</a>
+<a name="ln117"> </a>
+<a name="ln118">  if(img-&gt;flags &amp; DT_IMAGE_RAW) return TRUE;</a>
+<a name="ln119"> </a>
+<a name="ln120">  const char *c = img-&gt;filename + strlen(img-&gt;filename);</a>
+<a name="ln121">  while(*c != '.' &amp;&amp; c &gt; img-&gt;filename) c--;</a>
+<a name="ln122"> </a>
+<a name="ln123">  gboolean isnonraw = FALSE;</a>
+<a name="ln124">  for(const char **i = dt_non_raw_extensions; *i != NULL; i++)</a>
+<a name="ln125">  {</a>
+<a name="ln126">    if(!g_ascii_strncasecmp(c, *i, strlen(*i)))</a>
+<a name="ln127">    {</a>
+<a name="ln128">      isnonraw = TRUE;</a>
+<a name="ln129">      break;</a>
+<a name="ln130">    }</a>
+<a name="ln131">  }</a>
+<a name="ln132"> </a>
+<a name="ln133">  return !isnonraw;</a>
+<a name="ln134">}</a>
+<a name="ln135"> </a>
+<a name="ln136">int dt_image_is_monochrome(const dt_image_t *img)</a>
+<a name="ln137">{</a>
+<a name="ln138">   return (img-&gt;flags &amp; DT_IMAGE_MONOCHROME);</a>
+<a name="ln139">}</a>
+<a name="ln140"> </a>
+<a name="ln141">const char *dt_image_film_roll_name(const char *path)</a>
+<a name="ln142">{</a>
+<a name="ln143">  const char *folder = path + strlen(path);</a>
+<a name="ln144">  int numparts = dt_conf_get_int(&quot;show_folder_levels&quot;);</a>
+<a name="ln145">  numparts = CLAMPS(numparts, 1, 5);</a>
+<a name="ln146">  int count = 0;</a>
+<a name="ln147">  if(numparts &lt; 1) numparts = 1;</a>
+<a name="ln148">  while(folder &gt; path)</a>
+<a name="ln149">  {</a>
+<a name="ln150">    if(*folder == G_DIR_SEPARATOR)</a>
+<a name="ln151">      if(++count &gt;= numparts)</a>
+<a name="ln152">      {</a>
+<a name="ln153">        ++folder;</a>
+<a name="ln154">        break;</a>
+<a name="ln155">      }</a>
+<a name="ln156">    --folder;</a>
+<a name="ln157">  }</a>
+<a name="ln158">  return folder;</a>
+<a name="ln159">}</a>
+<a name="ln160"> </a>
+<a name="ln161">void dt_image_film_roll_directory(const dt_image_t *img, char *pathname, size_t pathname_len)</a>
+<a name="ln162">{</a>
+<a name="ln163">  sqlite3_stmt *stmt;</a>
+<a name="ln164">  DT_DEBUG_SQLITE3_PREPARE_V2(dt_database_get(darktable.db), &quot;SELECT folder FROM main.film_rolls WHERE id = ?1&quot;,</a>
+<a name="ln165">                              -1, &amp;stmt, NULL);</a>
+<a name="ln166">  DT_DEBUG_SQLITE3_BIND_INT(stmt, 1, img-&gt;film_id);</a>
+<a name="ln167">  if(sqlite3_step(stmt) == SQLITE_ROW)</a>
+<a name="ln168">  {</a>
+<a name="ln169">    char *f = (char *)sqlite3_column_text(stmt, 0);</a>
+<a name="ln170">    snprintf(pathname, pathname_len, &quot;%s&quot;, f);</a>
+<a name="ln171">  }</a>
+<a name="ln172">  sqlite3_finalize(stmt);</a>
+<a name="ln173">  pathname[pathname_len - 1] = '\0';</a>
+<a name="ln174">}</a>
+<a name="ln175"> </a>
+<a name="ln176"> </a>
+<a name="ln177">void dt_image_film_roll(const dt_image_t *img, char *pathname, size_t pathname_len)</a>
+<a name="ln178">{</a>
+<a name="ln179">  sqlite3_stmt *stmt;</a>
+<a name="ln180">  DT_DEBUG_SQLITE3_PREPARE_V2(dt_database_get(darktable.db), &quot;SELECT folder FROM main.film_rolls WHERE id = ?1&quot;,</a>
+<a name="ln181">                              -1, &amp;stmt, NULL);</a>
+<a name="ln182">  DT_DEBUG_SQLITE3_BIND_INT(stmt, 1, img-&gt;film_id);</a>
+<a name="ln183">  if(sqlite3_step(stmt) == SQLITE_ROW)</a>
+<a name="ln184">  {</a>
+<a name="ln185">    char *f = (char *)sqlite3_column_text(stmt, 0);</a>
+<a name="ln186">    const char *c = dt_image_film_roll_name(f);</a>
+<a name="ln187">    snprintf(pathname, pathname_len, &quot;%s&quot;, c);</a>
+<a name="ln188">  }</a>
+<a name="ln189">  else</a>
+<a name="ln190">  {</a>
+<a name="ln191">    snprintf(pathname, pathname_len, &quot;%s&quot;, _(&quot;orphaned image&quot;));</a>
+<a name="ln192">  }</a>
+<a name="ln193">  sqlite3_finalize(stmt);</a>
+<a name="ln194">  pathname[pathname_len - 1] = '\0';</a>
+<a name="ln195">}</a>
+<a name="ln196"> </a>
+<a name="ln197">gboolean dt_image_safe_remove(const int32_t imgid)</a>
+<a name="ln198">{</a>
+<a name="ln199">  // always safe to remove if we do not have .xmp</a>
+<a name="ln200">  if(!dt_conf_get_bool(&quot;write_sidecar_files&quot;)) return TRUE;</a>
+<a name="ln201"> </a>
+<a name="ln202">  // check whether the original file is accessible</a>
+<a name="ln203">  char pathname[PATH_MAX] = { 0 };</a>
+<a name="ln204">  gboolean from_cache = TRUE;</a>
+<a name="ln205"> </a>
+<a name="ln206">  dt_image_full_path(imgid, pathname, sizeof(pathname), &amp;from_cache);</a>
+<a name="ln207"> </a>
+<a name="ln208">  if(!from_cache)</a>
+<a name="ln209">    return TRUE;</a>
+<a name="ln210"> </a>
+<a name="ln211">  else</a>
+<a name="ln212">  {</a>
+<a name="ln213">    // finally check if we have a .xmp for the local copy. If no modification done on the local copy it is safe</a>
+<a name="ln214">    // to remove.</a>
+<a name="ln215">    g_strlcat(pathname, &quot;.xmp&quot;, sizeof(pathname));</a>
+<a name="ln216">    return !g_file_test(pathname, G_FILE_TEST_EXISTS);</a>
+<a name="ln217">  }</a>
+<a name="ln218">}</a>
+<a name="ln219"> </a>
+<a name="ln220">void dt_image_full_path(const int imgid, char *pathname, size_t pathname_len, gboolean *from_cache)</a>
+<a name="ln221">{</a>
+<a name="ln222">  sqlite3_stmt *stmt;</a>
+<a name="ln223">  DT_DEBUG_SQLITE3_PREPARE_V2(dt_database_get(darktable.db),</a>
+<a name="ln224">                              &quot;SELECT folder || '&quot; G_DIR_SEPARATOR_S &quot;' || filename FROM main.images i, main.film_rolls f WHERE &quot;</a>
+<a name="ln225">                              &quot;i.film_id = f.id and i.id = ?1&quot;,</a>
+<a name="ln226">                              -1, &amp;stmt, NULL);</a>
+<a name="ln227">  DT_DEBUG_SQLITE3_BIND_INT(stmt, 1, imgid);</a>
+<a name="ln228">  if(sqlite3_step(stmt) == SQLITE_ROW)</a>
+<a name="ln229">  {</a>
+<a name="ln230">    g_strlcpy(pathname, (char *)sqlite3_column_text(stmt, 0), pathname_len);</a>
+<a name="ln231">  }</a>
+<a name="ln232">  sqlite3_finalize(stmt);</a>
+<a name="ln233"> </a>
+<a name="ln234">  if(*from_cache)</a>
+<a name="ln235">  {</a>
+<a name="ln236">    char lc_pathname[PATH_MAX] = { 0 };</a>
+<a name="ln237">    _image_local_copy_full_path(imgid, lc_pathname, sizeof(lc_pathname));</a>
+<a name="ln238"> </a>
+<a name="ln239">    if (g_file_test(lc_pathname, G_FILE_TEST_EXISTS))</a>
+<a name="ln240">      g_strlcpy(pathname, (char *)lc_pathname, pathname_len);</a>
+<a name="ln241">    else</a>
+<a name="ln242">      *from_cache = FALSE;</a>
+<a name="ln243">  }</a>
+<a name="ln244">}</a>
+<a name="ln245"> </a>
+<a name="ln246">static void _image_local_copy_full_path(const int imgid, char *pathname, size_t pathname_len)</a>
+<a name="ln247">{</a>
+<a name="ln248">  sqlite3_stmt *stmt;</a>
+<a name="ln249"> </a>
+<a name="ln250">  *pathname = '\0';</a>
+<a name="ln251">  DT_DEBUG_SQLITE3_PREPARE_V2(dt_database_get(darktable.db),</a>
+<a name="ln252">                              &quot;SELECT folder || '&quot; G_DIR_SEPARATOR_S &quot;' || filename FROM main.images i, main.film_rolls f &quot;</a>
+<a name="ln253">                              &quot;WHERE i.film_id = f.id AND i.id = ?1&quot;,</a>
+<a name="ln254">                              -1, &amp;stmt, NULL);</a>
+<a name="ln255">  DT_DEBUG_SQLITE3_BIND_INT(stmt, 1, imgid);</a>
+<a name="ln256">  if(sqlite3_step(stmt) == SQLITE_ROW)</a>
+<a name="ln257">  {</a>
+<a name="ln258">    char filename[PATH_MAX] = { 0 };</a>
+<a name="ln259">    char cachedir[PATH_MAX] = { 0 };</a>
+<a name="ln260">    g_strlcpy(filename, (char *)sqlite3_column_text(stmt, 0), pathname_len);</a>
+<a name="ln261">    char *md5_filename = g_compute_checksum_for_string(G_CHECKSUM_MD5, filename, strlen(filename));</a>
+<a name="ln262">    dt_loc_get_user_cache_dir(cachedir, sizeof(cachedir));</a>
+<a name="ln263"> </a>
+<a name="ln264">    // and finally, add extension, needed as some part of the code is looking for the extension</a>
+<a name="ln265">    char *c = filename + strlen(filename);</a>
+<a name="ln266">    while(*c != '.' &amp;&amp; c &gt; filename) c--;</a>
+<a name="ln267"> </a>
+<a name="ln268">    // cache filename old format: &lt;cachedir&gt;/img-&lt;id&gt;-&lt;MD5&gt;.&lt;ext&gt;</a>
+<a name="ln269">    // for upward compatibility we check for the old name, if found we return it</a>
+<a name="ln270">    snprintf(pathname, pathname_len, &quot;%s/img-%d-%s%s&quot;, cachedir, imgid, md5_filename, c);</a>
+<a name="ln271"> </a>
+<a name="ln272">    // if it does not exist, we return the new naming</a>
+<a name="ln273">    if(!g_file_test(pathname, G_FILE_TEST_EXISTS))</a>
+<a name="ln274">    {</a>
+<a name="ln275">      // cache filename format: &lt;cachedir&gt;/img-&lt;MD5&gt;.&lt;ext&gt;</a>
+<a name="ln276">      snprintf(pathname, pathname_len, &quot;%s/img-%s%s&quot;, cachedir, md5_filename, c);</a>
+<a name="ln277">    }</a>
+<a name="ln278"> </a>
+<a name="ln279">    g_free(md5_filename);</a>
+<a name="ln280">  }</a>
+<a name="ln281">  sqlite3_finalize(stmt);</a>
+<a name="ln282">}</a>
+<a name="ln283"> </a>
+<a name="ln284">void dt_image_path_append_version_no_db(int version, char *pathname, size_t pathname_len)</a>
+<a name="ln285">{</a>
+<a name="ln286">  // the &quot;first&quot; instance (version zero) does not get a version suffix</a>
+<a name="ln287">  if(version &gt; 0)</a>
+<a name="ln288">  {</a>
+<a name="ln289">    // add version information:</a>
+<a name="ln290">    char *filename = g_strdup(pathname);</a>
+<a name="ln291"> </a>
+<a name="ln292">    char *c = pathname + strlen(pathname);</a>
+<a name="ln293">    while(*c != '.' &amp;&amp; c &gt; pathname) c--;</a>
+<a name="ln294">    snprintf(c, pathname + pathname_len - c, &quot;_%02d&quot;, version);</a>
+<a name="ln295">    c = pathname + strlen(pathname);</a>
+<a name="ln296">    char *c2 = filename + strlen(filename);</a>
+<a name="ln297">    while(*c2 != '.' &amp;&amp; c2 &gt; filename) c2--;</a>
+<a name="ln298">    snprintf(c, pathname + pathname_len - c, &quot;%s&quot;, c2);</a>
+<a name="ln299">    g_free(filename);</a>
+<a name="ln300">  }</a>
+<a name="ln301">}</a>
+<a name="ln302"> </a>
+<a name="ln303">void dt_image_path_append_version(int imgid, char *pathname, size_t pathname_len)</a>
+<a name="ln304">{</a>
+<a name="ln305">  // get duplicate suffix</a>
+<a name="ln306">  int version = 0;</a>
+<a name="ln307">  sqlite3_stmt *stmt;</a>
+<a name="ln308">  DT_DEBUG_SQLITE3_PREPARE_V2(dt_database_get(darktable.db), &quot;SELECT version FROM main.images WHERE id = ?1&quot;, -1,</a>
+<a name="ln309">                              &amp;stmt, NULL);</a>
+<a name="ln310">  DT_DEBUG_SQLITE3_BIND_INT(stmt, 1, imgid);</a>
+<a name="ln311"> </a>
+<a name="ln312">  if(sqlite3_step(stmt) == SQLITE_ROW) version = sqlite3_column_int(stmt, 0);</a>
+<a name="ln313">  sqlite3_finalize(stmt);</a>
+<a name="ln314"> </a>
+<a name="ln315">  dt_image_path_append_version_no_db(version, pathname, pathname_len);</a>
+<a name="ln316">}</a>
+<a name="ln317"> </a>
+<a name="ln318">void dt_image_print_exif(const dt_image_t *img, char *line, size_t line_len)</a>
+<a name="ln319">{</a>
+<a name="ln320">  if(img-&gt;exif_exposure &gt;= 1.0f)</a>
+<a name="ln321">    if(nearbyintf(img-&gt;exif_exposure) == img-&gt;exif_exposure)</a>
+<a name="ln322">      snprintf(line, line_len, &quot;%.0f″ f/%.1f %dmm iso %d&quot;, img-&gt;exif_exposure, img-&gt;exif_aperture,</a>
+<a name="ln323">               (int)img-&gt;exif_focal_length, (int)img-&gt;exif_iso);</a>
+<a name="ln324">    else</a>
+<a name="ln325">      snprintf(line, line_len, &quot;%.1f″ f/%.1f %dmm iso %d&quot;, img-&gt;exif_exposure, img-&gt;exif_aperture,</a>
+<a name="ln326">               (int)img-&gt;exif_focal_length, (int)img-&gt;exif_iso);</a>
+<a name="ln327">  /* want to catch everything below 0.3 seconds */</a>
+<a name="ln328">  else if(img-&gt;exif_exposure &lt; 0.29f)</a>
+<a name="ln329">    snprintf(line, line_len, &quot;1/%.0f f/%.1f %dmm iso %d&quot;, 1.0 / img-&gt;exif_exposure, img-&gt;exif_aperture,</a>
+<a name="ln330">             (int)img-&gt;exif_focal_length, (int)img-&gt;exif_iso);</a>
+<a name="ln331">  /* catch 1/2, 1/3 */</a>
+<a name="ln332">  else if(nearbyintf(1.0f / img-&gt;exif_exposure) == 1.0f / img-&gt;exif_exposure)</a>
+<a name="ln333">    snprintf(line, line_len, &quot;1/%.0f f/%.1f %dmm iso %d&quot;, 1.0 / img-&gt;exif_exposure, img-&gt;exif_aperture,</a>
+<a name="ln334">             (int)img-&gt;exif_focal_length, (int)img-&gt;exif_iso);</a>
+<a name="ln335">  /* catch 1/1.3, 1/1.6, etc. */</a>
+<a name="ln336">  else if(10 * nearbyintf(10.0f / img-&gt;exif_exposure) == nearbyintf(100.0f / img-&gt;exif_exposure))</a>
+<a name="ln337">    snprintf(line, line_len, &quot;1/%.1f f/%.1f %dmm iso %d&quot;, 1.0 / img-&gt;exif_exposure, img-&gt;exif_aperture,</a>
+<a name="ln338">             (int)img-&gt;exif_focal_length, (int)img-&gt;exif_iso);</a>
+<a name="ln339">  else</a>
+<a name="ln340">    snprintf(line, line_len, &quot;%.1f″ f/%.1f %dmm iso %d&quot;, img-&gt;exif_exposure, img-&gt;exif_aperture,</a>
+<a name="ln341">             (int)img-&gt;exif_focal_length, (int)img-&gt;exif_iso);</a>
+<a name="ln342">}</a>
+<a name="ln343"> </a>
+<a name="ln344">void dt_image_get_location(int imgid, dt_image_geoloc_t *geoloc)</a>
+<a name="ln345">{</a>
+<a name="ln346">  const dt_image_t *img = dt_image_cache_get(darktable.image_cache, imgid, 'r');</a>
+<a name="ln347">  geoloc-&gt;longitude = img-&gt;geoloc.longitude;</a>
+<a name="ln348">  geoloc-&gt;latitude = img-&gt;geoloc.latitude;</a>
+<a name="ln349">  geoloc-&gt;elevation = img-&gt;geoloc.elevation;</a>
+<a name="ln350">  dt_image_cache_read_release(darktable.image_cache, img);</a>
+<a name="ln351">}</a>
+<a name="ln352"> </a>
+<a name="ln353">void dt_image_set_location(const int32_t imgid, dt_image_geoloc_t *geoloc)</a>
+<a name="ln354">{</a>
+<a name="ln355">  /* fetch image from cache */</a>
+<a name="ln356">  dt_image_t *image = dt_image_cache_get(darktable.image_cache, imgid, 'w');</a>
+<a name="ln357"> </a>
+<a name="ln358">  /* set image location */</a>
+<a name="ln359">  image-&gt;geoloc.longitude = geoloc-&gt;longitude;</a>
+<a name="ln360">  image-&gt;geoloc.latitude = geoloc-&gt;latitude;</a>
+<a name="ln361"> </a>
+<a name="ln362">  /* store */</a>
+<a name="ln363">  dt_image_cache_write_release(darktable.image_cache, image, DT_IMAGE_CACHE_SAFE);</a>
+<a name="ln364">}</a>
+<a name="ln365"> </a>
+<a name="ln366">void dt_image_set_location_and_elevation(const int32_t imgid, dt_image_geoloc_t *geoloc)</a>
+<a name="ln367">{</a>
+<a name="ln368">  /* fetch image from cache */</a>
+<a name="ln369">  dt_image_t *image = dt_image_cache_get(darktable.image_cache, imgid, 'w');</a>
+<a name="ln370"> </a>
+<a name="ln371">  /* set image location and elevation */</a>
+<a name="ln372">  image-&gt;geoloc.longitude = geoloc-&gt;longitude;</a>
+<a name="ln373">  image-&gt;geoloc.latitude = geoloc-&gt;latitude;</a>
+<a name="ln374">  image-&gt;geoloc.elevation = geoloc-&gt;elevation;</a>
+<a name="ln375"> </a>
+<a name="ln376">  /* store */</a>
+<a name="ln377">  dt_image_cache_write_release(darktable.image_cache, image, DT_IMAGE_CACHE_SAFE);</a>
+<a name="ln378">}</a>
+<a name="ln379"> </a>
+<a name="ln380">void dt_image_reset_final_size(const int32_t imgid)</a>
+<a name="ln381">{</a>
+<a name="ln382">  dt_image_t *imgtmp = dt_image_cache_get(darktable.image_cache, imgid, 'w');</a>
+<a name="ln383">  imgtmp-&gt;final_width = imgtmp-&gt;final_height = 0;</a>
+<a name="ln384">  dt_image_cache_write_release(darktable.image_cache, imgtmp, DT_IMAGE_CACHE_RELAXED);</a>
+<a name="ln385">}</a>
+<a name="ln386"> </a>
+<a name="ln387">gboolean dt_image_get_final_size(const int32_t imgid, int *width, int *height)</a>
+<a name="ln388">{</a>
+<a name="ln389">  // get the img strcut</a>
+<a name="ln390">  dt_image_t *imgtmp = dt_image_cache_get(darktable.image_cache, imgid, 'r');</a>
+<a name="ln391">  dt_image_t img = *imgtmp;</a>
+<a name="ln392">  dt_image_cache_read_release(darktable.image_cache, imgtmp);</a>
+<a name="ln393">  // if we already have computed them</a>
+<a name="ln394">  if(img.final_height &gt; 0 &amp;&amp; img.final_width &gt; 0)</a>
+<a name="ln395">  {</a>
+<a name="ln396">    *width = img.final_width;</a>
+<a name="ln397">    *height = img.final_height;</a>
+<a name="ln398">    return 0;</a>
+<a name="ln399">  }</a>
+<a name="ln400"> </a>
+<a name="ln401">  // special case if we try to load embedded preview of raw file</a>
+<a name="ln402"> </a>
+<a name="ln403">  // the orientation for this camera is not read correctly from exiv2, so we need</a>
+<a name="ln404">  // to go the full path (as the thumbnail will be flipped the wrong way round)</a>
+<a name="ln405">  const int incompatible = !strncmp(img.exif_maker, &quot;Phase One&quot;, 9);</a>
+<a name="ln406">  if(!img.verified_size &amp;&amp; !dt_image_altered(imgid) &amp;&amp; !dt_conf_get_bool(&quot;never_use_embedded_thumb&quot;)</a>
+<a name="ln407">     &amp;&amp; !incompatible)</a>
+<a name="ln408">  {</a>
+<a name="ln409">    // we want to be sure to have the real image size.</a>
+<a name="ln410">    // some raw files need a pass via rawspeed to get it.</a>
+<a name="ln411">    char filename[PATH_MAX] = { 0 };</a>
+<a name="ln412">    gboolean from_cache = TRUE;</a>
+<a name="ln413">    dt_image_full_path(imgid, filename, sizeof(filename), &amp;from_cache);</a>
+<a name="ln414">    imgtmp = dt_image_cache_get(darktable.image_cache, imgid, 'w');</a>
+<a name="ln415">    dt_imageio_open(imgtmp, filename, NULL);</a>
+<a name="ln416">    imgtmp-&gt;verified_size = 1;</a>
+<a name="ln417">    img = *imgtmp;</a>
+<a name="ln418">    dt_image_cache_write_release(darktable.image_cache, imgtmp, DT_IMAGE_CACHE_RELAXED);</a>
+<a name="ln419">  }</a>
+<a name="ln420"> </a>
+<a name="ln421">  // and now we can do the pipe stuff to get final image size</a>
+<a name="ln422">  dt_develop_t dev;</a>
+<a name="ln423">  dt_dev_init(&amp;dev, 0);</a>
+<a name="ln424">  dt_dev_load_image(&amp;dev, imgid);</a>
+<a name="ln425"> </a>
+<a name="ln426">  dt_dev_pixelpipe_t pipe;</a>
+<a name="ln427">  int wd = img.width, ht = img.height;</a>
+<a name="ln428">  int res = dt_dev_pixelpipe_init_dummy(&amp;pipe, wd, ht);</a>
+<a name="ln429">  if(res)</a>
+<a name="ln430">  {</a>
+<a name="ln431">    // set mem pointer to 0, won't be used.</a>
+<a name="ln432">    dt_dev_pixelpipe_set_input(&amp;pipe, &amp;dev, NULL, wd, ht, 1.0f);</a>
+<a name="ln433">    dt_dev_pixelpipe_create_nodes(&amp;pipe, &amp;dev);</a>
+<a name="ln434">    dt_dev_pixelpipe_synch_all(&amp;pipe, &amp;dev);</a>
+<a name="ln435">    dt_dev_pixelpipe_get_dimensions(&amp;pipe, &amp;dev, pipe.iwidth, pipe.iheight, &amp;pipe.processed_width,</a>
+<a name="ln436">                                    &amp;pipe.processed_height);</a>
+<a name="ln437">    wd = pipe.processed_width;</a>
+<a name="ln438">    ht = pipe.processed_height;</a>
+<a name="ln439">    res = TRUE;</a>
+<a name="ln440">    dt_dev_pixelpipe_cleanup(&amp;pipe);</a>
+<a name="ln441">  }</a>
+<a name="ln442">  dt_dev_cleanup(&amp;dev);</a>
+<a name="ln443"> </a>
+<a name="ln444">  imgtmp = dt_image_cache_get(darktable.image_cache, imgid, 'w');</a>
+<a name="ln445">  imgtmp-&gt;final_width = *width = wd;</a>
+<a name="ln446">  imgtmp-&gt;final_height = *height = ht;</a>
+<a name="ln447">  dt_image_cache_write_release(darktable.image_cache, imgtmp, DT_IMAGE_CACHE_RELAXED);</a>
+<a name="ln448"> </a>
+<a name="ln449">  return res;</a>
+<a name="ln450">}</a>
+<a name="ln451"> </a>
+<a name="ln452">void dt_image_set_flip(const int32_t imgid, const dt_image_orientation_t orientation)</a>
+<a name="ln453">{</a>
+<a name="ln454">  sqlite3_stmt *stmt;</a>
+<a name="ln455">  // push new orientation to sql via additional history entry:</a>
+<a name="ln456">  DT_DEBUG_SQLITE3_PREPARE_V2(dt_database_get(darktable.db), &quot;SELECT IFNULL(MAX(num)+1, 0) FROM main.history &quot;</a>
+<a name="ln457">                                                             &quot;WHERE imgid = ?1&quot;, -1, &amp;stmt, NULL);</a>
+<a name="ln458">  DT_DEBUG_SQLITE3_BIND_INT(stmt, 1, imgid);</a>
+<a name="ln459">  const int iop_flip_MODVER = 2;</a>
+<a name="ln460">  int num = 0;</a>
+<a name="ln461">  if(sqlite3_step(stmt) == SQLITE_ROW) num = sqlite3_column_int(stmt, 0);</a>
+<a name="ln462">  sqlite3_finalize(stmt);</a>
+<a name="ln463"> </a>
+<a name="ln464">  double iop_order = DBL_MAX;</a>
+<a name="ln465">  DT_DEBUG_SQLITE3_PREPARE_V2(dt_database_get(darktable.db), &quot;SELECT iop_order FROM main.history &quot;</a>
+<a name="ln466">                                                             &quot;WHERE imgid = ?1 AND operation = 'flip' ORDER BY num DESC&quot;, -1, &amp;stmt, NULL);</a>
+<a name="ln467">  DT_DEBUG_SQLITE3_BIND_INT(stmt, 1, imgid);</a>
+<a name="ln468">  if(sqlite3_step(stmt) == SQLITE_ROW) iop_order = sqlite3_column_double(stmt, 0);</a>
+<a name="ln469">  sqlite3_finalize(stmt);</a>
+<a name="ln470"> </a>
+<a name="ln471">  if(iop_order == DBL_MAX)</a>
+<a name="ln472">  {</a>
+<a name="ln473">    iop_order = dt_ioppr_get_iop_order(darktable.iop_order_list, &quot;flip&quot;);</a>
+<a name="ln474">  }</a>
+<a name="ln475"> </a>
+<a name="ln476">  if(iop_order != DBL_MAX)</a>
+<a name="ln477">  {</a>
+<a name="ln478">  DT_DEBUG_SQLITE3_PREPARE_V2(dt_database_get(darktable.db),</a>
+<a name="ln479">                              &quot;INSERT INTO main.history (imgid, num, module, operation, op_params, enabled, &quot;</a>
+<a name="ln480">                              &quot;blendop_params, blendop_version, multi_priority, multi_name, iop_order) VALUES &quot;</a>
+<a name="ln481">                              &quot;(?1, ?2, ?3, 'flip', ?4, 1, NULL, 0, 0, '', ?5) &quot;,</a>
+<a name="ln482">                              -1, &amp;stmt, NULL);</a>
+<a name="ln483">  DT_DEBUG_SQLITE3_BIND_INT(stmt, 1, imgid);</a>
+<a name="ln484">  DT_DEBUG_SQLITE3_BIND_INT(stmt, 2, num);</a>
+<a name="ln485">  DT_DEBUG_SQLITE3_BIND_INT(stmt, 3, iop_flip_MODVER);</a>
+<a name="ln486">  DT_DEBUG_SQLITE3_BIND_BLOB(stmt, 4, &amp;orientation, sizeof(int32_t), SQLITE_TRANSIENT);</a>
+<a name="ln487">  DT_DEBUG_SQLITE3_BIND_DOUBLE(stmt, 5, iop_order);</a>
+<a name="ln488">  sqlite3_step(stmt);</a>
+<a name="ln489">  sqlite3_finalize(stmt);</a>
+<a name="ln490"> </a>
+<a name="ln491">  DT_DEBUG_SQLITE3_PREPARE_V2(dt_database_get(darktable.db),</a>
+<a name="ln492">                              &quot;UPDATE main.images SET history_end = (SELECT MAX(num) + 1 FROM main.history &quot;</a>
+<a name="ln493">                              &quot;WHERE imgid = ?1) WHERE id = ?1&quot;, -1, &amp;stmt, NULL);</a>
+<a name="ln494">  DT_DEBUG_SQLITE3_BIND_INT(stmt, 1, imgid);</a>
+<a name="ln495">  sqlite3_step(stmt);</a>
+<a name="ln496">  sqlite3_finalize(stmt);</a>
+<a name="ln497"> </a>
+<a name="ln498">  dt_mipmap_cache_remove(darktable.mipmap_cache, imgid);</a>
+<a name="ln499">  dt_image_reset_final_size(imgid);</a>
+<a name="ln500">  // write that through to xmp:</a>
+<a name="ln501">  dt_image_write_sidecar_file(imgid);</a>
+<a name="ln502">  }</a>
+<a name="ln503">  else</a>
+<a name="ln504">    fprintf(stderr, &quot;[dt_image_set_flip] can't find history entry for operation flip on image %i\n&quot;, imgid);</a>
+<a name="ln505">}</a>
+<a name="ln506"> </a>
+<a name="ln507">dt_image_orientation_t dt_image_get_orientation(const int imgid)</a>
+<a name="ln508">{</a>
+<a name="ln509">  // find the flip module -- the pointer stays valid until darktable shuts down</a>
+<a name="ln510">  static dt_iop_module_so_t *flip = NULL;</a>
+<a name="ln511">  if(flip == NULL)</a>
+<a name="ln512">  {</a>
+<a name="ln513">    GList *modules = g_list_first(darktable.iop);</a>
+<a name="ln514">    while(modules)</a>
+<a name="ln515">    {</a>
+<a name="ln516">      dt_iop_module_so_t *module = (dt_iop_module_so_t *)(modules-&gt;data);</a>
+<a name="ln517">      if(!strcmp(module-&gt;op, &quot;flip&quot;))</a>
+<a name="ln518">      {</a>
+<a name="ln519">        flip = module;</a>
+<a name="ln520">        break;</a>
+<a name="ln521">      }</a>
+<a name="ln522">      modules = g_list_next(modules);</a>
+<a name="ln523">    }</a>
+<a name="ln524">  }</a>
+<a name="ln525"> </a>
+<a name="ln526">  dt_image_orientation_t orientation = ORIENTATION_NULL;</a>
+<a name="ln527"> </a>
+<a name="ln528">  // db lookup flip params</a>
+<a name="ln529">  if(flip &amp;&amp; flip-&gt;get_p)</a>
+<a name="ln530">  {</a>
+<a name="ln531">    sqlite3_stmt *stmt;</a>
+<a name="ln532">    DT_DEBUG_SQLITE3_PREPARE_V2(</a>
+<a name="ln533">        dt_database_get(darktable.db),</a>
+<a name="ln534">        &quot;SELECT op_params FROM main.history WHERE imgid=?1 AND operation='flip' ORDER BY num DESC LIMIT 1&quot;, -1,</a>
+<a name="ln535">        &amp;stmt, NULL);</a>
+<a name="ln536">    DT_DEBUG_SQLITE3_BIND_INT(stmt, 1, imgid);</a>
+<a name="ln537">    if(sqlite3_step(stmt) == SQLITE_ROW)</a>
+<a name="ln538">    {</a>
+<a name="ln539">      // use introspection to get the orientation from the binary params blob</a>
+<a name="ln540">      const void *params = sqlite3_column_blob(stmt, 0);</a>
+<a name="ln541">      orientation = *((dt_image_orientation_t *)flip-&gt;get_p(params, &quot;orientation&quot;));</a>
+<a name="ln542">    }</a>
+<a name="ln543">    sqlite3_finalize(stmt);</a>
+<a name="ln544">  }</a>
+<a name="ln545"> </a>
+<a name="ln546">  if(orientation == ORIENTATION_NULL)</a>
+<a name="ln547">  {</a>
+<a name="ln548">    const dt_image_t *img = dt_image_cache_get(darktable.image_cache, imgid, 'r');</a>
+<a name="ln549">    orientation = dt_image_orientation(img);</a>
+<a name="ln550">    dt_image_cache_read_release(darktable.image_cache, img);</a>
+<a name="ln551">  }</a>
+<a name="ln552"> </a>
+<a name="ln553">  return orientation;</a>
+<a name="ln554">}</a>
+<a name="ln555"> </a>
+<a name="ln556">void dt_image_flip(const int32_t imgid, const int32_t cw)</a>
+<a name="ln557">{</a>
+<a name="ln558">  // this is light table only:</a>
+<a name="ln559">  const dt_view_t *cv = dt_view_manager_get_current_view(darktable.view_manager);</a>
+<a name="ln560">  if(darktable.develop-&gt;image_storage.id == imgid &amp;&amp; cv-&gt;view((dt_view_t *)cv) == DT_VIEW_DARKROOM) return;</a>
+<a name="ln561"> </a>
+<a name="ln562">  dt_image_orientation_t orientation = dt_image_get_orientation(imgid);</a>
+<a name="ln563"> </a>
+<a name="ln564">  if(cw == 1)</a>
+<a name="ln565">  {</a>
+<a name="ln566">    if(orientation &amp; ORIENTATION_SWAP_XY)</a>
+<a name="ln567">      orientation ^= ORIENTATION_FLIP_Y;</a>
+<a name="ln568">    else</a>
+<a name="ln569">      orientation ^= ORIENTATION_FLIP_X;</a>
+<a name="ln570">  }</a>
+<a name="ln571">  else</a>
+<a name="ln572">  {</a>
+<a name="ln573">    if(orientation &amp; ORIENTATION_SWAP_XY)</a>
+<a name="ln574">      orientation ^= ORIENTATION_FLIP_X;</a>
+<a name="ln575">    else</a>
+<a name="ln576">      orientation ^= ORIENTATION_FLIP_Y;</a>
+<a name="ln577">  }</a>
+<a name="ln578">  orientation ^= ORIENTATION_SWAP_XY;</a>
+<a name="ln579"> </a>
+<a name="ln580">  if(cw == 2) orientation = ORIENTATION_NULL;</a>
+<a name="ln581">  dt_image_set_flip(imgid, orientation);</a>
+<a name="ln582">}</a>
+<a name="ln583"> </a>
+<a name="ln584">void dt_image_set_aspect_ratio_to(const int32_t imgid, double aspect_ratio)</a>
+<a name="ln585">{</a>
+<a name="ln586">  if (aspect_ratio &gt; .0f)</a>
+<a name="ln587">  {</a>
+<a name="ln588">    sqlite3_stmt *stmt;</a>
+<a name="ln589"> </a>
+<a name="ln590">    DT_DEBUG_SQLITE3_PREPARE_V2(dt_database_get(darktable.db),</a>
+<a name="ln591">                                &quot;UPDATE images SET aspect_ratio=ROUND(?1,1) WHERE id=?2&quot;,</a>
+<a name="ln592">                                -1, &amp;stmt, NULL);</a>
+<a name="ln593"> </a>
+<a name="ln594">    DT_DEBUG_SQLITE3_BIND_DOUBLE(stmt, 1, aspect_ratio);</a>
+<a name="ln595">    DT_DEBUG_SQLITE3_BIND_INT(stmt, 2, imgid);</a>
+<a name="ln596">    sqlite3_step(stmt);</a>
+<a name="ln597">    sqlite3_finalize(stmt);</a>
+<a name="ln598"> </a>
+<a name="ln599">    if (darktable.collection-&gt;params.sort == DT_COLLECTION_SORT_ASPECT_RATIO)</a>
+<a name="ln600">      dt_control_signal_raise(darktable.signals, DT_SIGNAL_COLLECTION_CHANGED);</a>
+<a name="ln601">  }</a>
+<a name="ln602">}</a>
+<a name="ln603"> </a>
+<a name="ln604">void dt_image_reset_aspect_ratio(const int32_t imgid)</a>
+<a name="ln605">{</a>
+<a name="ln606">  sqlite3_stmt *stmt;</a>
+<a name="ln607"> </a>
+<a name="ln608">  DT_DEBUG_SQLITE3_PREPARE_V2(dt_database_get(darktable.db), &quot;UPDATE images SET aspect_ratio=0.0 WHERE id=?1&quot;, -1,</a>
+<a name="ln609">                              &amp;stmt, NULL);</a>
+<a name="ln610">  DT_DEBUG_SQLITE3_BIND_INT(stmt, 1, imgid);</a>
+<a name="ln611">  sqlite3_step(stmt);</a>
+<a name="ln612">  sqlite3_finalize(stmt);</a>
+<a name="ln613"> </a>
+<a name="ln614">  if(darktable.collection-&gt;params.sort == DT_COLLECTION_SORT_ASPECT_RATIO)</a>
+<a name="ln615">    dt_control_signal_raise(darktable.signals, DT_SIGNAL_COLLECTION_CHANGED);</a>
+<a name="ln616">}</a>
+<a name="ln617"> </a>
+<a name="ln618">double dt_image_set_aspect_ratio(const int32_t imgid)</a>
+<a name="ln619">{</a>
+<a name="ln620">  dt_mipmap_buffer_t buf;</a>
+<a name="ln621">  double aspect_ratio = 0.0;</a>
+<a name="ln622"> </a>
+<a name="ln623">  // mipmap cache must be initialized, otherwise we'll update next call</a>
+<a name="ln624">  if(darktable.mipmap_cache)</a>
+<a name="ln625">  {</a>
+<a name="ln626">    dt_mipmap_cache_get(darktable.mipmap_cache, &amp;buf, imgid, DT_MIPMAP_0, DT_MIPMAP_BLOCKING, 'r');</a>
+<a name="ln627"> </a>
+<a name="ln628">    if(buf.buf &amp;&amp; buf.height &amp;&amp; buf.width)</a>
+<a name="ln629">    {</a>
+<a name="ln630">      aspect_ratio = (double)buf.width / (double)buf.height;</a>
+<a name="ln631">      dt_image_set_aspect_ratio_to(imgid, aspect_ratio);</a>
+<a name="ln632">    }</a>
+<a name="ln633"> </a>
+<a name="ln634">    dt_mipmap_cache_release(darktable.mipmap_cache, &amp;buf);</a>
+<a name="ln635">  }</a>
+<a name="ln636"> </a>
+<a name="ln637">  return aspect_ratio;</a>
+<a name="ln638">}</a>
+<a name="ln639"> </a>
+<a name="ln640">int32_t dt_image_duplicate(const int32_t imgid)</a>
+<a name="ln641">{</a>
+<a name="ln642">  return dt_image_duplicate_with_version(imgid, -1);</a>
+<a name="ln643">}</a>
+<a name="ln644"> </a>
+<a name="ln645"> </a>
+<a name="ln646">int32_t dt_image_duplicate_with_version(const int32_t imgid, const int32_t newversion)</a>
+<a name="ln647">{</a>
+<a name="ln648">  sqlite3_stmt *stmt;</a>
+<a name="ln649">  int32_t newid = -1;</a>
+<a name="ln650">  const int64_t image_position = dt_collection_get_image_position(imgid);</a>
+<a name="ln651">  const int64_t new_image_position = (image_position &lt; 0) ? max_image_position() : image_position + 1;</a>
+<a name="ln652"> </a>
+<a name="ln653">  dt_collection_shift_image_positions(1, new_image_position);</a>
+<a name="ln654"> </a>
+<a name="ln655">  DT_DEBUG_SQLITE3_PREPARE_V2(dt_database_get(darktable.db),</a>
+<a name="ln656">                              &quot;SELECT a.id FROM main.images AS a JOIN main.images AS b WHERE &quot;</a>
+<a name="ln657">                              &quot;a.film_id = b.film_id AND a.filename = b.filename AND &quot;</a>
+<a name="ln658">                              &quot;b.id = ?1 AND a.version = ?2 ORDER BY a.id DESC&quot;,</a>
+<a name="ln659">                              -1, &amp;stmt, NULL);</a>
+<a name="ln660">  DT_DEBUG_SQLITE3_BIND_INT(stmt, 1, imgid);</a>
+<a name="ln661">  DT_DEBUG_SQLITE3_BIND_INT(stmt, 2, newversion);</a>
+<a name="ln662">  if(sqlite3_step(stmt) == SQLITE_ROW)</a>
+<a name="ln663">  {</a>
+<a name="ln664">    newid = sqlite3_column_int(stmt, 0);</a>
+<a name="ln665">  }</a>
+<a name="ln666">  sqlite3_finalize(stmt);</a>
+<a name="ln667"> </a>
+<a name="ln668">  // requested version is already present in DB, so we just return it</a>
+<a name="ln669">  if(newid != -1) return newid;</a>
+<a name="ln670"> </a>
+<a name="ln671">  DT_DEBUG_SQLITE3_PREPARE_V2(</a>
+<a name="ln672">      dt_database_get(darktable.db),</a>
+<a name="ln673">      &quot;INSERT INTO main.images &quot;</a>
+<a name="ln674">      &quot;(id, group_id, film_id, width, height, filename, maker, model, lens, exposure, &quot;</a>
+<a name="ln675">      &quot;aperture, iso, focal_length, focus_distance, datetime_taken, flags, &quot;</a>
+<a name="ln676">      &quot;output_width, output_height, crop, raw_parameters, raw_denoise_threshold, &quot;</a>
+<a name="ln677">      &quot;raw_auto_bright_threshold, raw_black, raw_maximum, &quot;</a>
+<a name="ln678">      &quot;caption, description, license, sha1sum, orientation, histogram, lightmap, &quot;</a>
+<a name="ln679">      &quot;longitude, latitude, altitude, color_matrix, colorspace, version, max_version, history_end, iop_order_version, &quot;</a>
+<a name="ln680">      &quot;position, aspect_ratio) &quot;</a>
+<a name="ln681">      &quot;SELECT NULL, group_id, film_id, width, height, filename, maker, model, lens, &quot;</a>
+<a name="ln682">      &quot;exposure, aperture, iso, focal_length, focus_distance, datetime_taken, &quot;</a>
+<a name="ln683">      &quot;flags, width, height, crop, raw_parameters, raw_denoise_threshold, &quot;</a>
+<a name="ln684">      &quot;raw_auto_bright_threshold, raw_black, raw_maximum, &quot;</a>
+<a name="ln685">      &quot;caption, description, license, sha1sum, orientation, histogram, lightmap, &quot;</a>
+<a name="ln686">      &quot;longitude, latitude, altitude, color_matrix, colorspace, NULL, NULL, 0, 0, ?1, aspect_ratio &quot;</a>
+<a name="ln687">      &quot;FROM main.images WHERE id = ?2&quot;,</a>
+<a name="ln688">      -1, &amp;stmt, NULL);</a>
+<a name="ln689">  DT_DEBUG_SQLITE3_BIND_INT64(stmt, 1, new_image_position);</a>
+<a name="ln690">  DT_DEBUG_SQLITE3_BIND_INT(stmt, 2, imgid);</a>
+<a name="ln691">  sqlite3_step(stmt);</a>
+<a name="ln692">  sqlite3_finalize(stmt);</a>
+<a name="ln693">  DT_DEBUG_SQLITE3_PREPARE_V2(</a>
+<a name="ln694">      dt_database_get(darktable.db),</a>
+<a name="ln695">      &quot;SELECT a.id, a.film_id, a.filename, b.max_version FROM main.images AS a JOIN main.images AS b WHERE &quot;</a>
+<a name="ln696">      &quot;a.film_id = b.film_id AND a.filename = b.filename AND &quot;</a>
+<a name="ln697">      &quot;b.id = ?1 ORDER BY a.id DESC&quot;,</a>
+<a name="ln698">      -1, &amp;stmt, NULL);</a>
+<a name="ln699">  DT_DEBUG_SQLITE3_BIND_INT(stmt, 1, imgid);</a>
+<a name="ln700"> </a>
+<a name="ln701">  int32_t film_id = 1;</a>
+<a name="ln702">  int32_t max_version = -1;</a>
+<a name="ln703">  gchar *filename = NULL;</a>
+<a name="ln704">  if(sqlite3_step(stmt) == SQLITE_ROW)</a>
+<a name="ln705">  {</a>
+<a name="ln706">    newid = sqlite3_column_int(stmt, 0);</a>
+<a name="ln707">    film_id = sqlite3_column_int(stmt, 1);</a>
+<a name="ln708">    filename = g_strdup((gchar *)sqlite3_column_text(stmt, 2));</a>
+<a name="ln709">    max_version = sqlite3_column_int(stmt, 3);</a>
+<a name="ln710">  }</a>
+<a name="ln711">  sqlite3_finalize(stmt);</a>
+<a name="ln712"> </a>
+<a name="ln713">  if(newid != -1)</a>
+<a name="ln714">  {</a>
+<a name="ln715">    DT_DEBUG_SQLITE3_PREPARE_V2(dt_database_get(darktable.db),</a>
+<a name="ln716">                                &quot;INSERT INTO main.color_labels (imgid, color) SELECT ?1, color FROM &quot;</a>
+<a name="ln717">                                &quot;main.color_labels WHERE imgid = ?2&quot;,</a>
+<a name="ln718">                                -1, &amp;stmt, NULL);</a>
+<a name="ln719">    DT_DEBUG_SQLITE3_BIND_INT(stmt, 1, newid);</a>
+<a name="ln720">    DT_DEBUG_SQLITE3_BIND_INT(stmt, 2, imgid);</a>
+<a name="ln721">    sqlite3_step(stmt);</a>
+<a name="ln722">    sqlite3_finalize(stmt);</a>
+<a name="ln723">    DT_DEBUG_SQLITE3_PREPARE_V2(dt_database_get(darktable.db),</a>
+<a name="ln724">                                &quot;INSERT INTO main.meta_data (id, key, value) SELECT ?1, key, value &quot;</a>
+<a name="ln725">                                &quot;FROM main.meta_data WHERE id = ?2&quot;,</a>
+<a name="ln726">                                -1, &amp;stmt, NULL);</a>
+<a name="ln727">    DT_DEBUG_SQLITE3_BIND_INT(stmt, 1, newid);</a>
+<a name="ln728">    DT_DEBUG_SQLITE3_BIND_INT(stmt, 2, imgid);</a>
+<a name="ln729">    sqlite3_step(stmt);</a>
+<a name="ln730">    sqlite3_finalize(stmt);</a>
+<a name="ln731">    DT_DEBUG_SQLITE3_PREPARE_V2(dt_database_get(darktable.db),</a>
+<a name="ln732">                                &quot;INSERT INTO main.tagged_images (imgid, tagid) SELECT ?1, tagid FROM &quot;</a>
+<a name="ln733">                                &quot;main.tagged_images WHERE imgid = ?2&quot;,</a>
+<a name="ln734">                                -1, &amp;stmt, NULL);</a>
+<a name="ln735">    DT_DEBUG_SQLITE3_BIND_INT(stmt, 1, newid);</a>
+<a name="ln736">    DT_DEBUG_SQLITE3_BIND_INT(stmt, 2, imgid);</a>
+<a name="ln737">    sqlite3_step(stmt);</a>
+<a name="ln738">    sqlite3_finalize(stmt);</a>
+<a name="ln739"> </a>
+<a name="ln740">    // make sure that the duplicate doesn't have some magic darktable| tags</a>
+<a name="ln741">    dt_tag_detach_by_string(&quot;darktable|changed&quot;, newid);</a>
+<a name="ln742">    dt_tag_detach_by_string(&quot;darktable|exported&quot;, newid);</a>
+<a name="ln743"> </a>
+<a name="ln744">    // set version of new entry and max_version of all involved duplicates (with same film_id and filename)</a>
+<a name="ln745">    int32_t version = (newversion != -1) ? newversion : max_version + 1;</a>
+<a name="ln746">    max_version = (newversion != -1) ? MAX(max_version, newversion) : max_version + 1;</a>
+<a name="ln747"> </a>
+<a name="ln748">    DT_DEBUG_SQLITE3_PREPARE_V2(dt_database_get(darktable.db), &quot;UPDATE main.images SET version=?1 WHERE id = ?2&quot;,</a>
+<a name="ln749">                                -1, &amp;stmt, NULL);</a>
+<a name="ln750">    DT_DEBUG_SQLITE3_BIND_INT(stmt, 1, version);</a>
+<a name="ln751">    DT_DEBUG_SQLITE3_BIND_INT(stmt, 2, newid);</a>
+<a name="ln752">    sqlite3_step(stmt);</a>
+<a name="ln753">    sqlite3_finalize(stmt);</a>
+<a name="ln754"> </a>
+<a name="ln755">    DT_DEBUG_SQLITE3_PREPARE_V2(dt_database_get(darktable.db),</a>
+<a name="ln756">                                &quot;UPDATE main.images SET max_version=?1 WHERE film_id = ?2 AND filename = ?3&quot;, -1,</a>
+<a name="ln757">                                &amp;stmt, NULL);</a>
+<a name="ln758">    DT_DEBUG_SQLITE3_BIND_INT(stmt, 1, max_version);</a>
+<a name="ln759">    DT_DEBUG_SQLITE3_BIND_INT(stmt, 2, film_id);</a>
+<a name="ln760">    DT_DEBUG_SQLITE3_BIND_TEXT(stmt, 3, filename, -1, SQLITE_TRANSIENT);</a>
+<a name="ln761">    sqlite3_step(stmt);</a>
+<a name="ln762">    sqlite3_finalize(stmt);</a>
+<a name="ln763"> </a>
+<a name="ln764">    g_free(filename);</a>
+<a name="ln765"> </a>
+<a name="ln766">    if(darktable.gui &amp;&amp; darktable.gui-&gt;grouping)</a>
+<a name="ln767">    {</a>
+<a name="ln768">      const dt_image_t *img = dt_image_cache_get(darktable.image_cache, newid, 'r');</a>
+<a name="ln769">      darktable.gui-&gt;expanded_group_id = img-&gt;group_id;</a>
+<a name="ln770">      dt_image_cache_read_release(darktable.image_cache, img);</a>
+<a name="ln771">    }</a>
+<a name="ln772">    dt_collection_update_query(darktable.collection);</a>
+<a name="ln773">  }</a>
+<a name="ln774">  return newid;</a>
+<a name="ln775">}</a>
+<a name="ln776"> </a>
+<a name="ln777">void dt_image_remove(const int32_t imgid)</a>
+<a name="ln778">{</a>
+<a name="ln779">  // if a local copy exists, remove it</a>
+<a name="ln780"> </a>
+<a name="ln781">  if(dt_image_local_copy_reset(imgid)) return;</a>
+<a name="ln782"> </a>
+<a name="ln783">  sqlite3_stmt *stmt;</a>
+<a name="ln784">  const dt_image_t *img = dt_image_cache_get(darktable.image_cache, imgid, 'r');</a>
+<a name="ln785">  int old_group_id = img-&gt;group_id;</a>
+<a name="ln786">  dt_image_cache_read_release(darktable.image_cache, img);</a>
+<a name="ln787"> </a>
+<a name="ln788">  // make sure we remove from the cache first, or else the cache will look for imgid in sql</a>
+<a name="ln789">  dt_image_cache_remove(darktable.image_cache, imgid);</a>
+<a name="ln790"> </a>
+<a name="ln791">  int new_group_id = dt_grouping_remove_from_group(imgid);</a>
+<a name="ln792">  if(darktable.gui &amp;&amp; darktable.gui-&gt;expanded_group_id == old_group_id)</a>
+<a name="ln793">    darktable.gui-&gt;expanded_group_id = new_group_id;</a>
+<a name="ln794"> </a>
+<a name="ln795">  DT_DEBUG_SQLITE3_PREPARE_V2(dt_database_get(darktable.db), &quot;DELETE FROM main.images WHERE id = ?1&quot;, -1, &amp;stmt,</a>
+<a name="ln796">                              NULL);</a>
+<a name="ln797">  DT_DEBUG_SQLITE3_BIND_INT(stmt, 1, imgid);</a>
+<a name="ln798">  sqlite3_step(stmt);</a>
+<a name="ln799">  sqlite3_finalize(stmt);</a>
+<a name="ln800">  DT_DEBUG_SQLITE3_PREPARE_V2(dt_database_get(darktable.db), &quot;DELETE FROM main.tagged_images WHERE imgid = ?1&quot;, -1,</a>
+<a name="ln801">                              &amp;stmt, NULL);</a>
+<a name="ln802">  DT_DEBUG_SQLITE3_BIND_INT(stmt, 1, imgid);</a>
+<a name="ln803">  sqlite3_step(stmt);</a>
+<a name="ln804">  sqlite3_finalize(stmt);</a>
+<a name="ln805">  DT_DEBUG_SQLITE3_PREPARE_V2(dt_database_get(darktable.db), &quot;DELETE FROM main.history WHERE imgid = ?1&quot;, -1,</a>
+<a name="ln806">                              &amp;stmt, NULL);</a>
+<a name="ln807">  DT_DEBUG_SQLITE3_BIND_INT(stmt, 1, imgid);</a>
+<a name="ln808">  sqlite3_step(stmt);</a>
+<a name="ln809">  sqlite3_finalize(stmt);</a>
+<a name="ln810">  DT_DEBUG_SQLITE3_PREPARE_V2(dt_database_get(darktable.db), &quot;DELETE FROM main.masks_history WHERE imgid = ?1&quot;, -1,</a>
+<a name="ln811">                              &amp;stmt, NULL);</a>
+<a name="ln812">  DT_DEBUG_SQLITE3_BIND_INT(stmt, 1, imgid);</a>
+<a name="ln813">  sqlite3_step(stmt);</a>
+<a name="ln814">  sqlite3_finalize(stmt);</a>
+<a name="ln815">  DT_DEBUG_SQLITE3_PREPARE_V2(dt_database_get(darktable.db), &quot;DELETE FROM main.color_labels WHERE imgid = ?1&quot;, -1,</a>
+<a name="ln816">                              &amp;stmt, NULL);</a>
+<a name="ln817">  DT_DEBUG_SQLITE3_BIND_INT(stmt, 1, imgid);</a>
+<a name="ln818">  sqlite3_step(stmt);</a>
+<a name="ln819">  sqlite3_finalize(stmt);</a>
+<a name="ln820">  DT_DEBUG_SQLITE3_PREPARE_V2(dt_database_get(darktable.db), &quot;DELETE FROM main.meta_data WHERE id = ?1&quot;, -1, &amp;stmt,</a>
+<a name="ln821">                              NULL);</a>
+<a name="ln822">  DT_DEBUG_SQLITE3_BIND_INT(stmt, 1, imgid);</a>
+<a name="ln823">  sqlite3_step(stmt);</a>
+<a name="ln824">  sqlite3_finalize(stmt);</a>
+<a name="ln825">  DT_DEBUG_SQLITE3_PREPARE_V2(dt_database_get(darktable.db), &quot;DELETE FROM main.selected_images WHERE imgid = ?1&quot;,</a>
+<a name="ln826">                              -1, &amp;stmt, NULL);</a>
+<a name="ln827">  DT_DEBUG_SQLITE3_BIND_INT(stmt, 1, imgid);</a>
+<a name="ln828">  sqlite3_step(stmt);</a>
+<a name="ln829">  sqlite3_finalize(stmt);</a>
+<a name="ln830">  // also clear all thumbnails in mipmap_cache.</a>
+<a name="ln831">  dt_mipmap_cache_remove(darktable.mipmap_cache, imgid);</a>
+<a name="ln832"> </a>
+<a name="ln833">  dt_tag_update_used_tags();</a>
+<a name="ln834">}</a>
+<a name="ln835"> </a>
+<a name="ln836">int dt_image_altered(const uint32_t imgid)</a>
+<a name="ln837">{</a>
+<a name="ln838">  int altered = 0;</a>
+<a name="ln839">  sqlite3_stmt *stmt;</a>
+<a name="ln840"> </a>
+<a name="ln841">  DT_DEBUG_SQLITE3_PREPARE_V2(dt_database_get(darktable.db),</a>
+<a name="ln842">                              &quot;SELECT operation FROM main.history, main.images WHERE id=?1 AND imgid=id AND num&lt;history_end AND enabled=1&quot;,</a>
+<a name="ln843">                              -1, &amp;stmt, NULL);</a>
+<a name="ln844">  DT_DEBUG_SQLITE3_BIND_INT(stmt, 1, imgid);</a>
+<a name="ln845">  while(sqlite3_step(stmt) == SQLITE_ROW)</a>
+<a name="ln846">  {</a>
+<a name="ln847">    const char *op = (const char *)sqlite3_column_text(stmt, 0);</a>
+<a name="ln848">    // FIXME: this is clearly a terrible way to determine which modules</a>
+<a name="ln849">    // are okay to still load the thumbnail and which aren't.</a>
+<a name="ln850">    // it is also used to display the altered symbol on the thumbnails.</a>
+<a name="ln851">    if(!op) continue; // can happen while importing or something like that</a>
+<a name="ln852">    if(!strcmp(op, &quot;basecurve&quot;) &amp;&amp; dt_conf_get_bool(&quot;plugins/darkroom/basecurve/auto_apply&quot;)) continue;</a>
+<a name="ln853">    if(!strcmp(op, &quot;flip&quot;)) continue;</a>
+<a name="ln854">    if(!strcmp(op, &quot;sharpen&quot;) &amp;&amp; dt_conf_get_bool(&quot;plugins/darkroom/sharpen/auto_apply&quot;)) continue;</a>
+<a name="ln855">    if(!strcmp(op, &quot;dither&quot;)) continue;</a>
+<a name="ln856">    if(!strcmp(op, &quot;highlights&quot;)) continue;</a>
+<a name="ln857">    altered = 1;</a>
+<a name="ln858">    break;</a>
+<a name="ln859">  }</a>
+<a name="ln860">  sqlite3_finalize(stmt);</a>
+<a name="ln861"> </a>
+<a name="ln862">  return altered;</a>
+<a name="ln863">}</a>
+<a name="ln864"> </a>
+<a name="ln865"> </a>
+<a name="ln866">void dt_image_read_duplicates(const uint32_t id, const char *filename)</a>
+<a name="ln867">{</a>
+<a name="ln868">  // Search for duplicate's sidecar files and import them if found and not in DB yet</a>
+<a name="ln869">  gchar *imgfname = g_path_get_basename(filename);</a>
+<a name="ln870">  gchar *imgpath = g_path_get_dirname(filename);</a>
+<a name="ln871">  gchar pattern[PATH_MAX] = { 0 };</a>
+<a name="ln872"> </a>
+<a name="ln873">  // NULL terminated list of glob patterns; should include &quot;&quot; and can be extended if needed</a>
+<a name="ln874">  static const gchar *glob_patterns[]</a>
+<a name="ln875">      = { &quot;&quot;, &quot;_[0-9][0-9]&quot;, &quot;_[0-9][0-9][0-9]&quot;, &quot;_[0-9][0-9][0-9][0-9]&quot;, NULL };</a>
+<a name="ln876"> </a>
+<a name="ln877">  const gchar **glob_pattern = glob_patterns;</a>
+<a name="ln878">  GList *files = NULL;</a>
+<a name="ln879">  while(*glob_pattern)</a>
+<a name="ln880">  {</a>
+<a name="ln881">    snprintf(pattern, sizeof(pattern), &quot;%s&quot;, filename);</a>
+<a name="ln882">    gchar *c1 = pattern + strlen(pattern);</a>
+<a name="ln883">    while(*c1 != '.' &amp;&amp; c1 &gt; pattern) c1--;</a>
+<a name="ln884">    snprintf(c1, pattern + sizeof(pattern) - c1, &quot;%s&quot;, *glob_pattern);</a>
+<a name="ln885">    const gchar *c2 = filename + strlen(filename);</a>
+<a name="ln886">    while(*c2 != '.' &amp;&amp; c2 &gt; filename) c2--;</a>
+<a name="ln887">    snprintf(c1 + strlen(*glob_pattern), pattern + sizeof(pattern) - c1 - strlen(*glob_pattern), &quot;%s.xmp&quot;, c2);</a>
+<a name="ln888"> </a>
+<a name="ln889">#ifdef _WIN32</a>
+<a name="ln890">    wchar_t *wpattern = g_utf8_to_utf16(pattern, -1, NULL, NULL, NULL);</a>
+<a name="ln891">    WIN32_FIND_DATAW data;</a>
+<a name="ln892">    HANDLE handle = FindFirstFileW(wpattern, &amp;data);</a>
+<a name="ln893">    g_free(wpattern);</a>
+<a name="ln894">    if(handle != INVALID_HANDLE_VALUE)</a>
+<a name="ln895">    {</a>
+<a name="ln896">      do</a>
+<a name="ln897">      {</a>
+<a name="ln898">        char *file = g_utf16_to_utf8(data.cFileName, -1, NULL, NULL, NULL);</a>
+<a name="ln899">        files = g_list_append(files, g_build_filename(imgpath, file, NULL));</a>
+<a name="ln900">        g_free(file);</a>
+<a name="ln901">      }</a>
+<a name="ln902">      while(FindNextFileW(handle, &amp;data));</a>
+<a name="ln903">    }</a>
+<a name="ln904">    FindClose(handle);</a>
+<a name="ln905">#else</a>
+<a name="ln906">    glob_t globbuf;</a>
+<a name="ln907">    if(!glob(pattern, 0, NULL, &amp;globbuf))</a>
+<a name="ln908">    {</a>
+<a name="ln909">      for(size_t i = 0; i &lt; globbuf.gl_pathc; i++)</a>
+<a name="ln910">        files = g_list_append(files, g_strdup(globbuf.gl_pathv[i]));</a>
+<a name="ln911">      globfree(&amp;globbuf);</a>
+<a name="ln912">    }</a>
+<a name="ln913">#endif</a>
+<a name="ln914"> </a>
+<a name="ln915">    glob_pattern++;</a>
+<a name="ln916">  }</a>
+<a name="ln917"> </a>
+<a name="ln918">  // we store the xmp filename without version part in pattern to speed up string comparison later</a>
+<a name="ln919">  g_snprintf(pattern, sizeof(pattern), &quot;%s.xmp&quot;, filename);</a>
+<a name="ln920"> </a>
+<a name="ln921">  GList *file_iter = g_list_first(files);</a>
+<a name="ln922">  while(file_iter != NULL)</a>
+<a name="ln923">  {</a>
+<a name="ln924">    gchar *xmpfilename = file_iter-&gt;data;</a>
+<a name="ln925">    int version = -1;</a>
+<a name="ln926"> </a>
+<a name="ln927">    // we need to get the version number of the sidecar filename</a>
+<a name="ln928">    if(!strncmp(xmpfilename, pattern, sizeof(pattern)))</a>
+<a name="ln929">    {</a>
+<a name="ln930">      // this is an xmp file without version number which corresponds to version 0</a>
+<a name="ln931">      version = 0;</a>
+<a name="ln932">    }</a>
+<a name="ln933">    else</a>
+<a name="ln934">    {</a>
+<a name="ln935">      // we need to derive the version number from the filename</a>
+<a name="ln936"> </a>
+<a name="ln937">      gchar *c3 = xmpfilename + strlen(xmpfilename)</a>
+<a name="ln938">                  - 5; // skip over .xmp extension; position c3 at character before the '.'</a>
+<a name="ln939">      while(*c3 != '.' &amp;&amp; c3 &gt; xmpfilename)</a>
+<a name="ln940">        c3--; // skip over filename extension; position c3 is at character '.'</a>
+<a name="ln941">      gchar *c4 = c3;</a>
+<a name="ln942">      while(*c4 != '_' &amp;&amp; c4 &gt; xmpfilename) c4--; // move to beginning of version number</a>
+<a name="ln943">      c4++;</a>
+<a name="ln944"> </a>
+<a name="ln945">      gchar *idfield = g_strndup(c4, c3 - c4);</a>
+<a name="ln946"> </a>
+<a name="ln947">      version = atoi(idfield);</a>
+<a name="ln948">      g_free(idfield);</a>
+<a name="ln949">    }</a>
+<a name="ln950"> </a>
+<a name="ln951">    int newid = dt_image_duplicate_with_version(id, version);</a>
+<a name="ln952">    dt_image_t *img = dt_image_cache_get(darktable.image_cache, newid, 'w');</a>
+<a name="ln953">    (void)dt_exif_xmp_read(img, xmpfilename, 0);</a>
+<a name="ln954">    dt_image_cache_write_release(darktable.image_cache, img, DT_IMAGE_CACHE_RELAXED);</a>
+<a name="ln955"> </a>
+<a name="ln956">    file_iter = g_list_next(file_iter);</a>
+<a name="ln957">  }</a>
+<a name="ln958"> </a>
+<a name="ln959">  g_list_free_full(files, g_free);</a>
+<a name="ln960">  g_free(imgfname);</a>
+<a name="ln961">  g_free(imgpath);</a>
+<a name="ln962">}</a>
+<a name="ln963"> </a>
+<a name="ln964"> </a>
+<a name="ln965">static uint32_t dt_image_import_internal(const int32_t film_id, const char *filename, gboolean override_ignore_jpegs, gboolean lua_locking)</a>
+<a name="ln966">{</a>
+<a name="ln967">  char *normalized_filename = dt_util_normalize_path(filename);</a>
+<a name="ln968">  if(!normalized_filename || !g_file_test(normalized_filename, G_FILE_TEST_IS_REGULAR) || dt_util_get_file_size(normalized_filename) == 0)</a>
+<a name="ln969">  {</a>
+<a name="ln970">    g_free(normalized_filename);</a>
+<a name="ln971">    return 0;</a>
+<a name="ln972">  }</a>
+<a name="ln973">  const char *cc = normalized_filename + strlen(normalized_filename);</a>
+<a name="ln974">  for(; *cc != '.' &amp;&amp; cc &gt; normalized_filename; cc--)</a>
+<a name="ln975">    ;</a>
+<a name="ln976">  if(!strcasecmp(cc, &quot;.dt&quot;) || !strcasecmp(cc, &quot;.dttags&quot;) || !strcasecmp(cc, &quot;.xmp&quot;))</a>
+<a name="ln977">  {</a>
+<a name="ln978">    g_free(normalized_filename);</a>
+<a name="ln979">    return 0;</a>
+<a name="ln980">  }</a>
+<a name="ln981">  char *ext = g_ascii_strdown(cc + 1, -1);</a>
+<a name="ln982">  if(override_ignore_jpegs == FALSE &amp;&amp; (!strcmp(ext, &quot;jpg&quot;) || !strcmp(ext, &quot;jpeg&quot;))</a>
+<a name="ln983">     &amp;&amp; dt_conf_get_bool(&quot;ui_last/import_ignore_jpegs&quot;))</a>
+<a name="ln984">  {</a>
+<a name="ln985">    g_free(normalized_filename);</a>
+<a name="ln986">    g_free(ext);</a>
+<a name="ln987">    return 0;</a>
+<a name="ln988">  }</a>
+<a name="ln989">  int supported = 0;</a>
+<a name="ln990">  for(const char **i = dt_supported_extensions; *i != NULL; i++)</a>
+<a name="ln991">    if(!strcmp(ext, *i))</a>
+<a name="ln992">    {</a>
+<a name="ln993">      supported = 1;</a>
+<a name="ln994">      break;</a>
+<a name="ln995">    }</a>
+<a name="ln996">  if(!supported)</a>
+<a name="ln997">  {</a>
+<a name="ln998">    g_free(normalized_filename);</a>
+<a name="ln999">    g_free(ext);</a>
+<a name="ln1000">    return 0;</a>
+<a name="ln1001">  }</a>
+<a name="ln1002">  int rc;</a>
+<a name="ln1003">  uint32_t id = 0;</a>
+<a name="ln1004">  // select from images; if found =&gt; return</a>
+<a name="ln1005">  gchar *imgfname;</a>
+<a name="ln1006">  imgfname = g_path_get_basename(normalized_filename);</a>
+<a name="ln1007">  sqlite3_stmt *stmt;</a>
+<a name="ln1008">  DT_DEBUG_SQLITE3_PREPARE_V2(dt_database_get(darktable.db),</a>
+<a name="ln1009">                              &quot;SELECT id FROM main.images WHERE film_id = ?1 AND filename = ?2&quot;, -1, &amp;stmt, NULL);</a>
+<a name="ln1010">  DT_DEBUG_SQLITE3_BIND_INT(stmt, 1, film_id);</a>
+<a name="ln1011">  DT_DEBUG_SQLITE3_BIND_TEXT(stmt, 2, imgfname, -1, SQLITE_STATIC);</a>
+<a name="ln1012">  if(sqlite3_step(stmt) == SQLITE_ROW)</a>
+<a name="ln1013">  {</a>
+<a name="ln1014">    id = sqlite3_column_int(stmt, 0);</a>
+<a name="ln1015">    g_free(imgfname);</a>
+<a name="ln1016">    sqlite3_finalize(stmt);</a>
+<a name="ln1017">    dt_image_t *img = dt_image_cache_get(darktable.image_cache, id, 'w');</a>
+<a name="ln1018">    img-&gt;flags &amp;= ~DT_IMAGE_REMOVE;</a>
+<a name="ln1019">    dt_image_cache_write_release(darktable.image_cache, img, DT_IMAGE_CACHE_RELAXED);</a>
+<a name="ln1020">    dt_image_read_duplicates(id, normalized_filename);</a>
+<a name="ln1021">    dt_image_synch_all_xmp(normalized_filename);</a>
+<a name="ln1022">    g_free(ext);</a>
+<a name="ln1023">    g_free(normalized_filename);</a>
+<a name="ln1024">    return id;</a>
+<a name="ln1025">  }</a>
+<a name="ln1026">  sqlite3_finalize(stmt);</a>
+<a name="ln1027"> </a>
+<a name="ln1028">  // also need to set the no-legacy bit, to make sure we get the right presets (new ones)</a>
+<a name="ln1029">  uint32_t flags = dt_conf_get_int(&quot;ui_last/import_initial_rating&quot;);</a>
+<a name="ln1030">  if(flags &gt; 5)</a>
+<a name="ln1031">  {</a>
+<a name="ln1032">    flags = 1;</a>
+<a name="ln1033">    dt_conf_set_int(&quot;ui_last/import_initial_rating&quot;, 1);</a>
+<a name="ln1034">  }</a>
+<a name="ln1035">  flags |= DT_IMAGE_NO_LEGACY_PRESETS;</a>
+<a name="ln1036">  // set the bits in flags that indicate if any of the extra files (.txt, .wav) are present</a>
+<a name="ln1037">  char *extra_file = dt_image_get_audio_path_from_path(normalized_filename);</a>
+<a name="ln1038">  if(extra_file)</a>
+<a name="ln1039">  {</a>
+<a name="ln1040">    flags |= DT_IMAGE_HAS_WAV;</a>
+<a name="ln1041">    g_free(extra_file);</a>
+<a name="ln1042">  }</a>
+<a name="ln1043">  extra_file = dt_image_get_text_path_from_path(normalized_filename);</a>
+<a name="ln1044">  if(extra_file)</a>
+<a name="ln1045">  {</a>
+<a name="ln1046">    flags |= DT_IMAGE_HAS_TXT;</a>
+<a name="ln1047">    g_free(extra_file);</a>
+<a name="ln1048">  }</a>
+<a name="ln1049"> </a>
+<a name="ln1050">  // insert dummy image entry in database</a>
+<a name="ln1051"> </a>
+<a name="ln1052">  /* Image Position Calculation</a>
+<a name="ln1053">   *</a>
+<a name="ln1054">   * The upper int32_t of the last image position is increased by one</a>
+<a name="ln1055">   * while the lower 32 bits are masked out.</a>
+<a name="ln1056">   *</a>
+<a name="ln1057">   * Example:</a>
+<a name="ln1058">   * last image position: (Hex)</a>
+<a name="ln1059">   * 0000 0002 0000 0001</a>
+<a name="ln1060">   *</a>
+<a name="ln1061">   * next image position</a>
+<a name="ln1062">   * 0000 0003 0000 0000</a>
+<a name="ln1063">   */</a>
+<a name="ln1064">  DT_DEBUG_SQLITE3_PREPARE_V2(</a>
+<a name="ln1065">      dt_database_get(darktable.db),</a>
+<a name="ln1066">      &quot;INSERT INTO main.images (id, film_id, filename, caption, description, license, sha1sum, flags, version, &quot;</a>
+<a name="ln1067">      &quot;max_version, history_end, iop_order_version, position) &quot;</a>
+<a name="ln1068">      &quot;SELECT NULL, ?1, ?2, '', '', '', '', ?3, 0, 0, 0, 0, (IFNULL(MAX(position),0) &amp; (4294967295 &lt;&lt; 32))  + (1 &lt;&lt; 32) &quot;</a>
+<a name="ln1069">      &quot;FROM images&quot;,</a>
+<a name="ln1070">      -1, &amp;stmt, NULL);</a>
+<a name="ln1071"> </a>
+<a name="ln1072">  DT_DEBUG_SQLITE3_BIND_INT(stmt, 1, film_id);</a>
+<a name="ln1073">  DT_DEBUG_SQLITE3_BIND_TEXT(stmt, 2, imgfname, -1, SQLITE_TRANSIENT);</a>
+<a name="ln1074">  DT_DEBUG_SQLITE3_BIND_INT(stmt, 3, flags);</a>
+<a name="ln1075"> </a>
+<a name="ln1076">  rc = sqlite3_step(stmt);</a>
+<a name="ln1077">  if(rc != SQLITE_DONE) fprintf(stderr, &quot;sqlite3 error %d\n&quot;, rc);</a>
+<a name="ln1078">  sqlite3_finalize(stmt);</a>
+<a name="ln1079"> </a>
+<a name="ln1080">  DT_DEBUG_SQLITE3_PREPARE_V2(dt_database_get(darktable.db),</a>
+<a name="ln1081">                              &quot;SELECT id FROM main.images WHERE film_id = ?1 AND filename = ?2&quot;, -1, &amp;stmt, NULL);</a>
+<a name="ln1082">  DT_DEBUG_SQLITE3_BIND_INT(stmt, 1, film_id);</a>
+<a name="ln1083">  DT_DEBUG_SQLITE3_BIND_TEXT(stmt, 2, imgfname, -1, SQLITE_STATIC);</a>
+<a name="ln1084">  if(sqlite3_step(stmt) == SQLITE_ROW) id = sqlite3_column_int(stmt, 0);</a>
+<a name="ln1085">  sqlite3_finalize(stmt);</a>
+<a name="ln1086"> </a>
+<a name="ln1087">  // Try to find out if this should be grouped already.</a>
+<a name="ln1088">  gchar *basename = g_strdup(imgfname);</a>
+<a name="ln1089">  gchar *cc2 = basename + strlen(basename);</a>
+<a name="ln1090">  for(; *cc2 != '.' &amp;&amp; cc2 &gt; basename; cc2--)</a>
+<a name="ln1091">    ;</a>
+<a name="ln1092">  *cc2 = '\0';</a>
+<a name="ln1093">  gchar *sql_pattern = g_strconcat(basename, &quot;.%&quot;, NULL);</a>
+<a name="ln1094">  int group_id;</a>
+<a name="ln1095">  // in case we are not a jpg check if we need to change group representative</a>
+<a name="ln1096">  if(strcmp(ext, &quot;jpg&quot;) != 0 &amp;&amp; strcmp(ext, &quot;jpeg&quot;) != 0)</a>
+<a name="ln1097">  {</a>
+<a name="ln1098">    sqlite3_stmt *stmt2;</a>
+<a name="ln1099">    DT_DEBUG_SQLITE3_PREPARE_V2(</a>
+<a name="ln1100">        dt_database_get(darktable.db),</a>
+<a name="ln1101">        &quot;SELECT group_id FROM main.images WHERE film_id = ?1 AND filename LIKE ?2 AND id = group_id&quot;, -1, &amp;stmt2,</a>
+<a name="ln1102">        NULL);</a>
+<a name="ln1103">    DT_DEBUG_SQLITE3_BIND_INT(stmt2, 1, film_id);</a>
+<a name="ln1104">    DT_DEBUG_SQLITE3_BIND_TEXT(stmt2, 2, sql_pattern, -1, SQLITE_TRANSIENT);</a>
+<a name="ln1105">    // if we have a group already</a>
+<a name="ln1106">    if(sqlite3_step(stmt2) == SQLITE_ROW)</a>
+<a name="ln1107">    {</a>
+<a name="ln1108">      int other_id = sqlite3_column_int(stmt2, 0);</a>
+<a name="ln1109">      dt_image_t *other_img = dt_image_cache_get(darktable.image_cache, other_id, 'w');</a>
+<a name="ln1110">      gchar *other_basename = g_strdup(other_img-&gt;filename);</a>
+<a name="ln1111">      gchar *cc3 = other_basename + strlen(other_img-&gt;filename);</a>
+<a name="ln1112">      for(; *cc3 != '.' &amp;&amp; cc3 &gt; other_basename; cc3--)</a>
+<a name="ln1113">        ;</a>
+<a name="ln1114">      ++cc3;</a>
+<a name="ln1115">      gchar *ext_lowercase = g_ascii_strdown(cc3, -1);</a>
+<a name="ln1116">      // if the group representative is a jpg, change group representative to this new imported image</a>
+<a name="ln1117">      if(!strcmp(ext_lowercase, &quot;jpg&quot;) || !strcmp(ext_lowercase, &quot;jpeg&quot;))</a>
+<a name="ln1118">      {</a>
+<a name="ln1119">        other_img-&gt;group_id = id;</a>
+<a name="ln1120">        dt_image_cache_write_release(darktable.image_cache, other_img, DT_IMAGE_CACHE_SAFE);</a>
+<a name="ln1121">        sqlite3_stmt *stmt3;</a>
+<a name="ln1122">        DT_DEBUG_SQLITE3_PREPARE_V2(dt_database_get(darktable.db),</a>
+<a name="ln1123">                                    &quot;SELECT id FROM main.images WHERE group_id = ?1 AND id != ?1&quot;, -1, &amp;stmt3,</a>
+<a name="ln1124">                                    NULL);</a>
+<a name="ln1125">        DT_DEBUG_SQLITE3_BIND_INT(stmt3, 1, other_id);</a>
+<a name="ln1126">        while(sqlite3_step(stmt3) == SQLITE_ROW)</a>
+<a name="ln1127">        {</a>
+<a name="ln1128">          other_id = sqlite3_column_int(stmt3, 0);</a>
+<a name="ln1129">          dt_image_t *group_img = dt_image_cache_get(darktable.image_cache, other_id, 'w');</a>
+<a name="ln1130">          group_img-&gt;group_id = id;</a>
+<a name="ln1131">          dt_image_cache_write_release(darktable.image_cache, group_img, DT_IMAGE_CACHE_SAFE);</a>
+<a name="ln1132">        }</a>
+<a name="ln1133">        group_id = id;</a>
+<a name="ln1134">        sqlite3_finalize(stmt3);</a>
+<a name="ln1135">      }</a>
+<a name="ln1136">      else</a>
+<a name="ln1137">      {</a>
+<a name="ln1138">        dt_image_cache_write_release(darktable.image_cache, other_img, DT_IMAGE_CACHE_RELAXED);</a>
+<a name="ln1139">        group_id = other_id;</a>
+<a name="ln1140">      }</a>
+<a name="ln1141">      g_free(ext_lowercase);</a>
+<a name="ln1142">      g_free(other_basename);</a>
+<a name="ln1143">    }</a>
+<a name="ln1144">    else</a>
+<a name="ln1145">    {</a>
+<a name="ln1146">      group_id = id;</a>
+<a name="ln1147">    }</a>
+<a name="ln1148">    sqlite3_finalize(stmt2);</a>
+<a name="ln1149">  }</a>
+<a name="ln1150">  else</a>
+<a name="ln1151">  {</a>
+<a name="ln1152">    sqlite3_stmt *stmt2;</a>
+<a name="ln1153">    DT_DEBUG_SQLITE3_PREPARE_V2(</a>
+<a name="ln1154">        dt_database_get(darktable.db),</a>
+<a name="ln1155">        &quot;SELECT group_id FROM main.images WHERE film_id = ?1 AND filename LIKE ?2 AND id != ?3&quot;, -1, &amp;stmt2, NULL);</a>
+<a name="ln1156">    DT_DEBUG_SQLITE3_BIND_INT(stmt2, 1, film_id);</a>
+<a name="ln1157">    DT_DEBUG_SQLITE3_BIND_TEXT(stmt2, 2, sql_pattern, -1, SQLITE_TRANSIENT);</a>
+<a name="ln1158">    DT_DEBUG_SQLITE3_BIND_INT(stmt2, 3, id);</a>
+<a name="ln1159">    if(sqlite3_step(stmt2) == SQLITE_ROW)</a>
+<a name="ln1160">      group_id = sqlite3_column_int(stmt2, 0);</a>
+<a name="ln1161">    else</a>
+<a name="ln1162">      group_id = id;</a>
+<a name="ln1163">    sqlite3_finalize(stmt2);</a>
+<a name="ln1164">  }</a>
+<a name="ln1165">  DT_DEBUG_SQLITE3_PREPARE_V2(dt_database_get(darktable.db), &quot;UPDATE main.images SET group_id = ?1 WHERE id = ?2&quot;,</a>
+<a name="ln1166">                              -1, &amp;stmt, NULL);</a>
+<a name="ln1167">  DT_DEBUG_SQLITE3_BIND_INT(stmt, 1, group_id);</a>
+<a name="ln1168">  DT_DEBUG_SQLITE3_BIND_INT(stmt, 2, id);</a>
+<a name="ln1169">  sqlite3_step(stmt);</a>
+<a name="ln1170">  sqlite3_finalize(stmt);</a>
+<a name="ln1171"> </a>
+<a name="ln1172">  // printf(&quot;[image_import] importing `%s' to img id %d\n&quot;, imgfname, id);</a>
+<a name="ln1173"> </a>
+<a name="ln1174">  // lock as shortly as possible:</a>
+<a name="ln1175">  dt_image_t *img = dt_image_cache_get(darktable.image_cache, id, 'w');</a>
+<a name="ln1176">  img-&gt;group_id = group_id;</a>
+<a name="ln1177"> </a>
+<a name="ln1178">  // read dttags and exif for database queries!</a>
+<a name="ln1179">  (void)dt_exif_read(img, normalized_filename);</a>
+<a name="ln1180">  char dtfilename[PATH_MAX] = { 0 };</a>
+<a name="ln1181">  g_strlcpy(dtfilename, normalized_filename, sizeof(dtfilename));</a>
+<a name="ln1182">  // dt_image_path_append_version(id, dtfilename, sizeof(dtfilename));</a>
+<a name="ln1183">  g_strlcat(dtfilename, &quot;.xmp&quot;, sizeof(dtfilename));</a>
+<a name="ln1184"> </a>
+<a name="ln1185">  int res = dt_exif_xmp_read(img, dtfilename, 0);</a>
+<a name="ln1186"> </a>
+<a name="ln1187">  // write through to db, but not to xmp.</a>
+<a name="ln1188">  dt_image_cache_write_release(darktable.image_cache, img, DT_IMAGE_CACHE_RELAXED);</a>
+<a name="ln1189"> </a>
+<a name="ln1190">  if(res != 0)</a>
+<a name="ln1191">  {</a>
+<a name="ln1192">    // Search for Lightroom sidecar file, import tags if found</a>
+<a name="ln1193">    dt_lightroom_import(id, NULL, TRUE);</a>
+<a name="ln1194">  }</a>
+<a name="ln1195"> </a>
+<a name="ln1196">  // add a tag with the file extension</a>
+<a name="ln1197">  guint tagid = 0;</a>
+<a name="ln1198">  char tagname[512];</a>
+<a name="ln1199">  snprintf(tagname, sizeof(tagname), &quot;darktable|format|%s&quot;, ext);</a>
+<a name="ln1200">  g_free(ext);</a>
+<a name="ln1201">  dt_tag_new(tagname, &amp;tagid);</a>
+<a name="ln1202">  dt_tag_attach(tagid, id);</a>
+<a name="ln1203"> </a>
+<a name="ln1204">  // make sure that there are no stale thumbnails left</a>
+<a name="ln1205">  dt_mipmap_cache_remove(darktable.mipmap_cache, id);</a>
+<a name="ln1206"> </a>
+<a name="ln1207">  // read all sidecar files</a>
+<a name="ln1208">  dt_image_read_duplicates(id, normalized_filename);</a>
+<a name="ln1209">  dt_image_synch_all_xmp(normalized_filename);</a>
+<a name="ln1210"> </a>
+<a name="ln1211">  g_free(imgfname);</a>
+<a name="ln1212">  g_free(basename);</a>
+<a name="ln1213">  g_free(sql_pattern);</a>
+<a name="ln1214">  g_free(normalized_filename);</a>
+<a name="ln1215"> </a>
+<a name="ln1216">#ifdef USE_LUA</a>
+<a name="ln1217">  //Synchronous calling of lua post-import-image events</a>
+<a name="ln1218">  if(lua_locking)</a>
+<a name="ln1219">    dt_lua_lock();</a>
+<a name="ln1220"> </a>
+<a name="ln1221">  lua_State *L = darktable.lua_state.state;</a>
+<a name="ln1222"> </a>
+<a name="ln1223">  luaA_push(L, dt_lua_image_t, &amp;id);</a>
+<a name="ln1224">  dt_lua_event_trigger(L, &quot;post-import-image&quot;, 1);</a>
+<a name="ln1225"> </a>
+<a name="ln1226">  if(lua_locking)</a>
+<a name="ln1227">    dt_lua_unlock();</a>
+<a name="ln1228">#endif</a>
+<a name="ln1229"> </a>
+<a name="ln1230">  dt_control_signal_raise(darktable.signals, DT_SIGNAL_IMAGE_IMPORT, id);</a>
+<a name="ln1231">  // the following line would look logical with new_tags_set being the return value</a>
+<a name="ln1232">  // from dt_tag_new above, but this could lead to too rapid signals, being able to lock up the</a>
+<a name="ln1233">  // keywords side pane when trying to use it, which can lock up the whole dt GUI ..</a>
+<a name="ln1234">  // if (new_tags_set) dt_control_signal_raise(darktable.signals,DT_SIGNAL_TAG_CHANGED);</a>
+<a name="ln1235">  return id;</a>
+<a name="ln1236">}</a>
+<a name="ln1237"> </a>
+<a name="ln1238">uint32_t dt_image_import(const int32_t film_id, const char *filename, gboolean override_ignore_jpegs)</a>
+<a name="ln1239">{</a>
+<a name="ln1240">  return dt_image_import_internal(film_id, filename, override_ignore_jpegs, TRUE);</a>
+<a name="ln1241">}</a>
+<a name="ln1242"> </a>
+<a name="ln1243">uint32_t dt_image_import_lua(const int32_t film_id, const char *filename, gboolean override_ignore_jpegs)</a>
+<a name="ln1244">{</a>
+<a name="ln1245">  return dt_image_import_internal(film_id, filename, override_ignore_jpegs, FALSE);</a>
+<a name="ln1246">}</a>
+<a name="ln1247"> </a>
+<a name="ln1248">void dt_image_init(dt_image_t *img)</a>
+<a name="ln1249">{</a>
+<a name="ln1250">  img-&gt;width = img-&gt;height = img-&gt;verified_size = 0;</a>
+<a name="ln1251">  img-&gt;final_width = img-&gt;final_height = 0;</a>
+<a name="ln1252">  img-&gt;crop_x = img-&gt;crop_y = img-&gt;crop_width = img-&gt;crop_height = 0;</a>
+<a name="ln1253">  img-&gt;orientation = ORIENTATION_NULL;</a>
+<a name="ln1254">  img-&gt;legacy_flip.legacy = 0;</a>
+<a name="ln1255">  img-&gt;legacy_flip.user_flip = 0;</a>
+<a name="ln1256"> </a>
+<a name="ln1257">  img-&gt;buf_dsc.filters = 0u;</a>
+<a name="ln1258">  img-&gt;buf_dsc = (dt_iop_buffer_dsc_t){.channels = 0, .datatype = TYPE_UNKNOWN };</a>
+<a name="ln1259">  img-&gt;film_id = -1;</a>
+<a name="ln1260">  img-&gt;group_id = -1;</a>
+<a name="ln1261">  img-&gt;flags = 0;</a>
+<a name="ln1262">  img-&gt;id = -1;</a>
+<a name="ln1263">  img-&gt;version = -1;</a>
+<a name="ln1264">  img-&gt;loader = LOADER_UNKNOWN;</a>
+<a name="ln1265">  img-&gt;exif_inited = 0;</a>
+<a name="ln1266">  memset(img-&gt;exif_maker, 0, sizeof(img-&gt;exif_maker));</a>
+<a name="ln1267">  memset(img-&gt;exif_model, 0, sizeof(img-&gt;exif_model));</a>
+<a name="ln1268">  memset(img-&gt;exif_lens, 0, sizeof(img-&gt;exif_lens));</a>
+<a name="ln1269">  memset(img-&gt;camera_maker, 0, sizeof(img-&gt;camera_maker));</a>
+<a name="ln1270">  memset(img-&gt;camera_model, 0, sizeof(img-&gt;camera_model));</a>
+<a name="ln1271">  memset(img-&gt;camera_alias, 0, sizeof(img-&gt;camera_alias));</a>
+<a name="ln1272">  memset(img-&gt;camera_makermodel, 0, sizeof(img-&gt;camera_makermodel));</a>
+<a name="ln1273">  memset(img-&gt;camera_legacy_makermodel, 0, sizeof(img-&gt;camera_legacy_makermodel));</a>
+<a name="ln1274">  memset(img-&gt;filename, 0, sizeof(img-&gt;filename));</a>
+<a name="ln1275">  g_strlcpy(img-&gt;filename, &quot;(unknown)&quot;, sizeof(img-&gt;filename));</a>
+<a name="ln1276">  img-&gt;exif_model[0] = img-&gt;exif_maker[0] = img-&gt;exif_lens[0] = '\0';</a>
+<a name="ln1277">  g_strlcpy(img-&gt;exif_datetime_taken, &quot;0000:00:00 00:00:00&quot;, sizeof(img-&gt;exif_datetime_taken));</a>
+<a name="ln1278">  img-&gt;exif_crop = 1.0;</a>
+<a name="ln1279">  img-&gt;exif_exposure = 0;</a>
+<a name="ln1280">  img-&gt;exif_aperture = 0;</a>
+<a name="ln1281">  img-&gt;exif_iso = 0;</a>
+<a name="ln1282">  img-&gt;exif_focal_length = 0;</a>
+<a name="ln1283">  img-&gt;exif_focus_distance = 0;</a>
+<a name="ln1284">  img-&gt;geoloc.latitude = NAN;</a>
+<a name="ln1285">  img-&gt;geoloc.longitude = NAN;</a>
+<a name="ln1286">  img-&gt;geoloc.elevation = NAN;</a>
+<a name="ln1287">  img-&gt;raw_black_level = 0;</a>
+<a name="ln1288">  for(uint8_t i = 0; i &lt; 4; i++) img-&gt;raw_black_level_separate[i] = 0;</a>
+<a name="ln1289">  img-&gt;raw_white_point = 16384; // 2^14</a>
+<a name="ln1290">  img-&gt;d65_color_matrix[0] = NAN;</a>
+<a name="ln1291">  img-&gt;profile = NULL;</a>
+<a name="ln1292">  img-&gt;profile_size = 0;</a>
+<a name="ln1293">  img-&gt;colorspace = DT_IMAGE_COLORSPACE_NONE;</a>
+<a name="ln1294">  img-&gt;fuji_rotation_pos = 0;</a>
+<a name="ln1295">  img-&gt;pixel_aspect_ratio = 1.0f;</a>
+<a name="ln1296">  img-&gt;wb_coeffs[0] = NAN;</a>
+<a name="ln1297">  img-&gt;wb_coeffs[1] = NAN;</a>
+<a name="ln1298">  img-&gt;wb_coeffs[2] = NAN;</a>
+<a name="ln1299">  img-&gt;wb_coeffs[3] = NAN;</a>
+<a name="ln1300">  img-&gt;usercrop[0] = img-&gt;usercrop[1] = 0;</a>
+<a name="ln1301">  img-&gt;usercrop[2] = img-&gt;usercrop[3] = 1;</a>
+<a name="ln1302">  img-&gt;cache_entry = 0;</a>
+<a name="ln1303">}</a>
+<a name="ln1304"> </a>
+<a name="ln1305">void dt_image_refresh_makermodel(dt_image_t *img)</a>
+<a name="ln1306">{</a>
+<a name="ln1307">  if (!img-&gt;camera_maker[0] || !img-&gt;camera_model[0] || !img-&gt;camera_alias[0])</a>
+<a name="ln1308">  {</a>
+<a name="ln1309">    // We need to use the exif values, so let's get rawspeed to munge them</a>
+<a name="ln1310">    dt_rawspeed_lookup_makermodel(img-&gt;exif_maker, img-&gt;exif_model,</a>
+<a name="ln1311">                                  img-&gt;camera_maker, sizeof(img-&gt;camera_maker),</a>
+<a name="ln1312">                                  img-&gt;camera_model, sizeof(img-&gt;camera_model),</a>
+<a name="ln1313">                                  img-&gt;camera_alias, sizeof(img-&gt;camera_alias));</a>
+<a name="ln1314">  }</a>
+<a name="ln1315"> </a>
+<a name="ln1316">  // Now we just create a makermodel by concatenation</a>
+<a name="ln1317">  g_strlcpy(img-&gt;camera_makermodel, img-&gt;camera_maker, sizeof(img-&gt;camera_makermodel));</a>
+<a name="ln1318">  int len = strlen(img-&gt;camera_maker);</a>
+<a name="ln1319">  img-&gt;camera_makermodel[len] = ' ';</a>
+<a name="ln1320">  g_strlcpy(img-&gt;camera_makermodel+len+1, img-&gt;camera_model, sizeof(img-&gt;camera_makermodel)-len-1);</a>
+<a name="ln1321">}</a>
+<a name="ln1322"> </a>
+<a name="ln1323">int32_t dt_image_rename(const int32_t imgid, const int32_t filmid, const gchar *newname)</a>
+<a name="ln1324">{</a>
+<a name="ln1325">  // TODO: several places where string truncation could occur unnoticed</a>
+<a name="ln1326">  int32_t result = -1;</a>
+<a name="ln1327">  gchar oldimg[PATH_MAX] = { 0 };</a>
+<a name="ln1328">  gchar newimg[PATH_MAX] = { 0 };</a>
+<a name="ln1329">  gboolean from_cache = FALSE;</a>
+<a name="ln1330">  dt_image_full_path(imgid, oldimg, sizeof(oldimg), &amp;from_cache);</a>
+<a name="ln1331">  gchar *newdir = NULL;</a>
+<a name="ln1332"> </a>
+<a name="ln1333">  sqlite3_stmt *film_stmt;</a>
+<a name="ln1334">  DT_DEBUG_SQLITE3_PREPARE_V2(dt_database_get(darktable.db), &quot;SELECT folder FROM main.film_rolls WHERE id = ?1&quot;,</a>
+<a name="ln1335">                              -1, &amp;film_stmt, NULL);</a>
+<a name="ln1336">  DT_DEBUG_SQLITE3_BIND_INT(film_stmt, 1, filmid);</a>
+<a name="ln1337">  if(sqlite3_step(film_stmt) == SQLITE_ROW) newdir = g_strdup((gchar *)sqlite3_column_text(film_stmt, 0));</a>
+<a name="ln1338">  sqlite3_finalize(film_stmt);</a>
+<a name="ln1339"> </a>
+<a name="ln1340">  gchar copysrcpath[PATH_MAX] = { 0 };</a>
+<a name="ln1341">  gchar copydestpath[PATH_MAX] = { 0 };</a>
+<a name="ln1342">  GFile *old = NULL, *new = NULL;</a>
+<a name="ln1343">  if(newdir)</a>
+<a name="ln1344">  {</a>
+<a name="ln1345">    old = g_file_new_for_path(oldimg);</a>
+<a name="ln1346"> </a>
+<a name="ln1347">    if(newname)</a>
+<a name="ln1348">    {</a>
+<a name="ln1349">      g_snprintf(newimg, sizeof(newimg), &quot;%s%c%s&quot;, newdir, G_DIR_SEPARATOR, newname);</a>
+<a name="ln1350">      new = g_file_new_for_path(newimg);</a>
+<a name="ln1351">      // 'newname' represents the file's new *basename* -- it must not</a>
+<a name="ln1352">      // refer to a file outside of 'newdir'.</a>
+<a name="ln1353">      gchar *newBasename = g_file_get_basename(new);</a>
+<a name="ln1354">      if(g_strcmp0(newname, newBasename) != 0)</a>
+<a name="ln1355">      {</a>
+<a name="ln1356">        g_object_unref(old);</a>
+<a name="ln1357">        old = NULL;</a>
+<a name="ln1358">        g_object_unref(new);</a>
+<a name="ln1359">        new = NULL;</a>
+<a name="ln1360">      }</a>
+<a name="ln1361">      g_free(newBasename);</a>
+<a name="ln1362">    }</a>
+<a name="ln1363">    else</a>
+<a name="ln1364">    {</a>
+<a name="ln1365">      gchar *imgbname = g_path_get_basename(oldimg);</a>
+<a name="ln1366">      g_snprintf(newimg, sizeof(newimg), &quot;%s%c%s&quot;, newdir, G_DIR_SEPARATOR, imgbname);</a>
+<a name="ln1367">      new = g_file_new_for_path(newimg);</a>
+<a name="ln1368">      g_free(imgbname);</a>
+<a name="ln1369">    }</a>
+<a name="ln1370">    g_free(newdir);</a>
+<a name="ln1371">  }</a>
+<a name="ln1372"> </a>
+<a name="ln1373">  if(new)</a>
+<a name="ln1374">  {</a>
+<a name="ln1375">    // get current local copy if any</a>
+<a name="ln1376">    _image_local_copy_full_path(imgid, copysrcpath, sizeof(copysrcpath));</a>
+<a name="ln1377"> </a>
+<a name="ln1378">    // move image</a>
+<a name="ln1379">    GError *moveError = NULL;</a>
+<a name="ln1380">    gboolean moveStatus = g_file_move(old, new, 0, NULL, NULL, NULL, &amp;moveError);</a>
+<a name="ln1381">    if(moveStatus)</a>
+<a name="ln1382">    {</a>
+<a name="ln1383">      // statement for getting ids of the image to be moved and its duplicates</a>
+<a name="ln1384">      sqlite3_stmt *duplicates_stmt;</a>
+<a name="ln1385">      DT_DEBUG_SQLITE3_PREPARE_V2(dt_database_get(darktable.db),</a>
+<a name="ln1386">                                  &quot;SELECT id FROM main.images WHERE filename IN (SELECT filename FROM main.images &quot;</a>
+<a name="ln1387">                                  &quot;WHERE id = ?1) AND film_id IN (SELECT film_id FROM main.images WHERE id = ?1)&quot;,</a>
+<a name="ln1388">                                  -1, &amp;duplicates_stmt, NULL);</a>
+<a name="ln1389"> </a>
+<a name="ln1390">      // first move xmp files of image and duplicates</a>
+<a name="ln1391">      GList *dup_list = NULL;</a>
+<a name="ln1392">      DT_DEBUG_SQLITE3_BIND_INT(duplicates_stmt, 1, imgid);</a>
+<a name="ln1393">      while(sqlite3_step(duplicates_stmt) == SQLITE_ROW)</a>
+<a name="ln1394">      {</a>
+<a name="ln1395">        int32_t id = sqlite3_column_int(duplicates_stmt, 0);</a>
+<a name="ln1396">        dup_list = g_list_append(dup_list, GINT_TO_POINTER(id));</a>
+<a name="ln1397">        gchar oldxmp[PATH_MAX] = { 0 }, newxmp[PATH_MAX] = { 0 };</a>
+<a name="ln1398">        g_strlcpy(oldxmp, oldimg, sizeof(oldxmp));</a>
+<a name="ln1399">        g_strlcpy(newxmp, newimg, sizeof(newxmp));</a>
+<a name="ln1400">        dt_image_path_append_version(id, oldxmp, sizeof(oldxmp));</a>
+<a name="ln1401">        dt_image_path_append_version(id, newxmp, sizeof(newxmp));</a>
+<a name="ln1402">        g_strlcat(oldxmp, &quot;.xmp&quot;, sizeof(oldxmp));</a>
+<a name="ln1403">        g_strlcat(newxmp, &quot;.xmp&quot;, sizeof(newxmp));</a>
+<a name="ln1404"> </a>
+<a name="ln1405">        GFile *goldxmp = g_file_new_for_path(oldxmp);</a>
+<a name="ln1406">        GFile *gnewxmp = g_file_new_for_path(newxmp);</a>
+<a name="ln1407"> </a>
+<a name="ln1408">	g_file_move(goldxmp, gnewxmp, 0, NULL, NULL, NULL, NULL);</a>
+<a name="ln1409"> </a>
+<a name="ln1410">        g_object_unref(goldxmp);</a>
+<a name="ln1411">        g_object_unref(gnewxmp);</a>
+<a name="ln1412">      }</a>
+<a name="ln1413">      sqlite3_finalize(duplicates_stmt);</a>
+<a name="ln1414"> </a>
+<a name="ln1415">      // then update database and cache</a>
+<a name="ln1416">      // if update was performed in above loop, dt_image_path_append_version()</a>
+<a name="ln1417">      // would return wrong version!</a>
+<a name="ln1418">      while(dup_list)</a>
+<a name="ln1419">      {</a>
+<a name="ln1420">        int id = GPOINTER_TO_INT(dup_list-&gt;data);</a>
+<a name="ln1421">        dt_image_t *img = dt_image_cache_get(darktable.image_cache, id, 'w');</a>
+<a name="ln1422">        img-&gt;film_id = filmid;</a>
+<a name="ln1423">        if(newname)</a>
+<a name="ln1424">        {</a>
+<a name="ln1425">          strncpy(img-&gt;filename, newname, DT_MAX_FILENAME_LEN-1);</a>
+<a name="ln1426">          img-&gt;filename[DT_MAX_FILENAME_LEN-1] = '\0';</a>
+<a name="ln1427">        }</a>
+<a name="ln1428">        // write through to db, but not to xmp</a>
+<a name="ln1429">        dt_image_cache_write_release(darktable.image_cache, img, DT_IMAGE_CACHE_RELAXED);</a>
+<a name="ln1430">        dup_list = g_list_delete_link(dup_list, dup_list);</a>
+<a name="ln1431">        // write xmp file</a>
+<a name="ln1432">        dt_image_write_sidecar_file(id);</a>
+<a name="ln1433">      }</a>
+<a name="ln1434">      g_list_free(dup_list);</a>
+<a name="ln1435"> </a>
+<a name="ln1436">      // finally, rename local copy if any</a>
+<a name="ln1437">      if(g_file_test(copysrcpath, G_FILE_TEST_EXISTS))</a>
+<a name="ln1438">      {</a>
+<a name="ln1439">        // get new name</a>
+<a name="ln1440">        _image_local_copy_full_path(imgid, copydestpath, sizeof(copydestpath));</a>
+<a name="ln1441"> </a>
+<a name="ln1442">        GFile *cold = g_file_new_for_path(copysrcpath);</a>
+<a name="ln1443">        GFile *cnew = g_file_new_for_path(copydestpath);</a>
+<a name="ln1444"> </a>
+<a name="ln1445">        g_clear_error(&amp;moveError);</a>
+<a name="ln1446">	moveStatus = g_file_move(cold, cnew, 0, NULL, NULL, NULL, &amp;moveError);</a>
+<a name="ln1447">        if(!moveStatus)</a>
+<a name="ln1448">        {</a>
+<a name="ln1449">          fprintf(stderr, &quot;[dt_image_rename] error moving local copy `%s' -&gt; `%s'\n&quot;, copysrcpath, copydestpath);</a>
+<a name="ln1450"> </a>
+<a name="ln1451">	  if(g_error_matches(moveError, G_IO_ERROR, G_IO_ERROR_NOT_FOUND))</a>
+<a name="ln1452">          {</a>
+<a name="ln1453">	    gchar *oldBasename = g_path_get_basename(copysrcpath);</a>
+<a name="ln1454">	    dt_control_log(_(&quot;cannot access local copy `%s'&quot;), oldBasename);</a>
+<a name="ln1455">	    g_free(oldBasename);</a>
+<a name="ln1456">          }</a>
+<a name="ln1457">          else if(g_error_matches(moveError, G_IO_ERROR, G_IO_ERROR_EXISTS) || g_error_matches(moveError, G_IO_ERROR, G_IO_ERROR_IS_DIRECTORY))</a>
+<a name="ln1458">          {</a>
+<a name="ln1459">	    gchar *newBasename = g_path_get_basename(copydestpath);</a>
+<a name="ln1460">	    dt_control_log(_(&quot;cannot write local copy `%s'&quot;), newBasename);</a>
+<a name="ln1461">	    g_free(newBasename);</a>
+<a name="ln1462">	  }</a>
+<a name="ln1463">          else</a>
+<a name="ln1464">          {</a>
+<a name="ln1465">	    gchar *oldBasename = g_path_get_basename(copysrcpath);</a>
+<a name="ln1466">	    gchar *newBasename = g_path_get_basename(copydestpath);</a>
+<a name="ln1467">	    dt_control_log(_(&quot;error moving local copy `%s' -&gt; `%s'&quot;), oldBasename, newBasename);</a>
+<a name="ln1468">	    g_free(oldBasename);</a>
+<a name="ln1469">	    g_free(newBasename);</a>
+<a name="ln1470">	  }</a>
+<a name="ln1471">	}</a>
+<a name="ln1472"> </a>
+<a name="ln1473">        g_object_unref(cold);</a>
+<a name="ln1474">        g_object_unref(cnew);</a>
+<a name="ln1475">      }</a>
+<a name="ln1476"> </a>
+<a name="ln1477">      result = 0;</a>
+<a name="ln1478">    }</a>
+<a name="ln1479">    else</a>
+<a name="ln1480">    {</a>
+<a name="ln1481">      if(g_error_matches(moveError, G_IO_ERROR, G_IO_ERROR_NOT_FOUND))</a>
+<a name="ln1482">      {</a>
+<a name="ln1483">	dt_control_log(_(&quot;error moving `%s': file not found&quot;), oldimg);</a>
+<a name="ln1484">      }</a>
+<a name="ln1485">      else if(g_error_matches(moveError, G_IO_ERROR, G_IO_ERROR_EXISTS) || g_error_matches(moveError, G_IO_ERROR, G_IO_ERROR_IS_DIRECTORY))</a>
+<a name="ln1486">      {</a>
+<a name="ln1487">	dt_control_log(_(&quot;error moving `%s' -&gt; `%s': file exists&quot;), oldimg, newimg);</a>
+<a name="ln1488">      }</a>
+<a name="ln1489">      else</a>
+<a name="ln1490">      {</a>
+<a name="ln1491">	dt_control_log(_(&quot;error moving `%s' -&gt; `%s'&quot;), oldimg, newimg);</a>
+<a name="ln1492">      }</a>
+<a name="ln1493">    }</a>
+<a name="ln1494"> </a>
+<a name="ln1495">    g_clear_error(&amp;moveError);</a>
+<a name="ln1496">    g_object_unref(old);</a>
+<a name="ln1497">    g_object_unref(new);</a>
+<a name="ln1498">  }</a>
+<a name="ln1499"> </a>
+<a name="ln1500">  return result;</a>
+<a name="ln1501">}</a>
+<a name="ln1502"> </a>
+<a name="ln1503">int32_t dt_image_move(const int32_t imgid, const int32_t filmid)</a>
+<a name="ln1504">{</a>
+<a name="ln1505">  return dt_image_rename(imgid, filmid, NULL);</a>
+<a name="ln1506">}</a>
+<a name="ln1507"> </a>
+<a name="ln1508">int32_t dt_image_copy_rename(const int32_t imgid, const int32_t filmid, const gchar *newname)</a>
+<a name="ln1509">{</a>
+<a name="ln1510">  int32_t newid = -1;</a>
+<a name="ln1511">  sqlite3_stmt *stmt;</a>
+<a name="ln1512">  gchar srcpath[PATH_MAX] = { 0 };</a>
+<a name="ln1513">  gchar *newdir = NULL;</a>
+<a name="ln1514">  gchar *filename = NULL;</a>
+<a name="ln1515">  gboolean from_cache = FALSE;</a>
+<a name="ln1516">  gchar *oldFilename = NULL;</a>
+<a name="ln1517">  gchar *newFilename = NULL;</a>
+<a name="ln1518"> </a>
+<a name="ln1519">  DT_DEBUG_SQLITE3_PREPARE_V2(dt_database_get(darktable.db), &quot;SELECT folder FROM main.film_rolls WHERE id = ?1&quot;,</a>
+<a name="ln1520">                              -1, &amp;stmt, NULL);</a>
+<a name="ln1521">  DT_DEBUG_SQLITE3_BIND_INT(stmt, 1, filmid);</a>
+<a name="ln1522">  if(sqlite3_step(stmt) == SQLITE_ROW) newdir = g_strdup((gchar *)sqlite3_column_text(stmt, 0));</a>
+<a name="ln1523">  sqlite3_finalize(stmt);</a>
+<a name="ln1524"> </a>
+<a name="ln1525">  GFile *src = NULL, *dest = NULL;</a>
+<a name="ln1526">  if(newdir)</a>
+<a name="ln1527">  {</a>
+<a name="ln1528">    dt_image_full_path(imgid, srcpath, sizeof(srcpath), &amp;from_cache);</a>
+<a name="ln1529">    oldFilename = g_path_get_basename(srcpath);</a>
+<a name="ln1530">    gchar *destpath;</a>
+<a name="ln1531">    if(newname)</a>
+<a name="ln1532">    {</a>
+<a name="ln1533">      newFilename = g_strdup(newname);</a>
+<a name="ln1534">      destpath = g_build_filename(newdir, newname, NULL);</a>
+<a name="ln1535">      dest = g_file_new_for_path(destpath);</a>
+<a name="ln1536">      // 'newname' represents the file's new *basename* -- it must not</a>
+<a name="ln1537">      // refer to a file outside of 'newdir'.</a>
+<a name="ln1538">      gchar *destBasename = g_file_get_basename(dest);</a>
+<a name="ln1539">      if(g_strcmp0(newname, destBasename) != 0)</a>
+<a name="ln1540">      {</a>
+<a name="ln1541">        g_object_unref(dest);</a>
+<a name="ln1542">        dest = NULL;</a>
+<a name="ln1543">      }</a>
+<a name="ln1544">      g_free(destBasename);</a>
+<a name="ln1545">    }</a>
+<a name="ln1546">    else</a>
+<a name="ln1547">    {</a>
+<a name="ln1548">      newFilename = g_path_get_basename(srcpath);</a>
+<a name="ln1549">      destpath = g_build_filename(newdir, newFilename, NULL);</a>
+<a name="ln1550">      dest = g_file_new_for_path(destpath);</a>
+<a name="ln1551">    }</a>
+<a name="ln1552">    if(dest)</a>
+<a name="ln1553">    {</a>
+<a name="ln1554">      src = g_file_new_for_path(srcpath);</a>
+<a name="ln1555">    }</a>
+<a name="ln1556">    g_free(newdir);</a>
+<a name="ln1557">    newdir = NULL;</a>
+<a name="ln1558">    g_free(destpath);</a>
+<a name="ln1559">    destpath = NULL;</a>
+<a name="ln1560">  }</a>
+<a name="ln1561"> </a>
+<a name="ln1562">  if(dest)</a>
+<a name="ln1563">  {</a>
+<a name="ln1564">    // copy image to new folder</a>
+<a name="ln1565">    // if image file already exists, continue</a>
+<a name="ln1566">    GError *gerror = NULL;</a>
+<a name="ln1567">    gboolean copyStatus = g_file_copy(src, dest, G_FILE_COPY_NONE, NULL, NULL, NULL, &amp;gerror);</a>
+<a name="ln1568"> </a>
+<a name="ln1569">    if(copyStatus || g_error_matches(gerror, G_IO_ERROR, G_IO_ERROR_EXISTS))</a>
+<a name="ln1570">    {</a>
+<a name="ln1571">      const int64_t new_image_position = create_next_image_position();</a>
+<a name="ln1572"> </a>
+<a name="ln1573">      // update database</a>
+<a name="ln1574">      DT_DEBUG_SQLITE3_PREPARE_V2(</a>
+<a name="ln1575">          dt_database_get(darktable.db),</a>
+<a name="ln1576">          &quot;INSERT INTO main.images &quot;</a>
+<a name="ln1577">          &quot;(id, group_id, film_id, width, height, filename, maker, model, lens, exposure, &quot;</a>
+<a name="ln1578">          &quot;aperture, iso, focal_length, focus_distance, datetime_taken, flags, &quot;</a>
+<a name="ln1579">          &quot;output_width, output_height, crop, raw_parameters, raw_denoise_threshold, &quot;</a>
+<a name="ln1580">          &quot;raw_auto_bright_threshold, raw_black, raw_maximum, &quot;</a>
+<a name="ln1581">          &quot;caption, description, license, sha1sum, orientation, histogram, lightmap, &quot;</a>
+<a name="ln1582">          &quot;longitude, latitude, altitude, color_matrix, colorspace, version, max_version, &quot;</a>
+<a name="ln1583">          &quot;position, aspect_ratio, iop_order_version) &quot;</a>
+<a name="ln1584">          &quot;SELECT NULL, group_id, ?1 as film_id, width, height, ?2 as filename, maker, model, lens, &quot;</a>
+<a name="ln1585">          &quot;exposure, aperture, iso, focal_length, focus_distance, datetime_taken, &quot;</a>
+<a name="ln1586">          &quot;flags, width, height, crop, raw_parameters, raw_denoise_threshold, &quot;</a>
+<a name="ln1587">          &quot;raw_auto_bright_threshold, raw_black, raw_maximum, &quot;</a>
+<a name="ln1588">          &quot;caption, description, license, sha1sum, orientation, histogram, lightmap, &quot;</a>
+<a name="ln1589">          &quot;longitude, latitude, altitude, color_matrix, colorspace, -1, -1, &quot;</a>
+<a name="ln1590">          &quot;?3, aspect_ratio, iop_order_version &quot;</a>
+<a name="ln1591">          &quot;FROM main.images WHERE id = ?4&quot;,</a>
+<a name="ln1592">          -1, &amp;stmt, NULL);</a>
+<a name="ln1593">      DT_DEBUG_SQLITE3_BIND_INT(stmt, 1, filmid);</a>
+<a name="ln1594">      DT_DEBUG_SQLITE3_BIND_TEXT(stmt, 2, newFilename, -1, SQLITE_TRANSIENT);</a>
+<a name="ln1595">      DT_DEBUG_SQLITE3_BIND_INT64(stmt, 3, new_image_position);</a>
+<a name="ln1596">      DT_DEBUG_SQLITE3_BIND_INT(stmt, 4, imgid);</a>
+<a name="ln1597">      sqlite3_step(stmt);</a>
+<a name="ln1598">      sqlite3_finalize(stmt);</a>
+<a name="ln1599">      DT_DEBUG_SQLITE3_PREPARE_V2(dt_database_get(darktable.db),</a>
+<a name="ln1600">                                  &quot;SELECT a.id, a.filename FROM main.images AS a JOIN main.images AS b WHERE &quot;</a>
+<a name="ln1601">                                  &quot;a.film_id = ?1 AND a.filename = ?2 AND b.filename = ?3 AND b.id = ?4 ORDER BY a.id DESC&quot;,</a>
+<a name="ln1602">                                  -1, &amp;stmt, NULL);</a>
+<a name="ln1603">      DT_DEBUG_SQLITE3_BIND_INT(stmt, 1, filmid);</a>
+<a name="ln1604">      DT_DEBUG_SQLITE3_BIND_TEXT(stmt, 2, newFilename, -1, SQLITE_TRANSIENT);</a>
+<a name="ln1605">      DT_DEBUG_SQLITE3_BIND_TEXT(stmt, 3, oldFilename, -1, SQLITE_TRANSIENT);</a>
+<a name="ln1606">      DT_DEBUG_SQLITE3_BIND_INT(stmt, 4, imgid);</a>
+<a name="ln1607"> </a>
+<a name="ln1608">      if(sqlite3_step(stmt) == SQLITE_ROW)</a>
+<a name="ln1609">      {</a>
+<a name="ln1610">        newid = sqlite3_column_int(stmt, 0);</a>
+<a name="ln1611">        filename = g_strdup((gchar *)sqlite3_column_text(stmt, 1));</a>
+<a name="ln1612">      }</a>
+<a name="ln1613">      sqlite3_finalize(stmt);</a>
+<a name="ln1614"> </a>
+<a name="ln1615">      if(newid != -1)</a>
+<a name="ln1616">      {</a>
+<a name="ln1617">        // also copy over on-disk thumbnails, if any</a>
+<a name="ln1618">        dt_mipmap_cache_copy_thumbnails(darktable.mipmap_cache, newid, imgid);</a>
+<a name="ln1619">        DT_DEBUG_SQLITE3_PREPARE_V2(dt_database_get(darktable.db),</a>
+<a name="ln1620">                                    &quot;INSERT INTO main.color_labels (imgid, color) SELECT ?1, color FROM &quot;</a>
+<a name="ln1621">                                    &quot;main.color_labels WHERE imgid = ?2&quot;,</a>
+<a name="ln1622">                                    -1, &amp;stmt, NULL);</a>
+<a name="ln1623">        DT_DEBUG_SQLITE3_BIND_INT(stmt, 1, newid);</a>
+<a name="ln1624">        DT_DEBUG_SQLITE3_BIND_INT(stmt, 2, imgid);</a>
+<a name="ln1625">        sqlite3_step(stmt);</a>
+<a name="ln1626">        sqlite3_finalize(stmt);</a>
+<a name="ln1627">        DT_DEBUG_SQLITE3_PREPARE_V2(dt_database_get(darktable.db),</a>
+<a name="ln1628">                                    &quot;INSERT INTO main.meta_data (id, key, value) SELECT ?1, key, value &quot;</a>
+<a name="ln1629">                                    &quot;FROM main.meta_data WHERE id = ?2&quot;,</a>
+<a name="ln1630">                                    -1, &amp;stmt, NULL);</a>
+<a name="ln1631">        DT_DEBUG_SQLITE3_BIND_INT(stmt, 1, newid);</a>
+<a name="ln1632">        DT_DEBUG_SQLITE3_BIND_INT(stmt, 2, imgid);</a>
+<a name="ln1633">        sqlite3_step(stmt);</a>
+<a name="ln1634">        sqlite3_finalize(stmt);</a>
+<a name="ln1635">        DT_DEBUG_SQLITE3_PREPARE_V2(dt_database_get(darktable.db),</a>
+<a name="ln1636">                                    &quot;INSERT INTO main.tagged_images (imgid, tagid) SELECT ?1, tagid FROM &quot;</a>
+<a name="ln1637">                                    &quot;main.tagged_images WHERE imgid = ?2&quot;,</a>
+<a name="ln1638">                                    -1, &amp;stmt, NULL);</a>
+<a name="ln1639">        DT_DEBUG_SQLITE3_BIND_INT(stmt, 1, newid);</a>
+<a name="ln1640">        DT_DEBUG_SQLITE3_BIND_INT(stmt, 2, imgid);</a>
+<a name="ln1641">        sqlite3_step(stmt);</a>
+<a name="ln1642">        sqlite3_finalize(stmt);</a>
+<a name="ln1643"> </a>
+<a name="ln1644">        // get max_version of image duplicates in destination filmroll</a>
+<a name="ln1645">        int32_t max_version = -1;</a>
+<a name="ln1646">        DT_DEBUG_SQLITE3_PREPARE_V2(dt_database_get(darktable.db),</a>
+<a name="ln1647">                                    &quot;SELECT MAX(a.max_version) FROM main.images AS a JOIN main.images AS b WHERE &quot;</a>
+<a name="ln1648">                                    &quot;a.film_id = b.film_id AND a.filename = b.filename AND b.id = ?1&quot;,</a>
+<a name="ln1649">                                    -1, &amp;stmt, NULL);</a>
+<a name="ln1650">        DT_DEBUG_SQLITE3_BIND_INT(stmt, 1, newid);</a>
+<a name="ln1651"> </a>
+<a name="ln1652">        if(sqlite3_step(stmt) == SQLITE_ROW) max_version = sqlite3_column_int(stmt, 0);</a>
+<a name="ln1653">        sqlite3_finalize(stmt);</a>
+<a name="ln1654"> </a>
+<a name="ln1655">        // set version of new entry and max_version of all involved duplicates (with same film_id and</a>
+<a name="ln1656">        // filename)</a>
+<a name="ln1657">        max_version = (max_version &gt;= 0) ? max_version + 1 : 0;</a>
+<a name="ln1658">        int32_t version = max_version;</a>
+<a name="ln1659"> </a>
+<a name="ln1660">        DT_DEBUG_SQLITE3_PREPARE_V2(dt_database_get(darktable.db),</a>
+<a name="ln1661">                                    &quot;UPDATE main.images SET version=?1 WHERE id = ?2&quot;, -1, &amp;stmt, NULL);</a>
+<a name="ln1662">        DT_DEBUG_SQLITE3_BIND_INT(stmt, 1, version);</a>
+<a name="ln1663">        DT_DEBUG_SQLITE3_BIND_INT(stmt, 2, newid);</a>
+<a name="ln1664">        sqlite3_step(stmt);</a>
+<a name="ln1665">        sqlite3_finalize(stmt);</a>
+<a name="ln1666"> </a>
+<a name="ln1667">        DT_DEBUG_SQLITE3_PREPARE_V2(dt_database_get(darktable.db),</a>
+<a name="ln1668">                                    &quot;UPDATE main.images SET max_version=?1 WHERE film_id = ?2 AND filename = ?3&quot;,</a>
+<a name="ln1669">                                    -1, &amp;stmt, NULL);</a>
+<a name="ln1670">        DT_DEBUG_SQLITE3_BIND_INT(stmt, 1, max_version);</a>
+<a name="ln1671">        DT_DEBUG_SQLITE3_BIND_INT(stmt, 2, filmid);</a>
+<a name="ln1672">        DT_DEBUG_SQLITE3_BIND_TEXT(stmt, 3, filename, -1, SQLITE_TRANSIENT);</a>
+<a name="ln1673">        sqlite3_step(stmt);</a>
+<a name="ln1674">        sqlite3_finalize(stmt);</a>
+<a name="ln1675"> </a>
+<a name="ln1676">        // image group handling follows</a>
+<a name="ln1677">        // get group_id of potential image duplicates in destination filmroll</a>
+<a name="ln1678">        int32_t new_group_id = -1;</a>
+<a name="ln1679">        DT_DEBUG_SQLITE3_PREPARE_V2(dt_database_get(darktable.db),</a>
+<a name="ln1680">                                    &quot;SELECT DISTINCT a.group_id FROM main.images AS a JOIN main.images AS b WHERE &quot;</a>
+<a name="ln1681">                                    &quot;a.film_id = b.film_id AND a.filename = b.filename AND &quot;</a>
+<a name="ln1682">                                    &quot;b.id = ?1 AND a.id != ?1&quot;,</a>
+<a name="ln1683">                                    -1, &amp;stmt, NULL);</a>
+<a name="ln1684">        DT_DEBUG_SQLITE3_BIND_INT(stmt, 1, newid);</a>
+<a name="ln1685"> </a>
+<a name="ln1686">        if(sqlite3_step(stmt) == SQLITE_ROW) new_group_id = sqlite3_column_int(stmt, 0);</a>
+<a name="ln1687"> </a>
+<a name="ln1688">        // then check if there are further duplicates belonging to different group(s)</a>
+<a name="ln1689">        if(sqlite3_step(stmt) == SQLITE_ROW) new_group_id = -1;</a>
+<a name="ln1690">        sqlite3_finalize(stmt);</a>
+<a name="ln1691"> </a>
+<a name="ln1692">        // rationale:</a>
+<a name="ln1693">        // if no group exists or if the image duplicates belong to multiple groups, then the</a>
+<a name="ln1694">        // new image builds a group of its own, else it is added to the (one) existing group</a>
+<a name="ln1695">        if(new_group_id == -1) new_group_id = newid;</a>
+<a name="ln1696"> </a>
+<a name="ln1697">        // make copied image belong to a group</a>
+<a name="ln1698">        DT_DEBUG_SQLITE3_PREPARE_V2(dt_database_get(darktable.db),</a>
+<a name="ln1699">                                    &quot;UPDATE main.images SET group_id=?1 WHERE id = ?2&quot;, -1, &amp;stmt, NULL);</a>
+<a name="ln1700"> </a>
+<a name="ln1701">        DT_DEBUG_SQLITE3_BIND_INT(stmt, 1, new_group_id);</a>
+<a name="ln1702">        DT_DEBUG_SQLITE3_BIND_INT(stmt, 2, newid);</a>
+<a name="ln1703">        sqlite3_step(stmt);</a>
+<a name="ln1704">        sqlite3_finalize(stmt);</a>
+<a name="ln1705"> </a>
+<a name="ln1706">        dt_history_copy_and_paste_on_image(imgid, newid, FALSE, NULL);</a>
+<a name="ln1707"> </a>
+<a name="ln1708">        // write xmp file</a>
+<a name="ln1709">        dt_image_write_sidecar_file(newid);</a>
+<a name="ln1710"> </a>
+<a name="ln1711">        dt_collection_update_query(darktable.collection);</a>
+<a name="ln1712">      }</a>
+<a name="ln1713"> </a>
+<a name="ln1714">      g_free(filename);</a>
+<a name="ln1715">    }</a>
+<a name="ln1716">    else</a>
+<a name="ln1717">    {</a>
+<a name="ln1718">      fprintf(stderr, &quot;Failed to copy image %s: %s\n&quot;, srcpath, gerror-&gt;message);</a>
+<a name="ln1719">    }</a>
+<a name="ln1720">    g_object_unref(dest);</a>
+<a name="ln1721">    g_object_unref(src);</a>
+<a name="ln1722">    g_clear_error(&amp;gerror);</a>
+<a name="ln1723">  }</a>
+<a name="ln1724">  g_free(oldFilename);</a>
+<a name="ln1725">  g_free(newFilename);</a>
+<a name="ln1726"> </a>
+<a name="ln1727">  return newid;</a>
+<a name="ln1728">}</a>
+<a name="ln1729"> </a>
+<a name="ln1730">int32_t dt_image_copy(const int32_t imgid, const int32_t filmid)</a>
+<a name="ln1731">{</a>
+<a name="ln1732">  return dt_image_copy_rename(imgid, filmid, NULL);</a>
+<a name="ln1733">}</a>
+<a name="ln1734"> </a>
+<a name="ln1735">int dt_image_local_copy_set(const int32_t imgid)</a>
+<a name="ln1736">{</a>
+<a name="ln1737">  gchar srcpath[PATH_MAX] = { 0 };</a>
+<a name="ln1738">  gchar destpath[PATH_MAX] = { 0 };</a>
+<a name="ln1739"> </a>
+<a name="ln1740">  gboolean from_cache = FALSE;</a>
+<a name="ln1741">  dt_image_full_path(imgid, srcpath, sizeof(srcpath), &amp;from_cache);</a>
+<a name="ln1742"> </a>
+<a name="ln1743">  _image_local_copy_full_path(imgid, destpath, sizeof(destpath));</a>
+<a name="ln1744"> </a>
+<a name="ln1745">  // check that the src file is readable</a>
+<a name="ln1746">  if(!g_file_test(srcpath, G_FILE_TEST_IS_REGULAR))</a>
+<a name="ln1747">  {</a>
+<a name="ln1748">    dt_control_log(_(&quot;cannot create local copy when the original file is not accessible.&quot;));</a>
+<a name="ln1749">    return 1;</a>
+<a name="ln1750">  }</a>
+<a name="ln1751"> </a>
+<a name="ln1752">  if(!g_file_test(destpath, G_FILE_TEST_EXISTS))</a>
+<a name="ln1753">  {</a>
+<a name="ln1754">    GFile *src = g_file_new_for_path(srcpath);</a>
+<a name="ln1755">    GFile *dest = g_file_new_for_path(destpath);</a>
+<a name="ln1756"> </a>
+<a name="ln1757">    // copy image to cache directory</a>
+<a name="ln1758">    GError *gerror = NULL;</a>
+<a name="ln1759"> </a>
+<a name="ln1760">    if(!g_file_copy(src, dest, G_FILE_COPY_NONE, NULL, NULL, NULL, &amp;gerror))</a>
+<a name="ln1761">    {</a>
+<a name="ln1762">      dt_control_log(_(&quot;cannot create local copy.&quot;));</a>
+<a name="ln1763">      g_object_unref(dest);</a>
+<a name="ln1764">      g_object_unref(src);</a>
+<a name="ln1765">      return 1;</a>
+<a name="ln1766">    }</a>
+<a name="ln1767"> </a>
+<a name="ln1768">    g_object_unref(dest);</a>
+<a name="ln1769">    g_object_unref(src);</a>
+<a name="ln1770">  }</a>
+<a name="ln1771"> </a>
+<a name="ln1772">  // update cache local copy flags, do this even if the local copy already exists as we need to set the flags</a>
+<a name="ln1773">  // for duplicate</a>
+<a name="ln1774">  dt_image_t *img = dt_image_cache_get(darktable.image_cache, imgid, 'w');</a>
+<a name="ln1775">  img-&gt;flags |= DT_IMAGE_LOCAL_COPY;</a>
+<a name="ln1776">  dt_image_cache_write_release(darktable.image_cache, img, DT_IMAGE_CACHE_RELAXED);</a>
+<a name="ln1777"> </a>
+<a name="ln1778">  dt_control_queue_redraw_center();</a>
+<a name="ln1779">  return 0;</a>
+<a name="ln1780">}</a>
+<a name="ln1781"> </a>
+<a name="ln1782">static int _nb_other_local_copy_for(const int32_t imgid)</a>
+<a name="ln1783">{</a>
+<a name="ln1784">  sqlite3_stmt *stmt;</a>
+<a name="ln1785">  int result = 1;</a>
+<a name="ln1786"> </a>
+<a name="ln1787">  DT_DEBUG_SQLITE3_PREPARE_V2(dt_database_get(darktable.db), &quot;SELECT COUNT(*) FROM main.images WHERE id!=?1 AND &quot;</a>
+<a name="ln1788">                                                             &quot;flags&amp;?2=?2 AND film_id=(SELECT film_id FROM &quot;</a>
+<a name="ln1789">                                                             &quot;main.images WHERE id=?1) AND filename=(SELECT &quot;</a>
+<a name="ln1790">                                                             &quot;filename FROM main.images WHERE id=?1);&quot;,</a>
+<a name="ln1791">                              -1, &amp;stmt, NULL);</a>
+<a name="ln1792">  DT_DEBUG_SQLITE3_BIND_INT(stmt, 1, imgid);</a>
+<a name="ln1793">  DT_DEBUG_SQLITE3_BIND_INT(stmt, 2, DT_IMAGE_LOCAL_COPY);</a>
+<a name="ln1794">  if(sqlite3_step(stmt) == SQLITE_ROW) result = sqlite3_column_int(stmt, 0);</a>
+<a name="ln1795">  sqlite3_finalize(stmt);</a>
+<a name="ln1796"> </a>
+<a name="ln1797">  return result;</a>
+<a name="ln1798">}</a>
+<a name="ln1799"> </a>
+<a name="ln1800">int dt_image_local_copy_reset(const int32_t imgid)</a>
+<a name="ln1801">{</a>
+<a name="ln1802">  gchar destpath[PATH_MAX] = { 0 };</a>
+<a name="ln1803">  gchar locppath[PATH_MAX] = { 0 };</a>
+<a name="ln1804">  gchar cachedir[PATH_MAX] = { 0 };</a>
+<a name="ln1805"> </a>
+<a name="ln1806">  // check that a local copy exists, otherwise there is nothing to do</a>
+<a name="ln1807">  dt_image_t *imgr = dt_image_cache_get(darktable.image_cache, imgid, 'r');</a>
+<a name="ln1808">  const gboolean local_copy_exists = (imgr-&gt;flags &amp; DT_IMAGE_LOCAL_COPY) == DT_IMAGE_LOCAL_COPY ? TRUE : FALSE;</a>
+<a name="ln1809">  dt_image_cache_read_release(darktable.image_cache, imgr);</a>
+<a name="ln1810"> </a>
+<a name="ln1811">  if (!local_copy_exists)</a>
+<a name="ln1812">    return 0;</a>
+<a name="ln1813"> </a>
+<a name="ln1814">  // check that the original file is accessible</a>
+<a name="ln1815"> </a>
+<a name="ln1816">  gboolean from_cache = FALSE;</a>
+<a name="ln1817">  dt_image_full_path(imgid, destpath, sizeof(destpath), &amp;from_cache);</a>
+<a name="ln1818"> </a>
+<a name="ln1819">  from_cache = TRUE;</a>
+<a name="ln1820">  dt_image_full_path(imgid, locppath, sizeof(locppath), &amp;from_cache);</a>
+<a name="ln1821">  dt_image_path_append_version(imgid, locppath, sizeof(locppath));</a>
+<a name="ln1822">  g_strlcat(locppath, &quot;.xmp&quot;, sizeof(locppath));</a>
+<a name="ln1823"> </a>
+<a name="ln1824">  // a local copy exists, but the original is not accessible</a>
+<a name="ln1825"> </a>
+<a name="ln1826">  if(g_file_test(locppath, G_FILE_TEST_EXISTS) &amp;&amp; !g_file_test(destpath, G_FILE_TEST_EXISTS))</a>
+<a name="ln1827">  {</a>
+<a name="ln1828">    dt_control_log(_(&quot;cannot remove local copy when the original file is not accessible.&quot;));</a>
+<a name="ln1829">    return 1;</a>
+<a name="ln1830">  }</a>
+<a name="ln1831"> </a>
+<a name="ln1832">  // get name of local copy</a>
+<a name="ln1833"> </a>
+<a name="ln1834">  _image_local_copy_full_path(imgid, locppath, sizeof(locppath));</a>
+<a name="ln1835"> </a>
+<a name="ln1836">  // remove cached file, but double check that this is really into the cache. We really want to avoid deleting</a>
+<a name="ln1837">  // a user's original file.</a>
+<a name="ln1838"> </a>
+<a name="ln1839">  dt_loc_get_user_cache_dir(cachedir, sizeof(cachedir));</a>
+<a name="ln1840"> </a>
+<a name="ln1841">  if(g_file_test(locppath, G_FILE_TEST_EXISTS) &amp;&amp; strstr(locppath, cachedir))</a>
+<a name="ln1842">  {</a>
+<a name="ln1843">    GFile *dest = g_file_new_for_path(locppath);</a>
+<a name="ln1844"> </a>
+<a name="ln1845">    // first sync the xmp with the original picture</a>
+<a name="ln1846"> </a>
+<a name="ln1847">    dt_image_write_sidecar_file(imgid);</a>
+<a name="ln1848"> </a>
+<a name="ln1849">    // delete image from cache directory only if there is no other local cache image referencing it</a>
+<a name="ln1850">    // for example duplicates are all referencing the same base picture.</a>
+<a name="ln1851"> </a>
+<a name="ln1852">    if(_nb_other_local_copy_for(imgid) == 0) g_file_delete(dest, NULL, NULL);</a>
+<a name="ln1853"> </a>
+<a name="ln1854">    g_object_unref(dest);</a>
+<a name="ln1855"> </a>
+<a name="ln1856">    // delete xmp if any</a>
+<a name="ln1857">    dt_image_path_append_version(imgid, locppath, sizeof(locppath));</a>
+<a name="ln1858">    g_strlcat(locppath, &quot;.xmp&quot;, sizeof(locppath));</a>
+<a name="ln1859">    dest = g_file_new_for_path(locppath);</a>
+<a name="ln1860"> </a>
+<a name="ln1861">    if(g_file_test(locppath, G_FILE_TEST_EXISTS)) g_file_delete(dest, NULL, NULL);</a>
+<a name="ln1862">    g_object_unref(dest);</a>
+<a name="ln1863">  }</a>
+<a name="ln1864"> </a>
+<a name="ln1865">  // update cache, remove local copy flags, this is done in all cases here as when we</a>
+<a name="ln1866">  // reach this point the local-copy flag is present and the file has been either removed</a>
+<a name="ln1867">  // or is not present.</a>
+<a name="ln1868"> </a>
+<a name="ln1869">  dt_image_t *img = dt_image_cache_get(darktable.image_cache, imgid, 'w');</a>
+<a name="ln1870">  img-&gt;flags &amp;= ~DT_IMAGE_LOCAL_COPY;</a>
+<a name="ln1871">  dt_image_cache_write_release(darktable.image_cache, img, DT_IMAGE_CACHE_RELAXED);</a>
+<a name="ln1872"> </a>
+<a name="ln1873">  dt_control_queue_redraw_center();</a>
+<a name="ln1874"> </a>
+<a name="ln1875">  return 0;</a>
+<a name="ln1876">}</a>
+<a name="ln1877"> </a>
+<a name="ln1878">// *******************************************************</a>
+<a name="ln1879">// xmp stuff</a>
+<a name="ln1880">// *******************************************************</a>
+<a name="ln1881"> </a>
+<a name="ln1882">void dt_image_write_sidecar_file(int imgid)</a>
+<a name="ln1883">{</a>
+<a name="ln1884">  // TODO: compute hash and don't write if not needed!</a>
+<a name="ln1885">  // write .xmp file</a>
+<a name="ln1886">  if(imgid &gt; 0 &amp;&amp; dt_conf_get_bool(&quot;write_sidecar_files&quot;))</a>
+<a name="ln1887">  {</a>
+<a name="ln1888">    char filename[PATH_MAX] = { 0 };</a>
+<a name="ln1889"> </a>
+<a name="ln1890">    // FIRST: check if the original file is present</a>
+<a name="ln1891">    gboolean from_cache = FALSE;</a>
+<a name="ln1892">    dt_image_full_path(imgid, filename, sizeof(filename), &amp;from_cache);</a>
+<a name="ln1893"> </a>
+<a name="ln1894">    if (!g_file_test(filename, G_FILE_TEST_EXISTS))</a>
+<a name="ln1895">    {</a>
+<a name="ln1896">      // OTHERWISE: check if the local copy exists</a>
+<a name="ln1897">      from_cache = TRUE;</a>
+<a name="ln1898">      dt_image_full_path(imgid, filename, sizeof(filename), &amp;from_cache);</a>
+<a name="ln1899"> </a>
+<a name="ln1900">      //  nothing to do, the original is not accessible and there is no local copy</a>
+<a name="ln1901">      if (!from_cache) return;</a>
+<a name="ln1902">    }</a>
+<a name="ln1903"> </a>
+<a name="ln1904">    dt_image_path_append_version(imgid, filename, sizeof(filename));</a>
+<a name="ln1905">    g_strlcat(filename, &quot;.xmp&quot;, sizeof(filename));</a>
+<a name="ln1906"> </a>
+<a name="ln1907">    if(!dt_exif_xmp_write(imgid, filename))</a>
+<a name="ln1908">    {</a>
+<a name="ln1909">      // put the timestamp into db. this can't be done in exif.cc since that code gets called</a>
+<a name="ln1910">      // for the copy exporter, too</a>
+<a name="ln1911">      sqlite3_stmt *stmt;</a>
+<a name="ln1912">      DT_DEBUG_SQLITE3_PREPARE_V2(dt_database_get(darktable.db),</a>
+<a name="ln1913">                                  &quot;UPDATE main.images SET write_timestamp = STRFTIME('%s', 'now') WHERE id = ?1&quot;,</a>
+<a name="ln1914">                                  -1, &amp;stmt, NULL);</a>
+<a name="ln1915">      DT_DEBUG_SQLITE3_BIND_INT(stmt, 1, imgid);</a>
+<a name="ln1916">      sqlite3_step(stmt);</a>
+<a name="ln1917">      sqlite3_finalize(stmt);</a>
+<a name="ln1918">    }</a>
+<a name="ln1919">  }</a>
+<a name="ln1920">}</a>
+<a name="ln1921"> </a>
+<a name="ln1922"> </a>
+<a name="ln1923">void dt_image_synch_xmp(const int selected)</a>
+<a name="ln1924">{</a>
+<a name="ln1925">  if(selected &gt; 0)</a>
+<a name="ln1926">  {</a>
+<a name="ln1927">    dt_image_write_sidecar_file(selected);</a>
+<a name="ln1928">  }</a>
+<a name="ln1929">  else if(dt_conf_get_bool(&quot;write_sidecar_files&quot;))</a>
+<a name="ln1930">  {</a>
+<a name="ln1931">    sqlite3_stmt *stmt;</a>
+<a name="ln1932">    DT_DEBUG_SQLITE3_PREPARE_V2(dt_database_get(darktable.db), &quot;SELECT imgid FROM main.selected_images&quot;, -1, &amp;stmt,</a>
+<a name="ln1933">                                NULL);</a>
+<a name="ln1934">    while(sqlite3_step(stmt) == SQLITE_ROW)</a>
+<a name="ln1935">    {</a>
+<a name="ln1936">      const int imgid = sqlite3_column_int(stmt, 0);</a>
+<a name="ln1937">      dt_image_write_sidecar_file(imgid);</a>
+<a name="ln1938">    }</a>
+<a name="ln1939">    sqlite3_finalize(stmt);</a>
+<a name="ln1940">  }</a>
+<a name="ln1941">}</a>
+<a name="ln1942"> </a>
+<a name="ln1943">void dt_image_synch_all_xmp(const gchar *pathname)</a>
+<a name="ln1944">{</a>
+<a name="ln1945">  if(dt_conf_get_bool(&quot;write_sidecar_files&quot;))</a>
+<a name="ln1946">  {</a>
+<a name="ln1947">    sqlite3_stmt *stmt;</a>
+<a name="ln1948">    gchar *imgfname = g_path_get_basename(pathname);</a>
+<a name="ln1949">    gchar *imgpath = g_path_get_dirname(pathname);</a>
+<a name="ln1950">    DT_DEBUG_SQLITE3_PREPARE_V2(dt_database_get(darktable.db),</a>
+<a name="ln1951">                                &quot;SELECT id FROM main.images WHERE film_id IN (SELECT id FROM main.film_rolls &quot;</a>
+<a name="ln1952">                                &quot;WHERE folder = ?1) AND filename = ?2&quot;,</a>
+<a name="ln1953">                                -1, &amp;stmt, NULL);</a>
+<a name="ln1954">    DT_DEBUG_SQLITE3_BIND_TEXT(stmt, 1, imgpath, -1, SQLITE_TRANSIENT);</a>
+<a name="ln1955">    DT_DEBUG_SQLITE3_BIND_TEXT(stmt, 2, imgfname, -1, SQLITE_TRANSIENT);</a>
+<a name="ln1956">    while(sqlite3_step(stmt) == SQLITE_ROW)</a>
+<a name="ln1957">    {</a>
+<a name="ln1958">      const int imgid = sqlite3_column_int(stmt, 0);</a>
+<a name="ln1959">      dt_image_write_sidecar_file(imgid);</a>
+<a name="ln1960">    }</a>
+<a name="ln1961">    sqlite3_finalize(stmt);</a>
+<a name="ln1962">    g_free(imgfname);</a>
+<a name="ln1963">    g_free(imgpath);</a>
+<a name="ln1964">  }</a>
+<a name="ln1965">}</a>
+<a name="ln1966"> </a>
+<a name="ln1967">void dt_image_local_copy_synch(void)</a>
+<a name="ln1968">{</a>
+<a name="ln1969">  // nothing to do if not creating .xmp</a>
+<a name="ln1970">  if(!dt_conf_get_bool(&quot;write_sidecar_files&quot;)) return;</a>
+<a name="ln1971"> </a>
+<a name="ln1972">  sqlite3_stmt *stmt;</a>
+<a name="ln1973"> </a>
+<a name="ln1974">  DT_DEBUG_SQLITE3_PREPARE_V2(dt_database_get(darktable.db), &quot;SELECT id FROM main.images WHERE flags&amp;?1=?1&quot;, -1,</a>
+<a name="ln1975">                              &amp;stmt, NULL);</a>
+<a name="ln1976">  DT_DEBUG_SQLITE3_BIND_INT(stmt, 1, DT_IMAGE_LOCAL_COPY);</a>
+<a name="ln1977"> </a>
+<a name="ln1978">  int count = 0;</a>
+<a name="ln1979"> </a>
+<a name="ln1980">  while(sqlite3_step(stmt) == SQLITE_ROW)</a>
+<a name="ln1981">  {</a>
+<a name="ln1982">    const int imgid = sqlite3_column_int(stmt, 0);</a>
+<a name="ln1983">    gboolean from_cache = FALSE;</a>
+<a name="ln1984">    char filename[PATH_MAX] = { 0 };</a>
+<a name="ln1985">    dt_image_full_path(imgid, filename, sizeof(filename), &amp;from_cache);</a>
+<a name="ln1986"> </a>
+<a name="ln1987">    if(g_file_test(filename, G_FILE_TEST_EXISTS))</a>
+<a name="ln1988">    {</a>
+<a name="ln1989">      dt_image_write_sidecar_file(imgid);</a>
+<a name="ln1990">      count++;</a>
+<a name="ln1991">    }</a>
+<a name="ln1992">  }</a>
+<a name="ln1993">  sqlite3_finalize(stmt);</a>
+<a name="ln1994"> </a>
+<a name="ln1995">  if(count &gt; 0)</a>
+<a name="ln1996">  {</a>
+<a name="ln1997">    dt_control_log(ngettext(&quot;%d local copy has been synchronized&quot;,</a>
+<a name="ln1998">                            &quot;%d local copies have been synchronized&quot;, count),</a>
+<a name="ln1999">                   count);</a>
+<a name="ln2000">  }</a>
+<a name="ln2001">}</a>
+<a name="ln2002"> </a>
+<a name="ln2003">void dt_image_add_time_offset(const int imgid, const long int offset)</a>
+<a name="ln2004">{</a>
+<a name="ln2005">  const dt_image_t *cimg = dt_image_cache_get(darktable.image_cache, imgid, 'r');</a>
+<a name="ln2006">  if(!cimg) return;</a>
+<a name="ln2007"> </a>
+<a name="ln2008">  // get the datetime_taken and calculate the new time</a>
+<a name="ln2009">  gint year;</a>
+<a name="ln2010">  gint month;</a>
+<a name="ln2011">  gint day;</a>
+<a name="ln2012">  gint hour;</a>
+<a name="ln2013">  gint minute;</a>
+<a name="ln2014">  gint seconds;</a>
+<a name="ln2015"> </a>
+<a name="ln2016">  if(sscanf(cimg-&gt;exif_datetime_taken, &quot;%d:%d:%d %d:%d:%d&quot;, (int *)&amp;year, (int *)&amp;month, (int *)&amp;day,</a>
+<a name="ln2017">            (int *)&amp;hour, (int *)&amp;minute, (int *)&amp;seconds) != 6)</a>
+<a name="ln2018">  {</a>
+<a name="ln2019">    fprintf(stderr, &quot;broken exif time in db, '%s', imgid %d\n&quot;, cimg-&gt;exif_datetime_taken, imgid);</a>
+<a name="ln2020">    dt_image_cache_read_release(darktable.image_cache, cimg);</a>
+<a name="ln2021">    return;</a>
+<a name="ln2022">  }</a>
+<a name="ln2023"> </a>
+<a name="ln2024">  GTimeZone *tz = g_time_zone_new_utc();</a>
+<a name="ln2025">  GDateTime *datetime_original = g_date_time_new(tz, year, month, day, hour, minute, seconds);</a>
+<a name="ln2026">  g_time_zone_unref(tz);</a>
+<a name="ln2027">  if(!datetime_original)</a>
+<a name="ln2028">  {</a>
+<a name="ln2029">    dt_image_cache_read_release(darktable.image_cache, cimg);</a>
+<a name="ln2030">    return;</a>
+<a name="ln2031">  }</a>
+<a name="ln2032"> </a>
+<a name="ln2033">  // let's add our offset</a>
+<a name="ln2034">  GDateTime *datetime_new = g_date_time_add_seconds(datetime_original, offset);</a>
+<a name="ln2035">  g_date_time_unref(datetime_original);</a>
+<a name="ln2036"> </a>
+<a name="ln2037">  if(!datetime_new)</a>
+<a name="ln2038">  {</a>
+<a name="ln2039">    dt_image_cache_read_release(darktable.image_cache, cimg);</a>
+<a name="ln2040">    return;</a>
+<a name="ln2041">  }</a>
+<a name="ln2042"> </a>
+<a name="ln2043">  gchar *datetime = g_date_time_format(datetime_new, &quot;%Y:%m:%d %H:%M:%S&quot;);</a>
+<a name="ln2044">  g_date_time_unref(datetime_new);</a>
+<a name="ln2045"> </a>
+<a name="ln2046">  // update exif_datetime_taken in img</a>
+<a name="ln2047">  if(datetime)</a>
+<a name="ln2048">  {</a>
+<a name="ln2049">    dt_image_cache_read_release(darktable.image_cache, cimg);</a>
+<a name="ln2050">    dt_image_t *img = dt_image_cache_get(darktable.image_cache, imgid, 'w');</a>
+<a name="ln2051">    g_strlcpy(img-&gt;exif_datetime_taken, datetime, sizeof(img-&gt;exif_datetime_taken));</a>
+<a name="ln2052">    dt_image_cache_write_release(darktable.image_cache, img, DT_IMAGE_CACHE_SAFE);</a>
+<a name="ln2053">  }</a>
+<a name="ln2054">  else dt_image_cache_read_release(darktable.image_cache, cimg);</a>
+<a name="ln2055"> </a>
+<a name="ln2056">  g_free(datetime);</a>
+<a name="ln2057">}</a>
+<a name="ln2058"> </a>
+<a name="ln2059">char *dt_image_get_audio_path_from_path(const char *image_path)</a>
+<a name="ln2060">{</a>
+<a name="ln2061">  size_t len = strlen(image_path);</a>
+<a name="ln2062">  const char *c = image_path + len;</a>
+<a name="ln2063">  while((c &gt; image_path) &amp;&amp; (*c != '.')) c--;</a>
+<a name="ln2064">  len = c - image_path + 1;</a>
+<a name="ln2065"> </a>
+<a name="ln2066">  char *result = g_strndup(image_path, len + 3);</a>
+<a name="ln2067"> </a>
+<a name="ln2068">  result[len] = 'w';</a>
+<a name="ln2069">  result[len + 1] = 'a';</a>
+<a name="ln2070">  result[len + 2] = 'v';</a>
+<a name="ln2071">  if(g_file_test(result, G_FILE_TEST_EXISTS)) return result;</a>
+<a name="ln2072"> </a>
+<a name="ln2073">  result[len] = 'W';</a>
+<a name="ln2074">  result[len + 1] = 'A';</a>
+<a name="ln2075">  result[len + 2] = 'V';</a>
+<a name="ln2076">  if(g_file_test(result, G_FILE_TEST_EXISTS)) return result;</a>
+<a name="ln2077"> </a>
+<a name="ln2078">  g_free(result);</a>
+<a name="ln2079">  return NULL;</a>
+<a name="ln2080">}</a>
+<a name="ln2081"> </a>
+<a name="ln2082">char *dt_image_get_audio_path(const int32_t imgid)</a>
+<a name="ln2083">{</a>
+<a name="ln2084">  gboolean from_cache = FALSE;</a>
+<a name="ln2085">  char image_path[PATH_MAX] = { 0 };</a>
+<a name="ln2086">  dt_image_full_path(imgid, image_path, sizeof(image_path), &amp;from_cache);</a>
+<a name="ln2087"> </a>
+<a name="ln2088">  return dt_image_get_audio_path_from_path(image_path);</a>
+<a name="ln2089">}</a>
+<a name="ln2090"> </a>
+<a name="ln2091">char *dt_image_get_text_path_from_path(const char *image_path)</a>
+<a name="ln2092">{</a>
+<a name="ln2093">  size_t len = strlen(image_path);</a>
+<a name="ln2094">  const char *c = image_path + len;</a>
+<a name="ln2095">  while((c &gt; image_path) &amp;&amp; (*c != '.')) c--;</a>
+<a name="ln2096">  len = c - image_path + 1;</a>
+<a name="ln2097"> </a>
+<a name="ln2098">  char *result = g_strndup(image_path, len + 3);</a>
+<a name="ln2099"> </a>
+<a name="ln2100">  result[len] = 't';</a>
+<a name="ln2101">  result[len + 1] = 'x';</a>
+<a name="ln2102">  result[len + 2] = 't';</a>
+<a name="ln2103">  if(g_file_test(result, G_FILE_TEST_EXISTS)) return result;</a>
+<a name="ln2104"> </a>
+<a name="ln2105">  result[len] = 'T';</a>
+<a name="ln2106">  result[len + 1] = 'X';</a>
+<a name="ln2107">  result[len + 2] = 'T';</a>
+<a name="ln2108">  if(g_file_test(result, G_FILE_TEST_EXISTS)) return result;</a>
+<a name="ln2109"> </a>
+<a name="ln2110">  g_free(result);</a>
+<a name="ln2111">  return NULL;</a>
+<a name="ln2112">}</a>
+<a name="ln2113"> </a>
+<a name="ln2114">char *dt_image_get_text_path(const int32_t imgid)</a>
+<a name="ln2115">{</a>
+<a name="ln2116">  gboolean from_cache = FALSE;</a>
+<a name="ln2117">  char image_path[PATH_MAX] = { 0 };</a>
+<a name="ln2118">  dt_image_full_path(imgid, image_path, sizeof(image_path), &amp;from_cache);</a>
+<a name="ln2119"> </a>
+<a name="ln2120">  return dt_image_get_text_path_from_path(image_path);</a>
+<a name="ln2121">}</a>
+<a name="ln2122"> </a>
+<a name="ln2123">// modelines: These editor modelines have been set for all relevant files by tools/update_modelines.sh</a>
+<a name="ln2124">// vim: shiftwidth=2 expandtab tabstop=2 cindent</a>
+<a name="ln2125">// kate: tab-indents: off; indent-width 2; replace-tabs on; indent-mode cstyle; remove-trailing-spaces modified;</a>
+
+</code></pre>
+<div class="balloon" rel="147"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v547/" target="_blank">V547</a> Expression 'numparts < 1' is always false.</p></div>
+<div class="balloon" rel="1434"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v575/" target="_blank">V575</a> The null pointer is passed into 'g_list_free' function. Inspect the first argument.</p></div>
+
+<link rel="stylesheet" href="highlight.css">
+<script src="highlight.pack.js"></script>
+<script src="highlightjs-line-numbers.js"></script>
+<script>hljs.initHighlightingOnLoad();</script>
+<script>hljs.initLineNumbersOnLoad();</script>
+<script>
+  $(document).ready(function() {
+      $('.balloon').each(function () {
+          var bl = $(this);
+          var line = bl.attr('rel');
+          var text = $('a[name="ln'+line+'"]').text();
+
+          var space_count = 0;
+          for(var i = 0; i<text.length; i++){
+              var char = text[i];
+              if((char !== ' ')&&(char !== '\t'))break;
+              if(char === '\t')space_count++;
+              space_count++;
+          }
+
+          bl.css('margin-left', space_count*8);
+          $('a[name="ln'+line+'"]').after(bl);
+      });
+
+      window.location = window.location;
+  });
+</script>
+</body>
+</html>

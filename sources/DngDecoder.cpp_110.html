@@ -1,0 +1,823 @@
+
+<html>
+<head>
+  <link rel="stylesheet" href="../style.css"/>
+  <script src="../jquery-3.2.1.min.js"></script>
+</head>
+<body>
+<pre><code class = "cpp">
+<a name="ln1">/*</a>
+<a name="ln2">    RawSpeed - RAW file decoder.</a>
+<a name="ln3"> </a>
+<a name="ln4">    Copyright (C) 2009-2014 Klaus Post</a>
+<a name="ln5"> </a>
+<a name="ln6">    This library is free software; you can redistribute it and/or</a>
+<a name="ln7">    modify it under the terms of the GNU Lesser General Public</a>
+<a name="ln8">    License as published by the Free Software Foundation; either</a>
+<a name="ln9">    version 2 of the License, or (at your option) any later version.</a>
+<a name="ln10"> </a>
+<a name="ln11">    This library is distributed in the hope that it will be useful,</a>
+<a name="ln12">    but WITHOUT ANY WARRANTY; without even the implied warranty of</a>
+<a name="ln13">    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU</a>
+<a name="ln14">    Lesser General Public License for more details.</a>
+<a name="ln15"> </a>
+<a name="ln16">    You should have received a copy of the GNU Lesser General Public</a>
+<a name="ln17">    License along with this library; if not, write to the Free Software</a>
+<a name="ln18">    Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA</a>
+<a name="ln19">*/</a>
+<a name="ln20"> </a>
+<a name="ln21">#include &quot;rawspeedconfig.h&quot; // for HAVE_JPEG, HAVE_ZLIB</a>
+<a name="ln22">#include &quot;decoders/DngDecoder.h&quot;</a>
+<a name="ln23">#include &quot;common/Common.h&quot;                         // for uint32_t, roundUpDi...</a>
+<a name="ln24">#include &quot;common/DngOpcodes.h&quot;                     // for DngOpcodes</a>
+<a name="ln25">#include &quot;common/NORangesSet.h&quot;                    // for set</a>
+<a name="ln26">#include &quot;common/Point.h&quot;                          // for iPoint2D, iRectan...</a>
+<a name="ln27">#include &quot;common/RawspeedException.h&quot;              // for RawspeedException</a>
+<a name="ln28">#include &quot;decoders/RawDecoderException.h&quot;          // for ThrowRDE, RawDeco...</a>
+<a name="ln29">#include &quot;decompressors/AbstractDngDecompressor.h&quot; // for DngSliceElement</a>
+<a name="ln30">#include &quot;io/Buffer.h&quot;                             // for Buffer, DataBuffer</a>
+<a name="ln31">#include &quot;io/ByteStream.h&quot;                         // for ByteStream</a>
+<a name="ln32">#include &quot;metadata/BlackArea.h&quot;                    // for BlackArea</a>
+<a name="ln33">#include &quot;metadata/Camera.h&quot;                       // for Camera</a>
+<a name="ln34">#include &quot;metadata/CameraMetaData.h&quot;               // for CameraMetaData</a>
+<a name="ln35">#include &quot;metadata/ColorFilterArray.h&quot;             // for CFAColor, ColorFi...</a>
+<a name="ln36">#include &quot;parsers/TiffParserException.h&quot;           // for ThrowTPE</a>
+<a name="ln37">#include &quot;tiff/TiffEntry.h&quot;                        // for TiffEntry, TIFF_LONG</a>
+<a name="ln38">#include &quot;tiff/TiffIFD.h&quot;                          // for TiffIFD, TiffRootIFD</a>
+<a name="ln39">#include &quot;tiff/TiffTag.h&quot;                          // for ACTIVEAREA, TILEO...</a>
+<a name="ln40">#include &lt;algorithm&gt;                               // for any_of</a>
+<a name="ln41">#include &lt;array&gt;                                   // for array, array&lt;&gt;::v...</a>
+<a name="ln42">#include &lt;cassert&gt;                                 // for assert</a>
+<a name="ln43">#include &lt;limits&gt;                                  // for numeric_limits</a>
+<a name="ln44">#include &lt;map&gt;                                     // for map</a>
+<a name="ln45">#include &lt;memory&gt;                                  // for unique_ptr</a>
+<a name="ln46">#include &lt;stdexcept&gt;                               // for out_of_range</a>
+<a name="ln47">#include &lt;string&gt;                                  // for string, operator+</a>
+<a name="ln48">#include &lt;utility&gt;                                 // for move, pair</a>
+<a name="ln49">#include &lt;vector&gt;                                  // for vector, allocator</a>
+<a name="ln50"> </a>
+<a name="ln51">using std::vector;</a>
+<a name="ln52">using std::map;</a>
+<a name="ln53">using std::string;</a>
+<a name="ln54"> </a>
+<a name="ln55">namespace rawspeed {</a>
+<a name="ln56"> </a>
+<a name="ln57">bool __attribute__((pure))</a>
+<a name="ln58">DngDecoder::isAppropriateDecoder(const TiffRootIFD* rootIFD,</a>
+<a name="ln59">                                 const Buffer* file) {</a>
+<a name="ln60">  return rootIFD-&gt;hasEntryRecursive(DNGVERSION);</a>
+<a name="ln61">}</a>
+<a name="ln62"> </a>
+<a name="ln63">DngDecoder::DngDecoder(TiffRootIFDOwner&amp;&amp; rootIFD, const Buffer* file)</a>
+<a name="ln64">    : AbstractTiffDecoder(move(rootIFD), file) {</a>
+<a name="ln65">  if (!mRootIFD-&gt;hasEntryRecursive(DNGVERSION))</a>
+<a name="ln66">    ThrowRDE(&quot;DNG, but version tag is missing. Will not guess.&quot;);</a>
+<a name="ln67"> </a>
+<a name="ln68">  const uint8_t* v = mRootIFD-&gt;getEntryRecursive(DNGVERSION)-&gt;getData(4);</a>
+<a name="ln69"> </a>
+<a name="ln70">  if (v[0] != 1)</a>
+<a name="ln71">    ThrowRDE(&quot;Not a supported DNG image format: v%u.%u.%u.%u&quot;, (int)v[0], (int)v[1], (int)v[2], (int)v[3]);</a>
+<a name="ln72">//  if (v[1] &gt; 4)</a>
+<a name="ln73">//    ThrowRDE(&quot;Not a supported DNG image format: v%u.%u.%u.%u&quot;, (int)v[0], (int)v[1], (int)v[2], (int)v[3]);</a>
+<a name="ln74"> </a>
+<a name="ln75">  // Prior to v1.1.xxx  fix LJPEG encoding bug</a>
+<a name="ln76">  mFixLjpeg = (v[0] &lt;= 1) &amp;&amp; (v[1] &lt; 1);</a>
+<a name="ln77">}</a>
+<a name="ln78"> </a>
+<a name="ln79">void DngDecoder::dropUnsuportedChunks(std::vector&lt;const TiffIFD*&gt;* data) {</a>
+<a name="ln80">  for (auto i = data-&gt;begin(); i != data-&gt;end();) {</a>
+<a name="ln81">    const auto&amp; ifd = *i;</a>
+<a name="ln82"> </a>
+<a name="ln83">    int comp = ifd-&gt;getEntry(COMPRESSION)-&gt;getU16();</a>
+<a name="ln84">    bool isSubsampled = false;</a>
+<a name="ln85">    bool isAlpha = false;</a>
+<a name="ln86"> </a>
+<a name="ln87">    if (ifd-&gt;hasEntry(NEWSUBFILETYPE) &amp;&amp;</a>
+<a name="ln88">        ifd-&gt;getEntry(NEWSUBFILETYPE)-&gt;isInt()) {</a>
+<a name="ln89">      const uint32_t NewSubFileType = (*i)-&gt;getEntry(NEWSUBFILETYPE)-&gt;getU32();</a>
+<a name="ln90"> </a>
+<a name="ln91">      // bit 0 is on if image is subsampled.</a>
+<a name="ln92">      // the value itself can be either 1, or 0x10001.</a>
+<a name="ln93">      // or 5 for &quot;Transparency information for subsampled raw images&quot;</a>
+<a name="ln94">      isSubsampled = NewSubFileType &amp; (1 &lt;&lt; 0);</a>
+<a name="ln95"> </a>
+<a name="ln96">      // bit 2 is on if image contains transparency information.</a>
+<a name="ln97">      // the value itself can be either 4 or 5</a>
+<a name="ln98">      isAlpha = NewSubFileType &amp; (1 &lt;&lt; 2);</a>
+<a name="ln99">    }</a>
+<a name="ln100"> </a>
+<a name="ln101">    // normal raw?</a>
+<a name="ln102">    bool supported = !isSubsampled &amp;&amp; !isAlpha;</a>
+<a name="ln103"> </a>
+<a name="ln104">    switch (comp) {</a>
+<a name="ln105">    case 1: // uncompressed</a>
+<a name="ln106">    case 7: // lossless JPEG</a>
+<a name="ln107">#ifdef HAVE_ZLIB</a>
+<a name="ln108">    case 8: // deflate</a>
+<a name="ln109">#endif</a>
+<a name="ln110">    case 9: // VC-5 as used by GoPro</a>
+<a name="ln111">#ifdef HAVE_JPEG</a>
+<a name="ln112">    case 0x884c: // lossy JPEG</a>
+<a name="ln113">#endif</a>
+<a name="ln114">      // no change, if supported, then is still supported.</a>
+<a name="ln115">      break;</a>
+<a name="ln116"> </a>
+<a name="ln117">#ifndef HAVE_ZLIB</a>
+<a name="ln118">    case 8: // deflate</a>
+<a name="ln119">#pragma message                                                                \</a>
+<a name="ln120">    &quot;ZLIB is not present! Deflate compression will not be supported!&quot;</a>
+<a name="ln121">      writeLog(DEBUG_PRIO_WARNING, &quot;DNG Decoder: found Deflate-encoded chunk, &quot;</a>
+<a name="ln122">                                   &quot;but the deflate support was disabled at &quot;</a>
+<a name="ln123">                                   &quot;build!&quot;);</a>
+<a name="ln124">      [[clang::fallthrough]];</a>
+<a name="ln125">#endif</a>
+<a name="ln126">#ifndef HAVE_JPEG</a>
+<a name="ln127">    case 0x884c: // lossy JPEG</a>
+<a name="ln128">#pragma message                                                                \</a>
+<a name="ln129">    &quot;JPEG is not present! Lossy JPEG compression will not be supported!&quot;</a>
+<a name="ln130">      writeLog(DEBUG_PRIO_WARNING, &quot;DNG Decoder: found lossy JPEG-encoded &quot;</a>
+<a name="ln131">                                   &quot;chunk, but the jpeg support was &quot;</a>
+<a name="ln132">                                   &quot;disabled at build!&quot;);</a>
+<a name="ln133">      [[clang::fallthrough]];</a>
+<a name="ln134">#endif</a>
+<a name="ln135">    default:</a>
+<a name="ln136">      supported = false;</a>
+<a name="ln137">      break;</a>
+<a name="ln138">    }</a>
+<a name="ln139"> </a>
+<a name="ln140">    if (supported)</a>
+<a name="ln141">      ++i;</a>
+<a name="ln142">    else</a>
+<a name="ln143">      i = data-&gt;erase(i);</a>
+<a name="ln144">  }</a>
+<a name="ln145">}</a>
+<a name="ln146"> </a>
+<a name="ln147">void DngDecoder::parseCFA(const TiffIFD* raw) {</a>
+<a name="ln148"> </a>
+<a name="ln149">  // Check if layout is OK, if present</a>
+<a name="ln150">  if (raw-&gt;hasEntry(CFALAYOUT) &amp;&amp; raw-&gt;getEntry(CFALAYOUT)-&gt;getU16() != 1)</a>
+<a name="ln151">    ThrowRDE(&quot;Unsupported CFA Layout.&quot;);</a>
+<a name="ln152"> </a>
+<a name="ln153">  TiffEntry* cfadim = raw-&gt;getEntry(CFAREPEATPATTERNDIM);</a>
+<a name="ln154">  if (cfadim-&gt;count != 2)</a>
+<a name="ln155">    ThrowRDE(&quot;Couldn't read CFA pattern dimension&quot;);</a>
+<a name="ln156"> </a>
+<a name="ln157">  // Does NOT contain dimensions as some documents state</a>
+<a name="ln158">  TiffEntry* cPat = raw-&gt;getEntry(CFAPATTERN);</a>
+<a name="ln159"> </a>
+<a name="ln160">  iPoint2D cfaSize(cfadim-&gt;getU32(1), cfadim-&gt;getU32(0));</a>
+<a name="ln161">  if (cfaSize.area() != cPat-&gt;count) {</a>
+<a name="ln162">    ThrowRDE(&quot;CFA pattern dimension and pattern count does not &quot;</a>
+<a name="ln163">             &quot;match: %d.&quot;,</a>
+<a name="ln164">             cPat-&gt;count);</a>
+<a name="ln165">  }</a>
+<a name="ln166"> </a>
+<a name="ln167">  mRaw-&gt;cfa.setSize(cfaSize);</a>
+<a name="ln168"> </a>
+<a name="ln169">  static const map&lt;uint32_t, CFAColor&gt; int2enum = {</a>
+<a name="ln170">      {0, CFA_RED},     {1, CFA_GREEN},  {2, CFA_BLUE},  {3, CFA_CYAN},</a>
+<a name="ln171">      {4, CFA_MAGENTA}, {5, CFA_YELLOW}, {6, CFA_WHITE},</a>
+<a name="ln172">  };</a>
+<a name="ln173"> </a>
+<a name="ln174">  for (int y = 0; y &lt; cfaSize.y; y++) {</a>
+<a name="ln175">    for (int x = 0; x &lt; cfaSize.x; x++) {</a>
+<a name="ln176">      uint32_t c1 = cPat-&gt;getByte(x + y * cfaSize.x);</a>
+<a name="ln177">      CFAColor c2 = CFA_UNKNOWN;</a>
+<a name="ln178"> </a>
+<a name="ln179">      try {</a>
+<a name="ln180">        c2 = int2enum.at(c1);</a>
+<a name="ln181">      } catch (std::out_of_range&amp;) {</a>
+<a name="ln182">        ThrowRDE(&quot;Unsupported CFA Color: %u&quot;, c1);</a>
+<a name="ln183">      }</a>
+<a name="ln184"> </a>
+<a name="ln185">      mRaw-&gt;cfa.setColorAt(iPoint2D(x, y), c2);</a>
+<a name="ln186">    }</a>
+<a name="ln187">  }</a>
+<a name="ln188"> </a>
+<a name="ln189">  // the cfa is specified relative to the ActiveArea. we want it relative (0,0)</a>
+<a name="ln190">  // Since in handleMetadata(), in subFrame() we unconditionally shift CFA by</a>
+<a name="ln191">  // activearea+DefaultCropOrigin; here we need to undo the 'ACTIVEAREA' part.</a>
+<a name="ln192">  if (!raw-&gt;hasEntry(ACTIVEAREA))</a>
+<a name="ln193">    return;</a>
+<a name="ln194"> </a>
+<a name="ln195">  TiffEntry* active_area = raw-&gt;getEntry(ACTIVEAREA);</a>
+<a name="ln196">  if (active_area-&gt;count != 4)</a>
+<a name="ln197">    ThrowRDE(&quot;active area has %d values instead of 4&quot;, active_area-&gt;count);</a>
+<a name="ln198"> </a>
+<a name="ln199">  const auto aa = active_area-&gt;getFloatArray(2);</a>
+<a name="ln200">  if (std::any_of(aa.cbegin(), aa.cend(), [](const auto v) {</a>
+<a name="ln201">        return v &lt; std::numeric_limits&lt;iPoint2D::value_type&gt;::min() ||</a>
+<a name="ln202">               v &gt; std::numeric_limits&lt;iPoint2D::value_type&gt;::max();</a>
+<a name="ln203">      }))</a>
+<a name="ln204">    ThrowRDE(&quot;Error decoding active area&quot;);</a>
+<a name="ln205"> </a>
+<a name="ln206">  mRaw-&gt;cfa.shiftLeft(aa[1]);</a>
+<a name="ln207">  mRaw-&gt;cfa.shiftDown(aa[0]);</a>
+<a name="ln208">}</a>
+<a name="ln209"> </a>
+<a name="ln210">DngTilingDescription DngDecoder::getTilingDescription(const TiffIFD* raw) {</a>
+<a name="ln211">  if (raw-&gt;hasEntry(TILEOFFSETS)) {</a>
+<a name="ln212">    const uint32_t tilew = raw-&gt;getEntry(TILEWIDTH)-&gt;getU32();</a>
+<a name="ln213">    const uint32_t tileh = raw-&gt;getEntry(TILELENGTH)-&gt;getU32();</a>
+<a name="ln214"> </a>
+<a name="ln215">    if (!(tilew &gt; 0 &amp;&amp; tileh &gt; 0))</a>
+<a name="ln216">      ThrowRDE(&quot;Invalid tile size: (%u, %u)&quot;, tilew, tileh);</a>
+<a name="ln217"> </a>
+<a name="ln218">    assert(tilew &gt; 0);</a>
+<a name="ln219">    const uint32_t tilesX = roundUpDivision(mRaw-&gt;dim.x, tilew);</a>
+<a name="ln220">    if (!tilesX)</a>
+<a name="ln221">      ThrowRDE(&quot;Zero tiles horizontally&quot;);</a>
+<a name="ln222"> </a>
+<a name="ln223">    assert(tileh &gt; 0);</a>
+<a name="ln224">    const uint32_t tilesY = roundUpDivision(mRaw-&gt;dim.y, tileh);</a>
+<a name="ln225">    if (!tilesY)</a>
+<a name="ln226">      ThrowRDE(&quot;Zero tiles vertically&quot;);</a>
+<a name="ln227"> </a>
+<a name="ln228">    TiffEntry* offsets = raw-&gt;getEntry(TILEOFFSETS);</a>
+<a name="ln229">    TiffEntry* counts = raw-&gt;getEntry(TILEBYTECOUNTS);</a>
+<a name="ln230">    if (offsets-&gt;count != counts-&gt;count) {</a>
+<a name="ln231">      ThrowRDE(&quot;Tile count mismatch: offsets:%u count:%u&quot;, offsets-&gt;count,</a>
+<a name="ln232">               counts-&gt;count);</a>
+<a name="ln233">    }</a>
+<a name="ln234"> </a>
+<a name="ln235">    // tilesX * tilesY may overflow, but division is fine, so let's do that.</a>
+<a name="ln236">    if ((offsets-&gt;count / tilesX != tilesY || (offsets-&gt;count % tilesX != 0)) ||</a>
+<a name="ln237">        (offsets-&gt;count / tilesY != tilesX || (offsets-&gt;count % tilesY != 0))) {</a>
+<a name="ln238">      ThrowRDE(&quot;Tile X/Y count mismatch: total:%u X:%u, Y:%u&quot;, offsets-&gt;count,</a>
+<a name="ln239">               tilesX, tilesY);</a>
+<a name="ln240">    }</a>
+<a name="ln241"> </a>
+<a name="ln242">    return {mRaw-&gt;dim, tilew, tileh};</a>
+<a name="ln243">  }</a>
+<a name="ln244"> </a>
+<a name="ln245">  // Strips</a>
+<a name="ln246">  TiffEntry* offsets = raw-&gt;getEntry(STRIPOFFSETS);</a>
+<a name="ln247">  TiffEntry* counts = raw-&gt;getEntry(STRIPBYTECOUNTS);</a>
+<a name="ln248"> </a>
+<a name="ln249">  if (counts-&gt;count != offsets-&gt;count) {</a>
+<a name="ln250">    ThrowRDE(&quot;Byte count number does not match strip size: &quot;</a>
+<a name="ln251">             &quot;count:%u, stips:%u &quot;,</a>
+<a name="ln252">             counts-&gt;count, offsets-&gt;count);</a>
+<a name="ln253">  }</a>
+<a name="ln254"> </a>
+<a name="ln255">  uint32_t yPerSlice = raw-&gt;hasEntry(ROWSPERSTRIP)</a>
+<a name="ln256">                           ? raw-&gt;getEntry(ROWSPERSTRIP)-&gt;getU32()</a>
+<a name="ln257">                           : mRaw-&gt;dim.y;</a>
+<a name="ln258"> </a>
+<a name="ln259">  if (yPerSlice == 0 || yPerSlice &gt; static_cast&lt;uint32_t&gt;(mRaw-&gt;dim.y) ||</a>
+<a name="ln260">      roundUpDivision(mRaw-&gt;dim.y, yPerSlice) != counts-&gt;count) {</a>
+<a name="ln261">    ThrowRDE(&quot;Invalid y per slice %u or strip count %u (height = %u)&quot;,</a>
+<a name="ln262">             yPerSlice, counts-&gt;count, mRaw-&gt;dim.y);</a>
+<a name="ln263">  }</a>
+<a name="ln264"> </a>
+<a name="ln265">  return {mRaw-&gt;dim, static_cast&lt;uint32_t&gt;(mRaw-&gt;dim.x), yPerSlice};</a>
+<a name="ln266">}</a>
+<a name="ln267"> </a>
+<a name="ln268">void DngDecoder::decodeData(const TiffIFD* raw, uint32_t sample_format) {</a>
+<a name="ln269">  if (compression == 8 &amp;&amp; sample_format != 3) {</a>
+<a name="ln270">    ThrowRDE(&quot;Only float format is supported for &quot;</a>
+<a name="ln271">             &quot;deflate-compressed data.&quot;);</a>
+<a name="ln272">  } else if ((compression == 7 || compression == 0x884c) &amp;&amp;</a>
+<a name="ln273">             sample_format != 1) {</a>
+<a name="ln274">    ThrowRDE(&quot;Only 16 bit unsigned data supported for &quot;</a>
+<a name="ln275">             &quot;JPEG-compressed data.&quot;);</a>
+<a name="ln276">  }</a>
+<a name="ln277"> </a>
+<a name="ln278">  uint32_t predictor = ~0U;</a>
+<a name="ln279">  if (raw-&gt;hasEntry(PREDICTOR))</a>
+<a name="ln280">    predictor = raw-&gt;getEntry(PREDICTOR)-&gt;getU32();</a>
+<a name="ln281"> </a>
+<a name="ln282">  // Some decompressors (such as VC5) may depend on the white point</a>
+<a name="ln283">  if (raw-&gt;hasEntry(WHITELEVEL)) {</a>
+<a name="ln284">    TiffEntry* whitelevel = raw-&gt;getEntry(WHITELEVEL);</a>
+<a name="ln285">    if (whitelevel-&gt;isInt())</a>
+<a name="ln286">      mRaw-&gt;whitePoint = whitelevel-&gt;getU32();</a>
+<a name="ln287">  }</a>
+<a name="ln288"> </a>
+<a name="ln289">  AbstractDngDecompressor slices(mRaw, getTilingDescription(raw), compression,</a>
+<a name="ln290">                                 mFixLjpeg, bps, predictor);</a>
+<a name="ln291"> </a>
+<a name="ln292">  slices.slices.reserve(slices.dsc.numTiles);</a>
+<a name="ln293"> </a>
+<a name="ln294">  TiffEntry* offsets = nullptr;</a>
+<a name="ln295">  TiffEntry* counts = nullptr;</a>
+<a name="ln296">  if (raw-&gt;hasEntry(TILEOFFSETS)) {</a>
+<a name="ln297">    offsets = raw-&gt;getEntry(TILEOFFSETS);</a>
+<a name="ln298">    counts = raw-&gt;getEntry(TILEBYTECOUNTS);</a>
+<a name="ln299">  } else { // Strips</a>
+<a name="ln300">    offsets = raw-&gt;getEntry(STRIPOFFSETS);</a>
+<a name="ln301">    counts = raw-&gt;getEntry(STRIPBYTECOUNTS);</a>
+<a name="ln302">  }</a>
+<a name="ln303">  assert(slices.dsc.numTiles == offsets-&gt;count);</a>
+<a name="ln304">  assert(slices.dsc.numTiles == counts-&gt;count);</a>
+<a name="ln305"> </a>
+<a name="ln306">  NORangesSet&lt;Buffer&gt; tilesLegality;</a>
+<a name="ln307">  for (auto n = 0U; n &lt; slices.dsc.numTiles; n++) {</a>
+<a name="ln308">    const auto offset = offsets-&gt;getU32(n);</a>
+<a name="ln309">    const auto count = counts-&gt;getU32(n);</a>
+<a name="ln310"> </a>
+<a name="ln311">    if (count &lt; 1)</a>
+<a name="ln312">      ThrowRDE(&quot;Tile %u is empty&quot;, n);</a>
+<a name="ln313"> </a>
+<a name="ln314">    ByteStream bs(DataBuffer(mFile-&gt;getSubView(offset, count),</a>
+<a name="ln315">                             mRootIFD-&gt;rootBuffer.getByteOrder()));</a>
+<a name="ln316"> </a>
+<a name="ln317">    if (!tilesLegality.emplace(bs).second)</a>
+<a name="ln318">      ThrowTPE(&quot;Two tiles overlap. Raw corrupt!&quot;);</a>
+<a name="ln319"> </a>
+<a name="ln320">    slices.slices.emplace_back(slices.dsc, n, bs);</a>
+<a name="ln321">  }</a>
+<a name="ln322"> </a>
+<a name="ln323">  assert(slices.slices.size() == slices.dsc.numTiles);</a>
+<a name="ln324">  if (slices.slices.empty())</a>
+<a name="ln325">    ThrowRDE(&quot;No valid slices found.&quot;);</a>
+<a name="ln326"> </a>
+<a name="ln327">  // FIXME: should we sort the tiles, to linearize the input reading?</a>
+<a name="ln328"> </a>
+<a name="ln329">  mRaw-&gt;createData();</a>
+<a name="ln330"> </a>
+<a name="ln331">  slices.decompress();</a>
+<a name="ln332">}</a>
+<a name="ln333"> </a>
+<a name="ln334">RawImage DngDecoder::decodeRawInternal() {</a>
+<a name="ln335">  vector&lt;const TiffIFD*&gt; data = mRootIFD-&gt;getIFDsWithTag(COMPRESSION);</a>
+<a name="ln336"> </a>
+<a name="ln337">  if (data.empty())</a>
+<a name="ln338">    ThrowRDE(&quot;No image data found&quot;);</a>
+<a name="ln339"> </a>
+<a name="ln340">  dropUnsuportedChunks(&amp;data);</a>
+<a name="ln341"> </a>
+<a name="ln342">  if (data.empty())</a>
+<a name="ln343">    ThrowRDE(&quot;No RAW chunks found&quot;);</a>
+<a name="ln344"> </a>
+<a name="ln345">  if (data.size() &gt; 1) {</a>
+<a name="ln346">    writeLog(DEBUG_PRIO_EXTRA, &quot;Multiple RAW chunks found - using first only!&quot;);</a>
+<a name="ln347">  }</a>
+<a name="ln348"> </a>
+<a name="ln349">  const TiffIFD* raw = data[0];</a>
+<a name="ln350"> </a>
+<a name="ln351">  bps = raw-&gt;getEntry(BITSPERSAMPLE)-&gt;getU32();</a>
+<a name="ln352">  if (bps &lt; 1 || bps &gt; 32)</a>
+<a name="ln353">    ThrowRDE(&quot;Unsupported bit per sample count: %u.&quot;, bps);</a>
+<a name="ln354"> </a>
+<a name="ln355">  uint32_t sample_format = 1;</a>
+<a name="ln356">  if (raw-&gt;hasEntry(SAMPLEFORMAT))</a>
+<a name="ln357">    sample_format = raw-&gt;getEntry(SAMPLEFORMAT)-&gt;getU32();</a>
+<a name="ln358"> </a>
+<a name="ln359">  compression = raw-&gt;getEntry(COMPRESSION)-&gt;getU16();</a>
+<a name="ln360"> </a>
+<a name="ln361">  switch (sample_format) {</a>
+<a name="ln362">  case 1:</a>
+<a name="ln363">    mRaw = RawImage::create(TYPE_USHORT16);</a>
+<a name="ln364">    break;</a>
+<a name="ln365">  case 3:</a>
+<a name="ln366">    mRaw = RawImage::create(TYPE_FLOAT32);</a>
+<a name="ln367">    break;</a>
+<a name="ln368">  default:</a>
+<a name="ln369">    ThrowRDE(&quot;Only 16 bit unsigned or float point data supported. Sample &quot;</a>
+<a name="ln370">             &quot;format %u is not supported.&quot;,</a>
+<a name="ln371">             sample_format);</a>
+<a name="ln372">  }</a>
+<a name="ln373"> </a>
+<a name="ln374">  mRaw-&gt;isCFA = (raw-&gt;getEntry(PHOTOMETRICINTERPRETATION)-&gt;getU16() == 32803);</a>
+<a name="ln375"> </a>
+<a name="ln376">  if (mRaw-&gt;isCFA)</a>
+<a name="ln377">    writeLog(DEBUG_PRIO_EXTRA, &quot;This is a CFA image&quot;);</a>
+<a name="ln378">  else {</a>
+<a name="ln379">    writeLog(DEBUG_PRIO_EXTRA, &quot;This is NOT a CFA image&quot;);</a>
+<a name="ln380">  }</a>
+<a name="ln381"> </a>
+<a name="ln382">  if (sample_format == 1 &amp;&amp; bps &gt; 16)</a>
+<a name="ln383">    ThrowRDE(&quot;Integer precision larger than 16 bits currently not supported.&quot;);</a>
+<a name="ln384"> </a>
+<a name="ln385">  if (sample_format == 3 &amp;&amp; bps != 32 &amp;&amp; compression != 8)</a>
+<a name="ln386">    ThrowRDE(&quot;Uncompressed float point must be 32 bits per sample.&quot;);</a>
+<a name="ln387"> </a>
+<a name="ln388">  mRaw-&gt;dim.x = raw-&gt;getEntry(IMAGEWIDTH)-&gt;getU32();</a>
+<a name="ln389">  mRaw-&gt;dim.y = raw-&gt;getEntry(IMAGELENGTH)-&gt;getU32();</a>
+<a name="ln390"> </a>
+<a name="ln391">  if (!mRaw-&gt;dim.hasPositiveArea())</a>
+<a name="ln392">    ThrowRDE(&quot;Image has zero size&quot;);</a>
+<a name="ln393"> </a>
+<a name="ln394">#ifdef FUZZING_BUILD_MODE_UNSAFE_FOR_PRODUCTION</a>
+<a name="ln395">  // Yeah, sure, here it would be just dumb to leave this for production :)</a>
+<a name="ln396">  if (mRaw-&gt;dim.x &gt; 7424 || mRaw-&gt;dim.y &gt; 5552) {</a>
+<a name="ln397">    ThrowRDE(&quot;Unexpected image dimensions found: (%u; %u)&quot;, mRaw-&gt;dim.x,</a>
+<a name="ln398">             mRaw-&gt;dim.y);</a>
+<a name="ln399">  }</a>
+<a name="ln400">#endif</a>
+<a name="ln401"> </a>
+<a name="ln402">  if (mRaw-&gt;isCFA)</a>
+<a name="ln403">    parseCFA(raw);</a>
+<a name="ln404"> </a>
+<a name="ln405">  uint32_t cpp = raw-&gt;getEntry(SAMPLESPERPIXEL)-&gt;getU32();</a>
+<a name="ln406"> </a>
+<a name="ln407">  if (cpp &lt; 1 || cpp &gt; 4)</a>
+<a name="ln408">    ThrowRDE(&quot;Unsupported samples per pixel count: %u.&quot;, cpp);</a>
+<a name="ln409"> </a>
+<a name="ln410">  mRaw-&gt;setCpp(cpp);</a>
+<a name="ln411"> </a>
+<a name="ln412">  // Now load the image</a>
+<a name="ln413">  decodeData(raw, sample_format);</a>
+<a name="ln414"> </a>
+<a name="ln415">  handleMetadata(raw);</a>
+<a name="ln416"> </a>
+<a name="ln417">  return mRaw;</a>
+<a name="ln418">}</a>
+<a name="ln419"> </a>
+<a name="ln420">void DngDecoder::handleMetadata(const TiffIFD* raw) {</a>
+<a name="ln421">  // Crop</a>
+<a name="ln422">  if (raw-&gt;hasEntry(ACTIVEAREA)) {</a>
+<a name="ln423">    TiffEntry *active_area = raw-&gt;getEntry(ACTIVEAREA);</a>
+<a name="ln424">    if (active_area-&gt;count != 4)</a>
+<a name="ln425">      ThrowRDE(&quot;active area has %d values instead of 4&quot;, active_area-&gt;count);</a>
+<a name="ln426"> </a>
+<a name="ln427">    const iRectangle2D fullImage(0, 0, mRaw-&gt;dim.x, mRaw-&gt;dim.y);</a>
+<a name="ln428"> </a>
+<a name="ln429">    const auto corners = active_area-&gt;getU32Array(4);</a>
+<a name="ln430">    const iPoint2D topLeft(corners[1], corners[0]);</a>
+<a name="ln431">    const iPoint2D bottomRight(corners[3], corners[2]);</a>
+<a name="ln432"> </a>
+<a name="ln433">    if (!(fullImage.isPointInsideInclusive(topLeft) &amp;&amp;</a>
+<a name="ln434">          fullImage.isPointInsideInclusive(bottomRight) &amp;&amp;</a>
+<a name="ln435">          bottomRight &gt;= topLeft)) {</a>
+<a name="ln436">      ThrowRDE(&quot;Rectangle (%u, %u, %u, %u) not inside image (%u, %u, %u, %u).&quot;,</a>
+<a name="ln437">               topLeft.x, topLeft.y, bottomRight.x, bottomRight.y,</a>
+<a name="ln438">               fullImage.getTopLeft().x, fullImage.getTopLeft().y,</a>
+<a name="ln439">               fullImage.getBottomRight().x, fullImage.getBottomRight().y);</a>
+<a name="ln440">    }</a>
+<a name="ln441"> </a>
+<a name="ln442">    iRectangle2D crop;</a>
+<a name="ln443">    crop.setTopLeft(topLeft);</a>
+<a name="ln444">    crop.setBottomRightAbsolute(bottomRight);</a>
+<a name="ln445">    assert(fullImage.isThisInside(fullImage));</a>
+<a name="ln446"> </a>
+<a name="ln447">    mRaw-&gt;subFrame(crop);</a>
+<a name="ln448">  }</a>
+<a name="ln449"> </a>
+<a name="ln450">  if (raw-&gt;hasEntry(DEFAULTCROPORIGIN) &amp;&amp; raw-&gt;hasEntry(DEFAULTCROPSIZE)) {</a>
+<a name="ln451">    iRectangle2D cropped(0, 0, mRaw-&gt;dim.x, mRaw-&gt;dim.y);</a>
+<a name="ln452">    TiffEntry *origin_entry = raw-&gt;getEntry(DEFAULTCROPORIGIN);</a>
+<a name="ln453">    TiffEntry *size_entry = raw-&gt;getEntry(DEFAULTCROPSIZE);</a>
+<a name="ln454"> </a>
+<a name="ln455">    /* Read crop position (sometimes is rational so use float) */</a>
+<a name="ln456">    const auto tl = origin_entry-&gt;getFloatArray(2);</a>
+<a name="ln457">    if (std::any_of(tl.cbegin(), tl.cend(), [](const auto v) {</a>
+<a name="ln458">          return v &lt; std::numeric_limits&lt;iPoint2D::value_type&gt;::min() ||</a>
+<a name="ln459">                 v &gt; std::numeric_limits&lt;iPoint2D::value_type&gt;::max();</a>
+<a name="ln460">        }))</a>
+<a name="ln461">      ThrowRDE(&quot;Error decoding default crop origin&quot;);</a>
+<a name="ln462"> </a>
+<a name="ln463">    iPoint2D cropOrigin(tl[0], tl[1]);</a>
+<a name="ln464">    if (cropped.isPointInsideInclusive(cropOrigin))</a>
+<a name="ln465">      cropped = iRectangle2D(cropOrigin, {0, 0});</a>
+<a name="ln466"> </a>
+<a name="ln467">    cropped.dim = mRaw-&gt;dim - cropped.pos;</a>
+<a name="ln468"> </a>
+<a name="ln469">    /* Read size (sometimes is rational so use float) */</a>
+<a name="ln470">    const auto sz = size_entry-&gt;getFloatArray(2);</a>
+<a name="ln471">    if (std::any_of(sz.cbegin(), sz.cend(), [](const auto v) {</a>
+<a name="ln472">          return v &lt; std::numeric_limits&lt;iPoint2D::value_type&gt;::min() ||</a>
+<a name="ln473">                 v &gt; std::numeric_limits&lt;iPoint2D::value_type&gt;::max();</a>
+<a name="ln474">        }))</a>
+<a name="ln475">      ThrowRDE(&quot;Error decoding default crop size&quot;);</a>
+<a name="ln476"> </a>
+<a name="ln477">    iPoint2D size(sz[0], sz[1]);</a>
+<a name="ln478">    if ((size + cropped.pos).isThisInside(mRaw-&gt;dim))</a>
+<a name="ln479">      cropped.dim = size;</a>
+<a name="ln480"> </a>
+<a name="ln481">    if (!cropped.hasPositiveArea())</a>
+<a name="ln482">      ThrowRDE(&quot;No positive crop area&quot;);</a>
+<a name="ln483"> </a>
+<a name="ln484">    mRaw-&gt;subFrame(cropped);</a>
+<a name="ln485">  }</a>
+<a name="ln486">  if (mRaw-&gt;dim.area() &lt;= 0)</a>
+<a name="ln487">    ThrowRDE(&quot;No image left after crop&quot;);</a>
+<a name="ln488"> </a>
+<a name="ln489">  // Apply stage 1 opcodes</a>
+<a name="ln490">  if (applyStage1DngOpcodes &amp;&amp; raw-&gt;hasEntry(OPCODELIST1)) {</a>
+<a name="ln491">    try {</a>
+<a name="ln492">      TiffEntry* opcodes = raw-&gt;getEntry(OPCODELIST1);</a>
+<a name="ln493">      // The entry might exist, but it might be empty, which means no opcodes</a>
+<a name="ln494">      if (opcodes-&gt;count &gt; 0) {</a>
+<a name="ln495">        DngOpcodes codes(mRaw, opcodes);</a>
+<a name="ln496">        codes.applyOpCodes(mRaw);</a>
+<a name="ln497">      }</a>
+<a name="ln498">    } catch (RawDecoderException&amp; e) {</a>
+<a name="ln499">      // We push back errors from the opcode parser, since the image may still</a>
+<a name="ln500">      // be usable</a>
+<a name="ln501">      mRaw-&gt;setError(e.what());</a>
+<a name="ln502">    }</a>
+<a name="ln503">  }</a>
+<a name="ln504"> </a>
+<a name="ln505">  // Linearization</a>
+<a name="ln506">  if (raw-&gt;hasEntry(LINEARIZATIONTABLE) &amp;&amp;</a>
+<a name="ln507">      raw-&gt;getEntry(LINEARIZATIONTABLE)-&gt;count &gt; 0) {</a>
+<a name="ln508">    TiffEntry *lintable = raw-&gt;getEntry(LINEARIZATIONTABLE);</a>
+<a name="ln509">    auto table = lintable-&gt;getU16Array(lintable-&gt;count);</a>
+<a name="ln510">    RawImageCurveGuard curveHandler(&amp;mRaw, table, uncorrectedRawValues);</a>
+<a name="ln511">    if (!uncorrectedRawValues)</a>
+<a name="ln512">      mRaw-&gt;sixteenBitLookup();</a>
+<a name="ln513">  }</a>
+<a name="ln514"> </a>
+<a name="ln515">  if (mRaw-&gt;getDataType() == TYPE_USHORT16) {</a>
+<a name="ln516">    // Default white level is (2 ** BitsPerSample) - 1</a>
+<a name="ln517">    mRaw-&gt;whitePoint = (1UL &lt;&lt; bps) - 1UL;</a>
+<a name="ln518">  } else if (mRaw-&gt;getDataType() == TYPE_FLOAT32) {</a>
+<a name="ln519">    // Default white level is 1.0f. But we can't represent that here.</a>
+<a name="ln520">    mRaw-&gt;whitePoint = 65535;</a>
+<a name="ln521">  }</a>
+<a name="ln522"> </a>
+<a name="ln523">  if (raw-&gt;hasEntry(WHITELEVEL)) {</a>
+<a name="ln524">    TiffEntry *whitelevel = raw-&gt;getEntry(WHITELEVEL);</a>
+<a name="ln525">    if (whitelevel-&gt;isInt())</a>
+<a name="ln526">      mRaw-&gt;whitePoint = whitelevel-&gt;getU32();</a>
+<a name="ln527">  }</a>
+<a name="ln528">  // Set black</a>
+<a name="ln529">  setBlack(raw);</a>
+<a name="ln530"> </a>
+<a name="ln531">  // Apply opcodes to lossy DNG</a>
+<a name="ln532">  if (compression == 0x884c &amp;&amp; !uncorrectedRawValues &amp;&amp;</a>
+<a name="ln533">      raw-&gt;hasEntry(OPCODELIST2)) {</a>
+<a name="ln534">    // We must apply black/white scaling</a>
+<a name="ln535">    mRaw-&gt;scaleBlackWhite();</a>
+<a name="ln536"> </a>
+<a name="ln537">    // Apply stage 2 codes</a>
+<a name="ln538">    try {</a>
+<a name="ln539">      DngOpcodes codes(mRaw, raw-&gt;getEntry(OPCODELIST2));</a>
+<a name="ln540">      codes.applyOpCodes(mRaw);</a>
+<a name="ln541">    } catch (RawDecoderException&amp; e) {</a>
+<a name="ln542">      // We push back errors from the opcode parser, since the image may still</a>
+<a name="ln543">      // be usable</a>
+<a name="ln544">      mRaw-&gt;setError(e.what());</a>
+<a name="ln545">    }</a>
+<a name="ln546">    mRaw-&gt;blackAreas.clear();</a>
+<a name="ln547">    mRaw-&gt;blackLevel = 0;</a>
+<a name="ln548">    mRaw-&gt;blackLevelSeparate[0] = mRaw-&gt;blackLevelSeparate[1] =</a>
+<a name="ln549">        mRaw-&gt;blackLevelSeparate[2] = mRaw-&gt;blackLevelSeparate[3] = 0;</a>
+<a name="ln550">    mRaw-&gt;whitePoint = 65535;</a>
+<a name="ln551">  }</a>
+<a name="ln552">}</a>
+<a name="ln553"> </a>
+<a name="ln554">void DngDecoder::decodeMetaDataInternal(const CameraMetaData* meta) {</a>
+<a name="ln555">  if (mRootIFD-&gt;hasEntryRecursive(ISOSPEEDRATINGS))</a>
+<a name="ln556">    mRaw-&gt;metadata.isoSpeed = mRootIFD-&gt;getEntryRecursive(ISOSPEEDRATINGS)-&gt;getU32();</a>
+<a name="ln557"> </a>
+<a name="ln558">  TiffID id;</a>
+<a name="ln559"> </a>
+<a name="ln560">  try {</a>
+<a name="ln561">    id = mRootIFD-&gt;getID();</a>
+<a name="ln562">  } catch (RawspeedException&amp; e) {</a>
+<a name="ln563">    mRaw-&gt;setError(e.what());</a>
+<a name="ln564">    // not all dngs have MAKE/MODEL entries,</a>
+<a name="ln565">    // will be dealt with by using UNIQUECAMERAMODEL below</a>
+<a name="ln566">  }</a>
+<a name="ln567"> </a>
+<a name="ln568">  // Set the make and model</a>
+<a name="ln569">  mRaw-&gt;metadata.make = id.make;</a>
+<a name="ln570">  mRaw-&gt;metadata.model = id.model;</a>
+<a name="ln571"> </a>
+<a name="ln572">  const Camera* cam = meta-&gt;getCamera(id.make, id.model, &quot;dng&quot;);</a>
+<a name="ln573">  if (!cam) //Also look for non-DNG cameras in case it's a converted file</a>
+<a name="ln574">    cam = meta-&gt;getCamera(id.make, id.model, &quot;&quot;);</a>
+<a name="ln575">  if (!cam) // Worst case scenario, look for any such camera.</a>
+<a name="ln576">    cam = meta-&gt;getCamera(id.make, id.model);</a>
+<a name="ln577">  if (cam) {</a>
+<a name="ln578">    mRaw-&gt;metadata.canonical_make = cam-&gt;canonical_make;</a>
+<a name="ln579">    mRaw-&gt;metadata.canonical_model = cam-&gt;canonical_model;</a>
+<a name="ln580">    mRaw-&gt;metadata.canonical_alias = cam-&gt;canonical_alias;</a>
+<a name="ln581">    mRaw-&gt;metadata.canonical_id = cam-&gt;canonical_id;</a>
+<a name="ln582">  } else {</a>
+<a name="ln583">    mRaw-&gt;metadata.canonical_make = id.make;</a>
+<a name="ln584">    mRaw-&gt;metadata.canonical_model = mRaw-&gt;metadata.canonical_alias = id.model;</a>
+<a name="ln585">    if (mRootIFD-&gt;hasEntryRecursive(UNIQUECAMERAMODEL)) {</a>
+<a name="ln586">      mRaw-&gt;metadata.canonical_id = mRootIFD-&gt;getEntryRecursive(UNIQUECAMERAMODEL)-&gt;getString();</a>
+<a name="ln587">    } else {</a>
+<a name="ln588">      mRaw-&gt;metadata.canonical_id = id.make + &quot; &quot; + id.model;</a>
+<a name="ln589">    }</a>
+<a name="ln590">  }</a>
+<a name="ln591"> </a>
+<a name="ln592">  // Fetch the white balance</a>
+<a name="ln593">  if (mRootIFD-&gt;hasEntryRecursive(ASSHOTNEUTRAL)) {</a>
+<a name="ln594">    TiffEntry* as_shot_neutral = mRootIFD-&gt;getEntryRecursive(ASSHOTNEUTRAL);</a>
+<a name="ln595">    if (as_shot_neutral-&gt;count == 3) {</a>
+<a name="ln596">      for (uint32_t i = 0; i &lt; 3; i++) {</a>
+<a name="ln597">        float c = as_shot_neutral-&gt;getFloat(i);</a>
+<a name="ln598">        mRaw-&gt;metadata.wbCoeffs[i] = (c &gt; 0.0F) ? (1.0F / c) : 0.0F;</a>
+<a name="ln599">      }</a>
+<a name="ln600">    }</a>
+<a name="ln601">  } else if (mRootIFD-&gt;hasEntryRecursive(ASSHOTWHITEXY)) {</a>
+<a name="ln602">    TiffEntry* as_shot_white_xy = mRootIFD-&gt;getEntryRecursive(ASSHOTWHITEXY);</a>
+<a name="ln603">    if (as_shot_white_xy-&gt;count == 2) {</a>
+<a name="ln604">      mRaw-&gt;metadata.wbCoeffs[0] = as_shot_white_xy-&gt;getFloat(0);</a>
+<a name="ln605">      mRaw-&gt;metadata.wbCoeffs[1] = as_shot_white_xy-&gt;getFloat(1);</a>
+<a name="ln606">      mRaw-&gt;metadata.wbCoeffs[2] =</a>
+<a name="ln607">          1 - mRaw-&gt;metadata.wbCoeffs[0] - mRaw-&gt;metadata.wbCoeffs[1];</a>
+<a name="ln608"> </a>
+<a name="ln609">      const std::array&lt;float, 3&gt; d65_white = {{0.950456, 1, 1.088754}};</a>
+<a name="ln610">      for (uint32_t i = 0; i &lt; 3; i++)</a>
+<a name="ln611">        mRaw-&gt;metadata.wbCoeffs[i] /= d65_white[i];</a>
+<a name="ln612">    }</a>
+<a name="ln613">  }</a>
+<a name="ln614">}</a>
+<a name="ln615"> </a>
+<a name="ln616">/* DNG Images are assumed to be decodable unless explicitly set so */</a>
+<a name="ln617">void DngDecoder::checkSupportInternal(const CameraMetaData* meta) {</a>
+<a name="ln618">  // We set this, since DNG's are not explicitly added.</a>
+<a name="ln619">  failOnUnknown = false;</a>
+<a name="ln620"> </a>
+<a name="ln621">  if (!(mRootIFD-&gt;hasEntryRecursive(MAKE) &amp;&amp; mRootIFD-&gt;hasEntryRecursive(MODEL))) {</a>
+<a name="ln622">    // Check &quot;Unique Camera Model&quot; instead, uses this for both make + model.</a>
+<a name="ln623">    if (mRootIFD-&gt;hasEntryRecursive(UNIQUECAMERAMODEL)) {</a>
+<a name="ln624">      string unique = mRootIFD-&gt;getEntryRecursive(UNIQUECAMERAMODEL)-&gt;getString();</a>
+<a name="ln625">      checkCameraSupported(meta, {unique, unique}, &quot;dng&quot;);</a>
+<a name="ln626">      return;</a>
+<a name="ln627">    }</a>
+<a name="ln628">    // If we don't have make/model we cannot tell, but still assume yes.</a>
+<a name="ln629">    return;</a>
+<a name="ln630">  }</a>
+<a name="ln631"> </a>
+<a name="ln632">  checkCameraSupported(meta, mRootIFD-&gt;getID(), &quot;dng&quot;);</a>
+<a name="ln633">}</a>
+<a name="ln634"> </a>
+<a name="ln635">/* Decodes DNG masked areas into blackareas in the image */</a>
+<a name="ln636">bool DngDecoder::decodeMaskedAreas(const TiffIFD* raw) {</a>
+<a name="ln637">  TiffEntry *masked = raw-&gt;getEntry(MASKEDAREAS);</a>
+<a name="ln638"> </a>
+<a name="ln639">  if (masked-&gt;type != TIFF_SHORT &amp;&amp; masked-&gt;type != TIFF_LONG)</a>
+<a name="ln640">    return false;</a>
+<a name="ln641"> </a>
+<a name="ln642">  uint32_t nrects = masked-&gt;count / 4;</a>
+<a name="ln643">  if (0 == nrects)</a>
+<a name="ln644">    return false;</a>
+<a name="ln645"> </a>
+<a name="ln646">  /* Since we may both have short or int, copy it to int array. */</a>
+<a name="ln647">  auto rects = masked-&gt;getU32Array(nrects*4);</a>
+<a name="ln648"> </a>
+<a name="ln649">  const iRectangle2D fullImage(0, 0, mRaw-&gt;getUncroppedDim().x,</a>
+<a name="ln650">                               mRaw-&gt;getUncroppedDim().y);</a>
+<a name="ln651">  const iPoint2D top = mRaw-&gt;getCropOffset();</a>
+<a name="ln652"> </a>
+<a name="ln653">  for (uint32_t i = 0; i &lt; nrects; i++) {</a>
+<a name="ln654">    iPoint2D topleft = iPoint2D(rects[i * 4UL + 1UL], rects[i * 4UL]);</a>
+<a name="ln655">    iPoint2D bottomright = iPoint2D(rects[i * 4UL + 3UL], rects[i * 4UL + 2UL]);</a>
+<a name="ln656"> </a>
+<a name="ln657">    if (!(fullImage.isPointInsideInclusive(topleft) &amp;&amp;</a>
+<a name="ln658">          fullImage.isPointInsideInclusive(bottomright) &amp;&amp;</a>
+<a name="ln659">          (topleft &lt; bottomright)))</a>
+<a name="ln660">      ThrowRDE(&quot;Bad masked area.&quot;);</a>
+<a name="ln661"> </a>
+<a name="ln662">    // Is this a horizontal box, only add it if it covers the active width of the image</a>
+<a name="ln663">    if (topleft.x &lt;= top.x &amp;&amp; bottomright.x &gt;= (mRaw-&gt;dim.x + top.x)) {</a>
+<a name="ln664">      mRaw-&gt;blackAreas.emplace_back(topleft.y, bottomright.y - topleft.y,</a>
+<a name="ln665">                                    false);</a>
+<a name="ln666">    }</a>
+<a name="ln667">    // Is it a vertical box, only add it if it covers the active height of the</a>
+<a name="ln668">    // image</a>
+<a name="ln669">    else if (topleft.y &lt;= top.y &amp;&amp; bottomright.y &gt;= (mRaw-&gt;dim.y + top.y)) {</a>
+<a name="ln670">      mRaw-&gt;blackAreas.emplace_back(topleft.x, bottomright.x - topleft.x, true);</a>
+<a name="ln671">    }</a>
+<a name="ln672">  }</a>
+<a name="ln673">  return !mRaw-&gt;blackAreas.empty();</a>
+<a name="ln674">}</a>
+<a name="ln675"> </a>
+<a name="ln676">bool DngDecoder::decodeBlackLevels(const TiffIFD* raw) {</a>
+<a name="ln677">  iPoint2D blackdim(1,1);</a>
+<a name="ln678">  if (raw-&gt;hasEntry(BLACKLEVELREPEATDIM)) {</a>
+<a name="ln679">    TiffEntry *bleveldim = raw-&gt;getEntry(BLACKLEVELREPEATDIM);</a>
+<a name="ln680">    if (bleveldim-&gt;count != 2)</a>
+<a name="ln681">      return false;</a>
+<a name="ln682">    blackdim = iPoint2D(bleveldim-&gt;getU32(0), bleveldim-&gt;getU32(1));</a>
+<a name="ln683">  }</a>
+<a name="ln684"> </a>
+<a name="ln685">  if (blackdim.x == 0 || blackdim.y == 0)</a>
+<a name="ln686">    return false;</a>
+<a name="ln687"> </a>
+<a name="ln688">  if (!raw-&gt;hasEntry(BLACKLEVEL))</a>
+<a name="ln689">    return true;</a>
+<a name="ln690"> </a>
+<a name="ln691">  if (mRaw-&gt;getCpp() != 1)</a>
+<a name="ln692">    return false;</a>
+<a name="ln693"> </a>
+<a name="ln694">  TiffEntry* black_entry = raw-&gt;getEntry(BLACKLEVEL);</a>
+<a name="ln695">  if (black_entry-&gt;count &lt; blackdim.area())</a>
+<a name="ln696">    ThrowRDE(&quot;BLACKLEVEL entry is too small&quot;);</a>
+<a name="ln697"> </a>
+<a name="ln698">  using BlackType = decltype(mRaw-&gt;blackLevelSeparate)::value_type;</a>
+<a name="ln699"> </a>
+<a name="ln700">  if (blackdim.x &lt; 2 || blackdim.y &lt; 2) {</a>
+<a name="ln701">    // We so not have enough to fill all individually, read a single and copy it</a>
+<a name="ln702">    float value = black_entry-&gt;getFloat();</a>
+<a name="ln703"> </a>
+<a name="ln704">    if (value &lt; std::numeric_limits&lt;BlackType&gt;::min() ||</a>
+<a name="ln705">        value &gt; std::numeric_limits&lt;BlackType&gt;::max())</a>
+<a name="ln706">      ThrowRDE(&quot;Error decoding black level&quot;);</a>
+<a name="ln707"> </a>
+<a name="ln708">    for (int y = 0; y &lt; 2; y++) {</a>
+<a name="ln709">      for (int x = 0; x &lt; 2; x++)</a>
+<a name="ln710">        mRaw-&gt;blackLevelSeparate[y*2+x] = value;</a>
+<a name="ln711">    }</a>
+<a name="ln712">  } else {</a>
+<a name="ln713">    for (int y = 0; y &lt; 2; y++) {</a>
+<a name="ln714">      for (int x = 0; x &lt; 2; x++) {</a>
+<a name="ln715">        float value = black_entry-&gt;getFloat(y * blackdim.x + x);</a>
+<a name="ln716"> </a>
+<a name="ln717">        if (value &lt; std::numeric_limits&lt;BlackType&gt;::min() ||</a>
+<a name="ln718">            value &gt; std::numeric_limits&lt;BlackType&gt;::max())</a>
+<a name="ln719">          ThrowRDE(&quot;Error decoding black level&quot;);</a>
+<a name="ln720"> </a>
+<a name="ln721">        mRaw-&gt;blackLevelSeparate[y * 2 + x] = value;</a>
+<a name="ln722">      }</a>
+<a name="ln723">    }</a>
+<a name="ln724">  }</a>
+<a name="ln725"> </a>
+<a name="ln726">  // DNG Spec says we must add black in deltav and deltah</a>
+<a name="ln727">  if (raw-&gt;hasEntry(BLACKLEVELDELTAV)) {</a>
+<a name="ln728">    TiffEntry *blackleveldeltav = raw-&gt;getEntry(BLACKLEVELDELTAV);</a>
+<a name="ln729">    if (static_cast&lt;int&gt;(blackleveldeltav-&gt;count) &lt; mRaw-&gt;dim.y)</a>
+<a name="ln730">      ThrowRDE(&quot;BLACKLEVELDELTAV array is too small&quot;);</a>
+<a name="ln731">    std::array&lt;float, 2&gt; black_sum = {{}};</a>
+<a name="ln732">    for (int i = 0; i &lt; mRaw-&gt;dim.y; i++)</a>
+<a name="ln733">      black_sum[i&amp;1] += blackleveldeltav-&gt;getFloat(i);</a>
+<a name="ln734"> </a>
+<a name="ln735">    for (int i = 0; i &lt; 4; i++) {</a>
+<a name="ln736">      const float value =</a>
+<a name="ln737">          black_sum[i &gt;&gt; 1] / static_cast&lt;float&gt;(mRaw-&gt;dim.y) * 2.0F;</a>
+<a name="ln738">      if (value &lt; std::numeric_limits&lt;BlackType&gt;::min() ||</a>
+<a name="ln739">          value &gt; std::numeric_limits&lt;BlackType&gt;::max())</a>
+<a name="ln740">        ThrowRDE(&quot;Error decoding black level&quot;);</a>
+<a name="ln741"> </a>
+<a name="ln742">      if (__builtin_sadd_overflow(mRaw-&gt;blackLevelSeparate[i], value,</a>
+<a name="ln743">                                  &amp;mRaw-&gt;blackLevelSeparate[i]))</a>
+<a name="ln744">        ThrowRDE(&quot;Integer overflow when calculating black level&quot;);</a>
+<a name="ln745">    }</a>
+<a name="ln746">  }</a>
+<a name="ln747"> </a>
+<a name="ln748">  if (raw-&gt;hasEntry(BLACKLEVELDELTAH)){</a>
+<a name="ln749">    TiffEntry *blackleveldeltah = raw-&gt;getEntry(BLACKLEVELDELTAH);</a>
+<a name="ln750">    if (static_cast&lt;int&gt;(blackleveldeltah-&gt;count) &lt; mRaw-&gt;dim.x)</a>
+<a name="ln751">      ThrowRDE(&quot;BLACKLEVELDELTAH array is too small&quot;);</a>
+<a name="ln752">    std::array&lt;float, 2&gt; black_sum = {{}};</a>
+<a name="ln753">    for (int i = 0; i &lt; mRaw-&gt;dim.x; i++)</a>
+<a name="ln754">      black_sum[i&amp;1] += blackleveldeltah-&gt;getFloat(i);</a>
+<a name="ln755"> </a>
+<a name="ln756">    for (int i = 0; i &lt; 4; i++) {</a>
+<a name="ln757">      const float value =</a>
+<a name="ln758">          black_sum[i &amp; 1] / static_cast&lt;float&gt;(mRaw-&gt;dim.x) * 2.0F;</a>
+<a name="ln759">      if (value &lt; std::numeric_limits&lt;BlackType&gt;::min() ||</a>
+<a name="ln760">          value &gt; std::numeric_limits&lt;BlackType&gt;::max())</a>
+<a name="ln761">        ThrowRDE(&quot;Error decoding black level&quot;);</a>
+<a name="ln762"> </a>
+<a name="ln763">      if (__builtin_sadd_overflow(mRaw-&gt;blackLevelSeparate[i], value,</a>
+<a name="ln764">                                  &amp;mRaw-&gt;blackLevelSeparate[i]))</a>
+<a name="ln765">        ThrowRDE(&quot;Integer overflow when calculating black level&quot;);</a>
+<a name="ln766">    }</a>
+<a name="ln767">  }</a>
+<a name="ln768">  return true;</a>
+<a name="ln769">}</a>
+<a name="ln770"> </a>
+<a name="ln771">void DngDecoder::setBlack(const TiffIFD* raw) {</a>
+<a name="ln772"> </a>
+<a name="ln773">  if (raw-&gt;hasEntry(MASKEDAREAS) &amp;&amp; decodeMaskedAreas(raw))</a>
+<a name="ln774">    return;</a>
+<a name="ln775"> </a>
+<a name="ln776">  // Black defaults to 0</a>
+<a name="ln777">  mRaw-&gt;blackLevelSeparate.fill(0);</a>
+<a name="ln778"> </a>
+<a name="ln779">  if (raw-&gt;hasEntry(BLACKLEVEL))</a>
+<a name="ln780">    decodeBlackLevels(raw);</a>
+<a name="ln781">}</a>
+<a name="ln782">} // namespace rawspeed</a>
+
+</code></pre>
+<div class="balloon" rel="76"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v560/" target="_blank">V560</a> A part of conditional expression is always true: (v[0] <= 1).</p></div>
+
+<link rel="stylesheet" href="highlight.css">
+<script src="highlight.pack.js"></script>
+<script src="highlightjs-line-numbers.js"></script>
+<script>hljs.initHighlightingOnLoad();</script>
+<script>hljs.initLineNumbersOnLoad();</script>
+<script>
+  $(document).ready(function() {
+      $('.balloon').each(function () {
+          var bl = $(this);
+          var line = bl.attr('rel');
+          var text = $('a[name="ln'+line+'"]').text();
+
+          var space_count = 0;
+          for(var i = 0; i<text.length; i++){
+              var char = text[i];
+              if((char !== ' ')&&(char !== '\t'))break;
+              if(char === '\t')space_count++;
+              space_count++;
+          }
+
+          bl.css('margin-left', space_count*8);
+          $('a[name="ln'+line+'"]').after(bl);
+      });
+
+      window.location = window.location;
+  });
+</script>
+</body>
+</html>

@@ -1,0 +1,2750 @@
+
+<html>
+<head>
+  <link rel="stylesheet" href="../style.css"/>
+  <script src="../jquery-3.2.1.min.js"></script>
+</head>
+<body>
+<pre><code class = "cpp">
+<a name="ln1">/*</a>
+<a name="ln2">    This file is part of darktable,</a>
+<a name="ln3">    copyright (c) 2009--2011 johannes hanika.</a>
+<a name="ln4">    copyright (c) 2011 henrik andersson.</a>
+<a name="ln5"> </a>
+<a name="ln6">    darktable is free software: you can redistribute it and/or modify</a>
+<a name="ln7">    it under the terms of the GNU General Public License as published by</a>
+<a name="ln8">    the Free Software Foundation, either version 3 of the License, or</a>
+<a name="ln9">    (at your option) any later version.</a>
+<a name="ln10"> </a>
+<a name="ln11">    darktable is distributed in the hope that it will be useful,</a>
+<a name="ln12">    but WITHOUT ANY WARRANTY; without even the implied warranty of</a>
+<a name="ln13">    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the</a>
+<a name="ln14">    GNU General Public License for more details.</a>
+<a name="ln15"> </a>
+<a name="ln16">    You should have received a copy of the GNU General Public License</a>
+<a name="ln17">    along with darktable.  If not, see &lt;http://www.gnu.org/licenses/&gt;.</a>
+<a name="ln18">*/</a>
+<a name="ln19">#include &lt;assert.h&gt;</a>
+<a name="ln20">#include &lt;glib/gprintf.h&gt;</a>
+<a name="ln21">#include &lt;math.h&gt;</a>
+<a name="ln22">#include &lt;stdint.h&gt;</a>
+<a name="ln23">#include &lt;stdlib.h&gt;</a>
+<a name="ln24">#include &lt;string.h&gt;</a>
+<a name="ln25">#include &lt;strings.h&gt;</a>
+<a name="ln26">#include &lt;unistd.h&gt;</a>
+<a name="ln27"> </a>
+<a name="ln28">#include &quot;common/debug.h&quot;</a>
+<a name="ln29">#include &quot;common/history.h&quot;</a>
+<a name="ln30">#include &quot;common/image_cache.h&quot;</a>
+<a name="ln31">#include &quot;common/imageio.h&quot;</a>
+<a name="ln32">#include &quot;common/mipmap_cache.h&quot;</a>
+<a name="ln33">#include &quot;common/opencl.h&quot;</a>
+<a name="ln34">#include &quot;common/tags.h&quot;</a>
+<a name="ln35">#include &quot;common/undo.h&quot;</a>
+<a name="ln36">#include &quot;control/conf.h&quot;</a>
+<a name="ln37">#include &quot;control/control.h&quot;</a>
+<a name="ln38">#include &quot;control/jobs.h&quot;</a>
+<a name="ln39">#include &quot;develop/blend.h&quot;</a>
+<a name="ln40">#include &quot;develop/develop.h&quot;</a>
+<a name="ln41">#include &quot;develop/imageop.h&quot;</a>
+<a name="ln42">#include &quot;develop/lightroom.h&quot;</a>
+<a name="ln43">#include &quot;develop/masks.h&quot;</a>
+<a name="ln44">#include &quot;gui/gtk.h&quot;</a>
+<a name="ln45">#include &quot;gui/presets.h&quot;</a>
+<a name="ln46"> </a>
+<a name="ln47">#define DT_DEV_AVERAGE_DELAY_START 250</a>
+<a name="ln48">#define DT_DEV_PREVIEW_AVERAGE_DELAY_START 50</a>
+<a name="ln49">#define DT_DEV_AVERAGE_DELAY_COUNT 5</a>
+<a name="ln50"> </a>
+<a name="ln51">const gchar *dt_dev_histogram_type_names[DT_DEV_HISTOGRAM_N] = { &quot;logarithmic&quot;, &quot;linear&quot;, &quot;waveform&quot; };</a>
+<a name="ln52"> </a>
+<a name="ln53">void dt_dev_init(dt_develop_t *dev, int32_t gui_attached)</a>
+<a name="ln54">{</a>
+<a name="ln55">  memset(dev, 0, sizeof(dt_develop_t));</a>
+<a name="ln56">  dev-&gt;full_preview = FALSE;</a>
+<a name="ln57">  dev-&gt;preview_downsampling = 1.0f;</a>
+<a name="ln58">  dev-&gt;gui_module = NULL;</a>
+<a name="ln59">  dev-&gt;timestamp = 0;</a>
+<a name="ln60">  dev-&gt;average_delay = DT_DEV_AVERAGE_DELAY_START;</a>
+<a name="ln61">  dev-&gt;preview_average_delay = DT_DEV_PREVIEW_AVERAGE_DELAY_START;</a>
+<a name="ln62">  dev-&gt;preview2_average_delay = DT_DEV_PREVIEW_AVERAGE_DELAY_START;</a>
+<a name="ln63">  dev-&gt;gui_leaving = 0;</a>
+<a name="ln64">  dev-&gt;gui_synch = 0;</a>
+<a name="ln65">  dt_pthread_mutex_init(&amp;dev-&gt;history_mutex, NULL);</a>
+<a name="ln66">  dev-&gt;history_end = 0;</a>
+<a name="ln67">  dev-&gt;history = NULL; // empty list</a>
+<a name="ln68"> </a>
+<a name="ln69">  dev-&gt;gui_attached = gui_attached;</a>
+<a name="ln70">  dev-&gt;width = -1;</a>
+<a name="ln71">  dev-&gt;height = -1;</a>
+<a name="ln72"> </a>
+<a name="ln73">  dt_image_init(&amp;dev-&gt;image_storage);</a>
+<a name="ln74">  dev-&gt;image_status = dev-&gt;preview_status = dev-&gt;preview2_status = DT_DEV_PIXELPIPE_DIRTY;</a>
+<a name="ln75">  dev-&gt;image_loading = dev-&gt;preview_loading = dev-&gt;preview2_loading = 0;</a>
+<a name="ln76">  dev-&gt;image_force_reload = 0;</a>
+<a name="ln77">  dev-&gt;preview_input_changed = dev-&gt;preview2_input_changed = 0;</a>
+<a name="ln78"> </a>
+<a name="ln79">  dev-&gt;pipe = dev-&gt;preview_pipe = dev-&gt;preview2_pipe = NULL;</a>
+<a name="ln80">  dt_pthread_mutex_init(&amp;dev-&gt;pipe_mutex, NULL);</a>
+<a name="ln81">  dt_pthread_mutex_init(&amp;dev-&gt;preview_pipe_mutex, NULL);</a>
+<a name="ln82">  dt_pthread_mutex_init(&amp;dev-&gt;preview2_pipe_mutex, NULL);</a>
+<a name="ln83">  //   dt_pthread_mutex_init(&amp;dev-&gt;histogram_waveform_mutex, NULL);</a>
+<a name="ln84">  dev-&gt;histogram = NULL;</a>
+<a name="ln85">  dev-&gt;histogram_pre_tonecurve = NULL;</a>
+<a name="ln86">  dev-&gt;histogram_pre_levels = NULL;</a>
+<a name="ln87">  gchar *mode = dt_conf_get_string(&quot;plugins/darkroom/histogram/mode&quot;);</a>
+<a name="ln88">  if(g_strcmp0(mode, &quot;linear&quot;) == 0)</a>
+<a name="ln89">    dev-&gt;histogram_type = DT_DEV_HISTOGRAM_LINEAR;</a>
+<a name="ln90">  else if(g_strcmp0(mode, &quot;logarithmic&quot;) == 0)</a>
+<a name="ln91">    dev-&gt;histogram_type = DT_DEV_HISTOGRAM_LOGARITHMIC;</a>
+<a name="ln92">  else if(g_strcmp0(mode, &quot;waveform&quot;) == 0)</a>
+<a name="ln93">    dev-&gt;histogram_type = DT_DEV_HISTOGRAM_WAVEFORM;</a>
+<a name="ln94">  g_free(mode);</a>
+<a name="ln95"> </a>
+<a name="ln96">  dev-&gt;forms = NULL;</a>
+<a name="ln97">  dev-&gt;form_visible = NULL;</a>
+<a name="ln98">  dev-&gt;form_gui = NULL;</a>
+<a name="ln99">  dev-&gt;allforms = NULL;</a>
+<a name="ln100"> </a>
+<a name="ln101">  if(dev-&gt;gui_attached)</a>
+<a name="ln102">  {</a>
+<a name="ln103">    dev-&gt;pipe = (dt_dev_pixelpipe_t *)malloc(sizeof(dt_dev_pixelpipe_t));</a>
+<a name="ln104">    dev-&gt;preview_pipe = (dt_dev_pixelpipe_t *)malloc(sizeof(dt_dev_pixelpipe_t));</a>
+<a name="ln105">    dev-&gt;preview2_pipe = (dt_dev_pixelpipe_t *)malloc(sizeof(dt_dev_pixelpipe_t));</a>
+<a name="ln106">    dt_dev_pixelpipe_init(dev-&gt;pipe);</a>
+<a name="ln107">    dt_dev_pixelpipe_init_preview(dev-&gt;preview_pipe);</a>
+<a name="ln108">    dt_dev_pixelpipe_init_preview2(dev-&gt;preview2_pipe);</a>
+<a name="ln109"> </a>
+<a name="ln110">    dev-&gt;histogram = (uint32_t *)calloc(4 * 256, sizeof(uint32_t));</a>
+<a name="ln111">    dev-&gt;histogram_pre_tonecurve = (uint32_t *)calloc(4 * 256, sizeof(uint32_t));</a>
+<a name="ln112">    dev-&gt;histogram_pre_levels = (uint32_t *)calloc(4 * 256, sizeof(uint32_t));</a>
+<a name="ln113"> </a>
+<a name="ln114">    dev-&gt;histogram_max = -1;</a>
+<a name="ln115">    dev-&gt;histogram_pre_tonecurve_max = -1;</a>
+<a name="ln116">    dev-&gt;histogram_pre_levels_max = -1;</a>
+<a name="ln117">  }</a>
+<a name="ln118"> </a>
+<a name="ln119">  dev-&gt;iop_instance = 0;</a>
+<a name="ln120">  dev-&gt;iop = NULL;</a>
+<a name="ln121">  dev-&gt;alliop = NULL;</a>
+<a name="ln122"> </a>
+<a name="ln123">  dev-&gt;allprofile_info = NULL;</a>
+<a name="ln124"> </a>
+<a name="ln125">  dev-&gt;iop_order_version = 0;</a>
+<a name="ln126">  dev-&gt;iop_order_list = NULL;</a>
+<a name="ln127"> </a>
+<a name="ln128">  dev-&gt;proxy.exposure = NULL;</a>
+<a name="ln129"> </a>
+<a name="ln130">  dev-&gt;rawoverexposed.enabled = FALSE;</a>
+<a name="ln131">  dev-&gt;rawoverexposed.mode = dt_conf_get_int(&quot;darkroom/ui/rawoverexposed/mode&quot;);</a>
+<a name="ln132">  dev-&gt;rawoverexposed.colorscheme = dt_conf_get_int(&quot;darkroom/ui/rawoverexposed/colorscheme&quot;);</a>
+<a name="ln133">  dev-&gt;rawoverexposed.threshold = dt_conf_get_float(&quot;darkroom/ui/rawoverexposed/threshold&quot;);</a>
+<a name="ln134"> </a>
+<a name="ln135">  dev-&gt;overexposed.enabled = FALSE;</a>
+<a name="ln136">  dev-&gt;overexposed.colorscheme = dt_conf_get_int(&quot;darkroom/ui/overexposed/colorscheme&quot;);</a>
+<a name="ln137">  dev-&gt;overexposed.lower = dt_conf_get_float(&quot;darkroom/ui/overexposed/lower&quot;);</a>
+<a name="ln138">  dev-&gt;overexposed.upper = dt_conf_get_float(&quot;darkroom/ui/overexposed/upper&quot;);</a>
+<a name="ln139"> </a>
+<a name="ln140">  dev-&gt;second_window.zoom = DT_ZOOM_FIT;</a>
+<a name="ln141">  dev-&gt;second_window.closeup = 0;</a>
+<a name="ln142">  dev-&gt;second_window.zoom_x = dev-&gt;second_window.zoom_y = 0;</a>
+<a name="ln143">  dev-&gt;second_window.zoom_scale = 1.f;</a>
+<a name="ln144">}</a>
+<a name="ln145"> </a>
+<a name="ln146">void dt_dev_cleanup(dt_develop_t *dev)</a>
+<a name="ln147">{</a>
+<a name="ln148">  if(!dev) return;</a>
+<a name="ln149">  // image_cache does not have to be unref'd, this is done outside develop module.</a>
+<a name="ln150">  dt_pthread_mutex_destroy(&amp;dev-&gt;pipe_mutex);</a>
+<a name="ln151">  dt_pthread_mutex_destroy(&amp;dev-&gt;pipe_mutex);</a>
+<a name="ln152">  dt_pthread_mutex_destroy(&amp;dev-&gt;preview_pipe_mutex);</a>
+<a name="ln153">  dt_pthread_mutex_destroy(&amp;dev-&gt;preview2_pipe_mutex);</a>
+<a name="ln154">  //   dt_pthread_mutex_destroy(&amp;dev-&gt;histogram_waveform_mutex);</a>
+<a name="ln155">  if(dev-&gt;pipe)</a>
+<a name="ln156">  {</a>
+<a name="ln157">    dt_dev_pixelpipe_cleanup(dev-&gt;pipe);</a>
+<a name="ln158">    free(dev-&gt;pipe);</a>
+<a name="ln159">  }</a>
+<a name="ln160">  if(dev-&gt;preview_pipe)</a>
+<a name="ln161">  {</a>
+<a name="ln162">    dt_dev_pixelpipe_cleanup(dev-&gt;preview_pipe);</a>
+<a name="ln163">    free(dev-&gt;preview_pipe);</a>
+<a name="ln164">  }</a>
+<a name="ln165">  if(dev-&gt;preview2_pipe)</a>
+<a name="ln166">  {</a>
+<a name="ln167">    dt_dev_pixelpipe_cleanup(dev-&gt;preview2_pipe);</a>
+<a name="ln168">    free(dev-&gt;preview2_pipe);</a>
+<a name="ln169">  }</a>
+<a name="ln170">  while(dev-&gt;history)</a>
+<a name="ln171">  {</a>
+<a name="ln172">    dt_dev_free_history_item(((dt_dev_history_item_t *)dev-&gt;history-&gt;data));</a>
+<a name="ln173">    dev-&gt;history = g_list_delete_link(dev-&gt;history, dev-&gt;history);</a>
+<a name="ln174">  }</a>
+<a name="ln175">  while(dev-&gt;iop)</a>
+<a name="ln176">  {</a>
+<a name="ln177">    dt_iop_cleanup_module((dt_iop_module_t *)dev-&gt;iop-&gt;data);</a>
+<a name="ln178">    free(dev-&gt;iop-&gt;data);</a>
+<a name="ln179">    dev-&gt;iop = g_list_delete_link(dev-&gt;iop, dev-&gt;iop);</a>
+<a name="ln180">  }</a>
+<a name="ln181">  while(dev-&gt;alliop)</a>
+<a name="ln182">  {</a>
+<a name="ln183">    dt_iop_cleanup_module((dt_iop_module_t *)dev-&gt;alliop-&gt;data);</a>
+<a name="ln184">    free(dev-&gt;alliop-&gt;data);</a>
+<a name="ln185">    dev-&gt;alliop = g_list_delete_link(dev-&gt;alliop, dev-&gt;alliop);</a>
+<a name="ln186">  }</a>
+<a name="ln187">  g_list_free_full(dev-&gt;iop_order_list, free);</a>
+<a name="ln188">  while(dev-&gt;allprofile_info)</a>
+<a name="ln189">  {</a>
+<a name="ln190">    dt_ioppr_cleanup_profile_info((dt_iop_order_iccprofile_info_t *)dev-&gt;allprofile_info-&gt;data);</a>
+<a name="ln191">    free(dev-&gt;allprofile_info-&gt;data);</a>
+<a name="ln192">    dev-&gt;allprofile_info = g_list_delete_link(dev-&gt;allprofile_info, dev-&gt;allprofile_info);</a>
+<a name="ln193">  }</a>
+<a name="ln194">  dt_pthread_mutex_destroy(&amp;dev-&gt;history_mutex);</a>
+<a name="ln195">  free(dev-&gt;histogram);</a>
+<a name="ln196">  free(dev-&gt;histogram_pre_tonecurve);</a>
+<a name="ln197">  free(dev-&gt;histogram_pre_levels);</a>
+<a name="ln198"> </a>
+<a name="ln199">  g_list_free_full(dev-&gt;forms, (void (*)(void *))dt_masks_free_form);</a>
+<a name="ln200">  g_list_free_full(dev-&gt;allforms, (void (*)(void *))dt_masks_free_form);</a>
+<a name="ln201"> </a>
+<a name="ln202">  g_list_free_full(dev-&gt;proxy.exposure, g_free);</a>
+<a name="ln203"> </a>
+<a name="ln204">  dt_conf_set_int(&quot;darkroom/ui/rawoverexposed/mode&quot;, dev-&gt;rawoverexposed.mode);</a>
+<a name="ln205">  dt_conf_set_int(&quot;darkroom/ui/rawoverexposed/colorscheme&quot;, dev-&gt;rawoverexposed.colorscheme);</a>
+<a name="ln206">  dt_conf_set_float(&quot;darkroom/ui/rawoverexposed/threshold&quot;, dev-&gt;rawoverexposed.threshold);</a>
+<a name="ln207"> </a>
+<a name="ln208">  dt_conf_set_int(&quot;darkroom/ui/overexposed/colorscheme&quot;, dev-&gt;overexposed.colorscheme);</a>
+<a name="ln209">  dt_conf_set_float(&quot;darkroom/ui/overexposed/lower&quot;, dev-&gt;overexposed.lower);</a>
+<a name="ln210">  dt_conf_set_float(&quot;darkroom/ui/overexposed/upper&quot;, dev-&gt;overexposed.upper);</a>
+<a name="ln211">}</a>
+<a name="ln212"> </a>
+<a name="ln213">void dt_dev_process_image(dt_develop_t *dev)</a>
+<a name="ln214">{</a>
+<a name="ln215">  if(!dev-&gt;gui_attached || dev-&gt;pipe-&gt;processing) return;</a>
+<a name="ln216">  int err</a>
+<a name="ln217">      = dt_control_add_job_res(darktable.control, dt_dev_process_image_job_create(dev), DT_CTL_WORKER_ZOOM_1);</a>
+<a name="ln218">  if(err) fprintf(stderr, &quot;[dev_process_image] job queue exceeded!\n&quot;);</a>
+<a name="ln219">}</a>
+<a name="ln220"> </a>
+<a name="ln221">void dt_dev_process_preview(dt_develop_t *dev)</a>
+<a name="ln222">{</a>
+<a name="ln223">  if(!dev-&gt;gui_attached) return;</a>
+<a name="ln224">  int err = dt_control_add_job_res(darktable.control, dt_dev_process_preview_job_create(dev),</a>
+<a name="ln225">                                   DT_CTL_WORKER_ZOOM_FILL);</a>
+<a name="ln226">  if(err) fprintf(stderr, &quot;[dev_process_preview] job queue exceeded!\n&quot;);</a>
+<a name="ln227">}</a>
+<a name="ln228"> </a>
+<a name="ln229">void dt_dev_process_preview2(dt_develop_t *dev)</a>
+<a name="ln230">{</a>
+<a name="ln231">  if(!dev-&gt;gui_attached) return;</a>
+<a name="ln232">  if(!(dev-&gt;second_window.widget &amp;&amp; GTK_IS_WIDGET(dev-&gt;second_window.widget))) return;</a>
+<a name="ln233">  int err = dt_control_add_job_res(darktable.control, dt_dev_process_preview2_job_create(dev),</a>
+<a name="ln234">                                   DT_CTL_WORKER_ZOOM_2);</a>
+<a name="ln235">  if(err) fprintf(stderr, &quot;[dev_process_preview2] job queue exceeded!\n&quot;);</a>
+<a name="ln236">}</a>
+<a name="ln237"> </a>
+<a name="ln238">void dt_dev_invalidate(dt_develop_t *dev)</a>
+<a name="ln239">{</a>
+<a name="ln240">  dev-&gt;image_status = DT_DEV_PIXELPIPE_DIRTY;</a>
+<a name="ln241">  dev-&gt;timestamp++;</a>
+<a name="ln242">  if(dev-&gt;preview_pipe) dev-&gt;preview_pipe-&gt;input_timestamp = dev-&gt;timestamp;</a>
+<a name="ln243">  if(dev-&gt;preview2_pipe) dev-&gt;preview2_pipe-&gt;input_timestamp = dev-&gt;timestamp;</a>
+<a name="ln244">}</a>
+<a name="ln245"> </a>
+<a name="ln246">void dt_dev_invalidate_all(dt_develop_t *dev)</a>
+<a name="ln247">{</a>
+<a name="ln248">  dev-&gt;image_status = dev-&gt;preview_status = dev-&gt;preview2_status = DT_DEV_PIXELPIPE_DIRTY;</a>
+<a name="ln249">  dev-&gt;timestamp++;</a>
+<a name="ln250">}</a>
+<a name="ln251"> </a>
+<a name="ln252">void dt_dev_process_preview_job(dt_develop_t *dev)</a>
+<a name="ln253">{</a>
+<a name="ln254">  if(dev-&gt;image_loading)</a>
+<a name="ln255">  {</a>
+<a name="ln256">    // raw is already loading, no use starting another file access, we wait.</a>
+<a name="ln257">    return;</a>
+<a name="ln258">  }</a>
+<a name="ln259"> </a>
+<a name="ln260">  dt_pthread_mutex_lock(&amp;dev-&gt;preview_pipe_mutex);</a>
+<a name="ln261"> </a>
+<a name="ln262">  if(dev-&gt;gui_leaving)</a>
+<a name="ln263">  {</a>
+<a name="ln264">    dt_pthread_mutex_unlock(&amp;dev-&gt;preview_pipe_mutex);</a>
+<a name="ln265">    return;</a>
+<a name="ln266">  }</a>
+<a name="ln267"> </a>
+<a name="ln268">  dt_control_log_busy_enter();</a>
+<a name="ln269">  dev-&gt;preview_pipe-&gt;input_timestamp = dev-&gt;timestamp;</a>
+<a name="ln270">  dev-&gt;preview_status = DT_DEV_PIXELPIPE_RUNNING;</a>
+<a name="ln271"> </a>
+<a name="ln272">  // lock if there, issue a background load, if not (best-effort for mip f).</a>
+<a name="ln273">  dt_mipmap_buffer_t buf;</a>
+<a name="ln274">  dt_mipmap_cache_get(darktable.mipmap_cache, &amp;buf, dev-&gt;image_storage.id, DT_MIPMAP_F, DT_MIPMAP_BEST_EFFORT,</a>
+<a name="ln275">                      'r');</a>
+<a name="ln276">  if(!buf.buf)</a>
+<a name="ln277">  {</a>
+<a name="ln278">    dt_control_log_busy_leave();</a>
+<a name="ln279">    dev-&gt;preview_status = DT_DEV_PIXELPIPE_DIRTY;</a>
+<a name="ln280">    dt_pthread_mutex_unlock(&amp;dev-&gt;preview_pipe_mutex);</a>
+<a name="ln281">    return; // not loaded yet. load will issue a gtk redraw on completion, which in turn will trigger us again</a>
+<a name="ln282">            // later.</a>
+<a name="ln283">  }</a>
+<a name="ln284">  // init pixel pipeline for preview.</a>
+<a name="ln285">  dt_dev_pixelpipe_set_input(dev-&gt;preview_pipe, dev, (float *)buf.buf, buf.width, buf.height, buf.iscale);</a>
+<a name="ln286"> </a>
+<a name="ln287">  if(dev-&gt;preview_loading)</a>
+<a name="ln288">  {</a>
+<a name="ln289">    dt_dev_pixelpipe_cleanup_nodes(dev-&gt;preview_pipe);</a>
+<a name="ln290">    dt_dev_pixelpipe_create_nodes(dev-&gt;preview_pipe, dev);</a>
+<a name="ln291">    dt_dev_pixelpipe_flush_caches(dev-&gt;preview_pipe);</a>
+<a name="ln292">    dev-&gt;preview_loading = 0;</a>
+<a name="ln293">  }</a>
+<a name="ln294"> </a>
+<a name="ln295">  // if raw loaded, get new mipf</a>
+<a name="ln296">  if(dev-&gt;preview_input_changed)</a>
+<a name="ln297">  {</a>
+<a name="ln298">    dt_dev_pixelpipe_flush_caches(dev-&gt;preview_pipe);</a>
+<a name="ln299">    dev-&gt;preview_input_changed = 0;</a>
+<a name="ln300">  }</a>
+<a name="ln301"> </a>
+<a name="ln302">// always process the whole downsampled mipf buffer, to allow for fast scrolling and mip4 write-through.</a>
+<a name="ln303">restart:</a>
+<a name="ln304">  if(dev-&gt;gui_leaving)</a>
+<a name="ln305">  {</a>
+<a name="ln306">    dt_control_log_busy_leave();</a>
+<a name="ln307">    dev-&gt;preview_status = DT_DEV_PIXELPIPE_INVALID;</a>
+<a name="ln308">    dt_pthread_mutex_unlock(&amp;dev-&gt;preview_pipe_mutex);</a>
+<a name="ln309">    dt_mipmap_cache_release(darktable.mipmap_cache, &amp;buf);</a>
+<a name="ln310">    return;</a>
+<a name="ln311">  }</a>
+<a name="ln312">  // adjust pipeline according to changed flag set by {add,pop}_history_item.</a>
+<a name="ln313">  // this locks dev-&gt;history_mutex.</a>
+<a name="ln314">  dt_times_t start;</a>
+<a name="ln315">  dt_get_times(&amp;start);</a>
+<a name="ln316">  dt_dev_pixelpipe_change(dev-&gt;preview_pipe, dev);</a>
+<a name="ln317">  if(dt_dev_pixelpipe_process(</a>
+<a name="ln318">         dev-&gt;preview_pipe, dev, 0, 0, dev-&gt;preview_pipe-&gt;processed_width * dev-&gt;preview_downsampling,</a>
+<a name="ln319">         dev-&gt;preview_pipe-&gt;processed_height * dev-&gt;preview_downsampling, dev-&gt;preview_downsampling))</a>
+<a name="ln320">  {</a>
+<a name="ln321">    if(dev-&gt;preview_loading || dev-&gt;preview_input_changed)</a>
+<a name="ln322">    {</a>
+<a name="ln323">      dt_control_log_busy_leave();</a>
+<a name="ln324">      dev-&gt;preview_status = DT_DEV_PIXELPIPE_INVALID;</a>
+<a name="ln325">      dt_pthread_mutex_unlock(&amp;dev-&gt;preview_pipe_mutex);</a>
+<a name="ln326">      dt_mipmap_cache_release(darktable.mipmap_cache, &amp;buf);</a>
+<a name="ln327">      return;</a>
+<a name="ln328">    }</a>
+<a name="ln329">    else</a>
+<a name="ln330">      goto restart;</a>
+<a name="ln331">  }</a>
+<a name="ln332"> </a>
+<a name="ln333">  dev-&gt;preview_status = DT_DEV_PIXELPIPE_VALID;</a>
+<a name="ln334"> </a>
+<a name="ln335">  dt_show_times(&amp;start, &quot;[dev_process_preview] pixel pipeline processing&quot;);</a>
+<a name="ln336">  dt_dev_average_delay_update(&amp;start, &amp;dev-&gt;preview_average_delay);</a>
+<a name="ln337"> </a>
+<a name="ln338">  // if a widget needs to be redraw there's the DT_SIGNAL_*_PIPE_FINISHED signals</a>
+<a name="ln339">  dt_control_log_busy_leave();</a>
+<a name="ln340">  dt_pthread_mutex_unlock(&amp;dev-&gt;preview_pipe_mutex);</a>
+<a name="ln341">  dt_mipmap_cache_release(darktable.mipmap_cache, &amp;buf);</a>
+<a name="ln342"> </a>
+<a name="ln343">  dt_control_signal_raise(darktable.signals, DT_SIGNAL_DEVELOP_PREVIEW_PIPE_FINISHED);</a>
+<a name="ln344">}</a>
+<a name="ln345"> </a>
+<a name="ln346">void dt_dev_process_preview2_job(dt_develop_t *dev)</a>
+<a name="ln347">{</a>
+<a name="ln348">  if(dev-&gt;image_loading)</a>
+<a name="ln349">  {</a>
+<a name="ln350">    // raw is already loading, no use starting another file access, we wait.</a>
+<a name="ln351">    return;</a>
+<a name="ln352">  }</a>
+<a name="ln353"> </a>
+<a name="ln354">  if(!(dev-&gt;second_window.widget &amp;&amp; GTK_IS_WIDGET(dev-&gt;second_window.widget)))</a>
+<a name="ln355">  {</a>
+<a name="ln356">    return;</a>
+<a name="ln357">  }</a>
+<a name="ln358"> </a>
+<a name="ln359">  dt_pthread_mutex_lock(&amp;dev-&gt;preview2_pipe_mutex);</a>
+<a name="ln360"> </a>
+<a name="ln361">  if(dev-&gt;gui_leaving)</a>
+<a name="ln362">  {</a>
+<a name="ln363">    dt_pthread_mutex_unlock(&amp;dev-&gt;preview2_pipe_mutex);</a>
+<a name="ln364">    return;</a>
+<a name="ln365">  }</a>
+<a name="ln366"> </a>
+<a name="ln367">  dt_control_log_busy_enter();</a>
+<a name="ln368">  dev-&gt;preview2_pipe-&gt;input_timestamp = dev-&gt;timestamp;</a>
+<a name="ln369">  dev-&gt;preview2_status = DT_DEV_PIXELPIPE_RUNNING;</a>
+<a name="ln370"> </a>
+<a name="ln371">  // lock if there, issue a background load, if not (best-effort for mip f).</a>
+<a name="ln372">  dt_mipmap_buffer_t buf;</a>
+<a name="ln373">  dt_mipmap_cache_get(darktable.mipmap_cache, &amp;buf, dev-&gt;image_storage.id, DT_MIPMAP_FULL, DT_MIPMAP_BLOCKING, 'r');</a>
+<a name="ln374"> </a>
+<a name="ln375">  if(!buf.buf)</a>
+<a name="ln376">  {</a>
+<a name="ln377">    dt_control_log_busy_leave();</a>
+<a name="ln378">    dev-&gt;preview2_status = DT_DEV_PIXELPIPE_DIRTY;</a>
+<a name="ln379">    dt_pthread_mutex_unlock(&amp;dev-&gt;preview2_pipe_mutex);</a>
+<a name="ln380">    return; // not loaded yet. load will issue a gtk redraw on completion, which in turn will trigger us again</a>
+<a name="ln381">            // later.</a>
+<a name="ln382">  }</a>
+<a name="ln383">  // init pixel pipeline for preview2.</a>
+<a name="ln384">  dt_dev_pixelpipe_set_input(dev-&gt;preview2_pipe, dev, (float *)buf.buf, buf.width, buf.height, 1.0 /*buf.iscale*/);</a>
+<a name="ln385"> </a>
+<a name="ln386">  if(dev-&gt;preview2_loading)</a>
+<a name="ln387">  {</a>
+<a name="ln388">    dt_dev_pixelpipe_cleanup_nodes(dev-&gt;preview2_pipe);</a>
+<a name="ln389">    dt_dev_pixelpipe_create_nodes(dev-&gt;preview2_pipe, dev);</a>
+<a name="ln390">    dt_dev_pixelpipe_flush_caches(dev-&gt;preview2_pipe);</a>
+<a name="ln391">    dev-&gt;preview2_loading = 0;</a>
+<a name="ln392">  }</a>
+<a name="ln393"> </a>
+<a name="ln394">  // if raw loaded, get new mipf</a>
+<a name="ln395">  if(dev-&gt;preview2_input_changed)</a>
+<a name="ln396">  {</a>
+<a name="ln397">    dt_dev_pixelpipe_flush_caches(dev-&gt;preview2_pipe);</a>
+<a name="ln398">    dev-&gt;preview2_input_changed = 0;</a>
+<a name="ln399">  }</a>
+<a name="ln400"> </a>
+<a name="ln401">// always process the whole downsampled mipf buffer, to allow for fast scrolling and mip4 write-through.</a>
+<a name="ln402">restart:</a>
+<a name="ln403">  if(dev-&gt;gui_leaving)</a>
+<a name="ln404">  {</a>
+<a name="ln405">    dt_control_log_busy_leave();</a>
+<a name="ln406">    dev-&gt;preview2_status = DT_DEV_PIXELPIPE_INVALID;</a>
+<a name="ln407">    dt_pthread_mutex_unlock(&amp;dev-&gt;preview2_pipe_mutex);</a>
+<a name="ln408">    dt_mipmap_cache_release(darktable.mipmap_cache, &amp;buf);</a>
+<a name="ln409">    return;</a>
+<a name="ln410">  }</a>
+<a name="ln411"> </a>
+<a name="ln412">  const dt_dev_pixelpipe_change_t pipe_changed = dev-&gt;pipe-&gt;changed;</a>
+<a name="ln413"> </a>
+<a name="ln414">  // adjust pipeline according to changed flag set by {add,pop}_history_item.</a>
+<a name="ln415">  // this locks dev-&gt;history_mutex.</a>
+<a name="ln416">  dt_times_t start;</a>
+<a name="ln417">  dt_get_times(&amp;start);</a>
+<a name="ln418">  dt_dev_pixelpipe_change(dev-&gt;preview2_pipe, dev);</a>
+<a name="ln419"> </a>
+<a name="ln420">  const dt_dev_zoom_t zoom = dt_second_window_get_dev_zoom(dev);</a>
+<a name="ln421">  const int closeup = dt_second_window_get_dev_closeup(dev);</a>
+<a name="ln422">  float zoom_x = dt_second_window_get_dev_zoom_x(dev);</a>
+<a name="ln423">  float zoom_y = dt_second_window_get_dev_zoom_y(dev);</a>
+<a name="ln424">  // if just changed to an image with a different aspect ratio or</a>
+<a name="ln425">  // altered image orientation, the prior zoom xy could now be beyond</a>
+<a name="ln426">  // the image boundary</a>
+<a name="ln427">  if(dev-&gt;preview2_loading || (pipe_changed != DT_DEV_PIPE_UNCHANGED))</a>
+<a name="ln428">  {</a>
+<a name="ln429">    dt_second_window_check_zoom_bounds(dev, &amp;zoom_x, &amp;zoom_y, zoom, closeup, NULL, NULL);</a>
+<a name="ln430">    dt_second_window_set_dev_zoom_x(dev, zoom_x);</a>
+<a name="ln431">    dt_second_window_set_dev_zoom_y(dev, zoom_y);</a>
+<a name="ln432">  }</a>
+<a name="ln433">  const float scale = dt_second_window_get_zoom_scale(dev, zoom, 1.0f, 0) * dev-&gt;second_window.ppd;</a>
+<a name="ln434">  int window_width = dev-&gt;second_window.width * dev-&gt;second_window.ppd;</a>
+<a name="ln435">  int window_height = dev-&gt;second_window.height * dev-&gt;second_window.ppd;</a>
+<a name="ln436">  if(closeup)</a>
+<a name="ln437">  {</a>
+<a name="ln438">    window_width /= 1 &lt;&lt; closeup;</a>
+<a name="ln439">    window_height /= 1 &lt;&lt; closeup;</a>
+<a name="ln440">  }</a>
+<a name="ln441"> </a>
+<a name="ln442">  const int wd = MIN(window_width, dev-&gt;preview2_pipe-&gt;processed_width * scale);</a>
+<a name="ln443">  const int ht = MIN(window_height, dev-&gt;preview2_pipe-&gt;processed_height * scale);</a>
+<a name="ln444">  int x = MAX(0, scale * dev-&gt;preview2_pipe-&gt;processed_width * (.5 + zoom_x) - wd / 2);</a>
+<a name="ln445">  int y = MAX(0, scale * dev-&gt;preview2_pipe-&gt;processed_height * (.5 + zoom_y) - ht / 2);</a>
+<a name="ln446"> </a>
+<a name="ln447">  if(dt_dev_pixelpipe_process(dev-&gt;preview2_pipe, dev, x, y, wd, ht, scale))</a>
+<a name="ln448">  {</a>
+<a name="ln449">    if(dev-&gt;preview2_loading || dev-&gt;preview2_input_changed)</a>
+<a name="ln450">    {</a>
+<a name="ln451">      dt_control_log_busy_leave();</a>
+<a name="ln452">      dev-&gt;preview2_status = DT_DEV_PIXELPIPE_INVALID;</a>
+<a name="ln453">      dt_pthread_mutex_unlock(&amp;dev-&gt;preview2_pipe_mutex);</a>
+<a name="ln454">      dt_mipmap_cache_release(darktable.mipmap_cache, &amp;buf);</a>
+<a name="ln455">      return;</a>
+<a name="ln456">    }</a>
+<a name="ln457">    else</a>
+<a name="ln458">      goto restart;</a>
+<a name="ln459">  }</a>
+<a name="ln460"> </a>
+<a name="ln461">  dev-&gt;preview2_pipe-&gt;backbuf_scale = scale;</a>
+<a name="ln462">  dev-&gt;preview2_pipe-&gt;backbuf_zoom_x = zoom_x;</a>
+<a name="ln463">  dev-&gt;preview2_pipe-&gt;backbuf_zoom_y = zoom_y;</a>
+<a name="ln464"> </a>
+<a name="ln465">  dev-&gt;preview2_status = DT_DEV_PIXELPIPE_VALID;</a>
+<a name="ln466"> </a>
+<a name="ln467">  dt_show_times(&amp;start, &quot;[dev_process_preview2] pixel pipeline processing&quot;);</a>
+<a name="ln468">  dt_dev_average_delay_update(&amp;start, &amp;dev-&gt;preview2_average_delay);</a>
+<a name="ln469"> </a>
+<a name="ln470">  dt_control_log_busy_leave();</a>
+<a name="ln471">  dt_pthread_mutex_unlock(&amp;dev-&gt;preview2_pipe_mutex);</a>
+<a name="ln472">  dt_mipmap_cache_release(darktable.mipmap_cache, &amp;buf);</a>
+<a name="ln473"> </a>
+<a name="ln474">  dt_control_signal_raise(darktable.signals, DT_SIGNAL_DEVELOP_PREVIEW2_PIPE_FINISHED);</a>
+<a name="ln475">}</a>
+<a name="ln476"> </a>
+<a name="ln477">void dt_dev_process_image_job(dt_develop_t *dev)</a>
+<a name="ln478">{</a>
+<a name="ln479">  dt_pthread_mutex_lock(&amp;dev-&gt;pipe_mutex);</a>
+<a name="ln480"> </a>
+<a name="ln481">  if(dev-&gt;gui_leaving)</a>
+<a name="ln482">  {</a>
+<a name="ln483">    dt_pthread_mutex_unlock(&amp;dev-&gt;pipe_mutex);</a>
+<a name="ln484">    return;</a>
+<a name="ln485">  }</a>
+<a name="ln486"> </a>
+<a name="ln487">  dt_control_log_busy_enter();</a>
+<a name="ln488">  // let gui know to draw preview instead of us, if it's there:</a>
+<a name="ln489">  dev-&gt;image_status = DT_DEV_PIXELPIPE_RUNNING;</a>
+<a name="ln490"> </a>
+<a name="ln491">  dt_mipmap_buffer_t buf;</a>
+<a name="ln492">  dt_times_t start;</a>
+<a name="ln493">  dt_get_times(&amp;start);</a>
+<a name="ln494">  dt_mipmap_cache_get(darktable.mipmap_cache, &amp;buf, dev-&gt;image_storage.id, DT_MIPMAP_FULL,</a>
+<a name="ln495">                           DT_MIPMAP_BLOCKING, 'r');</a>
+<a name="ln496">  dt_show_times_f(&amp;start, &quot;[dev]&quot;, &quot;to load the image.&quot;);</a>
+<a name="ln497"> </a>
+<a name="ln498">  // failed to load raw?</a>
+<a name="ln499">  if(!buf.buf)</a>
+<a name="ln500">  {</a>
+<a name="ln501">    dt_control_log_busy_leave();</a>
+<a name="ln502">    dev-&gt;image_status = DT_DEV_PIXELPIPE_DIRTY;</a>
+<a name="ln503">    dt_pthread_mutex_unlock(&amp;dev-&gt;pipe_mutex);</a>
+<a name="ln504">    return;</a>
+<a name="ln505">  }</a>
+<a name="ln506"> </a>
+<a name="ln507">  dt_dev_pixelpipe_set_input(dev-&gt;pipe, dev, (float *)buf.buf, buf.width, buf.height, 1.0);</a>
+<a name="ln508"> </a>
+<a name="ln509">  if(dev-&gt;image_loading)</a>
+<a name="ln510">  {</a>
+<a name="ln511">    // init pixel pipeline</a>
+<a name="ln512">    dt_dev_pixelpipe_cleanup_nodes(dev-&gt;pipe);</a>
+<a name="ln513">    dt_dev_pixelpipe_create_nodes(dev-&gt;pipe, dev);</a>
+<a name="ln514">    if(dev-&gt;image_force_reload) dt_dev_pixelpipe_flush_caches(dev-&gt;pipe);</a>
+<a name="ln515">    dev-&gt;image_force_reload = 0;</a>
+<a name="ln516">    if(dev-&gt;gui_attached)</a>
+<a name="ln517">    {</a>
+<a name="ln518">      // during load, a mipf update could have been issued.</a>
+<a name="ln519">      dev-&gt;preview_input_changed = 1;</a>
+<a name="ln520">      dev-&gt;preview_status = DT_DEV_PIXELPIPE_DIRTY;</a>
+<a name="ln521">      dev-&gt;preview2_input_changed = 1;</a>
+<a name="ln522">      dev-&gt;preview2_status = DT_DEV_PIXELPIPE_DIRTY;</a>
+<a name="ln523">      dev-&gt;gui_synch = 1; // notify gui thread we want to synch (call gui_update in the modules)</a>
+<a name="ln524">      dev-&gt;preview_pipe-&gt;changed |= DT_DEV_PIPE_SYNCH;</a>
+<a name="ln525">      dev-&gt;preview2_pipe-&gt;changed |= DT_DEV_PIPE_SYNCH;</a>
+<a name="ln526">    }</a>
+<a name="ln527">    dev-&gt;pipe-&gt;changed |= DT_DEV_PIPE_SYNCH;</a>
+<a name="ln528">  }</a>
+<a name="ln529"> </a>
+<a name="ln530">  dt_dev_zoom_t zoom;</a>
+<a name="ln531">  float zoom_x, zoom_y, scale;</a>
+<a name="ln532">  int window_width, window_height, x, y, closeup;</a>
+<a name="ln533">  dt_dev_pixelpipe_change_t pipe_changed;</a>
+<a name="ln534"> </a>
+<a name="ln535">// adjust pipeline according to changed flag set by {add,pop}_history_item.</a>
+<a name="ln536">restart:</a>
+<a name="ln537">  if(dev-&gt;gui_leaving)</a>
+<a name="ln538">  {</a>
+<a name="ln539">    dt_mipmap_cache_release(darktable.mipmap_cache, &amp;buf);</a>
+<a name="ln540">    dt_control_log_busy_leave();</a>
+<a name="ln541">    dev-&gt;image_status = DT_DEV_PIXELPIPE_INVALID;</a>
+<a name="ln542">    dt_pthread_mutex_unlock(&amp;dev-&gt;pipe_mutex);</a>
+<a name="ln543">    return;</a>
+<a name="ln544">  }</a>
+<a name="ln545">  dev-&gt;pipe-&gt;input_timestamp = dev-&gt;timestamp;</a>
+<a name="ln546">  // dt_dev_pixelpipe_change() will clear the changed value</a>
+<a name="ln547">  pipe_changed = dev-&gt;pipe-&gt;changed;</a>
+<a name="ln548">  // this locks dev-&gt;history_mutex.</a>
+<a name="ln549">  dt_dev_pixelpipe_change(dev-&gt;pipe, dev);</a>
+<a name="ln550">  // determine scale according to new dimensions</a>
+<a name="ln551">  zoom = dt_control_get_dev_zoom();</a>
+<a name="ln552">  closeup = dt_control_get_dev_closeup();</a>
+<a name="ln553">  zoom_x = dt_control_get_dev_zoom_x();</a>
+<a name="ln554">  zoom_y = dt_control_get_dev_zoom_y();</a>
+<a name="ln555">  // if just changed to an image with a different aspect ratio or</a>
+<a name="ln556">  // altered image orientation, the prior zoom xy could now be beyond</a>
+<a name="ln557">  // the image boundary</a>
+<a name="ln558">  if(dev-&gt;image_loading || (pipe_changed != DT_DEV_PIPE_UNCHANGED))</a>
+<a name="ln559">  {</a>
+<a name="ln560">    dt_dev_check_zoom_bounds(dev, &amp;zoom_x, &amp;zoom_y, zoom, closeup, NULL, NULL);</a>
+<a name="ln561">    dt_control_set_dev_zoom_x(zoom_x);</a>
+<a name="ln562">    dt_control_set_dev_zoom_y(zoom_y);</a>
+<a name="ln563">  }</a>
+<a name="ln564"> </a>
+<a name="ln565">  scale = dt_dev_get_zoom_scale(dev, zoom, 1.0f, 0) * darktable.gui-&gt;ppd;</a>
+<a name="ln566">  window_width = dev-&gt;width * darktable.gui-&gt;ppd;</a>
+<a name="ln567">  window_height = dev-&gt;height * darktable.gui-&gt;ppd;</a>
+<a name="ln568">  if(closeup)</a>
+<a name="ln569">  {</a>
+<a name="ln570">    window_width /= 1&lt;&lt;closeup;</a>
+<a name="ln571">    window_height /= 1&lt;&lt;closeup;</a>
+<a name="ln572">  }</a>
+<a name="ln573">  const int wd = MIN(window_width, dev-&gt;pipe-&gt;processed_width * scale);</a>
+<a name="ln574">  const int ht = MIN(window_height, dev-&gt;pipe-&gt;processed_height * scale);</a>
+<a name="ln575">  x = MAX(0, scale * dev-&gt;pipe-&gt;processed_width  * (.5 + zoom_x) - wd / 2);</a>
+<a name="ln576">  y = MAX(0, scale * dev-&gt;pipe-&gt;processed_height * (.5 + zoom_y) - ht / 2);</a>
+<a name="ln577"> </a>
+<a name="ln578">  dt_get_times(&amp;start);</a>
+<a name="ln579">  if(dt_dev_pixelpipe_process(dev-&gt;pipe, dev, x, y, wd, ht, scale))</a>
+<a name="ln580">  {</a>
+<a name="ln581">    // interrupted because image changed?</a>
+<a name="ln582">    if(dev-&gt;image_force_reload)</a>
+<a name="ln583">    {</a>
+<a name="ln584">      dt_mipmap_cache_release(darktable.mipmap_cache, &amp;buf);</a>
+<a name="ln585">      dt_control_log_busy_leave();</a>
+<a name="ln586">      dev-&gt;image_status = DT_DEV_PIXELPIPE_INVALID;</a>
+<a name="ln587">      dt_pthread_mutex_unlock(&amp;dev-&gt;pipe_mutex);</a>
+<a name="ln588">      return;</a>
+<a name="ln589">    }</a>
+<a name="ln590">    // or because the pipeline changed?</a>
+<a name="ln591">    else</a>
+<a name="ln592">      goto restart;</a>
+<a name="ln593">  }</a>
+<a name="ln594">  dt_show_times(&amp;start, &quot;[dev_process_image] pixel pipeline processing&quot;);</a>
+<a name="ln595">  dt_dev_average_delay_update(&amp;start, &amp;dev-&gt;average_delay);</a>
+<a name="ln596"> </a>
+<a name="ln597">  // maybe we got zoomed/panned in the meantime?</a>
+<a name="ln598">  if(dev-&gt;pipe-&gt;changed != DT_DEV_PIPE_UNCHANGED) goto restart;</a>
+<a name="ln599"> </a>
+<a name="ln600">  // cool, we got a new image!</a>
+<a name="ln601">  dev-&gt;pipe-&gt;backbuf_scale = scale;</a>
+<a name="ln602">  dev-&gt;pipe-&gt;backbuf_zoom_x = zoom_x;</a>
+<a name="ln603">  dev-&gt;pipe-&gt;backbuf_zoom_y = zoom_y;</a>
+<a name="ln604"> </a>
+<a name="ln605">  dev-&gt;image_status = DT_DEV_PIXELPIPE_VALID;</a>
+<a name="ln606">  dev-&gt;image_loading = 0;</a>
+<a name="ln607"> </a>
+<a name="ln608">  dt_mipmap_cache_release(darktable.mipmap_cache, &amp;buf);</a>
+<a name="ln609">  // if a widget needs to be redraw there's the DT_SIGNAL_*_PIPE_FINISHED signals</a>
+<a name="ln610">  dt_control_log_busy_leave();</a>
+<a name="ln611">  dt_pthread_mutex_unlock(&amp;dev-&gt;pipe_mutex);</a>
+<a name="ln612"> </a>
+<a name="ln613">  if(dev-&gt;gui_attached &amp;&amp; !dev-&gt;gui_leaving)</a>
+<a name="ln614">    dt_control_signal_raise(darktable.signals, DT_SIGNAL_DEVELOP_UI_PIPE_FINISHED);</a>
+<a name="ln615">}</a>
+<a name="ln616"> </a>
+<a name="ln617">// load the raw and get the new image struct, blocking in gui thread</a>
+<a name="ln618">static inline void _dt_dev_load_raw(dt_develop_t *dev, const uint32_t imgid)</a>
+<a name="ln619">{</a>
+<a name="ln620">  // first load the raw, to make sure dt_image_t will contain all and correct data.</a>
+<a name="ln621">  dt_mipmap_buffer_t buf;</a>
+<a name="ln622">  dt_times_t start;</a>
+<a name="ln623">  dt_get_times(&amp;start);</a>
+<a name="ln624">  dt_mipmap_cache_get(darktable.mipmap_cache, &amp;buf, imgid, DT_MIPMAP_FULL, DT_MIPMAP_BLOCKING, 'r');</a>
+<a name="ln625">  dt_mipmap_cache_release(darktable.mipmap_cache, &amp;buf);</a>
+<a name="ln626">  dt_show_times_f(&amp;start, &quot;[dev]&quot;, &quot;to load the image.&quot;);</a>
+<a name="ln627"> </a>
+<a name="ln628">  const dt_image_t *image = dt_image_cache_get(darktable.image_cache, imgid, 'r');</a>
+<a name="ln629">  dev-&gt;image_storage = *image;</a>
+<a name="ln630">  dt_image_cache_read_release(darktable.image_cache, image);</a>
+<a name="ln631">}</a>
+<a name="ln632"> </a>
+<a name="ln633">void dt_dev_reload_image(dt_develop_t *dev, const uint32_t imgid)</a>
+<a name="ln634">{</a>
+<a name="ln635">  _dt_dev_load_raw(dev, imgid);</a>
+<a name="ln636">  dev-&gt;image_force_reload = dev-&gt;image_loading = dev-&gt;preview_loading = dev-&gt;preview2_loading = 1;</a>
+<a name="ln637"> </a>
+<a name="ln638">  dev-&gt;pipe-&gt;changed |= DT_DEV_PIPE_SYNCH;</a>
+<a name="ln639">  dt_dev_invalidate(dev); // only invalidate image, preview will follow once it's loaded.</a>
+<a name="ln640">}</a>
+<a name="ln641"> </a>
+<a name="ln642">float dt_dev_get_zoom_scale(dt_develop_t *dev, dt_dev_zoom_t zoom, int closeup_factor, int preview)</a>
+<a name="ln643">{</a>
+<a name="ln644">  float zoom_scale;</a>
+<a name="ln645"> </a>
+<a name="ln646">  const float w = preview ? dev-&gt;preview_pipe-&gt;processed_width : dev-&gt;pipe-&gt;processed_width;</a>
+<a name="ln647">  const float h = preview ? dev-&gt;preview_pipe-&gt;processed_height : dev-&gt;pipe-&gt;processed_height;</a>
+<a name="ln648">  const float ps = dev-&gt;pipe-&gt;backbuf_width</a>
+<a name="ln649">                       ? dev-&gt;pipe-&gt;processed_width / (float)dev-&gt;preview_pipe-&gt;processed_width</a>
+<a name="ln650">                       : dev-&gt;preview_pipe-&gt;iscale / dev-&gt;preview_downsampling;</a>
+<a name="ln651"> </a>
+<a name="ln652">  switch(zoom)</a>
+<a name="ln653">  {</a>
+<a name="ln654">    case DT_ZOOM_FIT:</a>
+<a name="ln655">      zoom_scale = fminf(dev-&gt;width / w, dev-&gt;height / h);</a>
+<a name="ln656">      break;</a>
+<a name="ln657">    case DT_ZOOM_FILL:</a>
+<a name="ln658">      zoom_scale = fmaxf(dev-&gt;width / w, dev-&gt;height / h);</a>
+<a name="ln659">      break;</a>
+<a name="ln660">    case DT_ZOOM_1:</a>
+<a name="ln661">      zoom_scale = closeup_factor;</a>
+<a name="ln662">      if(preview) zoom_scale *= ps;</a>
+<a name="ln663">      break;</a>
+<a name="ln664">    default: // DT_ZOOM_FREE</a>
+<a name="ln665">      zoom_scale = dt_control_get_dev_zoom_scale();</a>
+<a name="ln666">      if(preview) zoom_scale *= ps;</a>
+<a name="ln667">      break;</a>
+<a name="ln668">  }</a>
+<a name="ln669">  return zoom_scale;</a>
+<a name="ln670">}</a>
+<a name="ln671"> </a>
+<a name="ln672">void dt_dev_load_image(dt_develop_t *dev, const uint32_t imgid)</a>
+<a name="ln673">{</a>
+<a name="ln674">  _dt_dev_load_raw(dev, imgid);</a>
+<a name="ln675"> </a>
+<a name="ln676">  if(dev-&gt;pipe)</a>
+<a name="ln677">  {</a>
+<a name="ln678">    dev-&gt;pipe-&gt;processed_width = 0;</a>
+<a name="ln679">    dev-&gt;pipe-&gt;processed_height = 0;</a>
+<a name="ln680">  }</a>
+<a name="ln681">  dev-&gt;image_loading = 1;</a>
+<a name="ln682">  dev-&gt;preview_loading = 1;</a>
+<a name="ln683">  dev-&gt;preview2_loading = 1;</a>
+<a name="ln684">  dev-&gt;first_load = 1;</a>
+<a name="ln685">  dev-&gt;image_status = dev-&gt;preview_status = dev-&gt;preview2_status = DT_DEV_PIXELPIPE_DIRTY;</a>
+<a name="ln686"> </a>
+<a name="ln687">  dev-&gt;iop = dt_iop_load_modules(dev);</a>
+<a name="ln688"> </a>
+<a name="ln689">  dt_dev_read_history(dev);</a>
+<a name="ln690"> </a>
+<a name="ln691">  dev-&gt;first_load = 0;</a>
+<a name="ln692"> </a>
+<a name="ln693">  // Loading an image means we do some developing and so remove the darktable|problem|history-compress tag</a>
+<a name="ln694">  dt_history_set_compress_problem(imgid, FALSE);</a>
+<a name="ln695">}</a>
+<a name="ln696"> </a>
+<a name="ln697">void dt_dev_configure(dt_develop_t *dev, int wd, int ht)</a>
+<a name="ln698">{</a>
+<a name="ln699">  // fixed border on every side</a>
+<a name="ln700">  const int tb = DT_PIXEL_APPLY_DPI(dt_conf_get_int(&quot;plugins/darkroom/ui/border_size&quot;));</a>
+<a name="ln701">  wd -= 2*tb;</a>
+<a name="ln702">  ht -= 2*tb;</a>
+<a name="ln703">  if(dev-&gt;width != wd || dev-&gt;height != ht)</a>
+<a name="ln704">  {</a>
+<a name="ln705">    dev-&gt;width = wd;</a>
+<a name="ln706">    dev-&gt;height = ht;</a>
+<a name="ln707">    dev-&gt;preview_pipe-&gt;changed |= DT_DEV_PIPE_ZOOMED;</a>
+<a name="ln708">    dev-&gt;preview2_pipe-&gt;changed |= DT_DEV_PIPE_ZOOMED;</a>
+<a name="ln709">    dev-&gt;pipe-&gt;changed |= DT_DEV_PIPE_ZOOMED;</a>
+<a name="ln710">    dt_dev_invalidate(dev);</a>
+<a name="ln711">  }</a>
+<a name="ln712">}</a>
+<a name="ln713"> </a>
+<a name="ln714">// helper used to synch a single history item with db</a>
+<a name="ln715">int dt_dev_write_history_item(const int imgid, dt_dev_history_item_t *h, int32_t num)</a>
+<a name="ln716">{</a>
+<a name="ln717">//  if(!image) return 1;</a>
+<a name="ln718">  sqlite3_stmt *stmt;</a>
+<a name="ln719">  DT_DEBUG_SQLITE3_PREPARE_V2(dt_database_get(darktable.db),</a>
+<a name="ln720">                              &quot;SELECT num FROM main.history WHERE imgid = ?1 AND num = ?2&quot;, -1, &amp;stmt, NULL);</a>
+<a name="ln721">  DT_DEBUG_SQLITE3_BIND_INT(stmt, 1, imgid);</a>
+<a name="ln722">  DT_DEBUG_SQLITE3_BIND_INT(stmt, 2, num);</a>
+<a name="ln723">  if(sqlite3_step(stmt) != SQLITE_ROW)</a>
+<a name="ln724">  {</a>
+<a name="ln725">    sqlite3_finalize(stmt);</a>
+<a name="ln726">    DT_DEBUG_SQLITE3_PREPARE_V2(dt_database_get(darktable.db),</a>
+<a name="ln727">                                &quot;INSERT INTO main.history (imgid, num) VALUES (?1, ?2)&quot;, -1, &amp;stmt, NULL);</a>
+<a name="ln728">    DT_DEBUG_SQLITE3_BIND_INT(stmt, 1, imgid);</a>
+<a name="ln729">    DT_DEBUG_SQLITE3_BIND_INT(stmt, 2, num);</a>
+<a name="ln730">    sqlite3_step(stmt);</a>
+<a name="ln731">  }</a>
+<a name="ln732">  // printf(&quot;[dev write history item] writing %d - %s params %f %f\n&quot;, h-&gt;module-&gt;instance, h-&gt;module-&gt;op,</a>
+<a name="ln733">  // *(float *)h-&gt;params, *(((float *)h-&gt;params)+1));</a>
+<a name="ln734">  sqlite3_finalize(stmt);</a>
+<a name="ln735">  DT_DEBUG_SQLITE3_PREPARE_V2(dt_database_get(darktable.db),</a>
+<a name="ln736">                              &quot;UPDATE main.history SET operation = ?1, op_params = ?2, module = ?3, enabled = ?4, &quot;</a>
+<a name="ln737">                              &quot;blendop_params = ?7, blendop_version = ?8, multi_priority = ?9, multi_name = &quot;</a>
+<a name="ln738">                              &quot;?10, iop_order = ?11 WHERE imgid = ?5 AND num = ?6&quot;,</a>
+<a name="ln739">                              -1, &amp;stmt, NULL);</a>
+<a name="ln740">  DT_DEBUG_SQLITE3_BIND_TEXT(stmt, 1, h-&gt;module-&gt;op, -1, SQLITE_TRANSIENT);</a>
+<a name="ln741">  DT_DEBUG_SQLITE3_BIND_BLOB(stmt, 2, h-&gt;params, h-&gt;module-&gt;params_size, SQLITE_TRANSIENT);</a>
+<a name="ln742">  DT_DEBUG_SQLITE3_BIND_INT(stmt, 3, h-&gt;module-&gt;version());</a>
+<a name="ln743">  DT_DEBUG_SQLITE3_BIND_INT(stmt, 4, h-&gt;enabled);</a>
+<a name="ln744">  DT_DEBUG_SQLITE3_BIND_INT(stmt, 5, imgid);</a>
+<a name="ln745">  DT_DEBUG_SQLITE3_BIND_INT(stmt, 6, num);</a>
+<a name="ln746">  DT_DEBUG_SQLITE3_BIND_BLOB(stmt, 7, h-&gt;blend_params, sizeof(dt_develop_blend_params_t), SQLITE_TRANSIENT);</a>
+<a name="ln747">  DT_DEBUG_SQLITE3_BIND_INT(stmt, 8, dt_develop_blend_version());</a>
+<a name="ln748">  DT_DEBUG_SQLITE3_BIND_INT(stmt, 9, h-&gt;multi_priority);</a>
+<a name="ln749">  DT_DEBUG_SQLITE3_BIND_TEXT(stmt, 10, h-&gt;multi_name, -1, SQLITE_TRANSIENT);</a>
+<a name="ln750">  DT_DEBUG_SQLITE3_BIND_DOUBLE(stmt, 11, h-&gt;iop_order);</a>
+<a name="ln751"> </a>
+<a name="ln752">  sqlite3_step(stmt);</a>
+<a name="ln753">  sqlite3_finalize(stmt);</a>
+<a name="ln754"> </a>
+<a name="ln755">  // write masks (if any)</a>
+<a name="ln756">  GList *forms = g_list_first(h-&gt;forms);</a>
+<a name="ln757">  while(forms)</a>
+<a name="ln758">  {</a>
+<a name="ln759">    dt_masks_form_t *form = (dt_masks_form_t *)forms-&gt;data;</a>
+<a name="ln760">    if (form)</a>
+<a name="ln761">      dt_masks_write_masks_history_item(imgid, num, form);</a>
+<a name="ln762">    forms = g_list_next(forms);</a>
+<a name="ln763">  }</a>
+<a name="ln764"> </a>
+<a name="ln765">  return 0;</a>
+<a name="ln766">}</a>
+<a name="ln767"> </a>
+<a name="ln768">static void _dev_add_history_item_ext(dt_develop_t *dev, dt_iop_module_t *module, gboolean enable, gboolean no_image, gboolean include_masks)</a>
+<a name="ln769">{</a>
+<a name="ln770">    GList *history = g_list_nth(dev-&gt;history, dev-&gt;history_end);</a>
+<a name="ln771">    // look for leaks on top of history in two steps</a>
+<a name="ln772">    // first remove obsolete items above history_end</a>
+<a name="ln773">    while(history)</a>
+<a name="ln774">    {</a>
+<a name="ln775">      GList *next = g_list_next(history);</a>
+<a name="ln776">      dt_dev_history_item_t *hist = (dt_dev_history_item_t *)(history-&gt;data);</a>
+<a name="ln777">      // printf(&quot;removing obsoleted history item: %s\n&quot;, hist-&gt;module-&gt;op);</a>
+<a name="ln778">      dt_dev_free_history_item(hist);</a>
+<a name="ln779">      dev-&gt;history = g_list_delete_link(dev-&gt;history, history);</a>
+<a name="ln780">      history = next;</a>
+<a name="ln781">    }</a>
+<a name="ln782">    // then remove NIL items there</a>
+<a name="ln783">    while ((dev-&gt;history_end&gt;0) &amp;&amp; (! g_list_nth(dev-&gt;history, dev-&gt;history_end - 1)))</a>
+<a name="ln784">      dev-&gt;history_end--;</a>
+<a name="ln785"> </a>
+<a name="ln786">    history = g_list_nth(dev-&gt;history, dev-&gt;history_end - 1);</a>
+<a name="ln787">    dt_dev_history_item_t *hist = history ? (dt_dev_history_item_t *)(history-&gt;data) : 0;</a>
+<a name="ln788">    if(!history // if no history yet, push new item for sure.</a>
+<a name="ln789">       || module != hist-&gt;module</a>
+<a name="ln790">       || module-&gt;instance != hist-&gt;module-&gt;instance             // add new item for different op</a>
+<a name="ln791">       || module-&gt;multi_priority != hist-&gt;module-&gt;multi_priority // or instance</a>
+<a name="ln792">       || ((dev-&gt;focus_hash != hist-&gt;focus_hash)                 // or if focused out and in</a>
+<a name="ln793">       &amp;&amp; (// but only add item if there is a difference at all for the same module</a>
+<a name="ln794">         (module-&gt;params_size != hist-&gt;module-&gt;params_size) ||</a>
+<a name="ln795">         include_masks ||</a>
+<a name="ln796">         (module-&gt;params_size == hist-&gt;module-&gt;params_size &amp;&amp; memcmp(hist-&gt;params, module-&gt;params, module-&gt;params_size)))))</a>
+<a name="ln797">    {</a>
+<a name="ln798">      // new operation, push new item</a>
+<a name="ln799">      // printf(&quot;adding new history item %d - %s\n&quot;, dev-&gt;history_end, module-&gt;op);</a>
+<a name="ln800">      // if(history) printf(&quot;because item %d - %s is different operation.\n&quot;, dev-&gt;history_end-1,</a>
+<a name="ln801">      // ((dt_dev_history_item_t *)history-&gt;data)-&gt;module-&gt;op);</a>
+<a name="ln802">      dev-&gt;history_end++;</a>
+<a name="ln803"> </a>
+<a name="ln804">      hist = (dt_dev_history_item_t *)calloc(1, sizeof(dt_dev_history_item_t));</a>
+<a name="ln805">      if(enable)</a>
+<a name="ln806">      {</a>
+<a name="ln807">        module-&gt;enabled = TRUE;</a>
+<a name="ln808">        if(!no_image)</a>
+<a name="ln809">        {</a>
+<a name="ln810">          if(module-&gt;off)</a>
+<a name="ln811">          {</a>
+<a name="ln812">            const int reset = darktable.gui-&gt;reset;</a>
+<a name="ln813">            darktable.gui-&gt;reset = 1;</a>
+<a name="ln814">            gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(module-&gt;off), module-&gt;enabled);</a>
+<a name="ln815">            darktable.gui-&gt;reset = reset;</a>
+<a name="ln816">          }</a>
+<a name="ln817">        }</a>
+<a name="ln818">      }</a>
+<a name="ln819">      snprintf(hist-&gt;op_name, sizeof(hist-&gt;op_name), &quot;%s&quot;, module-&gt;op);</a>
+<a name="ln820">      hist-&gt;focus_hash = dev-&gt;focus_hash;</a>
+<a name="ln821">      hist-&gt;enabled = module-&gt;enabled;</a>
+<a name="ln822">      hist-&gt;module = module;</a>
+<a name="ln823">      hist-&gt;params = malloc(module-&gt;params_size);</a>
+<a name="ln824">      hist-&gt;iop_order = module-&gt;iop_order;</a>
+<a name="ln825">      hist-&gt;multi_priority = module-&gt;multi_priority;</a>
+<a name="ln826">      snprintf(hist-&gt;multi_name, sizeof(hist-&gt;multi_name), &quot;%s&quot;, module-&gt;multi_name);</a>
+<a name="ln827">      /* allocate and set hist blend_params */</a>
+<a name="ln828">      hist-&gt;blend_params = malloc(sizeof(dt_develop_blend_params_t));</a>
+<a name="ln829">      memcpy(hist-&gt;params, module-&gt;params, module-&gt;params_size);</a>
+<a name="ln830">      memcpy(hist-&gt;blend_params, module-&gt;blend_params, sizeof(dt_develop_blend_params_t));</a>
+<a name="ln831">      if(include_masks)</a>
+<a name="ln832">        hist-&gt;forms = dt_masks_dup_forms_deep(dev-&gt;forms, NULL);</a>
+<a name="ln833">      else</a>
+<a name="ln834">        hist-&gt;forms = NULL;</a>
+<a name="ln835"> </a>
+<a name="ln836">      dev-&gt;history = g_list_append(dev-&gt;history, hist);</a>
+<a name="ln837">      if(!no_image)</a>
+<a name="ln838">      {</a>
+<a name="ln839">        dev-&gt;pipe-&gt;changed |= DT_DEV_PIPE_SYNCH;</a>
+<a name="ln840">        dev-&gt;preview_pipe-&gt;changed |= DT_DEV_PIPE_SYNCH; // topology remains, as modules are fixed for now.</a>
+<a name="ln841">        dev-&gt;preview2_pipe-&gt;changed |= DT_DEV_PIPE_SYNCH; // topology remains, as modules are fixed for now.</a>
+<a name="ln842">      }</a>
+<a name="ln843">    }</a>
+<a name="ln844">    else</a>
+<a name="ln845">    {</a>
+<a name="ln846">      // same operation, change params</a>
+<a name="ln847">      // printf(&quot;changing same history item %d - %s\n&quot;, dev-&gt;history_end-1, module-&gt;op);</a>
+<a name="ln848">      hist = (dt_dev_history_item_t *)history-&gt;data;</a>
+<a name="ln849">      memcpy(hist-&gt;params, module-&gt;params, module-&gt;params_size);</a>
+<a name="ln850"> </a>
+<a name="ln851">      if(module-&gt;flags() &amp; IOP_FLAGS_SUPPORTS_BLENDING)</a>
+<a name="ln852">        memcpy(hist-&gt;blend_params, module-&gt;blend_params, sizeof(dt_develop_blend_params_t));</a>
+<a name="ln853"> </a>
+<a name="ln854">      // if the user changed stuff and the module is still not enabled, do it:</a>
+<a name="ln855">      if(!hist-&gt;enabled &amp;&amp; !module-&gt;enabled)</a>
+<a name="ln856">      {</a>
+<a name="ln857">        module-&gt;enabled = 1;</a>
+<a name="ln858">        if(!no_image)</a>
+<a name="ln859">        {</a>
+<a name="ln860">          if(module-&gt;off)</a>
+<a name="ln861">          {</a>
+<a name="ln862">            const int reset = darktable.gui-&gt;reset;</a>
+<a name="ln863">            darktable.gui-&gt;reset = 1;</a>
+<a name="ln864">            gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(module-&gt;off), module-&gt;enabled);</a>
+<a name="ln865">            darktable.gui-&gt;reset = reset;</a>
+<a name="ln866">          }</a>
+<a name="ln867">        }</a>
+<a name="ln868">      }</a>
+<a name="ln869">      hist-&gt;iop_order = module-&gt;iop_order;</a>
+<a name="ln870">      hist-&gt;multi_priority = module-&gt;multi_priority;</a>
+<a name="ln871">      memcpy(hist-&gt;multi_name, module-&gt;multi_name, sizeof(module-&gt;multi_name));</a>
+<a name="ln872">      hist-&gt;enabled = module-&gt;enabled;</a>
+<a name="ln873"> </a>
+<a name="ln874">      if(include_masks)</a>
+<a name="ln875">      {</a>
+<a name="ln876">        g_list_free_full(hist-&gt;forms, (void (*)(void *))dt_masks_free_form);</a>
+<a name="ln877">        hist-&gt;forms = dt_masks_dup_forms_deep(dev-&gt;forms, NULL);</a>
+<a name="ln878">      }</a>
+<a name="ln879">      if(!no_image)</a>
+<a name="ln880">      {</a>
+<a name="ln881">        dev-&gt;pipe-&gt;changed |= DT_DEV_PIPE_TOP_CHANGED;</a>
+<a name="ln882">        dev-&gt;preview_pipe-&gt;changed |= DT_DEV_PIPE_TOP_CHANGED;</a>
+<a name="ln883">        dev-&gt;preview2_pipe-&gt;changed |= DT_DEV_PIPE_TOP_CHANGED;</a>
+<a name="ln884">      }</a>
+<a name="ln885">    }</a>
+<a name="ln886">}</a>
+<a name="ln887"> </a>
+<a name="ln888">void dt_dev_add_history_item_ext(dt_develop_t *dev, dt_iop_module_t *module, gboolean enable, const int no_image)</a>
+<a name="ln889">{</a>
+<a name="ln890">  _dev_add_history_item_ext(dev, module, enable, no_image, FALSE);</a>
+<a name="ln891">}</a>
+<a name="ln892"> </a>
+<a name="ln893">void dt_dev_add_history_item(dt_develop_t *dev, dt_iop_module_t *module, gboolean enable)</a>
+<a name="ln894">{</a>
+<a name="ln895">  if(!darktable.gui || darktable.gui-&gt;reset) return;</a>
+<a name="ln896">  dt_pthread_mutex_lock(&amp;dev-&gt;history_mutex);</a>
+<a name="ln897"> </a>
+<a name="ln898">  if(dev-&gt;gui_attached)</a>
+<a name="ln899">  {</a>
+<a name="ln900">    _dev_add_history_item_ext(dev, module, enable, FALSE, FALSE);</a>
+<a name="ln901">  }</a>
+<a name="ln902">#if 0</a>
+<a name="ln903">  {</a>
+<a name="ln904">    // debug:</a>
+<a name="ln905">    printf(&quot;remaining %d history items:\n&quot;, dev-&gt;history_end);</a>
+<a name="ln906">    GList *history = dev-&gt;history;</a>
+<a name="ln907">    int i = 0;</a>
+<a name="ln908">    while(history)</a>
+<a name="ln909">    {</a>
+<a name="ln910">      dt_dev_history_item_t *hist = (dt_dev_history_item_t *)(history-&gt;data);</a>
+<a name="ln911">      printf(&quot;%d %s\n&quot;, i, hist-&gt;module-&gt;op);</a>
+<a name="ln912">      history = g_list_next(history);</a>
+<a name="ln913">      i++;</a>
+<a name="ln914">    }</a>
+<a name="ln915">  }</a>
+<a name="ln916">#endif</a>
+<a name="ln917"> </a>
+<a name="ln918">  /* attach changed tag reflecting actual change */</a>
+<a name="ln919">  const int imgid = dev-&gt;image_storage.id;</a>
+<a name="ln920">  guint tagid = 0;</a>
+<a name="ln921">  dt_tag_new(&quot;darktable|changed&quot;, &amp;tagid);</a>
+<a name="ln922">  dt_tag_attach_from_gui(tagid, imgid);</a>
+<a name="ln923"> </a>
+<a name="ln924">  // invalidate buffers and force redraw of darkroom</a>
+<a name="ln925">  dt_dev_invalidate_all(dev);</a>
+<a name="ln926">  dt_pthread_mutex_unlock(&amp;dev-&gt;history_mutex);</a>
+<a name="ln927"> </a>
+<a name="ln928">  if(dev-&gt;gui_attached)</a>
+<a name="ln929">  {</a>
+<a name="ln930">    /* signal that history has changed */</a>
+<a name="ln931">    dt_control_signal_raise(darktable.signals, DT_SIGNAL_DEVELOP_HISTORY_CHANGE);</a>
+<a name="ln932"> </a>
+<a name="ln933">    /* redraw */</a>
+<a name="ln934">    dt_control_queue_redraw_center();</a>
+<a name="ln935">  }</a>
+<a name="ln936">}</a>
+<a name="ln937"> </a>
+<a name="ln938">void dt_dev_add_masks_history_item_ext(dt_develop_t *dev, dt_iop_module_t *_module, gboolean _enable, gboolean no_image)</a>
+<a name="ln939">{</a>
+<a name="ln940">  dt_iop_module_t *module = _module;</a>
+<a name="ln941">  gboolean enable = _enable;</a>
+<a name="ln942"> </a>
+<a name="ln943">  // no module means that is called from the mask manager, so find the iop</a>
+<a name="ln944">  if(module == NULL)</a>
+<a name="ln945">  {</a>
+<a name="ln946">    GList *modules = g_list_first(dev-&gt;iop);</a>
+<a name="ln947">    while(modules)</a>
+<a name="ln948">    {</a>
+<a name="ln949">      dt_iop_module_t *mod = (dt_iop_module_t *)(modules-&gt;data);</a>
+<a name="ln950">      if(strcmp(mod-&gt;op, &quot;mask_manager&quot;) == 0)</a>
+<a name="ln951">      {</a>
+<a name="ln952">        module = mod;</a>
+<a name="ln953">        break;</a>
+<a name="ln954">      }</a>
+<a name="ln955">      modules = g_list_next(modules);</a>
+<a name="ln956">    }</a>
+<a name="ln957">    enable = FALSE;</a>
+<a name="ln958">  }</a>
+<a name="ln959">  if(module)</a>
+<a name="ln960">  {</a>
+<a name="ln961">    _dev_add_history_item_ext(dev, module, enable, no_image, TRUE);</a>
+<a name="ln962">  }</a>
+<a name="ln963">  else</a>
+<a name="ln964">    fprintf(stderr, &quot;[dt_dev_add_masks_history_item_ext] can't find mask manager module\n&quot;);</a>
+<a name="ln965">}</a>
+<a name="ln966"> </a>
+<a name="ln967">void dt_dev_add_masks_history_item(dt_develop_t *dev, dt_iop_module_t *module, gboolean enable)</a>
+<a name="ln968">{</a>
+<a name="ln969">  if(!darktable.gui || darktable.gui-&gt;reset) return;</a>
+<a name="ln970">  dt_pthread_mutex_lock(&amp;dev-&gt;history_mutex);</a>
+<a name="ln971"> </a>
+<a name="ln972">  if(dev-&gt;gui_attached)</a>
+<a name="ln973">  {</a>
+<a name="ln974">    dt_dev_add_masks_history_item_ext(dev, module, enable, FALSE);</a>
+<a name="ln975">  }</a>
+<a name="ln976"> </a>
+<a name="ln977">  // invalidate buffers and force redraw of darkroom</a>
+<a name="ln978">  dt_dev_invalidate_all(dev);</a>
+<a name="ln979">  dt_pthread_mutex_unlock(&amp;dev-&gt;history_mutex);</a>
+<a name="ln980"> </a>
+<a name="ln981">  if(dev-&gt;gui_attached)</a>
+<a name="ln982">  {</a>
+<a name="ln983">    /* signal that history has changed */</a>
+<a name="ln984">    dt_control_signal_raise(darktable.signals, DT_SIGNAL_DEVELOP_HISTORY_CHANGE);</a>
+<a name="ln985"> </a>
+<a name="ln986">    /* recreate mask list */</a>
+<a name="ln987">    dt_dev_masks_list_change(dev);</a>
+<a name="ln988"> </a>
+<a name="ln989">    /* redraw */</a>
+<a name="ln990">    dt_control_queue_redraw_center();</a>
+<a name="ln991">  }</a>
+<a name="ln992">}</a>
+<a name="ln993"> </a>
+<a name="ln994">void dt_dev_free_history_item(gpointer data)</a>
+<a name="ln995">{</a>
+<a name="ln996">  dt_dev_history_item_t *item = (dt_dev_history_item_t *)data;</a>
+<a name="ln997">  free(item-&gt;params);</a>
+<a name="ln998">  free(item-&gt;blend_params);</a>
+<a name="ln999">  g_list_free_full(item-&gt;forms, (void (*)(void *))dt_masks_free_form);</a>
+<a name="ln1000">  free(item);</a>
+<a name="ln1001">}</a>
+<a name="ln1002"> </a>
+<a name="ln1003">void dt_dev_reload_history_items(dt_develop_t *dev)</a>
+<a name="ln1004">{</a>
+<a name="ln1005">  dev-&gt;focus_hash = 0;</a>
+<a name="ln1006">  dt_dev_pop_history_items(dev, 0);</a>
+<a name="ln1007"> </a>
+<a name="ln1008">  // remove unused history items:</a>
+<a name="ln1009">  GList *history = g_list_nth(dev-&gt;history, dev-&gt;history_end);</a>
+<a name="ln1010">  while(history)</a>
+<a name="ln1011">  {</a>
+<a name="ln1012">    GList *next = g_list_next(history);</a>
+<a name="ln1013">    dt_dev_history_item_t *hist = (dt_dev_history_item_t *)(history-&gt;data);</a>
+<a name="ln1014">    dt_dev_free_history_item(hist);</a>
+<a name="ln1015">    dev-&gt;history = g_list_delete_link(dev-&gt;history, history);</a>
+<a name="ln1016">    history = next;</a>
+<a name="ln1017">  }</a>
+<a name="ln1018">  dt_dev_read_history(dev);</a>
+<a name="ln1019"> </a>
+<a name="ln1020">  // we have to add new module instances first</a>
+<a name="ln1021">  GList *modules = dev-&gt;iop;</a>
+<a name="ln1022">  while(modules)</a>
+<a name="ln1023">  {</a>
+<a name="ln1024">    dt_iop_module_t *module = (dt_iop_module_t *)(modules-&gt;data);</a>
+<a name="ln1025">    if(module-&gt;multi_priority &gt; 0)</a>
+<a name="ln1026">    {</a>
+<a name="ln1027">      if(!dt_iop_is_hidden(module) &amp;&amp; !module-&gt;expander)</a>
+<a name="ln1028">      {</a>
+<a name="ln1029">        module-&gt;gui_init(module);</a>
+<a name="ln1030">        dt_iop_reload_defaults(module);</a>
+<a name="ln1031"> </a>
+<a name="ln1032">        /* add module to right panel */</a>
+<a name="ln1033">        GtkWidget *expander = dt_iop_gui_get_expander(module);</a>
+<a name="ln1034">        dt_ui_container_add_widget(darktable.gui-&gt;ui, DT_UI_CONTAINER_PANEL_RIGHT_CENTER, expander);</a>
+<a name="ln1035">        dt_iop_gui_set_expanded(module, TRUE, FALSE);</a>
+<a name="ln1036">        dt_iop_gui_update_blending(module);</a>
+<a name="ln1037"> </a>
+<a name="ln1038">        // the pipe need to be reconstruct</a>
+<a name="ln1039">        dev-&gt;pipe-&gt;changed |= DT_DEV_PIPE_REMOVE;</a>
+<a name="ln1040">        dev-&gt;preview_pipe-&gt;changed |= DT_DEV_PIPE_REMOVE;</a>
+<a name="ln1041">        dev-&gt;preview2_pipe-&gt;changed |= DT_DEV_PIPE_REMOVE;</a>
+<a name="ln1042">      }</a>
+<a name="ln1043">    }</a>
+<a name="ln1044">    else if(!dt_iop_is_hidden(module) &amp;&amp; module-&gt;expander)</a>
+<a name="ln1045">    {</a>
+<a name="ln1046">      // we have to ensure that the name of the widget is correct</a>
+<a name="ln1047">      GtkWidget *wlabel;</a>
+<a name="ln1048">      GList *childs = gtk_container_get_children(GTK_CONTAINER(module-&gt;expander));</a>
+<a name="ln1049">      GtkWidget *header = gtk_bin_get_child(GTK_BIN(g_list_nth_data(childs, 0)));</a>
+<a name="ln1050">      g_list_free(childs);</a>
+<a name="ln1051"> </a>
+<a name="ln1052">      childs = gtk_container_get_children(GTK_CONTAINER(header));</a>
+<a name="ln1053">      wlabel = g_list_nth(childs, IOP_MODULE_LABEL)-&gt;data;</a>
+<a name="ln1054">      g_list_free(childs);</a>
+<a name="ln1055">      gchar *label = dt_history_item_get_name_html(module);</a>
+<a name="ln1056">      gtk_label_set_markup(GTK_LABEL(wlabel), label);</a>
+<a name="ln1057">      g_free(label);</a>
+<a name="ln1058">    }</a>
+<a name="ln1059">    modules = g_list_next(modules);</a>
+<a name="ln1060">  }</a>
+<a name="ln1061"> </a>
+<a name="ln1062">  dt_dev_pop_history_items(dev, dev-&gt;history_end);</a>
+<a name="ln1063"> </a>
+<a name="ln1064">  // set the module list order</a>
+<a name="ln1065">  dt_dev_reorder_gui_module_list(dev);</a>
+<a name="ln1066"> </a>
+<a name="ln1067">  // we update show params for multi-instances for each other instances</a>
+<a name="ln1068">  //dt_dev_modules_update_multishow(dev);</a>
+<a name="ln1069">}</a>
+<a name="ln1070"> </a>
+<a name="ln1071">void dt_dev_pop_history_items_ext(dt_develop_t *dev, int32_t cnt)</a>
+<a name="ln1072">{</a>
+<a name="ln1073">  dt_ioppr_check_iop_order(dev, 0, &quot;dt_dev_pop_history_items_ext begin&quot;);</a>
+<a name="ln1074">  const int end_prev = dev-&gt;history_end;</a>
+<a name="ln1075">  dev-&gt;history_end = cnt;</a>
+<a name="ln1076"> </a>
+<a name="ln1077">  // reset gui params for all modules</a>
+<a name="ln1078">  GList *modules = dev-&gt;iop;</a>
+<a name="ln1079">  while(modules)</a>
+<a name="ln1080">  {</a>
+<a name="ln1081">    dt_iop_module_t *module = (dt_iop_module_t *)(modules-&gt;data);</a>
+<a name="ln1082">    memcpy(module-&gt;params, module-&gt;default_params, module-&gt;params_size);</a>
+<a name="ln1083">    dt_iop_commit_blend_params(module, module-&gt;default_blendop_params);</a>
+<a name="ln1084">    module-&gt;enabled = module-&gt;default_enabled;</a>
+<a name="ln1085">    if(module-&gt;multi_priority == 0)</a>
+<a name="ln1086">      module-&gt;iop_order = dt_ioppr_get_iop_order(dev-&gt;iop_order_list, module-&gt;op);</a>
+<a name="ln1087">    else</a>
+<a name="ln1088">      module-&gt;iop_order = DBL_MAX;</a>
+<a name="ln1089">    module-&gt;multi_name[0] = '\0';</a>
+<a name="ln1090">    modules = g_list_next(modules);</a>
+<a name="ln1091">  }</a>
+<a name="ln1092"> </a>
+<a name="ln1093">  // go through history and set gui params</a>
+<a name="ln1094">  GList *forms = NULL;</a>
+<a name="ln1095">  GList *history = dev-&gt;history;</a>
+<a name="ln1096">  for(int i = 0; i &lt; cnt &amp;&amp; history; i++)</a>
+<a name="ln1097">  {</a>
+<a name="ln1098">    dt_dev_history_item_t *hist = (dt_dev_history_item_t *)(history-&gt;data);</a>
+<a name="ln1099">    memcpy(hist-&gt;module-&gt;params, hist-&gt;params, hist-&gt;module-&gt;params_size);</a>
+<a name="ln1100">    dt_iop_commit_blend_params(hist-&gt;module, hist-&gt;blend_params);</a>
+<a name="ln1101"> </a>
+<a name="ln1102">    hist-&gt;module-&gt;iop_order = hist-&gt;iop_order;</a>
+<a name="ln1103">    hist-&gt;module-&gt;enabled = hist-&gt;enabled;</a>
+<a name="ln1104">    snprintf(hist-&gt;module-&gt;multi_name, sizeof(hist-&gt;module-&gt;multi_name), &quot;%s&quot;, hist-&gt;multi_name);</a>
+<a name="ln1105">    if(hist-&gt;forms) forms = hist-&gt;forms;</a>
+<a name="ln1106"> </a>
+<a name="ln1107">    history = g_list_next(history);</a>
+<a name="ln1108">  }</a>
+<a name="ln1109"> </a>
+<a name="ln1110">  dev-&gt;iop = g_list_sort(dev-&gt;iop, dt_sort_iop_by_order);</a>
+<a name="ln1111"> </a>
+<a name="ln1112">  dt_ioppr_check_duplicate_iop_order(&amp;dev-&gt;iop, dev-&gt;history);</a>
+<a name="ln1113"> </a>
+<a name="ln1114">  dt_ioppr_check_iop_order(dev, 0, &quot;dt_dev_pop_history_items_ext end&quot;);</a>
+<a name="ln1115"> </a>
+<a name="ln1116">  // check if masks have changed</a>
+<a name="ln1117">  int masks_changed = 0;</a>
+<a name="ln1118">  if(cnt &lt; end_prev)</a>
+<a name="ln1119">    history = g_list_nth(dev-&gt;history, cnt);</a>
+<a name="ln1120">  else if(cnt &gt; end_prev)</a>
+<a name="ln1121">    history = g_list_nth(dev-&gt;history, end_prev);</a>
+<a name="ln1122">  else</a>
+<a name="ln1123">    history = NULL;</a>
+<a name="ln1124">  for(int i = MIN(cnt, end_prev); i &lt; MAX(cnt, end_prev) &amp;&amp; history &amp;&amp; !masks_changed; i++)</a>
+<a name="ln1125">  {</a>
+<a name="ln1126">    dt_dev_history_item_t *hist = (dt_dev_history_item_t *)(history-&gt;data);</a>
+<a name="ln1127"> </a>
+<a name="ln1128">    if(hist-&gt;forms != NULL)</a>
+<a name="ln1129">      masks_changed = 1;</a>
+<a name="ln1130"> </a>
+<a name="ln1131">    history = g_list_next(history);</a>
+<a name="ln1132">  }</a>
+<a name="ln1133">  if(masks_changed)</a>
+<a name="ln1134">    dt_masks_replace_current_forms(dev, forms);</a>
+<a name="ln1135">}</a>
+<a name="ln1136"> </a>
+<a name="ln1137">void dt_dev_pop_history_items(dt_develop_t *dev, int32_t cnt)</a>
+<a name="ln1138">{</a>
+<a name="ln1139">  dt_pthread_mutex_lock(&amp;dev-&gt;history_mutex);</a>
+<a name="ln1140">  const int reset = darktable.gui-&gt;reset;</a>
+<a name="ln1141">  darktable.gui-&gt;reset = 1;</a>
+<a name="ln1142">  GList *dev_iop = g_list_copy(dev-&gt;iop);</a>
+<a name="ln1143"> </a>
+<a name="ln1144">  dt_dev_pop_history_items_ext(dev, cnt);</a>
+<a name="ln1145"> </a>
+<a name="ln1146">  // update all gui modules</a>
+<a name="ln1147">  GList *modules = dev-&gt;iop;</a>
+<a name="ln1148">  while(modules)</a>
+<a name="ln1149">  {</a>
+<a name="ln1150">    dt_iop_module_t *module = (dt_iop_module_t *)(modules-&gt;data);</a>
+<a name="ln1151">    dt_iop_gui_update(module);</a>
+<a name="ln1152">    modules = g_list_next(modules);</a>
+<a name="ln1153">  }</a>
+<a name="ln1154"> </a>
+<a name="ln1155">  // check if the order of modules has changed</a>
+<a name="ln1156">  int dev_iop_changed = (g_list_length(dev_iop) != g_list_length(dev-&gt;iop));</a>
+<a name="ln1157">  if(!dev_iop_changed)</a>
+<a name="ln1158">  {</a>
+<a name="ln1159">    modules = g_list_first(dev-&gt;iop);</a>
+<a name="ln1160">    GList *modules_old = g_list_first(dev_iop);</a>
+<a name="ln1161">    while(modules &amp;&amp; modules_old)</a>
+<a name="ln1162">    {</a>
+<a name="ln1163">      dt_iop_module_t *module = (dt_iop_module_t *)(modules-&gt;data);</a>
+<a name="ln1164">      dt_iop_module_t *module_old = (dt_iop_module_t *)(modules_old-&gt;data);</a>
+<a name="ln1165"> </a>
+<a name="ln1166">      if(module-&gt;iop_order != module_old-&gt;iop_order)</a>
+<a name="ln1167">      {</a>
+<a name="ln1168">        dev_iop_changed = 1;</a>
+<a name="ln1169">        break;</a>
+<a name="ln1170">      }</a>
+<a name="ln1171"> </a>
+<a name="ln1172">      modules = g_list_next(modules);</a>
+<a name="ln1173">      modules_old = g_list_next(modules_old);</a>
+<a name="ln1174">    }</a>
+<a name="ln1175">  }</a>
+<a name="ln1176">  g_list_free(dev_iop);</a>
+<a name="ln1177"> </a>
+<a name="ln1178">  if(!dev_iop_changed)</a>
+<a name="ln1179">  {</a>
+<a name="ln1180">    dev-&gt;pipe-&gt;changed |= DT_DEV_PIPE_SYNCH;</a>
+<a name="ln1181">    dev-&gt;preview_pipe-&gt;changed |= DT_DEV_PIPE_SYNCH; // again, fixed topology for now.</a>
+<a name="ln1182">    dev-&gt;preview2_pipe-&gt;changed |= DT_DEV_PIPE_SYNCH; // again, fixed topology for now.</a>
+<a name="ln1183">  }</a>
+<a name="ln1184">  else</a>
+<a name="ln1185">  {</a>
+<a name="ln1186">    dev-&gt;pipe-&gt;changed |= DT_DEV_PIPE_REMOVE;</a>
+<a name="ln1187">    dev-&gt;preview_pipe-&gt;changed |= DT_DEV_PIPE_REMOVE;</a>
+<a name="ln1188">    dev-&gt;preview2_pipe-&gt;changed |= DT_DEV_PIPE_REMOVE;</a>
+<a name="ln1189">    dev-&gt;pipe-&gt;cache_obsolete = 1;</a>
+<a name="ln1190">    dev-&gt;preview_pipe-&gt;cache_obsolete = 1;</a>
+<a name="ln1191">    dev-&gt;preview2_pipe-&gt;cache_obsolete = 1;</a>
+<a name="ln1192">  }</a>
+<a name="ln1193"> </a>
+<a name="ln1194">  darktable.gui-&gt;reset = reset;</a>
+<a name="ln1195">  dt_dev_invalidate_all(dev);</a>
+<a name="ln1196">  dt_pthread_mutex_unlock(&amp;dev-&gt;history_mutex);</a>
+<a name="ln1197"> </a>
+<a name="ln1198">  dt_dev_masks_list_change(dev);</a>
+<a name="ln1199"> </a>
+<a name="ln1200">  dt_control_queue_redraw_center();</a>
+<a name="ln1201">}</a>
+<a name="ln1202"> </a>
+<a name="ln1203">void dt_dev_write_history_ext(dt_develop_t *dev, const int imgid)</a>
+<a name="ln1204">{</a>
+<a name="ln1205">  sqlite3_stmt *stmt;</a>
+<a name="ln1206"> </a>
+<a name="ln1207">  DT_DEBUG_SQLITE3_PREPARE_V2(dt_database_get(darktable.db), &quot;DELETE FROM main.history WHERE imgid = ?1&quot;, -1,</a>
+<a name="ln1208">                              &amp;stmt, NULL);</a>
+<a name="ln1209">  DT_DEBUG_SQLITE3_BIND_INT(stmt, 1, imgid);</a>
+<a name="ln1210">  sqlite3_step(stmt);</a>
+<a name="ln1211">  sqlite3_finalize(stmt);</a>
+<a name="ln1212">  DT_DEBUG_SQLITE3_PREPARE_V2(dt_database_get(darktable.db), &quot;DELETE FROM main.masks_history WHERE imgid = ?1&quot;, -1,</a>
+<a name="ln1213">                              &amp;stmt, NULL);</a>
+<a name="ln1214">  DT_DEBUG_SQLITE3_BIND_INT(stmt, 1, imgid);</a>
+<a name="ln1215">  sqlite3_step(stmt);</a>
+<a name="ln1216">  sqlite3_finalize(stmt);</a>
+<a name="ln1217">  GList *history = dev-&gt;history;</a>
+<a name="ln1218"> </a>
+<a name="ln1219">  for(int i = 0; history; i++)</a>
+<a name="ln1220">  {</a>
+<a name="ln1221">    dt_dev_history_item_t *hist = (dt_dev_history_item_t *)(history-&gt;data);</a>
+<a name="ln1222">    (void)dt_dev_write_history_item(imgid, hist, i);</a>
+<a name="ln1223">    history = g_list_next(history);</a>
+<a name="ln1224">  }</a>
+<a name="ln1225"> </a>
+<a name="ln1226">  DT_DEBUG_SQLITE3_PREPARE_V2(dt_database_get(darktable.db),</a>
+<a name="ln1227">                              &quot;UPDATE main.images SET history_end = ?1, iop_order_version = ?3 WHERE id = ?2&quot;, -1,</a>
+<a name="ln1228">                              &amp;stmt, NULL);</a>
+<a name="ln1229">  DT_DEBUG_SQLITE3_BIND_INT(stmt, 1, dev-&gt;history_end);</a>
+<a name="ln1230">  DT_DEBUG_SQLITE3_BIND_INT(stmt, 2, imgid);</a>
+<a name="ln1231">  DT_DEBUG_SQLITE3_BIND_INT(stmt, 3, dev-&gt;iop_order_version);</a>
+<a name="ln1232">  sqlite3_step(stmt);</a>
+<a name="ln1233">  sqlite3_finalize(stmt);</a>
+<a name="ln1234">}</a>
+<a name="ln1235"> </a>
+<a name="ln1236">void dt_dev_write_history(dt_develop_t *dev)</a>
+<a name="ln1237">{</a>
+<a name="ln1238">  dt_dev_write_history_ext(dev, dev-&gt;image_storage.id);</a>
+<a name="ln1239">}</a>
+<a name="ln1240"> </a>
+<a name="ln1241">static gboolean _dev_auto_apply_presets(dt_develop_t *dev)</a>
+<a name="ln1242">{</a>
+<a name="ln1243">  // NOTE: the presets/default iops will be *prepended* into the history.</a>
+<a name="ln1244"> </a>
+<a name="ln1245">  const int imgid = dev-&gt;image_storage.id;</a>
+<a name="ln1246"> </a>
+<a name="ln1247">  if(imgid &lt;= 0) return FALSE;</a>
+<a name="ln1248"> </a>
+<a name="ln1249">  // be extra sure that we don't mess up history in separate threads:</a>
+<a name="ln1250">  dt_pthread_mutex_lock(&amp;darktable.db_insert);</a>
+<a name="ln1251"> </a>
+<a name="ln1252">  gboolean run = FALSE;</a>
+<a name="ln1253">  dt_image_t *image = dt_image_cache_get(darktable.image_cache, imgid, 'w');</a>
+<a name="ln1254">  if(!(image-&gt;flags &amp; DT_IMAGE_AUTO_PRESETS_APPLIED)) run = TRUE;</a>
+<a name="ln1255"> </a>
+<a name="ln1256">  // flag was already set? only apply presets once in the lifetime of a history stack.</a>
+<a name="ln1257">  // (the flag will be cleared when removing it)</a>
+<a name="ln1258">  if(!run || image-&gt;id &lt;= 0)</a>
+<a name="ln1259">  {</a>
+<a name="ln1260">    dt_image_cache_write_release(darktable.image_cache, image, DT_IMAGE_CACHE_RELAXED);</a>
+<a name="ln1261">    dt_pthread_mutex_unlock(&amp;darktable.db_insert);</a>
+<a name="ln1262">    return FALSE;</a>
+<a name="ln1263">  }</a>
+<a name="ln1264"> </a>
+<a name="ln1265">  // select all presets from one of the following table and add them into memory.history. Note that</a>
+<a name="ln1266">  // this is appended to possibly already present default modules.</a>
+<a name="ln1267">  const char *preset_table[2] = { &quot;data.presets&quot;, &quot;main.legacy_presets&quot; };</a>
+<a name="ln1268">  const int legacy = (image-&gt;flags &amp; DT_IMAGE_NO_LEGACY_PRESETS) ? 0 : 1;</a>
+<a name="ln1269">  char query[1024];</a>
+<a name="ln1270">  snprintf(query, sizeof(query), &quot;INSERT INTO memory.history SELECT ?1, 0, op_version, operation, op_params, &quot;</a>
+<a name="ln1271">                                 &quot;enabled, blendop_params, blendop_version, multi_priority, multi_name, 0 &quot;</a>
+<a name="ln1272">                                 &quot;FROM %s WHERE autoapply=1 AND &quot;</a>
+<a name="ln1273">                                 &quot;((?2 LIKE model AND ?3 LIKE maker) OR (?4 LIKE model AND ?5 LIKE maker)) AND &quot;</a>
+<a name="ln1274">                                 &quot;?6 LIKE lens AND ?7 BETWEEN iso_min AND iso_max AND &quot;</a>
+<a name="ln1275">                                 &quot;?8 BETWEEN exposure_min AND exposure_max AND &quot;</a>
+<a name="ln1276">                                 &quot;?9 BETWEEN aperture_min AND aperture_max AND &quot;</a>
+<a name="ln1277">                                 &quot;?10 BETWEEN focal_length_min AND focal_length_max AND &quot;</a>
+<a name="ln1278">                                 &quot;(format = 0 OR format&amp;?11!=0) ORDER BY writeprotect DESC, &quot;</a>
+<a name="ln1279">                                 &quot;LENGTH(model), LENGTH(maker), LENGTH(lens)&quot;,</a>
+<a name="ln1280">           preset_table[legacy]);</a>
+<a name="ln1281">  // query for all modules at once:</a>
+<a name="ln1282">  sqlite3_stmt *stmt;</a>
+<a name="ln1283">  DT_DEBUG_SQLITE3_PREPARE_V2(dt_database_get(darktable.db), query, -1, &amp;stmt, NULL);</a>
+<a name="ln1284">  DT_DEBUG_SQLITE3_BIND_INT(stmt, 1, imgid);</a>
+<a name="ln1285">  DT_DEBUG_SQLITE3_BIND_TEXT(stmt, 2, image-&gt;exif_model, -1, SQLITE_TRANSIENT);</a>
+<a name="ln1286">  DT_DEBUG_SQLITE3_BIND_TEXT(stmt, 3, image-&gt;exif_maker, -1, SQLITE_TRANSIENT);</a>
+<a name="ln1287">  DT_DEBUG_SQLITE3_BIND_TEXT(stmt, 4, image-&gt;camera_alias, -1, SQLITE_TRANSIENT);</a>
+<a name="ln1288">  DT_DEBUG_SQLITE3_BIND_TEXT(stmt, 5, image-&gt;camera_maker, -1, SQLITE_TRANSIENT);</a>
+<a name="ln1289">  DT_DEBUG_SQLITE3_BIND_TEXT(stmt, 6, image-&gt;exif_lens, -1, SQLITE_TRANSIENT);</a>
+<a name="ln1290">  DT_DEBUG_SQLITE3_BIND_DOUBLE(stmt, 7, fmaxf(0.0f, fminf(FLT_MAX, image-&gt;exif_iso)));</a>
+<a name="ln1291">  DT_DEBUG_SQLITE3_BIND_DOUBLE(stmt, 8, fmaxf(0.0f, fminf(1000000, image-&gt;exif_exposure)));</a>
+<a name="ln1292">  DT_DEBUG_SQLITE3_BIND_DOUBLE(stmt, 9, fmaxf(0.0f, fminf(1000000, image-&gt;exif_aperture)));</a>
+<a name="ln1293">  DT_DEBUG_SQLITE3_BIND_DOUBLE(stmt, 10, fmaxf(0.0f, fminf(1000000, image-&gt;exif_focal_length)));</a>
+<a name="ln1294">  // 0: dontcare, 1: ldr, 2: raw</a>
+<a name="ln1295">  DT_DEBUG_SQLITE3_BIND_DOUBLE(stmt, 11,</a>
+<a name="ln1296">                               dt_image_is_ldr(image) ? FOR_LDR : (dt_image_is_raw(image) ? FOR_RAW : FOR_HDR));</a>
+<a name="ln1297">  sqlite3_step(stmt);</a>
+<a name="ln1298">  sqlite3_finalize(stmt);</a>
+<a name="ln1299"> </a>
+<a name="ln1300">  image-&gt;flags |= DT_IMAGE_AUTO_PRESETS_APPLIED | DT_IMAGE_NO_LEGACY_PRESETS;</a>
+<a name="ln1301">  dt_pthread_mutex_unlock(&amp;darktable.db_insert);</a>
+<a name="ln1302"> </a>
+<a name="ln1303">  // make sure these end up in the image_cache + xmp (sync through here if we set the flag)</a>
+<a name="ln1304">  dt_image_cache_write_release(darktable.image_cache, image, DT_IMAGE_CACHE_SAFE);</a>
+<a name="ln1305"> </a>
+<a name="ln1306">  return TRUE;</a>
+<a name="ln1307">}</a>
+<a name="ln1308"> </a>
+<a name="ln1309">void _dev_insert_module(dt_develop_t *dev, dt_iop_module_t *module, const int imgid)</a>
+<a name="ln1310">{</a>
+<a name="ln1311">  sqlite3_stmt *stmt;</a>
+<a name="ln1312"> </a>
+<a name="ln1313">  DT_DEBUG_SQLITE3_PREPARE_V2(</a>
+<a name="ln1314">    dt_database_get(darktable.db),</a>
+<a name="ln1315">    &quot;INSERT INTO memory.history VALUES (?1, 0, ?2, ?3, ?4, 1, NULL, 0, 0, '', ?5)&quot;,</a>
+<a name="ln1316">    -1, &amp;stmt, NULL);</a>
+<a name="ln1317">  DT_DEBUG_SQLITE3_BIND_INT(stmt, 1, imgid);</a>
+<a name="ln1318">  DT_DEBUG_SQLITE3_BIND_INT(stmt, 2, module-&gt;version());</a>
+<a name="ln1319">  DT_DEBUG_SQLITE3_BIND_TEXT(stmt, 3, module-&gt;op, -1, SQLITE_TRANSIENT);</a>
+<a name="ln1320">  DT_DEBUG_SQLITE3_BIND_BLOB(stmt, 4, module-&gt;default_params, module-&gt;params_size, SQLITE_TRANSIENT);</a>
+<a name="ln1321">  DT_DEBUG_SQLITE3_BIND_DOUBLE(stmt, 5,  dt_ioppr_get_iop_order(dev-&gt;iop_order_list, module-&gt;op));</a>
+<a name="ln1322">  sqlite3_step(stmt);</a>
+<a name="ln1323">  sqlite3_finalize(stmt);</a>
+<a name="ln1324">}</a>
+<a name="ln1325"> </a>
+<a name="ln1326">static void _dev_add_default_modules(dt_develop_t *dev, const int imgid)</a>
+<a name="ln1327">{</a>
+<a name="ln1328">  for(GList *modules = dev-&gt;iop; modules; modules = g_list_next(modules))</a>
+<a name="ln1329">  {</a>
+<a name="ln1330">    dt_iop_module_t *module = (dt_iop_module_t *)modules-&gt;data;</a>
+<a name="ln1331"> </a>
+<a name="ln1332">    if(!dt_history_check_module_exists(imgid, module-&gt;op)</a>
+<a name="ln1333">       &amp;&amp; module-&gt;default_enabled == 1</a>
+<a name="ln1334">       &amp;&amp; !(module-&gt;flags() &amp; IOP_FLAGS_NO_HISTORY_STACK))</a>
+<a name="ln1335">    {</a>
+<a name="ln1336">      _dev_insert_module(dev, module, imgid);</a>
+<a name="ln1337">    }</a>
+<a name="ln1338">  }</a>
+<a name="ln1339">}</a>
+<a name="ln1340"> </a>
+<a name="ln1341">static void _dev_merge_history(dt_develop_t *dev, const int imgid)</a>
+<a name="ln1342">{</a>
+<a name="ln1343">  sqlite3_stmt *stmt;</a>
+<a name="ln1344"> </a>
+<a name="ln1345">  // count what we found:</a>
+<a name="ln1346">  DT_DEBUG_SQLITE3_PREPARE_V2(dt_database_get(darktable.db), &quot;SELECT COUNT(*) FROM memory.history&quot;, -1,</a>
+<a name="ln1347">                              &amp;stmt, NULL);</a>
+<a name="ln1348">  if(sqlite3_step(stmt) == SQLITE_ROW)</a>
+<a name="ln1349">  {</a>
+<a name="ln1350">    // if there is anything..</a>
+<a name="ln1351">    const int cnt = sqlite3_column_int(stmt, 0);</a>
+<a name="ln1352">    sqlite3_finalize(stmt);</a>
+<a name="ln1353"> </a>
+<a name="ln1354">    // workaround a sqlite3 &quot;feature&quot;. The above statement to insert items into memory.history is complex and in</a>
+<a name="ln1355">    // this case sqlite does not give rowid a linear increment. But the following code really expect that the rowid in</a>
+<a name="ln1356">    // this table starts from 0 and increment one by one. So in the following code we rewrite the num values.</a>
+<a name="ln1357"> </a>
+<a name="ln1358">    if(cnt &gt; 0)</a>
+<a name="ln1359">    {</a>
+<a name="ln1360">      // get all rowids</a>
+<a name="ln1361">      GList *rowids = NULL;</a>
+<a name="ln1362"> </a>
+<a name="ln1363">      DT_DEBUG_SQLITE3_PREPARE_V2(dt_database_get(darktable.db),</a>
+<a name="ln1364">                                  &quot;SELECT rowid FROM memory.history ORDER BY rowid ASC&quot;, -1, &amp;stmt, NULL);</a>
+<a name="ln1365">      while(sqlite3_step(stmt) == SQLITE_ROW)</a>
+<a name="ln1366">        rowids = g_list_append(rowids, GINT_TO_POINTER(sqlite3_column_int(stmt, 0)));</a>
+<a name="ln1367">      sqlite3_finalize(stmt);</a>
+<a name="ln1368"> </a>
+<a name="ln1369">      // update num accordingly</a>
+<a name="ln1370">      int v = 0;</a>
+<a name="ln1371"> </a>
+<a name="ln1372">      DT_DEBUG_SQLITE3_PREPARE_V2(dt_database_get(darktable.db),</a>
+<a name="ln1373">                                  &quot;UPDATE memory.history SET num=?1 WHERE rowid=?2&quot;, -1, &amp;stmt, NULL);</a>
+<a name="ln1374"> </a>
+<a name="ln1375">      // let's wrap this into a transaction, it might make it a little faster.</a>
+<a name="ln1376">      sqlite3_exec(dt_database_get(darktable.db), &quot;BEGIN TRANSACTION&quot;, NULL, NULL, NULL);</a>
+<a name="ln1377">      for(GList *r = rowids; r; r = g_list_next(r))</a>
+<a name="ln1378">      {</a>
+<a name="ln1379">        DT_DEBUG_SQLITE3_CLEAR_BINDINGS(stmt);</a>
+<a name="ln1380">        DT_DEBUG_SQLITE3_RESET(stmt);</a>
+<a name="ln1381">        DT_DEBUG_SQLITE3_BIND_INT(stmt, 1, v);</a>
+<a name="ln1382">        DT_DEBUG_SQLITE3_BIND_INT(stmt, 2, GPOINTER_TO_INT(r-&gt;data));</a>
+<a name="ln1383"> </a>
+<a name="ln1384">        if(sqlite3_step(stmt) != SQLITE_DONE) break;</a>
+<a name="ln1385"> </a>
+<a name="ln1386">        v++;</a>
+<a name="ln1387">      }</a>
+<a name="ln1388"> </a>
+<a name="ln1389">      sqlite3_exec(dt_database_get(darktable.db), &quot;COMMIT&quot;, NULL, NULL, NULL);</a>
+<a name="ln1390"> </a>
+<a name="ln1391">      g_list_free(rowids);</a>
+<a name="ln1392">      sqlite3_finalize(stmt);</a>
+<a name="ln1393"> </a>
+<a name="ln1394">      // while we are here update the iop order</a>
+<a name="ln1395">      DT_DEBUG_SQLITE3_PREPARE_V2(dt_database_get(darktable.db), &quot;SELECT num, operation FROM memory.history&quot;, -1,</a>
+<a name="ln1396">                                  &amp;stmt, NULL);</a>
+<a name="ln1397">      while(sqlite3_step(stmt) == SQLITE_ROW)</a>
+<a name="ln1398">      {</a>
+<a name="ln1399">        const int num = sqlite3_column_int(stmt, 0);</a>
+<a name="ln1400">        const char *op_name = (char *)sqlite3_column_text(stmt, 1);</a>
+<a name="ln1401"> </a>
+<a name="ln1402">        double iop_order = -1.0;</a>
+<a name="ln1403"> </a>
+<a name="ln1404">        GList *modules = g_list_first(dev-&gt;iop);</a>
+<a name="ln1405">        while(modules)</a>
+<a name="ln1406">        {</a>
+<a name="ln1407">          dt_iop_module_t *mod = (dt_iop_module_t *)modules-&gt;data;</a>
+<a name="ln1408">          if(strcmp(mod-&gt;op, op_name) == 0)</a>
+<a name="ln1409">          {</a>
+<a name="ln1410">            iop_order = dt_ioppr_get_iop_order(dev-&gt;iop_order_list, mod-&gt;op);</a>
+<a name="ln1411">            break;</a>
+<a name="ln1412">          }</a>
+<a name="ln1413">          modules = g_list_next(modules);</a>
+<a name="ln1414">        }</a>
+<a name="ln1415"> </a>
+<a name="ln1416">        if(iop_order != DBL_MAX)</a>
+<a name="ln1417">        {</a>
+<a name="ln1418">          sqlite3_stmt *stmt2;</a>
+<a name="ln1419">          DT_DEBUG_SQLITE3_PREPARE_V2(dt_database_get(darktable.db),</a>
+<a name="ln1420">                                      &quot;UPDATE memory.history SET iop_order=?1 WHERE num=?2&quot;, -1, &amp;stmt2, NULL);</a>
+<a name="ln1421">          DT_DEBUG_SQLITE3_BIND_DOUBLE(stmt2, 1, iop_order);</a>
+<a name="ln1422">          DT_DEBUG_SQLITE3_BIND_INT(stmt2, 2, num);</a>
+<a name="ln1423">          sqlite3_step(stmt2);</a>
+<a name="ln1424">          sqlite3_finalize(stmt2);</a>
+<a name="ln1425">        }</a>
+<a name="ln1426">      }</a>
+<a name="ln1427">      sqlite3_finalize(stmt);</a>
+<a name="ln1428">    }</a>
+<a name="ln1429"> </a>
+<a name="ln1430">    // advance the current history by cnt amount, that is, make space for the preset/default iops that will be</a>
+<a name="ln1431">    // *prepended* into the history.</a>
+<a name="ln1432">    DT_DEBUG_SQLITE3_PREPARE_V2(dt_database_get(darktable.db),</a>
+<a name="ln1433">                                &quot;UPDATE main.history SET num=num+?1 WHERE imgid=?2&quot;, -1, &amp;stmt, NULL);</a>
+<a name="ln1434">    DT_DEBUG_SQLITE3_BIND_INT(stmt, 1, cnt);</a>
+<a name="ln1435">    DT_DEBUG_SQLITE3_BIND_INT(stmt, 2, imgid);</a>
+<a name="ln1436"> </a>
+<a name="ln1437">    if(sqlite3_step(stmt) == SQLITE_DONE)</a>
+<a name="ln1438">    {</a>
+<a name="ln1439">      sqlite3_finalize(stmt);</a>
+<a name="ln1440">      DT_DEBUG_SQLITE3_PREPARE_V2(dt_database_get(darktable.db),</a>
+<a name="ln1441">                                  &quot;UPDATE main.images SET history_end=history_end+?1 WHERE id=?2&quot;,</a>
+<a name="ln1442">                                  -1, &amp;stmt, NULL);</a>
+<a name="ln1443">      DT_DEBUG_SQLITE3_BIND_INT(stmt, 1, cnt);</a>
+<a name="ln1444">      DT_DEBUG_SQLITE3_BIND_INT(stmt, 2, imgid);</a>
+<a name="ln1445"> </a>
+<a name="ln1446">      if(sqlite3_step(stmt) == SQLITE_DONE)</a>
+<a name="ln1447">      {</a>
+<a name="ln1448">        // and finally prepend the rest with increasing numbers (starting at 0)</a>
+<a name="ln1449">        sqlite3_finalize(stmt);</a>
+<a name="ln1450">        DT_DEBUG_SQLITE3_PREPARE_V2(</a>
+<a name="ln1451">          dt_database_get(darktable.db),</a>
+<a name="ln1452">          &quot;INSERT INTO main.history SELECT imgid, num, module, operation, op_params, enabled, &quot;</a>
+<a name="ln1453">          &quot;blendop_params, blendop_version, multi_priority, multi_name, iop_order FROM memory.history&quot;,</a>
+<a name="ln1454">          -1, &amp;stmt, NULL);</a>
+<a name="ln1455">        sqlite3_step(stmt);</a>
+<a name="ln1456">        sqlite3_finalize(stmt);</a>
+<a name="ln1457">      }</a>
+<a name="ln1458">    }</a>
+<a name="ln1459">  }</a>
+<a name="ln1460">}</a>
+<a name="ln1461"> </a>
+<a name="ln1462">void dt_dev_read_history_ext(dt_develop_t *dev, const int imgid, gboolean no_image)</a>
+<a name="ln1463">{</a>
+<a name="ln1464">  if(imgid &lt;= 0) return;</a>
+<a name="ln1465">  if(!dev-&gt;iop) return;</a>
+<a name="ln1466"> </a>
+<a name="ln1467">  int history_end_current = 0;</a>
+<a name="ln1468"> </a>
+<a name="ln1469">  sqlite3_stmt *stmt;</a>
+<a name="ln1470"> </a>
+<a name="ln1471">  dev-&gt;iop_order_version = 0;</a>
+<a name="ln1472"> </a>
+<a name="ln1473">  DT_DEBUG_SQLITE3_PREPARE_V2(dt_database_get(darktable.db), &quot;SELECT iop_order_version FROM main.images WHERE id = ?1&quot;,</a>
+<a name="ln1474">                              -1, &amp;stmt, NULL);</a>
+<a name="ln1475">  DT_DEBUG_SQLITE3_BIND_INT(stmt, 1, imgid);</a>
+<a name="ln1476">  if(sqlite3_step(stmt) == SQLITE_ROW) // seriously, this should never fail</a>
+<a name="ln1477">  {</a>
+<a name="ln1478">    dev-&gt;iop_order_version = sqlite3_column_int(stmt, 0);</a>
+<a name="ln1479">  }</a>
+<a name="ln1480">  sqlite3_finalize(stmt);</a>
+<a name="ln1481"> </a>
+<a name="ln1482">  // free iop_order if any</a>
+<a name="ln1483">  if(dev-&gt;iop_order_list) g_list_free_full(dev-&gt;iop_order_list, free);</a>
+<a name="ln1484">  // read iop_order for this particular edit</a>
+<a name="ln1485">  dev-&gt;iop_order_list = dt_ioppr_get_iop_order_list(&amp;dev-&gt;iop_order_version);</a>
+<a name="ln1486">  // set the iop_order to the iop list</a>
+<a name="ln1487">  dt_ioppr_set_default_iop_order(&amp;dev-&gt;iop, dev-&gt;iop_order_list);</a>
+<a name="ln1488"> </a>
+<a name="ln1489">  //dt_ioppr_print_iop_order(dev-&gt;iop_order_list, &quot;dt_dev_read_history_no_image 1&quot;);</a>
+<a name="ln1490"> </a>
+<a name="ln1491">  if(!no_image)</a>
+<a name="ln1492">  {</a>
+<a name="ln1493">    // cleanup</a>
+<a name="ln1494">    DT_DEBUG_SQLITE3_EXEC(dt_database_get(darktable.db), &quot;DELETE FROM memory.history&quot;, NULL, NULL, NULL);</a>
+<a name="ln1495"> </a>
+<a name="ln1496">    // prepend all default modules to memory.history</a>
+<a name="ln1497">    _dev_add_default_modules(dev, imgid);</a>
+<a name="ln1498"> </a>
+<a name="ln1499">    // maybe add auto-presets to memory.history and commit everything into main.history</a>
+<a name="ln1500">    const gboolean first_run = _dev_auto_apply_presets(dev);</a>
+<a name="ln1501"> </a>
+<a name="ln1502">    // now merge memory.histroy into main.history</a>
+<a name="ln1503">    _dev_merge_history(dev, imgid);</a>
+<a name="ln1504"> </a>
+<a name="ln1505">    //  first time we are loading the image, try to import lightroom .xmp if any</a>
+<a name="ln1506">    if(dev-&gt;image_loading &amp;&amp; first_run) dt_lightroom_import(dev-&gt;image_storage.id, dev, TRUE);</a>
+<a name="ln1507">  }</a>
+<a name="ln1508"> </a>
+<a name="ln1509">  DT_DEBUG_SQLITE3_PREPARE_V2(dt_database_get(darktable.db), &quot;SELECT history_end FROM main.images WHERE id = ?1&quot;,</a>
+<a name="ln1510">                              -1, &amp;stmt, NULL);</a>
+<a name="ln1511">  DT_DEBUG_SQLITE3_BIND_INT(stmt, 1, imgid);</a>
+<a name="ln1512">  if(sqlite3_step(stmt) == SQLITE_ROW) // seriously, this should never fail</a>
+<a name="ln1513">  {</a>
+<a name="ln1514">    if(sqlite3_column_type(stmt, 0) != SQLITE_NULL)</a>
+<a name="ln1515">      history_end_current = sqlite3_column_int(stmt, 0);</a>
+<a name="ln1516">  }</a>
+<a name="ln1517">  sqlite3_finalize(stmt);</a>
+<a name="ln1518"> </a>
+<a name="ln1519">  DT_DEBUG_SQLITE3_PREPARE_V2(dt_database_get(darktable.db), &quot;SELECT imgid, num, module, operation, &quot;</a>
+<a name="ln1520">                                                             &quot;op_params, enabled, blendop_params, &quot;</a>
+<a name="ln1521">                                                             &quot;blendop_version, multi_priority, multi_name, iop_order &quot;</a>
+<a name="ln1522">                                                             &quot;FROM main.history WHERE imgid = ?1 ORDER BY num&quot;,</a>
+<a name="ln1523">                              -1, &amp;stmt, NULL);</a>
+<a name="ln1524">  DT_DEBUG_SQLITE3_BIND_INT(stmt, 1, imgid);</a>
+<a name="ln1525">  dev-&gt;history_end = 0;</a>
+<a name="ln1526">  while(sqlite3_step(stmt) == SQLITE_ROW)</a>
+<a name="ln1527">  {</a>
+<a name="ln1528">    // db record:</a>
+<a name="ln1529">    // 0-img, 1-num, 2-module_instance, 3-operation char, 4-params blob, 5-enabled, 6-blend_params,</a>
+<a name="ln1530">    // 7-blendop_version, 8 multi_priority, 9 multi_name, 10 iop_order</a>
+<a name="ln1531">    dt_dev_history_item_t *hist = (dt_dev_history_item_t *)calloc(1, sizeof(dt_dev_history_item_t));</a>
+<a name="ln1532">    hist-&gt;enabled = sqlite3_column_int(stmt, 5);</a>
+<a name="ln1533"> </a>
+<a name="ln1534">    const char *opname = (const char *)sqlite3_column_text(stmt, 3);</a>
+<a name="ln1535">    const double iop_order = sqlite3_column_double(stmt, 10);</a>
+<a name="ln1536">    int multi_priority = sqlite3_column_int(stmt, 8);</a>
+<a name="ln1537">    const char *multi_name = (const char *)sqlite3_column_text(stmt, 9);</a>
+<a name="ln1538">    if(!opname)</a>
+<a name="ln1539">    {</a>
+<a name="ln1540">      fprintf(stderr, &quot;[dev_read_history] database history for image `%s' seems to be corrupted!\n&quot;,</a>
+<a name="ln1541">              dev-&gt;image_storage.filename);</a>
+<a name="ln1542">      free(hist);</a>
+<a name="ln1543">      continue;</a>
+<a name="ln1544">    }</a>
+<a name="ln1545"> </a>
+<a name="ln1546">    hist-&gt;module = NULL;</a>
+<a name="ln1547">    dt_iop_module_t *find_op = NULL;</a>
+<a name="ln1548">    for(GList *modules = dev-&gt;iop; modules; modules = g_list_next(modules))</a>
+<a name="ln1549">    {</a>
+<a name="ln1550">      dt_iop_module_t *module = (dt_iop_module_t *)modules-&gt;data;</a>
+<a name="ln1551">      if(!strcmp(module-&gt;op, opname))</a>
+<a name="ln1552">      {</a>
+<a name="ln1553">        if(module-&gt;multi_priority == multi_priority)</a>
+<a name="ln1554">        {</a>
+<a name="ln1555">          hist-&gt;module = module;</a>
+<a name="ln1556">          if(multi_name)</a>
+<a name="ln1557">            snprintf(module-&gt;multi_name, sizeof(module-&gt;multi_name), &quot;%s&quot;, multi_name);</a>
+<a name="ln1558">          else</a>
+<a name="ln1559">            memset(module-&gt;multi_name, 0, sizeof(module-&gt;multi_name));</a>
+<a name="ln1560">          break;</a>
+<a name="ln1561">        }</a>
+<a name="ln1562">        else if(multi_priority &gt; 0)</a>
+<a name="ln1563">        {</a>
+<a name="ln1564">          // we just say that we find the name, so we just have to add new instance of this module</a>
+<a name="ln1565">          find_op = module;</a>
+<a name="ln1566">        }</a>
+<a name="ln1567">      }</a>
+<a name="ln1568">    }</a>
+<a name="ln1569">    if(!hist-&gt;module &amp;&amp; find_op)</a>
+<a name="ln1570">    {</a>
+<a name="ln1571">      // we have to add a new instance of this module and set index to modindex</a>
+<a name="ln1572">      dt_iop_module_t *new_module = (dt_iop_module_t *)calloc(1, sizeof(dt_iop_module_t));</a>
+<a name="ln1573">      if(!dt_iop_load_module(new_module, find_op-&gt;so, dev))</a>
+<a name="ln1574">      {</a>
+<a name="ln1575">        dt_iop_update_multi_priority(new_module, multi_priority);</a>
+<a name="ln1576">        // flag all multi-instances as not used</a>
+<a name="ln1577">        if(new_module-&gt;multi_priority != 0) new_module-&gt;iop_order = DBL_MAX;</a>
+<a name="ln1578"> </a>
+<a name="ln1579">        snprintf(new_module-&gt;multi_name, sizeof(new_module-&gt;multi_name), &quot;%s&quot;, multi_name);</a>
+<a name="ln1580"> </a>
+<a name="ln1581">        dev-&gt;iop = g_list_append(dev-&gt;iop, new_module);</a>
+<a name="ln1582"> </a>
+<a name="ln1583">        new_module-&gt;instance = find_op-&gt;instance;</a>
+<a name="ln1584">        hist-&gt;module = new_module;</a>
+<a name="ln1585">      }</a>
+<a name="ln1586">    }</a>
+<a name="ln1587"> </a>
+<a name="ln1588">    if(!hist-&gt;module)</a>
+<a name="ln1589">    {</a>
+<a name="ln1590">      fprintf(</a>
+<a name="ln1591">          stderr,</a>
+<a name="ln1592">          &quot;[dev_read_history] the module `%s' requested by image `%s' is not installed on this computer!\n&quot;,</a>
+<a name="ln1593">          opname, dev-&gt;image_storage.filename);</a>
+<a name="ln1594">      free(hist);</a>
+<a name="ln1595">      continue;</a>
+<a name="ln1596">    }</a>
+<a name="ln1597"> </a>
+<a name="ln1598">    if(hist-&gt;module-&gt;flags() &amp; IOP_FLAGS_NO_HISTORY_STACK)</a>
+<a name="ln1599">    {</a>
+<a name="ln1600">      free(hist);</a>
+<a name="ln1601">      continue;</a>
+<a name="ln1602">    }</a>
+<a name="ln1603"> </a>
+<a name="ln1604">    hist-&gt;num = sqlite3_column_int(stmt, 1);</a>
+<a name="ln1605">    const int modversion = sqlite3_column_int(stmt, 2);</a>
+<a name="ln1606">    assert(strcmp((char *)sqlite3_column_text(stmt, 3), hist-&gt;module-&gt;op) == 0);</a>
+<a name="ln1607">    hist-&gt;params = malloc(hist-&gt;module-&gt;params_size);</a>
+<a name="ln1608">    hist-&gt;blend_params = malloc(sizeof(dt_develop_blend_params_t));</a>
+<a name="ln1609">    snprintf(hist-&gt;op_name, sizeof(hist-&gt;op_name), &quot;%s&quot;, hist-&gt;module-&gt;op);</a>
+<a name="ln1610">    snprintf(hist-&gt;multi_name, sizeof(hist-&gt;multi_name), &quot;%s&quot;, multi_name);</a>
+<a name="ln1611">    hist-&gt;iop_order = iop_order;</a>
+<a name="ln1612">    hist-&gt;multi_priority = multi_priority;</a>
+<a name="ln1613">    // update module iop_order only on active history entries</a>
+<a name="ln1614">    if(history_end_current &gt; dev-&gt;history_end) hist-&gt;module-&gt;iop_order = hist-&gt;iop_order;</a>
+<a name="ln1615"> </a>
+<a name="ln1616">    const void *blendop_params = sqlite3_column_blob(stmt, 6);</a>
+<a name="ln1617">    const int bl_length = sqlite3_column_bytes(stmt, 6);</a>
+<a name="ln1618">    const int blendop_version = sqlite3_column_int(stmt, 7);</a>
+<a name="ln1619"> </a>
+<a name="ln1620">    if(blendop_params &amp;&amp; (blendop_version == dt_develop_blend_version())</a>
+<a name="ln1621">       &amp;&amp; (bl_length == sizeof(dt_develop_blend_params_t)))</a>
+<a name="ln1622">    {</a>
+<a name="ln1623">      memcpy(hist-&gt;blend_params, blendop_params, sizeof(dt_develop_blend_params_t));</a>
+<a name="ln1624">    }</a>
+<a name="ln1625">    else if(blendop_params</a>
+<a name="ln1626">            &amp;&amp; dt_develop_blend_legacy_params(hist-&gt;module, blendop_params, blendop_version,</a>
+<a name="ln1627">                                              hist-&gt;blend_params, dt_develop_blend_version(), bl_length) == 0)</a>
+<a name="ln1628">    {</a>
+<a name="ln1629">      // do nothing</a>
+<a name="ln1630">    }</a>
+<a name="ln1631">    else</a>
+<a name="ln1632">    {</a>
+<a name="ln1633">      memcpy(hist-&gt;blend_params, hist-&gt;module-&gt;default_blendop_params, sizeof(dt_develop_blend_params_t));</a>
+<a name="ln1634">    }</a>
+<a name="ln1635"> </a>
+<a name="ln1636">    if(hist-&gt;module-&gt;version() != modversion || hist-&gt;module-&gt;params_size != sqlite3_column_bytes(stmt, 4)</a>
+<a name="ln1637">       || strcmp((char *)sqlite3_column_text(stmt, 3), hist-&gt;module-&gt;op))</a>
+<a name="ln1638">    {</a>
+<a name="ln1639">      if(!hist-&gt;module-&gt;legacy_params</a>
+<a name="ln1640">         || hist-&gt;module-&gt;legacy_params(hist-&gt;module, sqlite3_column_blob(stmt, 4), labs(modversion),</a>
+<a name="ln1641">                                        hist-&gt;params, labs(hist-&gt;module-&gt;version())))</a>
+<a name="ln1642">      {</a>
+<a name="ln1643">        fprintf(stderr, &quot;[dev_read_history] module `%s' version mismatch: history is %d, dt %d.\n&quot;,</a>
+<a name="ln1644">                hist-&gt;module-&gt;op, modversion, hist-&gt;module-&gt;version());</a>
+<a name="ln1645">        const char *fname = dev-&gt;image_storage.filename + strlen(dev-&gt;image_storage.filename);</a>
+<a name="ln1646">        while(fname &gt; dev-&gt;image_storage.filename &amp;&amp; *fname != '/') fname--;</a>
+<a name="ln1647">        if(fname &gt; dev-&gt;image_storage.filename) fname++;</a>
+<a name="ln1648">        dt_control_log(_(&quot;%s: module `%s' version mismatch: %d != %d&quot;), fname, hist-&gt;module-&gt;op,</a>
+<a name="ln1649">                       hist-&gt;module-&gt;version(), modversion);</a>
+<a name="ln1650">        dt_dev_free_history_item(hist);</a>
+<a name="ln1651">        continue;</a>
+<a name="ln1652">      }</a>
+<a name="ln1653">      else</a>
+<a name="ln1654">      {</a>
+<a name="ln1655">        if(!strcmp(hist-&gt;module-&gt;op, &quot;spots&quot;) &amp;&amp; modversion == 1)</a>
+<a name="ln1656">        {</a>
+<a name="ln1657">          // quick and dirty hack to handle spot removal legacy_params</a>
+<a name="ln1658">          memcpy(hist-&gt;blend_params, hist-&gt;module-&gt;blend_params, sizeof(dt_develop_blend_params_t));</a>
+<a name="ln1659">          dt_iop_commit_blend_params(hist-&gt;module, hist-&gt;module-&gt;default_blendop_params);</a>
+<a name="ln1660">        }</a>
+<a name="ln1661">      }</a>
+<a name="ln1662"> </a>
+<a name="ln1663">      /*</a>
+<a name="ln1664">       * Fix for flip iop: previously it was not always needed, but it might be</a>
+<a name="ln1665">       * in history stack as &quot;orientation (off)&quot;, but now we always want it</a>
+<a name="ln1666">       * by default, so if it is disabled, enable it, and replace params with</a>
+<a name="ln1667">       * default_params. if user want to, he can disable it.</a>
+<a name="ln1668">       */</a>
+<a name="ln1669">      if(!strcmp(hist-&gt;module-&gt;op, &quot;flip&quot;) &amp;&amp; hist-&gt;enabled == 0 &amp;&amp; labs(modversion) == 1)</a>
+<a name="ln1670">      {</a>
+<a name="ln1671">        memcpy(hist-&gt;params, hist-&gt;module-&gt;default_params, hist-&gt;module-&gt;params_size);</a>
+<a name="ln1672">        hist-&gt;enabled = 1;</a>
+<a name="ln1673">      }</a>
+<a name="ln1674">    }</a>
+<a name="ln1675">    else</a>
+<a name="ln1676">    {</a>
+<a name="ln1677">      memcpy(hist-&gt;params, sqlite3_column_blob(stmt, 4), hist-&gt;module-&gt;params_size);</a>
+<a name="ln1678">    }</a>
+<a name="ln1679"> </a>
+<a name="ln1680">    // make sure that always-on modules are always on. duh.</a>
+<a name="ln1681">    if(hist-&gt;module-&gt;default_enabled == 1 &amp;&amp; hist-&gt;module-&gt;hide_enable_button == 1)</a>
+<a name="ln1682">    {</a>
+<a name="ln1683">      hist-&gt;enabled = 1;</a>
+<a name="ln1684">    }</a>
+<a name="ln1685"> </a>
+<a name="ln1686">    dev-&gt;history = g_list_append(dev-&gt;history, hist);</a>
+<a name="ln1687">    dev-&gt;history_end++;</a>
+<a name="ln1688">  }</a>
+<a name="ln1689">  sqlite3_finalize(stmt);</a>
+<a name="ln1690"> </a>
+<a name="ln1691">  // sort the modules, as the iop_order may have changed</a>
+<a name="ln1692">  dev-&gt;iop = g_list_sort(dev-&gt;iop, dt_sort_iop_by_order);</a>
+<a name="ln1693"> </a>
+<a name="ln1694">  DT_DEBUG_SQLITE3_PREPARE_V2(dt_database_get(darktable.db), &quot;SELECT history_end FROM main.images WHERE id = ?1&quot;,</a>
+<a name="ln1695">                              -1, &amp;stmt, NULL);</a>
+<a name="ln1696">  DT_DEBUG_SQLITE3_BIND_INT(stmt, 1, imgid);</a>
+<a name="ln1697">  if(sqlite3_step(stmt) == SQLITE_ROW) // seriously, this should never fail</a>
+<a name="ln1698">  {</a>
+<a name="ln1699">    if(sqlite3_column_type(stmt, 0) != SQLITE_NULL)</a>
+<a name="ln1700">      dev-&gt;history_end = sqlite3_column_int(stmt, 0);</a>
+<a name="ln1701">  }</a>
+<a name="ln1702">  sqlite3_finalize(stmt);</a>
+<a name="ln1703"> </a>
+<a name="ln1704">  // now add any module created after dev-&gt;iop_order_version</a>
+<a name="ln1705">  dt_ioppr_legacy_iop_order(&amp;dev-&gt;iop, &amp;dev-&gt;iop_order_list, dev-&gt;history, dev-&gt;iop_order_version);</a>
+<a name="ln1706"> </a>
+<a name="ln1707">  //dt_ioppr_print_module_iop_order(dev-&gt;iop, &quot;dt_dev_read_history_no_image end&quot;);</a>
+<a name="ln1708">  //dt_ioppr_print_history_iop_order(dev-&gt;history, &quot;dt_dev_read_history_no_image end&quot;);</a>
+<a name="ln1709">  //dt_ioppr_print_iop_order(dev-&gt;iop_order_list, &quot;dt_dev_read_history_no_image end&quot;);</a>
+<a name="ln1710"> </a>
+<a name="ln1711">  dt_ioppr_check_iop_order(dev, imgid, &quot;dt_dev_read_history_no_image end&quot;);</a>
+<a name="ln1712"> </a>
+<a name="ln1713">  dt_masks_read_masks_history(dev, imgid);</a>
+<a name="ln1714"> </a>
+<a name="ln1715">  if(dev-&gt;gui_attached &amp;&amp; !no_image)</a>
+<a name="ln1716">  {</a>
+<a name="ln1717">    dev-&gt;pipe-&gt;changed |= DT_DEV_PIPE_SYNCH;</a>
+<a name="ln1718">    dev-&gt;preview_pipe-&gt;changed |= DT_DEV_PIPE_SYNCH; // again, fixed topology for now.</a>
+<a name="ln1719">    dev-&gt;preview2_pipe-&gt;changed |= DT_DEV_PIPE_SYNCH; // again, fixed topology for now.</a>
+<a name="ln1720">    dt_dev_invalidate_all(dev);</a>
+<a name="ln1721"> </a>
+<a name="ln1722">    /* signal history changed */</a>
+<a name="ln1723">    dt_control_signal_raise(darktable.signals, DT_SIGNAL_DEVELOP_HISTORY_CHANGE);</a>
+<a name="ln1724">  }</a>
+<a name="ln1725">  dt_dev_masks_list_change(dev);</a>
+<a name="ln1726">}</a>
+<a name="ln1727"> </a>
+<a name="ln1728">void dt_dev_read_history(dt_develop_t *dev)</a>
+<a name="ln1729">{</a>
+<a name="ln1730">  dt_dev_read_history_ext(dev, dev-&gt;image_storage.id, FALSE);</a>
+<a name="ln1731">}</a>
+<a name="ln1732"> </a>
+<a name="ln1733">void dt_dev_reprocess_all(dt_develop_t *dev)</a>
+<a name="ln1734">{</a>
+<a name="ln1735">  if(darktable.gui-&gt;reset) return;</a>
+<a name="ln1736">  if(dev &amp;&amp; dev-&gt;gui_attached)</a>
+<a name="ln1737">  {</a>
+<a name="ln1738">    dev-&gt;pipe-&gt;changed |= DT_DEV_PIPE_SYNCH;</a>
+<a name="ln1739">    dev-&gt;preview_pipe-&gt;changed |= DT_DEV_PIPE_SYNCH;</a>
+<a name="ln1740">    dev-&gt;preview2_pipe-&gt;changed |= DT_DEV_PIPE_SYNCH;</a>
+<a name="ln1741">    dev-&gt;pipe-&gt;cache_obsolete = 1;</a>
+<a name="ln1742">    dev-&gt;preview_pipe-&gt;cache_obsolete = 1;</a>
+<a name="ln1743">    dev-&gt;preview2_pipe-&gt;cache_obsolete = 1;</a>
+<a name="ln1744"> </a>
+<a name="ln1745">    // invalidate buffers and force redraw of darkroom</a>
+<a name="ln1746">    dt_dev_invalidate_all(dev);</a>
+<a name="ln1747"> </a>
+<a name="ln1748">    /* redraw */</a>
+<a name="ln1749">    dt_control_queue_redraw_center();</a>
+<a name="ln1750">  }</a>
+<a name="ln1751">}</a>
+<a name="ln1752"> </a>
+<a name="ln1753">void dt_dev_reprocess_center(dt_develop_t *dev)</a>
+<a name="ln1754">{</a>
+<a name="ln1755">  if(darktable.gui-&gt;reset) return;</a>
+<a name="ln1756">  if(dev &amp;&amp; dev-&gt;gui_attached)</a>
+<a name="ln1757">  {</a>
+<a name="ln1758">    dev-&gt;pipe-&gt;changed |= DT_DEV_PIPE_SYNCH;</a>
+<a name="ln1759">    dev-&gt;pipe-&gt;cache_obsolete = 1;</a>
+<a name="ln1760"> </a>
+<a name="ln1761">    // invalidate buffers and force redraw of darkroom</a>
+<a name="ln1762">    dt_dev_invalidate_all(dev);</a>
+<a name="ln1763"> </a>
+<a name="ln1764">    /* redraw */</a>
+<a name="ln1765">    dt_control_queue_redraw_center();</a>
+<a name="ln1766">  }</a>
+<a name="ln1767">}</a>
+<a name="ln1768"> </a>
+<a name="ln1769"> </a>
+<a name="ln1770">void dt_dev_check_zoom_bounds(dt_develop_t *dev, float *zoom_x, float *zoom_y, dt_dev_zoom_t zoom,</a>
+<a name="ln1771">                              int closeup, float *boxww, float *boxhh)</a>
+<a name="ln1772">{</a>
+<a name="ln1773">  int procw = 0, proch = 0;</a>
+<a name="ln1774">  dt_dev_get_processed_size(dev, &amp;procw, &amp;proch);</a>
+<a name="ln1775">  float boxw = 1, boxh = 1; // viewport in normalised space</a>
+<a name="ln1776">                            //   if(zoom == DT_ZOOM_1)</a>
+<a name="ln1777">                            //   {</a>
+<a name="ln1778">                            //     const float imgw = (closeup ? 2 : 1)*procw;</a>
+<a name="ln1779">                            //     const float imgh = (closeup ? 2 : 1)*proch;</a>
+<a name="ln1780">                            //     const float devw = MIN(imgw, dev-&gt;width);</a>
+<a name="ln1781">                            //     const float devh = MIN(imgh, dev-&gt;height);</a>
+<a name="ln1782">                            //     boxw = fminf(1.0, devw/imgw);</a>
+<a name="ln1783">                            //     boxh = fminf(1.0, devh/imgh);</a>
+<a name="ln1784">                            //   }</a>
+<a name="ln1785">  if(zoom == DT_ZOOM_FIT)</a>
+<a name="ln1786">  {</a>
+<a name="ln1787">    *zoom_x = *zoom_y = 0.0f;</a>
+<a name="ln1788">    boxw = boxh = 1.0f;</a>
+<a name="ln1789">  }</a>
+<a name="ln1790">  else</a>
+<a name="ln1791">  {</a>
+<a name="ln1792">    const float scale = dt_dev_get_zoom_scale(dev, zoom, 1&lt;&lt;closeup, 0);</a>
+<a name="ln1793">    const float imgw = procw;</a>
+<a name="ln1794">    const float imgh = proch;</a>
+<a name="ln1795">    const float devw = dev-&gt;width;</a>
+<a name="ln1796">    const float devh = dev-&gt;height;</a>
+<a name="ln1797">    boxw = devw / (imgw * scale);</a>
+<a name="ln1798">    boxh = devh / (imgh * scale);</a>
+<a name="ln1799">  }</a>
+<a name="ln1800"> </a>
+<a name="ln1801">  if(*zoom_x &lt; boxw / 2 - .5) *zoom_x = boxw / 2 - .5;</a>
+<a name="ln1802">  if(*zoom_x &gt; .5 - boxw / 2) *zoom_x = .5 - boxw / 2;</a>
+<a name="ln1803">  if(*zoom_y &lt; boxh / 2 - .5) *zoom_y = boxh / 2 - .5;</a>
+<a name="ln1804">  if(*zoom_y &gt; .5 - boxh / 2) *zoom_y = .5 - boxh / 2;</a>
+<a name="ln1805">  if(boxw &gt; 1.0) *zoom_x = 0.f;</a>
+<a name="ln1806">  if(boxh &gt; 1.0) *zoom_y = 0.f;</a>
+<a name="ln1807"> </a>
+<a name="ln1808">  if(boxww) *boxww = boxw;</a>
+<a name="ln1809">  if(boxhh) *boxhh = boxh;</a>
+<a name="ln1810">}</a>
+<a name="ln1811"> </a>
+<a name="ln1812">void dt_dev_get_processed_size(const dt_develop_t *dev, int *procw, int *proch)</a>
+<a name="ln1813">{</a>
+<a name="ln1814">  if(!dev) return;</a>
+<a name="ln1815"> </a>
+<a name="ln1816">  // if pipe is processed, lets return its size</a>
+<a name="ln1817">  if(dev-&gt;pipe &amp;&amp; dev-&gt;pipe-&gt;processed_width)</a>
+<a name="ln1818">  {</a>
+<a name="ln1819">    *procw = dev-&gt;pipe-&gt;processed_width;</a>
+<a name="ln1820">    *proch = dev-&gt;pipe-&gt;processed_height;</a>
+<a name="ln1821">    return;</a>
+<a name="ln1822">  }</a>
+<a name="ln1823"> </a>
+<a name="ln1824">  // fallback on preview pipe</a>
+<a name="ln1825">  if(dev-&gt;preview_pipe &amp;&amp; dev-&gt;preview_pipe-&gt;processed_width)</a>
+<a name="ln1826">  {</a>
+<a name="ln1827">    const float scale = (dev-&gt;preview_pipe-&gt;iscale / dev-&gt;preview_downsampling);</a>
+<a name="ln1828">    *procw = scale * dev-&gt;preview_pipe-&gt;processed_width;</a>
+<a name="ln1829">    *proch = scale * dev-&gt;preview_pipe-&gt;processed_height;</a>
+<a name="ln1830">    return;</a>
+<a name="ln1831">  }</a>
+<a name="ln1832"> </a>
+<a name="ln1833">  // no processed pipes, lets return 0 size</a>
+<a name="ln1834">  *procw = *proch = 0;</a>
+<a name="ln1835">  return;</a>
+<a name="ln1836">}</a>
+<a name="ln1837"> </a>
+<a name="ln1838">void dt_dev_get_pointer_zoom_pos(dt_develop_t *dev, const float px, const float py, float *zoom_x,</a>
+<a name="ln1839">                                 float *zoom_y)</a>
+<a name="ln1840">{</a>
+<a name="ln1841">  dt_dev_zoom_t zoom;</a>
+<a name="ln1842">  int closeup, procw = 0, proch = 0;</a>
+<a name="ln1843">  float zoom2_x, zoom2_y;</a>
+<a name="ln1844">  zoom = dt_control_get_dev_zoom();</a>
+<a name="ln1845">  closeup = dt_control_get_dev_closeup();</a>
+<a name="ln1846">  zoom2_x = dt_control_get_dev_zoom_x();</a>
+<a name="ln1847">  zoom2_y = dt_control_get_dev_zoom_y();</a>
+<a name="ln1848">  dt_dev_get_processed_size(dev, &amp;procw, &amp;proch);</a>
+<a name="ln1849">  const float scale = dt_dev_get_zoom_scale(dev, zoom, 1&lt;&lt;closeup, 0);</a>
+<a name="ln1850">  // offset from center now (current zoom_{x,y} points there)</a>
+<a name="ln1851">  const float mouse_off_x = px - .5 * dev-&gt;width, mouse_off_y = py - .5 * dev-&gt;height;</a>
+<a name="ln1852">  zoom2_x += mouse_off_x / (procw * scale);</a>
+<a name="ln1853">  zoom2_y += mouse_off_y / (proch * scale);</a>
+<a name="ln1854">  *zoom_x = zoom2_x;</a>
+<a name="ln1855">  *zoom_y = zoom2_y;</a>
+<a name="ln1856">}</a>
+<a name="ln1857"> </a>
+<a name="ln1858">void dt_dev_get_history_item_label(dt_dev_history_item_t *hist, char *label, const int cnt)</a>
+<a name="ln1859">{</a>
+<a name="ln1860">  gchar *module_label = dt_history_item_get_name(hist-&gt;module);</a>
+<a name="ln1861">  g_snprintf(label, cnt, &quot;%s (%s)&quot;, module_label, hist-&gt;enabled ? _(&quot;on&quot;) : _(&quot;off&quot;));</a>
+<a name="ln1862">  g_free(module_label);</a>
+<a name="ln1863">}</a>
+<a name="ln1864"> </a>
+<a name="ln1865">int dt_dev_is_current_image(dt_develop_t *dev, uint32_t imgid)</a>
+<a name="ln1866">{</a>
+<a name="ln1867">  return (dev-&gt;image_storage.id == imgid) ? 1 : 0;</a>
+<a name="ln1868">}</a>
+<a name="ln1869"> </a>
+<a name="ln1870">gint dt_dev_exposure_hooks_sort(gconstpointer a, gconstpointer b)</a>
+<a name="ln1871">{</a>
+<a name="ln1872">  const dt_dev_proxy_exposure_t *ai = (const dt_dev_proxy_exposure_t *)a;</a>
+<a name="ln1873">  const dt_dev_proxy_exposure_t *bi = (const dt_dev_proxy_exposure_t *)b;</a>
+<a name="ln1874">  const dt_iop_module_t *am = (const dt_iop_module_t *)ai-&gt;module;</a>
+<a name="ln1875">  const dt_iop_module_t *bm = (const dt_iop_module_t *)bi-&gt;module;</a>
+<a name="ln1876">  // if(am-&gt;priority == bm-&gt;priority) return bm-&gt;multi_priority - am-&gt;multi_priority;</a>
+<a name="ln1877">  // return am-&gt;priority - bm-&gt;priority;</a>
+<a name="ln1878">  if(am-&gt;iop_order &lt; bm-&gt;iop_order) return -1;</a>
+<a name="ln1879">  if(am-&gt;iop_order &gt; bm-&gt;iop_order) return 1;</a>
+<a name="ln1880">  return 0;</a>
+<a name="ln1881">}</a>
+<a name="ln1882"> </a>
+<a name="ln1883">static dt_dev_proxy_exposure_t *find_last_exposure_instance(dt_develop_t *dev)</a>
+<a name="ln1884">{</a>
+<a name="ln1885">  if(!dev-&gt;proxy.exposure) return NULL;</a>
+<a name="ln1886"> </a>
+<a name="ln1887">  dev-&gt;proxy.exposure = g_list_sort(dev-&gt;proxy.exposure, dt_dev_exposure_hooks_sort);</a>
+<a name="ln1888">  dt_dev_proxy_exposure_t *instance = (dt_dev_proxy_exposure_t *)(g_list_last(dev-&gt;proxy.exposure)-&gt;data);</a>
+<a name="ln1889"> </a>
+<a name="ln1890">  return instance;</a>
+<a name="ln1891">};</a>
+<a name="ln1892"> </a>
+<a name="ln1893">gboolean dt_dev_exposure_hooks_available(dt_develop_t *dev)</a>
+<a name="ln1894">{</a>
+<a name="ln1895">  dt_dev_proxy_exposure_t *instance = find_last_exposure_instance(dev);</a>
+<a name="ln1896"> </a>
+<a name="ln1897">  /* check if exposure iop module has registered its hooks */</a>
+<a name="ln1898">  if(instance &amp;&amp; instance-&gt;module &amp;&amp; instance-&gt;set_black &amp;&amp; instance-&gt;get_black &amp;&amp; instance-&gt;set_exposure</a>
+<a name="ln1899">     &amp;&amp; instance-&gt;get_exposure)</a>
+<a name="ln1900">    return TRUE;</a>
+<a name="ln1901"> </a>
+<a name="ln1902">  return FALSE;</a>
+<a name="ln1903">}</a>
+<a name="ln1904"> </a>
+<a name="ln1905">void dt_dev_exposure_reset_defaults(dt_develop_t *dev)</a>
+<a name="ln1906">{</a>
+<a name="ln1907">  if(!dev-&gt;proxy.exposure) return;</a>
+<a name="ln1908"> </a>
+<a name="ln1909">  dt_dev_proxy_exposure_t *instance = find_last_exposure_instance(dev);</a>
+<a name="ln1910"> </a>
+<a name="ln1911">  if(!(instance &amp;&amp; instance-&gt;module)) return;</a>
+<a name="ln1912"> </a>
+<a name="ln1913">  dt_iop_module_t *exposure = instance-&gt;module;</a>
+<a name="ln1914">  memcpy(exposure-&gt;params, exposure-&gt;default_params, exposure-&gt;params_size);</a>
+<a name="ln1915">  exposure-&gt;gui_update(exposure);</a>
+<a name="ln1916">  dt_dev_add_history_item(exposure-&gt;dev, exposure, TRUE);</a>
+<a name="ln1917">}</a>
+<a name="ln1918"> </a>
+<a name="ln1919">void dt_dev_exposure_set_exposure(dt_develop_t *dev, const float exposure)</a>
+<a name="ln1920">{</a>
+<a name="ln1921">  dt_dev_proxy_exposure_t *instance = find_last_exposure_instance(dev);</a>
+<a name="ln1922"> </a>
+<a name="ln1923">  if(instance &amp;&amp; instance-&gt;module &amp;&amp; instance-&gt;set_exposure) instance-&gt;set_exposure(instance-&gt;module, exposure);</a>
+<a name="ln1924">}</a>
+<a name="ln1925"> </a>
+<a name="ln1926">float dt_dev_exposure_get_exposure(dt_develop_t *dev)</a>
+<a name="ln1927">{</a>
+<a name="ln1928">  dt_dev_proxy_exposure_t *instance = find_last_exposure_instance(dev);</a>
+<a name="ln1929"> </a>
+<a name="ln1930">  if(instance &amp;&amp; instance-&gt;module &amp;&amp; instance-&gt;get_exposure) return instance-&gt;get_exposure(instance-&gt;module);</a>
+<a name="ln1931"> </a>
+<a name="ln1932">  return 0.0;</a>
+<a name="ln1933">}</a>
+<a name="ln1934"> </a>
+<a name="ln1935">void dt_dev_exposure_set_black(dt_develop_t *dev, const float black)</a>
+<a name="ln1936">{</a>
+<a name="ln1937">  dt_dev_proxy_exposure_t *instance = find_last_exposure_instance(dev);</a>
+<a name="ln1938"> </a>
+<a name="ln1939">  if(instance &amp;&amp; instance-&gt;module &amp;&amp; instance-&gt;set_black) instance-&gt;set_black(instance-&gt;module, black);</a>
+<a name="ln1940">}</a>
+<a name="ln1941"> </a>
+<a name="ln1942">float dt_dev_exposure_get_black(dt_develop_t *dev)</a>
+<a name="ln1943">{</a>
+<a name="ln1944">  dt_dev_proxy_exposure_t *instance = find_last_exposure_instance(dev);</a>
+<a name="ln1945"> </a>
+<a name="ln1946">  if(instance &amp;&amp; instance-&gt;module &amp;&amp; instance-&gt;get_black) return instance-&gt;get_black(instance-&gt;module);</a>
+<a name="ln1947"> </a>
+<a name="ln1948">  return 0.0;</a>
+<a name="ln1949">}</a>
+<a name="ln1950"> </a>
+<a name="ln1951">gboolean dt_dev_modulegroups_available(dt_develop_t *dev)</a>
+<a name="ln1952">{</a>
+<a name="ln1953">  if(dev-&gt;proxy.modulegroups.module &amp;&amp; dev-&gt;proxy.modulegroups.set &amp;&amp; dev-&gt;proxy.modulegroups.get)</a>
+<a name="ln1954">    return TRUE;</a>
+<a name="ln1955"> </a>
+<a name="ln1956">  return FALSE;</a>
+<a name="ln1957">}</a>
+<a name="ln1958"> </a>
+<a name="ln1959">void dt_dev_modulegroups_set(dt_develop_t *dev, uint32_t group)</a>
+<a name="ln1960">{</a>
+<a name="ln1961">  if(dev-&gt;proxy.modulegroups.module &amp;&amp; dev-&gt;proxy.modulegroups.set &amp;&amp; dev-&gt;first_load == 0)</a>
+<a name="ln1962">    dev-&gt;proxy.modulegroups.set(dev-&gt;proxy.modulegroups.module, group);</a>
+<a name="ln1963">}</a>
+<a name="ln1964"> </a>
+<a name="ln1965">uint32_t dt_dev_modulegroups_get(dt_develop_t *dev)</a>
+<a name="ln1966">{</a>
+<a name="ln1967">  if(dev-&gt;proxy.modulegroups.module &amp;&amp; dev-&gt;proxy.modulegroups.get)</a>
+<a name="ln1968">    return dev-&gt;proxy.modulegroups.get(dev-&gt;proxy.modulegroups.module);</a>
+<a name="ln1969"> </a>
+<a name="ln1970">  return 0;</a>
+<a name="ln1971">}</a>
+<a name="ln1972"> </a>
+<a name="ln1973">gboolean dt_dev_modulegroups_test(dt_develop_t *dev, uint32_t group, uint32_t iop_group)</a>
+<a name="ln1974">{</a>
+<a name="ln1975">  if(dev-&gt;proxy.modulegroups.module &amp;&amp; dev-&gt;proxy.modulegroups.test)</a>
+<a name="ln1976">    return dev-&gt;proxy.modulegroups.test(dev-&gt;proxy.modulegroups.module, group, iop_group);</a>
+<a name="ln1977">  return FALSE;</a>
+<a name="ln1978">}</a>
+<a name="ln1979"> </a>
+<a name="ln1980">void dt_dev_modulegroups_switch(dt_develop_t *dev, dt_iop_module_t *module)</a>
+<a name="ln1981">{</a>
+<a name="ln1982">  if(dev-&gt;proxy.modulegroups.module &amp;&amp; dev-&gt;proxy.modulegroups.switch_group &amp;&amp; dev-&gt;first_load == 0)</a>
+<a name="ln1983">    dev-&gt;proxy.modulegroups.switch_group(dev-&gt;proxy.modulegroups.module, module);</a>
+<a name="ln1984">}</a>
+<a name="ln1985"> </a>
+<a name="ln1986">void dt_dev_modulegroups_search_text_focus(dt_develop_t *dev)</a>
+<a name="ln1987">{</a>
+<a name="ln1988">  if(dev-&gt;proxy.modulegroups.module &amp;&amp; dev-&gt;proxy.modulegroups.search_text_focus &amp;&amp; dev-&gt;first_load == 0)</a>
+<a name="ln1989">    dev-&gt;proxy.modulegroups.search_text_focus(dev-&gt;proxy.modulegroups.module);</a>
+<a name="ln1990">}</a>
+<a name="ln1991"> </a>
+<a name="ln1992">void dt_dev_masks_list_change(dt_develop_t *dev)</a>
+<a name="ln1993">{</a>
+<a name="ln1994">  if(dev-&gt;proxy.masks.module &amp;&amp; dev-&gt;proxy.masks.list_change)</a>
+<a name="ln1995">    dev-&gt;proxy.masks.list_change(dev-&gt;proxy.masks.module);</a>
+<a name="ln1996">}</a>
+<a name="ln1997">void dt_dev_masks_list_update(dt_develop_t *dev)</a>
+<a name="ln1998">{</a>
+<a name="ln1999">  if(dev-&gt;proxy.masks.module &amp;&amp; dev-&gt;proxy.masks.list_update)</a>
+<a name="ln2000">    dev-&gt;proxy.masks.list_update(dev-&gt;proxy.masks.module);</a>
+<a name="ln2001">}</a>
+<a name="ln2002">void dt_dev_masks_list_remove(dt_develop_t *dev, int formid, int parentid)</a>
+<a name="ln2003">{</a>
+<a name="ln2004">  if(dev-&gt;proxy.masks.module &amp;&amp; dev-&gt;proxy.masks.list_remove)</a>
+<a name="ln2005">    dev-&gt;proxy.masks.list_remove(dev-&gt;proxy.masks.module, formid, parentid);</a>
+<a name="ln2006">}</a>
+<a name="ln2007">void dt_dev_masks_selection_change(dt_develop_t *dev, int selectid, int throw_event)</a>
+<a name="ln2008">{</a>
+<a name="ln2009">  if(dev-&gt;proxy.masks.module &amp;&amp; dev-&gt;proxy.masks.selection_change)</a>
+<a name="ln2010">    dev-&gt;proxy.masks.selection_change(dev-&gt;proxy.masks.module, selectid, throw_event);</a>
+<a name="ln2011">}</a>
+<a name="ln2012"> </a>
+<a name="ln2013">void dt_dev_snapshot_request(dt_develop_t *dev, const char *filename)</a>
+<a name="ln2014">{</a>
+<a name="ln2015">  dev-&gt;proxy.snapshot.filename = filename;</a>
+<a name="ln2016">  dev-&gt;proxy.snapshot.request = TRUE;</a>
+<a name="ln2017">  dt_control_queue_redraw_center();</a>
+<a name="ln2018">}</a>
+<a name="ln2019"> </a>
+<a name="ln2020">void dt_dev_invalidate_from_gui(dt_develop_t *dev)</a>
+<a name="ln2021">{</a>
+<a name="ln2022">  dt_dev_pop_history_items(darktable.develop, darktable.develop-&gt;history_end);</a>
+<a name="ln2023">}</a>
+<a name="ln2024"> </a>
+<a name="ln2025">void dt_dev_average_delay_update(const dt_times_t *start, uint32_t *average_delay)</a>
+<a name="ln2026">{</a>
+<a name="ln2027">  dt_times_t end;</a>
+<a name="ln2028">  dt_get_times(&amp;end);</a>
+<a name="ln2029"> </a>
+<a name="ln2030">  *average_delay += ((end.clock - start-&gt;clock) * 1000 / DT_DEV_AVERAGE_DELAY_COUNT</a>
+<a name="ln2031">                     - *average_delay / DT_DEV_AVERAGE_DELAY_COUNT);</a>
+<a name="ln2032">}</a>
+<a name="ln2033"> </a>
+<a name="ln2034"> </a>
+<a name="ln2035">/** duplicate a existent module */</a>
+<a name="ln2036">dt_iop_module_t *dt_dev_module_duplicate(dt_develop_t *dev, dt_iop_module_t *base)</a>
+<a name="ln2037">{</a>
+<a name="ln2038">  // we create the new module</a>
+<a name="ln2039">  dt_iop_module_t *module = (dt_iop_module_t *)calloc(1, sizeof(dt_iop_module_t));</a>
+<a name="ln2040">  if(dt_iop_load_module(module, base-&gt;so, base-&gt;dev)) return NULL;</a>
+<a name="ln2041">  module-&gt;instance = base-&gt;instance;</a>
+<a name="ln2042"> </a>
+<a name="ln2043">  // we set the multi-instance priority and the iop order</a>
+<a name="ln2044">  GList *modules = g_list_first(base-&gt;dev-&gt;iop);</a>
+<a name="ln2045">  int pmax = 0;</a>
+<a name="ln2046">  while(modules)</a>
+<a name="ln2047">  {</a>
+<a name="ln2048">    dt_iop_module_t *mod = (dt_iop_module_t *)modules-&gt;data;</a>
+<a name="ln2049">    if(mod-&gt;instance == base-&gt;instance)</a>
+<a name="ln2050">    {</a>
+<a name="ln2051">      if(pmax &lt; mod-&gt;multi_priority) pmax = mod-&gt;multi_priority;</a>
+<a name="ln2052">    }</a>
+<a name="ln2053">    modules = g_list_next(modules);</a>
+<a name="ln2054">  }</a>
+<a name="ln2055">  // create a unique multi-priority</a>
+<a name="ln2056">  pmax += 1;</a>
+<a name="ln2057">  dt_iop_update_multi_priority(module, pmax);</a>
+<a name="ln2058"> </a>
+<a name="ln2059">  // since we do not rename the module we need to check that an old module does not have the same name. Indeed</a>
+<a name="ln2060">  // the multi_priority</a>
+<a name="ln2061">  // are always rebased to start from 0, to it may be the case that the same multi_name be generated when</a>
+<a name="ln2062">  // duplicating a module.</a>
+<a name="ln2063">  int pname = module-&gt;multi_priority;</a>
+<a name="ln2064">  char mname[128];</a>
+<a name="ln2065"> </a>
+<a name="ln2066">  do</a>
+<a name="ln2067">  {</a>
+<a name="ln2068">    snprintf(mname, sizeof(mname), &quot;%d&quot;, pname);</a>
+<a name="ln2069">    gboolean dup = FALSE;</a>
+<a name="ln2070"> </a>
+<a name="ln2071">    modules = g_list_first(base-&gt;dev-&gt;iop);</a>
+<a name="ln2072">    while(modules)</a>
+<a name="ln2073">    {</a>
+<a name="ln2074">      dt_iop_module_t *mod = (dt_iop_module_t *)modules-&gt;data;</a>
+<a name="ln2075">      if(mod-&gt;instance == base-&gt;instance)</a>
+<a name="ln2076">      {</a>
+<a name="ln2077">        if(strcmp(mname, mod-&gt;multi_name) == 0)</a>
+<a name="ln2078">        {</a>
+<a name="ln2079">          dup = TRUE;</a>
+<a name="ln2080">          break;</a>
+<a name="ln2081">        }</a>
+<a name="ln2082">      }</a>
+<a name="ln2083">      modules = g_list_next(modules);</a>
+<a name="ln2084">    }</a>
+<a name="ln2085"> </a>
+<a name="ln2086">    if(dup)</a>
+<a name="ln2087">      pname++;</a>
+<a name="ln2088">    else</a>
+<a name="ln2089">      break;</a>
+<a name="ln2090">  } while(1);</a>
+<a name="ln2091"> </a>
+<a name="ln2092">  // the multi instance name</a>
+<a name="ln2093">  g_strlcpy(module-&gt;multi_name, mname, sizeof(module-&gt;multi_name));</a>
+<a name="ln2094">  // we insert this module into dev-&gt;iop</a>
+<a name="ln2095">  base-&gt;dev-&gt;iop = g_list_insert_sorted(base-&gt;dev-&gt;iop, module, dt_sort_iop_by_order);</a>
+<a name="ln2096"> </a>
+<a name="ln2097">  // always place the new instance after the base one</a>
+<a name="ln2098">  if(!dt_ioppr_move_iop_after(&amp;base-&gt;dev-&gt;iop, module, base, 0, 1))</a>
+<a name="ln2099">  {</a>
+<a name="ln2100">    fprintf(stderr, &quot;[dt_dev_module_duplicate] can't move new instance after the base one\n&quot;);</a>
+<a name="ln2101">  }</a>
+<a name="ln2102"> </a>
+<a name="ln2103">  // that's all. rest of insertion is gui work !</a>
+<a name="ln2104">  return module;</a>
+<a name="ln2105">}</a>
+<a name="ln2106"> </a>
+<a name="ln2107">void dt_dev_invalidate_history_module(GList *list, dt_iop_module_t *module)</a>
+<a name="ln2108">{</a>
+<a name="ln2109">  while (list)</a>
+<a name="ln2110">  {</a>
+<a name="ln2111">    dt_dev_history_item_t *hitem = (dt_dev_history_item_t *)list-&gt;data;</a>
+<a name="ln2112">    if (hitem-&gt;module == module)</a>
+<a name="ln2113">    {</a>
+<a name="ln2114">      hitem-&gt;module = NULL;</a>
+<a name="ln2115">    }</a>
+<a name="ln2116">    list = list-&gt;next;</a>
+<a name="ln2117">  }</a>
+<a name="ln2118">}</a>
+<a name="ln2119"> </a>
+<a name="ln2120">void dt_dev_module_remove(dt_develop_t *dev, dt_iop_module_t *module)</a>
+<a name="ln2121">{</a>
+<a name="ln2122">  // if(darktable.gui-&gt;reset) return;</a>
+<a name="ln2123">  dt_pthread_mutex_lock(&amp;dev-&gt;history_mutex);</a>
+<a name="ln2124">  int del = 0;</a>
+<a name="ln2125">  if(dev-&gt;gui_attached)</a>
+<a name="ln2126">  {</a>
+<a name="ln2127">    GList *elem = g_list_first(dev-&gt;history);</a>
+<a name="ln2128">    while(elem != NULL)</a>
+<a name="ln2129">    {</a>
+<a name="ln2130">      GList *next = g_list_next(elem);</a>
+<a name="ln2131">      dt_dev_history_item_t *hist = (dt_dev_history_item_t *)(elem-&gt;data);</a>
+<a name="ln2132"> </a>
+<a name="ln2133">      if(module == hist-&gt;module)</a>
+<a name="ln2134">      {</a>
+<a name="ln2135">        // printf(&quot;removing obsoleted history item: %s %s %p %p\n&quot;, hist-&gt;module-&gt;op, hist-&gt;module-&gt;multi_name,</a>
+<a name="ln2136">        //        module, hist-&gt;module);</a>
+<a name="ln2137">        dt_dev_free_history_item(hist);</a>
+<a name="ln2138">        dev-&gt;history = g_list_delete_link(dev-&gt;history, elem);</a>
+<a name="ln2139">        dev-&gt;history_end--;</a>
+<a name="ln2140">        del = 1;</a>
+<a name="ln2141">      }</a>
+<a name="ln2142">      elem = next;</a>
+<a name="ln2143">    }</a>
+<a name="ln2144">  }</a>
+<a name="ln2145"> </a>
+<a name="ln2146">  dt_pthread_mutex_unlock(&amp;dev-&gt;history_mutex);</a>
+<a name="ln2147"> </a>
+<a name="ln2148">  // and we remove it from the list</a>
+<a name="ln2149">  GList *modules = g_list_first(dev-&gt;iop);</a>
+<a name="ln2150">  while(modules)</a>
+<a name="ln2151">  {</a>
+<a name="ln2152">    dt_iop_module_t *mod = (dt_iop_module_t *)modules-&gt;data;</a>
+<a name="ln2153">    if(mod == module)</a>
+<a name="ln2154">    {</a>
+<a name="ln2155">      dev-&gt;iop = g_list_remove_link(dev-&gt;iop, modules);</a>
+<a name="ln2156">      break;</a>
+<a name="ln2157">    }</a>
+<a name="ln2158">    modules = g_list_next(modules);</a>
+<a name="ln2159">  }</a>
+<a name="ln2160"> </a>
+<a name="ln2161">  if(dev-&gt;gui_attached &amp;&amp; del)</a>
+<a name="ln2162">  {</a>
+<a name="ln2163">    /* signal that history has changed */</a>
+<a name="ln2164">    dt_control_signal_raise(darktable.signals, DT_SIGNAL_DEVELOP_HISTORY_CHANGE);</a>
+<a name="ln2165">    dt_control_signal_raise(darktable.signals, DT_SIGNAL_DEVELOP_MODULE_REMOVE, module);</a>
+<a name="ln2166">    /* redraw */</a>
+<a name="ln2167">    dt_control_queue_redraw_center();</a>
+<a name="ln2168">  }</a>
+<a name="ln2169">}</a>
+<a name="ln2170"> </a>
+<a name="ln2171">void _dev_module_update_multishow(dt_develop_t *dev, struct dt_iop_module_t *module)</a>
+<a name="ln2172">{</a>
+<a name="ln2173">  // We count the number of other instances</a>
+<a name="ln2174">  int nb_instances = 0;</a>
+<a name="ln2175">  GList *modules = g_list_first(dev-&gt;iop);</a>
+<a name="ln2176">  while(modules)</a>
+<a name="ln2177">  {</a>
+<a name="ln2178">    dt_iop_module_t *mod = (dt_iop_module_t *)modules-&gt;data;</a>
+<a name="ln2179"> </a>
+<a name="ln2180">    if(mod-&gt;instance == module-&gt;instance) nb_instances++;</a>
+<a name="ln2181"> </a>
+<a name="ln2182">    modules = g_list_next(modules);</a>
+<a name="ln2183">  }</a>
+<a name="ln2184"> </a>
+<a name="ln2185">  dt_iop_module_t *mod_prev = dt_iop_gui_get_previous_visible_module(module);</a>
+<a name="ln2186">  dt_iop_module_t *mod_next = dt_iop_gui_get_next_visible_module(module);</a>
+<a name="ln2187"> </a>
+<a name="ln2188">  const double iop_order_next = (mod_next &amp;&amp; mod_next-&gt;iop_order != DBL_MAX) ? dt_ioppr_get_iop_order_after_iop(dev-&gt;iop, module, mod_next, 1, 0) : -1.0;</a>
+<a name="ln2189">  const double iop_order_prev = (mod_prev &amp;&amp; mod_prev-&gt;iop_order != DBL_MAX) ? dt_ioppr_get_iop_order_before_iop(dev-&gt;iop, module, mod_prev, 1, 0) : -1.0;</a>
+<a name="ln2190"> </a>
+<a name="ln2191">  module-&gt;multi_show_new = !(module-&gt;flags() &amp; IOP_FLAGS_ONE_INSTANCE);</a>
+<a name="ln2192">  module-&gt;multi_show_close = (nb_instances &gt; 1);</a>
+<a name="ln2193">  if(mod_next)</a>
+<a name="ln2194">    module-&gt;multi_show_up = (iop_order_next &gt;= 0.0);</a>
+<a name="ln2195">  else</a>
+<a name="ln2196">    module-&gt;multi_show_up = 0;</a>
+<a name="ln2197">  if(mod_prev)</a>
+<a name="ln2198">    module-&gt;multi_show_down = (iop_order_prev &gt;= 0.0);</a>
+<a name="ln2199">  else</a>
+<a name="ln2200">    module-&gt;multi_show_down = 0;</a>
+<a name="ln2201">}</a>
+<a name="ln2202"> </a>
+<a name="ln2203">void dt_dev_modules_update_multishow(dt_develop_t *dev)</a>
+<a name="ln2204">{</a>
+<a name="ln2205">  dt_ioppr_check_iop_order(dev, 0, &quot;dt_dev_modules_update_multishow&quot;);</a>
+<a name="ln2206"> </a>
+<a name="ln2207">  GList *modules = g_list_first(dev-&gt;iop);</a>
+<a name="ln2208">  while(modules)</a>
+<a name="ln2209">  {</a>
+<a name="ln2210">    dt_iop_module_t *mod = (dt_iop_module_t *)modules-&gt;data;</a>
+<a name="ln2211"> </a>
+<a name="ln2212">    // only for visible modules</a>
+<a name="ln2213">    GtkWidget *expander = mod-&gt;expander;</a>
+<a name="ln2214">    if(expander &amp;&amp; gtk_widget_is_visible(expander))</a>
+<a name="ln2215">    {</a>
+<a name="ln2216">      _dev_module_update_multishow(dev, mod);</a>
+<a name="ln2217">    }</a>
+<a name="ln2218"> </a>
+<a name="ln2219">    modules = g_list_next(modules);</a>
+<a name="ln2220">  }</a>
+<a name="ln2221">}</a>
+<a name="ln2222"> </a>
+<a name="ln2223">gchar *dt_history_item_get_name(const struct dt_iop_module_t *module)</a>
+<a name="ln2224">{</a>
+<a name="ln2225">  gchar *label;</a>
+<a name="ln2226">  /* create a history button and add to box */</a>
+<a name="ln2227">  if(!module-&gt;multi_name[0] || strcmp(module-&gt;multi_name, &quot;0&quot;) == 0)</a>
+<a name="ln2228">    label = g_strdup_printf(&quot;%s&quot;, module-&gt;name());</a>
+<a name="ln2229">  else</a>
+<a name="ln2230">    label = g_strdup_printf(&quot;%s %s&quot;, module-&gt;name(), module-&gt;multi_name);</a>
+<a name="ln2231">  return label;</a>
+<a name="ln2232">}</a>
+<a name="ln2233"> </a>
+<a name="ln2234">gchar *dt_history_item_get_name_html(const struct dt_iop_module_t *module)</a>
+<a name="ln2235">{</a>
+<a name="ln2236">  gchar *label;</a>
+<a name="ln2237">  /* create a history button and add to box */</a>
+<a name="ln2238">  if(!module-&gt;multi_name[0] || strcmp(module-&gt;multi_name, &quot;0&quot;) == 0)</a>
+<a name="ln2239">    label = g_strdup_printf(&quot;%s&quot;, module-&gt;name());</a>
+<a name="ln2240">  else</a>
+<a name="ln2241">    label = g_strdup_printf(&quot;%s &lt;span size=\&quot;smaller\&quot;&gt;%s&lt;/span&gt;&quot;, module-&gt;name(), module-&gt;multi_name);</a>
+<a name="ln2242">  return label;</a>
+<a name="ln2243">}</a>
+<a name="ln2244"> </a>
+<a name="ln2245">int dt_dev_distort_transform(dt_develop_t *dev, float *points, size_t points_count)</a>
+<a name="ln2246">{</a>
+<a name="ln2247">  return dt_dev_distort_transform_plus(dev, dev-&gt;preview_pipe, 0.f, DT_DEV_TRANSFORM_DIR_ALL, points, points_count);</a>
+<a name="ln2248">}</a>
+<a name="ln2249">int dt_dev_distort_backtransform(dt_develop_t *dev, float *points, size_t points_count)</a>
+<a name="ln2250">{</a>
+<a name="ln2251">  return dt_dev_distort_backtransform_plus(dev, dev-&gt;preview_pipe, 0.f, DT_DEV_TRANSFORM_DIR_ALL, points, points_count);</a>
+<a name="ln2252">}</a>
+<a name="ln2253"> </a>
+<a name="ln2254">int dt_dev_distort_transform_plus(dt_develop_t *dev, dt_dev_pixelpipe_t *pipe, const double iop_order, const int transf_direction,</a>
+<a name="ln2255">                                  float *points, size_t points_count)</a>
+<a name="ln2256">{</a>
+<a name="ln2257">  dt_pthread_mutex_lock(&amp;dev-&gt;history_mutex);</a>
+<a name="ln2258">  GList *modules = g_list_first(pipe-&gt;iop);</a>
+<a name="ln2259">  GList *pieces = g_list_first(pipe-&gt;nodes);</a>
+<a name="ln2260">  while(modules)</a>
+<a name="ln2261">  {</a>
+<a name="ln2262">    if(!pieces)</a>
+<a name="ln2263">    {</a>
+<a name="ln2264">      dt_pthread_mutex_unlock(&amp;dev-&gt;history_mutex);</a>
+<a name="ln2265">      return 0;</a>
+<a name="ln2266">    }</a>
+<a name="ln2267">    dt_iop_module_t *module = (dt_iop_module_t *)(modules-&gt;data);</a>
+<a name="ln2268">    dt_dev_pixelpipe_iop_t *piece = (dt_dev_pixelpipe_iop_t *)(pieces-&gt;data);</a>
+<a name="ln2269">    if(piece-&gt;enabled &amp;&amp; ((transf_direction == DT_DEV_TRANSFORM_DIR_ALL)</a>
+<a name="ln2270">                          || (transf_direction == DT_DEV_TRANSFORM_DIR_FORW_INCL &amp;&amp; module-&gt;iop_order &gt;= iop_order)</a>
+<a name="ln2271">                          || (transf_direction == DT_DEV_TRANSFORM_DIR_FORW_EXCL &amp;&amp; module-&gt;iop_order &gt; iop_order)</a>
+<a name="ln2272">                          || (transf_direction == DT_DEV_TRANSFORM_DIR_BACK_INCL &amp;&amp; module-&gt;iop_order &lt;= iop_order)</a>
+<a name="ln2273">                          || (transf_direction == DT_DEV_TRANSFORM_DIR_BACK_EXCL &amp;&amp; module-&gt;iop_order &lt; iop_order)) &amp;&amp;</a>
+<a name="ln2274">      !(dev-&gt;gui_module &amp;&amp; dev-&gt;gui_module-&gt;operation_tags_filter() &amp; module-&gt;operation_tags()))</a>
+<a name="ln2275">    {</a>
+<a name="ln2276">      module-&gt;distort_transform(module, piece, points, points_count);</a>
+<a name="ln2277">    }</a>
+<a name="ln2278">    modules = g_list_next(modules);</a>
+<a name="ln2279">    pieces = g_list_next(pieces);</a>
+<a name="ln2280">  }</a>
+<a name="ln2281">  dt_pthread_mutex_unlock(&amp;dev-&gt;history_mutex);</a>
+<a name="ln2282">  return 1;</a>
+<a name="ln2283">}</a>
+<a name="ln2284">int dt_dev_distort_backtransform_plus(dt_develop_t *dev, dt_dev_pixelpipe_t *pipe, const double iop_order, const int transf_direction,</a>
+<a name="ln2285">                                      float *points, size_t points_count)</a>
+<a name="ln2286">{</a>
+<a name="ln2287">  dt_pthread_mutex_lock(&amp;dev-&gt;history_mutex);</a>
+<a name="ln2288">  GList *modules = g_list_last(pipe-&gt;iop);</a>
+<a name="ln2289">  GList *pieces = g_list_last(pipe-&gt;nodes);</a>
+<a name="ln2290">  while(modules)</a>
+<a name="ln2291">  {</a>
+<a name="ln2292">    if(!pieces)</a>
+<a name="ln2293">    {</a>
+<a name="ln2294">      dt_pthread_mutex_unlock(&amp;dev-&gt;history_mutex);</a>
+<a name="ln2295">      return 0;</a>
+<a name="ln2296">    }</a>
+<a name="ln2297">    dt_iop_module_t *module = (dt_iop_module_t *)(modules-&gt;data);</a>
+<a name="ln2298">    dt_dev_pixelpipe_iop_t *piece = (dt_dev_pixelpipe_iop_t *)(pieces-&gt;data);</a>
+<a name="ln2299">    if(piece-&gt;enabled &amp;&amp; ((transf_direction == DT_DEV_TRANSFORM_DIR_ALL)</a>
+<a name="ln2300">                          || (transf_direction == DT_DEV_TRANSFORM_DIR_FORW_INCL &amp;&amp; module-&gt;iop_order &gt;= iop_order)</a>
+<a name="ln2301">                          || (transf_direction == DT_DEV_TRANSFORM_DIR_FORW_EXCL &amp;&amp; module-&gt;iop_order &gt; iop_order)</a>
+<a name="ln2302">                          || (transf_direction == DT_DEV_TRANSFORM_DIR_BACK_INCL &amp;&amp; module-&gt;iop_order &lt;= iop_order)</a>
+<a name="ln2303">                          || (transf_direction == DT_DEV_TRANSFORM_DIR_BACK_EXCL &amp;&amp; module-&gt;iop_order &lt; iop_order)) &amp;&amp;</a>
+<a name="ln2304">      !(dev-&gt;gui_module &amp;&amp; dev-&gt;gui_module-&gt;operation_tags_filter() &amp; module-&gt;operation_tags()))</a>
+<a name="ln2305">    {</a>
+<a name="ln2306">      module-&gt;distort_backtransform(module, piece, points, points_count);</a>
+<a name="ln2307">    }</a>
+<a name="ln2308">    modules = g_list_previous(modules);</a>
+<a name="ln2309">    pieces = g_list_previous(pieces);</a>
+<a name="ln2310">  }</a>
+<a name="ln2311">  dt_pthread_mutex_unlock(&amp;dev-&gt;history_mutex);</a>
+<a name="ln2312">  return 1;</a>
+<a name="ln2313">}</a>
+<a name="ln2314"> </a>
+<a name="ln2315">dt_dev_pixelpipe_iop_t *dt_dev_distort_get_iop_pipe(dt_develop_t *dev, struct dt_dev_pixelpipe_t *pipe,</a>
+<a name="ln2316">                                                    struct dt_iop_module_t *module)</a>
+<a name="ln2317">{</a>
+<a name="ln2318">  GList *pieces = g_list_last(pipe-&gt;nodes);</a>
+<a name="ln2319">  while(pieces)</a>
+<a name="ln2320">  {</a>
+<a name="ln2321">    dt_dev_pixelpipe_iop_t *piece = (dt_dev_pixelpipe_iop_t *)(pieces-&gt;data);</a>
+<a name="ln2322">    if(piece-&gt;module == module)</a>
+<a name="ln2323">    {</a>
+<a name="ln2324">      return piece;</a>
+<a name="ln2325">    }</a>
+<a name="ln2326">    pieces = g_list_previous(pieces);</a>
+<a name="ln2327">  }</a>
+<a name="ln2328">  return NULL;</a>
+<a name="ln2329">}</a>
+<a name="ln2330"> </a>
+<a name="ln2331">uint64_t dt_dev_hash(dt_develop_t *dev)</a>
+<a name="ln2332">{</a>
+<a name="ln2333">  return dt_dev_hash_plus(dev, dev-&gt;preview_pipe, 0.f, DT_DEV_TRANSFORM_DIR_ALL);</a>
+<a name="ln2334">}</a>
+<a name="ln2335"> </a>
+<a name="ln2336">uint64_t dt_dev_hash_plus(dt_develop_t *dev, struct dt_dev_pixelpipe_t *pipe, const double iop_order, const int transf_direction)</a>
+<a name="ln2337">{</a>
+<a name="ln2338">  uint64_t hash = 5381;</a>
+<a name="ln2339">  dt_pthread_mutex_lock(&amp;dev-&gt;history_mutex);</a>
+<a name="ln2340">  GList *modules = g_list_last(pipe-&gt;iop);</a>
+<a name="ln2341">  GList *pieces = g_list_last(pipe-&gt;nodes);</a>
+<a name="ln2342">  while(modules)</a>
+<a name="ln2343">  {</a>
+<a name="ln2344">    if(!pieces)</a>
+<a name="ln2345">    {</a>
+<a name="ln2346">      dt_pthread_mutex_unlock(&amp;dev-&gt;history_mutex);</a>
+<a name="ln2347">      return 0;</a>
+<a name="ln2348">    }</a>
+<a name="ln2349">    dt_iop_module_t *module = (dt_iop_module_t *)(modules-&gt;data);</a>
+<a name="ln2350">    dt_dev_pixelpipe_iop_t *piece = (dt_dev_pixelpipe_iop_t *)(pieces-&gt;data);</a>
+<a name="ln2351">    if(piece-&gt;enabled &amp;&amp; ((transf_direction == DT_DEV_TRANSFORM_DIR_ALL)</a>
+<a name="ln2352">                          || (transf_direction == DT_DEV_TRANSFORM_DIR_FORW_INCL &amp;&amp; module-&gt;iop_order &gt;= iop_order)</a>
+<a name="ln2353">                          || (transf_direction == DT_DEV_TRANSFORM_DIR_FORW_EXCL &amp;&amp; module-&gt;iop_order &gt; iop_order)</a>
+<a name="ln2354">                          || (transf_direction == DT_DEV_TRANSFORM_DIR_BACK_INCL &amp;&amp; module-&gt;iop_order &lt;= iop_order)</a>
+<a name="ln2355">                          || (transf_direction == DT_DEV_TRANSFORM_DIR_BACK_EXCL &amp;&amp; module-&gt;iop_order &lt; iop_order)))</a>
+<a name="ln2356">    {</a>
+<a name="ln2357">      hash = ((hash &lt;&lt; 5) + hash) ^ piece-&gt;hash;</a>
+<a name="ln2358">    }</a>
+<a name="ln2359">    modules = g_list_previous(modules);</a>
+<a name="ln2360">    pieces = g_list_previous(pieces);</a>
+<a name="ln2361">  }</a>
+<a name="ln2362">  dt_pthread_mutex_unlock(&amp;dev-&gt;history_mutex);</a>
+<a name="ln2363">  return hash;</a>
+<a name="ln2364">}</a>
+<a name="ln2365"> </a>
+<a name="ln2366">int dt_dev_wait_hash(dt_develop_t *dev, struct dt_dev_pixelpipe_t *pipe, const double iop_order, const int transf_direction, dt_pthread_mutex_t *lock,</a>
+<a name="ln2367">                     const volatile uint64_t *const hash)</a>
+<a name="ln2368">{</a>
+<a name="ln2369">  const int usec = 5000;</a>
+<a name="ln2370">  int nloop;</a>
+<a name="ln2371"> </a>
+<a name="ln2372">#ifdef HAVE_OPENCL</a>
+<a name="ln2373">  if(pipe-&gt;devid &gt;= 0)</a>
+<a name="ln2374">    nloop = darktable.opencl-&gt;opencl_synchronization_timeout;</a>
+<a name="ln2375">  else</a>
+<a name="ln2376">    nloop = dt_conf_get_int(&quot;pixelpipe_synchronization_timeout&quot;);</a>
+<a name="ln2377">#else</a>
+<a name="ln2378">  nloop = dt_conf_get_int(&quot;pixelpipe_synchronization_timeout&quot;);</a>
+<a name="ln2379">#endif</a>
+<a name="ln2380"> </a>
+<a name="ln2381">  if(nloop &lt;= 0) return TRUE;  // non-positive values omit pixelpipe synchronization</a>
+<a name="ln2382"> </a>
+<a name="ln2383">  for(int n = 0; n &lt; nloop; n++)</a>
+<a name="ln2384">  {</a>
+<a name="ln2385">    if(pipe-&gt;shutdown)</a>
+<a name="ln2386">      return TRUE;  // stop waiting if pipe shuts down</a>
+<a name="ln2387"> </a>
+<a name="ln2388">    uint64_t probehash;</a>
+<a name="ln2389"> </a>
+<a name="ln2390">    if(lock)</a>
+<a name="ln2391">    {</a>
+<a name="ln2392">      dt_pthread_mutex_lock(lock);</a>
+<a name="ln2393">      probehash = *hash;</a>
+<a name="ln2394">      dt_pthread_mutex_unlock(lock);</a>
+<a name="ln2395">    }</a>
+<a name="ln2396">    else</a>
+<a name="ln2397">      probehash = *hash;</a>
+<a name="ln2398"> </a>
+<a name="ln2399">    if(probehash == dt_dev_hash_plus(dev, pipe, iop_order, transf_direction))</a>
+<a name="ln2400">      return TRUE;</a>
+<a name="ln2401"> </a>
+<a name="ln2402">    dt_iop_nap(usec);</a>
+<a name="ln2403">  }</a>
+<a name="ln2404"> </a>
+<a name="ln2405">  return FALSE;</a>
+<a name="ln2406">}</a>
+<a name="ln2407"> </a>
+<a name="ln2408">int dt_dev_sync_pixelpipe_hash(dt_develop_t *dev, struct dt_dev_pixelpipe_t *pipe, const double iop_order, const int transf_direction, dt_pthread_mutex_t *lock,</a>
+<a name="ln2409">                               const volatile uint64_t *const hash)</a>
+<a name="ln2410">{</a>
+<a name="ln2411">  // first wait for matching hash values</a>
+<a name="ln2412">  if(dt_dev_wait_hash(dev, pipe, iop_order, transf_direction, lock, hash))</a>
+<a name="ln2413">    return TRUE;</a>
+<a name="ln2414"> </a>
+<a name="ln2415">  // timed out. let's see if history stack has changed</a>
+<a name="ln2416">  if(pipe-&gt;changed &amp; (DT_DEV_PIPE_TOP_CHANGED | DT_DEV_PIPE_REMOVE | DT_DEV_PIPE_SYNCH))</a>
+<a name="ln2417">  {</a>
+<a name="ln2418">    // history stack has changed. let's trigger reprocessing</a>
+<a name="ln2419">    dt_control_queue_redraw_center();</a>
+<a name="ln2420">    // pretend that everything is fine</a>
+<a name="ln2421">    return TRUE;</a>
+<a name="ln2422">  }</a>
+<a name="ln2423"> </a>
+<a name="ln2424">  // no way to get pixelpipes in sync</a>
+<a name="ln2425">  return FALSE;</a>
+<a name="ln2426">}</a>
+<a name="ln2427"> </a>
+<a name="ln2428">uint64_t dt_dev_hash_distort(dt_develop_t *dev)</a>
+<a name="ln2429">{</a>
+<a name="ln2430">  return dt_dev_hash_distort_plus(dev, dev-&gt;preview_pipe, 0.f, DT_DEV_TRANSFORM_DIR_ALL);</a>
+<a name="ln2431">}</a>
+<a name="ln2432"> </a>
+<a name="ln2433">uint64_t dt_dev_hash_distort_plus(dt_develop_t *dev, struct dt_dev_pixelpipe_t *pipe, const double iop_order, const int transf_direction)</a>
+<a name="ln2434">{</a>
+<a name="ln2435">  uint64_t hash = 5381;</a>
+<a name="ln2436">  dt_pthread_mutex_lock(&amp;dev-&gt;history_mutex);</a>
+<a name="ln2437">  GList *modules = g_list_last(pipe-&gt;iop);</a>
+<a name="ln2438">  GList *pieces = g_list_last(pipe-&gt;nodes);</a>
+<a name="ln2439">  while(modules)</a>
+<a name="ln2440">  {</a>
+<a name="ln2441">    if(!pieces)</a>
+<a name="ln2442">    {</a>
+<a name="ln2443">      dt_pthread_mutex_unlock(&amp;dev-&gt;history_mutex);</a>
+<a name="ln2444">      return 0;</a>
+<a name="ln2445">    }</a>
+<a name="ln2446">    dt_iop_module_t *module = (dt_iop_module_t *)(modules-&gt;data);</a>
+<a name="ln2447">    dt_dev_pixelpipe_iop_t *piece = (dt_dev_pixelpipe_iop_t *)(pieces-&gt;data);</a>
+<a name="ln2448">    if(piece-&gt;enabled &amp;&amp; module-&gt;operation_tags() &amp; IOP_TAG_DISTORT</a>
+<a name="ln2449">       &amp;&amp; ((transf_direction == DT_DEV_TRANSFORM_DIR_ALL)</a>
+<a name="ln2450">           || (transf_direction == DT_DEV_TRANSFORM_DIR_FORW_INCL &amp;&amp; module-&gt;iop_order &gt;= iop_order)</a>
+<a name="ln2451">           || (transf_direction == DT_DEV_TRANSFORM_DIR_FORW_EXCL &amp;&amp; module-&gt;iop_order &gt; iop_order)</a>
+<a name="ln2452">           || (transf_direction == DT_DEV_TRANSFORM_DIR_BACK_INCL &amp;&amp; module-&gt;iop_order &lt;= iop_order)</a>
+<a name="ln2453">           || (transf_direction == DT_DEV_TRANSFORM_DIR_BACK_EXCL &amp;&amp; module-&gt;iop_order &lt; iop_order)))</a>
+<a name="ln2454">    {</a>
+<a name="ln2455">      hash = ((hash &lt;&lt; 5) + hash) ^ piece-&gt;hash;</a>
+<a name="ln2456">    }</a>
+<a name="ln2457">    modules = g_list_previous(modules);</a>
+<a name="ln2458">    pieces = g_list_previous(pieces);</a>
+<a name="ln2459">  }</a>
+<a name="ln2460">  dt_pthread_mutex_unlock(&amp;dev-&gt;history_mutex);</a>
+<a name="ln2461">  return hash;</a>
+<a name="ln2462">}</a>
+<a name="ln2463"> </a>
+<a name="ln2464">int dt_dev_wait_hash_distort(dt_develop_t *dev, struct dt_dev_pixelpipe_t *pipe, const double iop_order, const int transf_direction, dt_pthread_mutex_t *lock,</a>
+<a name="ln2465">                     const volatile uint64_t *const hash)</a>
+<a name="ln2466">{</a>
+<a name="ln2467">  const int usec = 5000;</a>
+<a name="ln2468">  int nloop;</a>
+<a name="ln2469"> </a>
+<a name="ln2470">#ifdef HAVE_OPENCL</a>
+<a name="ln2471">  if(pipe-&gt;devid &gt;= 0)</a>
+<a name="ln2472">    nloop = darktable.opencl-&gt;opencl_synchronization_timeout;</a>
+<a name="ln2473">  else</a>
+<a name="ln2474">    nloop = dt_conf_get_int(&quot;pixelpipe_synchronization_timeout&quot;);</a>
+<a name="ln2475">#else</a>
+<a name="ln2476">  nloop = dt_conf_get_int(&quot;pixelpipe_synchronization_timeout&quot;);</a>
+<a name="ln2477">#endif</a>
+<a name="ln2478"> </a>
+<a name="ln2479">  if(nloop &lt;= 0) return TRUE;  // non-positive values omit pixelpipe synchronization</a>
+<a name="ln2480"> </a>
+<a name="ln2481">  for(int n = 0; n &lt; nloop; n++)</a>
+<a name="ln2482">  {</a>
+<a name="ln2483">    if(pipe-&gt;shutdown)</a>
+<a name="ln2484">      return TRUE;  // stop waiting if pipe shuts down</a>
+<a name="ln2485"> </a>
+<a name="ln2486">    uint64_t probehash;</a>
+<a name="ln2487"> </a>
+<a name="ln2488">    if(lock)</a>
+<a name="ln2489">    {</a>
+<a name="ln2490">      dt_pthread_mutex_lock(lock);</a>
+<a name="ln2491">      probehash = *hash;</a>
+<a name="ln2492">      dt_pthread_mutex_unlock(lock);</a>
+<a name="ln2493">    }</a>
+<a name="ln2494">    else</a>
+<a name="ln2495">      probehash = *hash;</a>
+<a name="ln2496"> </a>
+<a name="ln2497">    if(probehash == dt_dev_hash_distort_plus(dev, pipe, iop_order, transf_direction))</a>
+<a name="ln2498">      return TRUE;</a>
+<a name="ln2499"> </a>
+<a name="ln2500">    dt_iop_nap(usec);</a>
+<a name="ln2501">  }</a>
+<a name="ln2502"> </a>
+<a name="ln2503">  return FALSE;</a>
+<a name="ln2504">}</a>
+<a name="ln2505"> </a>
+<a name="ln2506">int dt_dev_sync_pixelpipe_hash_distort(dt_develop_t *dev, struct dt_dev_pixelpipe_t *pipe, const double iop_order, const int transf_direction, dt_pthread_mutex_t *lock,</a>
+<a name="ln2507">                                       const volatile uint64_t *const hash)</a>
+<a name="ln2508">{</a>
+<a name="ln2509">  // first wait for matching hash values</a>
+<a name="ln2510">  if(dt_dev_wait_hash_distort(dev, pipe, iop_order, transf_direction, lock, hash))</a>
+<a name="ln2511">    return TRUE;</a>
+<a name="ln2512"> </a>
+<a name="ln2513">  // timed out. let's see if history stack has changed</a>
+<a name="ln2514">  if(pipe-&gt;changed &amp; (DT_DEV_PIPE_TOP_CHANGED | DT_DEV_PIPE_REMOVE | DT_DEV_PIPE_SYNCH))</a>
+<a name="ln2515">  {</a>
+<a name="ln2516">    // history stack has changed. let's trigger reprocessing</a>
+<a name="ln2517">    dt_control_queue_redraw_center();</a>
+<a name="ln2518">    // pretend that everything is fine</a>
+<a name="ln2519">    return TRUE;</a>
+<a name="ln2520">  }</a>
+<a name="ln2521"> </a>
+<a name="ln2522">  // no way to get pixelpipes in sync</a>
+<a name="ln2523">  return FALSE;</a>
+<a name="ln2524">}</a>
+<a name="ln2525"> </a>
+<a name="ln2526">// set the module list order</a>
+<a name="ln2527">void dt_dev_reorder_gui_module_list(dt_develop_t *dev)</a>
+<a name="ln2528">{</a>
+<a name="ln2529">  int pos_module = 0;</a>
+<a name="ln2530">  GList *modules = g_list_last(dev-&gt;iop);</a>
+<a name="ln2531">  while(modules)</a>
+<a name="ln2532">  {</a>
+<a name="ln2533">    dt_iop_module_t *module = (dt_iop_module_t *)(modules-&gt;data);</a>
+<a name="ln2534"> </a>
+<a name="ln2535">    GtkWidget *expander = module-&gt;expander;</a>
+<a name="ln2536">    if(expander)</a>
+<a name="ln2537">    {</a>
+<a name="ln2538">      gtk_box_reorder_child(dt_ui_get_container(darktable.gui-&gt;ui, DT_UI_CONTAINER_PANEL_RIGHT_CENTER), expander,</a>
+<a name="ln2539">                            pos_module++);</a>
+<a name="ln2540">    }</a>
+<a name="ln2541"> </a>
+<a name="ln2542">    modules = g_list_previous(modules);</a>
+<a name="ln2543">  }</a>
+<a name="ln2544">}</a>
+<a name="ln2545"> </a>
+<a name="ln2546">//-----------------------------------------------------------</a>
+<a name="ln2547">// second darkroom window</a>
+<a name="ln2548">//-----------------------------------------------------------</a>
+<a name="ln2549"> </a>
+<a name="ln2550">dt_dev_zoom_t dt_second_window_get_dev_zoom(dt_develop_t *dev)</a>
+<a name="ln2551">{</a>
+<a name="ln2552">  return dev-&gt;second_window.zoom;</a>
+<a name="ln2553">}</a>
+<a name="ln2554"> </a>
+<a name="ln2555">void dt_second_window_set_dev_zoom(dt_develop_t *dev, const dt_dev_zoom_t value)</a>
+<a name="ln2556">{</a>
+<a name="ln2557">  dev-&gt;second_window.zoom = value;</a>
+<a name="ln2558">}</a>
+<a name="ln2559"> </a>
+<a name="ln2560">int dt_second_window_get_dev_closeup(dt_develop_t *dev)</a>
+<a name="ln2561">{</a>
+<a name="ln2562">  return dev-&gt;second_window.closeup;</a>
+<a name="ln2563">}</a>
+<a name="ln2564"> </a>
+<a name="ln2565">void dt_second_window_set_dev_closeup(dt_develop_t *dev, const int value)</a>
+<a name="ln2566">{</a>
+<a name="ln2567">  dev-&gt;second_window.closeup = value;</a>
+<a name="ln2568">}</a>
+<a name="ln2569"> </a>
+<a name="ln2570">float dt_second_window_get_dev_zoom_x(dt_develop_t *dev)</a>
+<a name="ln2571">{</a>
+<a name="ln2572">  return dev-&gt;second_window.zoom_x;</a>
+<a name="ln2573">}</a>
+<a name="ln2574"> </a>
+<a name="ln2575">void dt_second_window_set_dev_zoom_x(dt_develop_t *dev, const float value)</a>
+<a name="ln2576">{</a>
+<a name="ln2577">  dev-&gt;second_window.zoom_x = value;</a>
+<a name="ln2578">}</a>
+<a name="ln2579"> </a>
+<a name="ln2580">float dt_second_window_get_dev_zoom_y(dt_develop_t *dev)</a>
+<a name="ln2581">{</a>
+<a name="ln2582">  return dev-&gt;second_window.zoom_y;</a>
+<a name="ln2583">}</a>
+<a name="ln2584"> </a>
+<a name="ln2585">void dt_second_window_set_dev_zoom_y(dt_develop_t *dev, const float value)</a>
+<a name="ln2586">{</a>
+<a name="ln2587">  dev-&gt;second_window.zoom_y = value;</a>
+<a name="ln2588">}</a>
+<a name="ln2589"> </a>
+<a name="ln2590">float dt_second_window_get_free_zoom_scale(dt_develop_t *dev)</a>
+<a name="ln2591">{</a>
+<a name="ln2592">  return dev-&gt;second_window.zoom_scale;</a>
+<a name="ln2593">}</a>
+<a name="ln2594"> </a>
+<a name="ln2595">float dt_second_window_get_zoom_scale(dt_develop_t *dev, const dt_dev_zoom_t zoom, const int closeup_factor,</a>
+<a name="ln2596">                                      const int preview)</a>
+<a name="ln2597">{</a>
+<a name="ln2598">  float zoom_scale;</a>
+<a name="ln2599"> </a>
+<a name="ln2600">  const float w = preview ? dev-&gt;preview_pipe-&gt;processed_width : dev-&gt;preview2_pipe-&gt;processed_width;</a>
+<a name="ln2601">  const float h = preview ? dev-&gt;preview_pipe-&gt;processed_height : dev-&gt;preview2_pipe-&gt;processed_height;</a>
+<a name="ln2602">  const float ps = dev-&gt;preview2_pipe-&gt;backbuf_width</a>
+<a name="ln2603">                       ? dev-&gt;preview2_pipe-&gt;processed_width / (float)dev-&gt;preview_pipe-&gt;processed_width</a>
+<a name="ln2604">                       : dev-&gt;preview_pipe-&gt;iscale / dev-&gt;preview_downsampling;</a>
+<a name="ln2605"> </a>
+<a name="ln2606">  switch(zoom)</a>
+<a name="ln2607">  {</a>
+<a name="ln2608">    case DT_ZOOM_FIT:</a>
+<a name="ln2609">      zoom_scale = fminf(dev-&gt;second_window.width / w, dev-&gt;second_window.height / h);</a>
+<a name="ln2610">      break;</a>
+<a name="ln2611">    case DT_ZOOM_FILL:</a>
+<a name="ln2612">      zoom_scale = fmaxf(dev-&gt;second_window.width / w, dev-&gt;second_window.height / h);</a>
+<a name="ln2613">      break;</a>
+<a name="ln2614">    case DT_ZOOM_1:</a>
+<a name="ln2615">      zoom_scale = closeup_factor;</a>
+<a name="ln2616">      if(preview) zoom_scale *= ps;</a>
+<a name="ln2617">      break;</a>
+<a name="ln2618">    default: // DT_ZOOM_FREE</a>
+<a name="ln2619">      zoom_scale = dt_second_window_get_free_zoom_scale(dev);</a>
+<a name="ln2620">      if(preview) zoom_scale *= ps;</a>
+<a name="ln2621">      break;</a>
+<a name="ln2622">  }</a>
+<a name="ln2623">  return zoom_scale;</a>
+<a name="ln2624">}</a>
+<a name="ln2625"> </a>
+<a name="ln2626">void dt_second_window_set_zoom_scale(dt_develop_t *dev, const float value)</a>
+<a name="ln2627">{</a>
+<a name="ln2628">  dev-&gt;second_window.zoom_scale = value;</a>
+<a name="ln2629">}</a>
+<a name="ln2630"> </a>
+<a name="ln2631">void dt_second_window_get_processed_size(const dt_develop_t *dev, int *procw, int *proch)</a>
+<a name="ln2632">{</a>
+<a name="ln2633">  if(!dev) return;</a>
+<a name="ln2634"> </a>
+<a name="ln2635">  // if preview2 is processed, lets return its size</a>
+<a name="ln2636">  if(dev-&gt;preview2_pipe &amp;&amp; dev-&gt;preview2_pipe-&gt;processed_width)</a>
+<a name="ln2637">  {</a>
+<a name="ln2638">    *procw = dev-&gt;preview2_pipe-&gt;processed_width;</a>
+<a name="ln2639">    *proch = dev-&gt;preview2_pipe-&gt;processed_height;</a>
+<a name="ln2640">    return;</a>
+<a name="ln2641">  }</a>
+<a name="ln2642"> </a>
+<a name="ln2643">  // fallback on preview pipe</a>
+<a name="ln2644">  if(dev-&gt;preview_pipe &amp;&amp; dev-&gt;preview_pipe-&gt;processed_width)</a>
+<a name="ln2645">  {</a>
+<a name="ln2646">    const float scale = (dev-&gt;preview_pipe-&gt;iscale / dev-&gt;preview_downsampling);</a>
+<a name="ln2647">    *procw = scale * dev-&gt;preview_pipe-&gt;processed_width;</a>
+<a name="ln2648">    *proch = scale * dev-&gt;preview_pipe-&gt;processed_height;</a>
+<a name="ln2649">    return;</a>
+<a name="ln2650">  }</a>
+<a name="ln2651"> </a>
+<a name="ln2652">  // no processed pipes, lets return 0 size</a>
+<a name="ln2653">  *procw = *proch = 0;</a>
+<a name="ln2654">  return;</a>
+<a name="ln2655">}</a>
+<a name="ln2656"> </a>
+<a name="ln2657">void dt_second_window_check_zoom_bounds(dt_develop_t *dev, float *zoom_x, float *zoom_y, const dt_dev_zoom_t zoom,</a>
+<a name="ln2658">                                        const int closeup, float *boxww, float *boxhh)</a>
+<a name="ln2659">{</a>
+<a name="ln2660">  int procw = 0, proch = 0;</a>
+<a name="ln2661">  dt_second_window_get_processed_size(dev, &amp;procw, &amp;proch);</a>
+<a name="ln2662">  float boxw = 1, boxh = 1; // viewport in normalised space</a>
+<a name="ln2663">                            //   if(zoom == DT_ZOOM_1)</a>
+<a name="ln2664">                            //   {</a>
+<a name="ln2665">                            //     const float imgw = (closeup ? 2 : 1)*procw;</a>
+<a name="ln2666">                            //     const float imgh = (closeup ? 2 : 1)*proch;</a>
+<a name="ln2667">                            //     const float devw = MIN(imgw, dev-&gt;width);</a>
+<a name="ln2668">                            //     const float devh = MIN(imgh, dev-&gt;height);</a>
+<a name="ln2669">                            //     boxw = fminf(1.0, devw/imgw);</a>
+<a name="ln2670">                            //     boxh = fminf(1.0, devh/imgh);</a>
+<a name="ln2671">                            //   }</a>
+<a name="ln2672">  if(zoom == DT_ZOOM_FIT)</a>
+<a name="ln2673">  {</a>
+<a name="ln2674">    *zoom_x = *zoom_y = 0.0f;</a>
+<a name="ln2675">    boxw = boxh = 1.0f;</a>
+<a name="ln2676">  }</a>
+<a name="ln2677">  else</a>
+<a name="ln2678">  {</a>
+<a name="ln2679">    const float scale = dt_second_window_get_zoom_scale(dev, zoom, 1 &lt;&lt; closeup, 0);</a>
+<a name="ln2680">    const float imgw = procw;</a>
+<a name="ln2681">    const float imgh = proch;</a>
+<a name="ln2682">    const float devw = dev-&gt;second_window.width;</a>
+<a name="ln2683">    const float devh = dev-&gt;second_window.height;</a>
+<a name="ln2684">    boxw = devw / (imgw * scale);</a>
+<a name="ln2685">    boxh = devh / (imgh * scale);</a>
+<a name="ln2686">  }</a>
+<a name="ln2687"> </a>
+<a name="ln2688">  if(*zoom_x &lt; boxw / 2 - .5) *zoom_x = boxw / 2 - .5;</a>
+<a name="ln2689">  if(*zoom_x &gt; .5 - boxw / 2) *zoom_x = .5 - boxw / 2;</a>
+<a name="ln2690">  if(*zoom_y &lt; boxh / 2 - .5) *zoom_y = boxh / 2 - .5;</a>
+<a name="ln2691">  if(*zoom_y &gt; .5 - boxh / 2) *zoom_y = .5 - boxh / 2;</a>
+<a name="ln2692">  if(boxw &gt; 1.0) *zoom_x = 0.f;</a>
+<a name="ln2693">  if(boxh &gt; 1.0) *zoom_y = 0.f;</a>
+<a name="ln2694"> </a>
+<a name="ln2695">  if(boxww) *boxww = boxw;</a>
+<a name="ln2696">  if(boxhh) *boxhh = boxh;</a>
+<a name="ln2697">}</a>
+<a name="ln2698"> </a>
+<a name="ln2699">// modelines: These editor modelines have been set for all relevant files by tools/update_modelines.sh</a>
+<a name="ln2700">// vim: shiftwidth=2 expandtab tabstop=2 cindent</a>
+<a name="ln2701">// kate: tab-indents: off; indent-width 2; replace-tabs on; indent-mode cstyle; remove-trailing-spaces modified;</a>
+
+</code></pre>
+<div class="balloon" rel="796"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v728/" target="_blank">V728</a> An excessive check can be simplified. The '||' operator is surrounded by opposite expressions.</p></div>
+<div class="balloon" rel="819"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v522/" target="_blank">V522</a> There might be dereferencing of a potential null pointer 'hist'. Check lines: 819, 804.</p></div>
+<div class="balloon" rel="829"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v575/" target="_blank">V575</a> The potential null pointer is passed into 'memcpy' function. Inspect the first argument. Check lines: 829, 823.</p></div>
+<div class="balloon" rel="830"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v575/" target="_blank">V575</a> The potential null pointer is passed into 'memcpy' function. Inspect the first argument. Check lines: 830, 828.</p></div>
+<div class="balloon" rel="1532"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v522/" target="_blank">V522</a> There might be dereferencing of a potential null pointer 'hist'. Check lines: 1532, 1531.</p></div>
+<div class="balloon" rel="1577"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v522/" target="_blank">V522</a> There might be dereferencing of a potential null pointer 'new_module'. Check lines: 1577, 1572.</p></div>
+<div class="balloon" rel="1623"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v575/" target="_blank">V575</a> The potential null pointer is passed into 'memcpy' function. Inspect the first argument. Check lines: 1623, 1608.</p></div>
+<div class="balloon" rel="1671"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v575/" target="_blank">V575</a> The potential null pointer is passed into 'memcpy' function. Inspect the first argument. Check lines: 1671, 1607.</p></div>
+<div class="balloon" rel="2041"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v522/" target="_blank">V522</a> There might be dereferencing of a potential null pointer 'module'. Check lines: 2041, 2039.</p></div>
+
+<link rel="stylesheet" href="highlight.css">
+<script src="highlight.pack.js"></script>
+<script src="highlightjs-line-numbers.js"></script>
+<script>hljs.initHighlightingOnLoad();</script>
+<script>hljs.initLineNumbersOnLoad();</script>
+<script>
+  $(document).ready(function() {
+      $('.balloon').each(function () {
+          var bl = $(this);
+          var line = bl.attr('rel');
+          var text = $('a[name="ln'+line+'"]').text();
+
+          var space_count = 0;
+          for(var i = 0; i<text.length; i++){
+              var char = text[i];
+              if((char !== ' ')&&(char !== '\t'))break;
+              if(char === '\t')space_count++;
+              space_count++;
+          }
+
+          bl.css('margin-left', space_count*8);
+          $('a[name="ln'+line+'"]').after(bl);
+      });
+
+      window.location = window.location;
+  });
+</script>
+</body>
+</html>

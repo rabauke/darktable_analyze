@@ -1,0 +1,217 @@
+
+<html>
+<head>
+  <link rel="stylesheet" href="../style.css"/>
+  <script src="../jquery-3.2.1.min.js"></script>
+</head>
+<body>
+<pre><code class = "cpp">
+<a name="ln1">/*</a>
+<a name="ln2">    RawSpeed - RAW file decoder.</a>
+<a name="ln3"> </a>
+<a name="ln4">    Copyright (C) 2009-2014 Klaus Post</a>
+<a name="ln5">    Copyright (C) 2014-2015 Pedro Côrte-Real</a>
+<a name="ln6">    Copyright (C) 2017-2018 Roman Lebedev</a>
+<a name="ln7"> </a>
+<a name="ln8">    This library is free software; you can redistribute it and/or</a>
+<a name="ln9">    modify it under the terms of the GNU Lesser General Public</a>
+<a name="ln10">    License as published by the Free Software Foundation; either</a>
+<a name="ln11">    version 2 of the License, or (at your option) any later version.</a>
+<a name="ln12"> </a>
+<a name="ln13">    This library is distributed in the hope that it will be useful,</a>
+<a name="ln14">    but WITHOUT ANY WARRANTY; without even the implied warranty of</a>
+<a name="ln15">    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU</a>
+<a name="ln16">    Lesser General Public License for more details.</a>
+<a name="ln17"> </a>
+<a name="ln18">    You should have received a copy of the GNU Lesser General Public</a>
+<a name="ln19">    License along with this library; if not, write to the Free Software</a>
+<a name="ln20">    Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA</a>
+<a name="ln21">*/</a>
+<a name="ln22"> </a>
+<a name="ln23">#include &quot;rawspeedconfig.h&quot;</a>
+<a name="ln24">#include &quot;decompressors/PhaseOneDecompressor.h&quot;</a>
+<a name="ln25">#include &quot;common/Common.h&quot;                // for int32_t, uint32_t, uint16_t</a>
+<a name="ln26">#include &quot;common/Point.h&quot;                 // for iPoint2D</a>
+<a name="ln27">#include &quot;common/RawImage.h&quot;              // for RawImage, RawImageData</a>
+<a name="ln28">#include &quot;decoders/RawDecoderException.h&quot; // for ThrowRDE</a>
+<a name="ln29">#include &quot;io/BitPumpMSB32.h&quot;              // for BitPumpMSB32</a>
+<a name="ln30">#include &lt;algorithm&gt;                      // for for_each</a>
+<a name="ln31">#include &lt;array&gt;                          // for array</a>
+<a name="ln32">#include &lt;cassert&gt;                        // for assert</a>
+<a name="ln33">#include &lt;cstddef&gt;                        // for size_t</a>
+<a name="ln34">#include &lt;utility&gt;                        // for move</a>
+<a name="ln35">#include &lt;vector&gt;                         // for vector, vector&lt;&gt;::size_type</a>
+<a name="ln36"> </a>
+<a name="ln37">namespace rawspeed {</a>
+<a name="ln38"> </a>
+<a name="ln39">PhaseOneDecompressor::PhaseOneDecompressor(const RawImage&amp; img,</a>
+<a name="ln40">                                           std::vector&lt;PhaseOneStrip&gt;&amp;&amp; strips_)</a>
+<a name="ln41">    : mRaw(img), strips(std::move(strips_)) {</a>
+<a name="ln42">  if (mRaw-&gt;getDataType() != TYPE_USHORT16)</a>
+<a name="ln43">    ThrowRDE(&quot;Unexpected data type&quot;);</a>
+<a name="ln44"> </a>
+<a name="ln45">  if (!((mRaw-&gt;getCpp() == 1 &amp;&amp; mRaw-&gt;getBpp() == 2)))</a>
+<a name="ln46">    ThrowRDE(&quot;Unexpected cpp: %u&quot;, mRaw-&gt;getCpp());</a>
+<a name="ln47"> </a>
+<a name="ln48">  if (!mRaw-&gt;dim.hasPositiveArea() || mRaw-&gt;dim.x % 2 != 0 ||</a>
+<a name="ln49">      mRaw-&gt;dim.x &gt; 11976 || mRaw-&gt;dim.y &gt; 8852) {</a>
+<a name="ln50">    ThrowRDE(&quot;Unexpected image dimensions found: (%u; %u)&quot;, mRaw-&gt;dim.x,</a>
+<a name="ln51">             mRaw-&gt;dim.y);</a>
+<a name="ln52">  }</a>
+<a name="ln53"> </a>
+<a name="ln54">  validateStrips();</a>
+<a name="ln55">}</a>
+<a name="ln56"> </a>
+<a name="ln57">void PhaseOneDecompressor::validateStrips() const {</a>
+<a name="ln58">  // The 'strips' vector should contain exactly one element per row of image.</a>
+<a name="ln59"> </a>
+<a name="ln60">  // If the length is different, then the 'strips' vector is clearly incorrect.</a>
+<a name="ln61">  if (strips.size() != static_cast&lt;decltype(strips)::size_type&gt;(mRaw-&gt;dim.y)) {</a>
+<a name="ln62">    ThrowRDE(&quot;Height (%u) vs strip count %zu mismatch&quot;, mRaw-&gt;dim.y,</a>
+<a name="ln63">             strips.size());</a>
+<a name="ln64">  }</a>
+<a name="ln65"> </a>
+<a name="ln66">  struct RowBin {</a>
+<a name="ln67">    using value_type = unsigned char;</a>
+<a name="ln68">    bool isEmpty() const { return data == 0; }</a>
+<a name="ln69">    void fill() { data = 1; }</a>
+<a name="ln70">    value_type data = 0;</a>
+<a name="ln71">  };</a>
+<a name="ln72"> </a>
+<a name="ln73">  // Now, the strips in 'strips' vector aren't in order.</a>
+<a name="ln74">  // The 'decltype(strips)::value_type::n' is the row number of a strip.</a>
+<a name="ln75">  // We need to make sure that we have every row (0..mRaw-&gt;dim.y-1), once.</a>
+<a name="ln76"> </a>
+<a name="ln77">  // There are many ways to do that. Here, we take the histogram of all the</a>
+<a name="ln78">  // row numbers, and if any bin ends up not being '1' (one strip per row),</a>
+<a name="ln79">  // then the input is bad.</a>
+<a name="ln80">  std::vector&lt;RowBin&gt; histogram;</a>
+<a name="ln81">  histogram.resize(strips.size());</a>
+<a name="ln82">  int numBinsFilled = 0;</a>
+<a name="ln83">  std::for_each(strips.begin(), strips.end(),</a>
+<a name="ln84">                [y = mRaw-&gt;dim.y, &amp;histogram,</a>
+<a name="ln85">                 &amp;numBinsFilled](const PhaseOneStrip&amp; strip) {</a>
+<a name="ln86">                  if (strip.n &lt; 0 || strip.n &gt;= y)</a>
+<a name="ln87">                    ThrowRDE(&quot;Strip specifies out-of-bounds row %u&quot;, strip.n);</a>
+<a name="ln88">                  RowBin&amp; rowBin = histogram[strip.n];</a>
+<a name="ln89">                  if (!rowBin.isEmpty())</a>
+<a name="ln90">                    ThrowRDE(&quot;Duplicate row %u&quot;, strip.n);</a>
+<a name="ln91">                  rowBin.fill();</a>
+<a name="ln92">                  numBinsFilled++;</a>
+<a name="ln93">                });</a>
+<a name="ln94">  assert(histogram.size() == strips.size());</a>
+<a name="ln95">  assert(numBinsFilled == mRaw-&gt;dim.y &amp;&amp;</a>
+<a name="ln96">         &quot;We should only get here if all the rows/bins got filled.&quot;);</a>
+<a name="ln97">}</a>
+<a name="ln98"> </a>
+<a name="ln99">void PhaseOneDecompressor::decompressStrip(const PhaseOneStrip&amp; strip) const {</a>
+<a name="ln100">  uint32_t width = mRaw-&gt;dim.x;</a>
+<a name="ln101">  assert(width % 2 == 0);</a>
+<a name="ln102"> </a>
+<a name="ln103">  static constexpr std::array&lt;const int, 10&gt; length = {8,  7, 6,  9,  11,</a>
+<a name="ln104">                                                       10, 5, 12, 14, 13};</a>
+<a name="ln105"> </a>
+<a name="ln106">  BitPumpMSB32 pump(strip.bs);</a>
+<a name="ln107"> </a>
+<a name="ln108">  std::array&lt;int32_t, 2&gt; pred;</a>
+<a name="ln109">  pred.fill(0);</a>
+<a name="ln110">  std::array&lt;int, 2&gt; len;</a>
+<a name="ln111">  auto* img = reinterpret_cast&lt;uint16_t*&gt;(mRaw-&gt;getData(0, strip.n));</a>
+<a name="ln112">  for (uint32_t col = 0; col &lt; width; col++) {</a>
+<a name="ln113">    pump.fill(32);</a>
+<a name="ln114">    if (col &gt;= (width &amp; ~7U)) // last 'width % 8' pixels.</a>
+<a name="ln115">      len[0] = len[1] = 14;</a>
+<a name="ln116">    else if ((col &amp; 7) == 0) {</a>
+<a name="ln117">      for (int&amp; i : len) {</a>
+<a name="ln118">        int j = 0;</a>
+<a name="ln119"> </a>
+<a name="ln120">        for (; j &lt; 5; j++) {</a>
+<a name="ln121">          if (pump.getBitsNoFill(1) != 0) {</a>
+<a name="ln122">            if (col == 0)</a>
+<a name="ln123">              ThrowRDE(&quot;Can not initialize lengths. Data is corrupt.&quot;);</a>
+<a name="ln124"> </a>
+<a name="ln125">            // else, we have previously initialized lengths, so we are fine</a>
+<a name="ln126">            break;</a>
+<a name="ln127">          }</a>
+<a name="ln128">        }</a>
+<a name="ln129"> </a>
+<a name="ln130">        assert((col == 0 &amp;&amp; j &gt; 0) || col != 0);</a>
+<a name="ln131">        if (j &gt; 0)</a>
+<a name="ln132">          i = length[2 * (j - 1) + pump.getBitsNoFill(1)];</a>
+<a name="ln133">      }</a>
+<a name="ln134">    }</a>
+<a name="ln135"> </a>
+<a name="ln136">    int i = len[col &amp; 1];</a>
+<a name="ln137">    if (i == 14)</a>
+<a name="ln138">      img[col] = pred[col &amp; 1] = pump.getBitsNoFill(16);</a>
+<a name="ln139">    else {</a>
+<a name="ln140">      pred[col &amp; 1] +=</a>
+<a name="ln141">          static_cast&lt;signed&gt;(pump.getBitsNoFill(i)) + 1 - (1 &lt;&lt; (i - 1));</a>
+<a name="ln142">      // FIXME: is the truncation the right solution here?</a>
+<a name="ln143">      img[col] = uint16_t(pred[col &amp; 1]);</a>
+<a name="ln144">    }</a>
+<a name="ln145">  }</a>
+<a name="ln146">}</a>
+<a name="ln147"> </a>
+<a name="ln148">void PhaseOneDecompressor::decompressThread() const noexcept {</a>
+<a name="ln149">#ifdef HAVE_OPENMP</a>
+<a name="ln150">#pragma omp for schedule(static)</a>
+<a name="ln151">#endif</a>
+<a name="ln152">  for (auto strip = strips.cbegin(); strip &lt; strips.cend(); ++strip) {</a>
+<a name="ln153">    try {</a>
+<a name="ln154">      decompressStrip(*strip);</a>
+<a name="ln155">    } catch (RawspeedException&amp; err) {</a>
+<a name="ln156">      // Propagate the exception out of OpenMP magic.</a>
+<a name="ln157">      mRaw-&gt;setError(err.what());</a>
+<a name="ln158">    }</a>
+<a name="ln159">  }</a>
+<a name="ln160">}</a>
+<a name="ln161"> </a>
+<a name="ln162">void PhaseOneDecompressor::decompress() const {</a>
+<a name="ln163">#ifdef HAVE_OPENMP</a>
+<a name="ln164">#pragma omp parallel default(none)                                             \</a>
+<a name="ln165">    num_threads(rawspeed_get_number_of_processor_cores())</a>
+<a name="ln166">#endif</a>
+<a name="ln167">  decompressThread();</a>
+<a name="ln168"> </a>
+<a name="ln169">  std::string firstErr;</a>
+<a name="ln170">  if (mRaw-&gt;isTooManyErrors(1, &amp;firstErr)) {</a>
+<a name="ln171">    ThrowRDE(&quot;Too many errors encountered. Giving up. First Error:\n%s&quot;,</a>
+<a name="ln172">             firstErr.c_str());</a>
+<a name="ln173">  }</a>
+<a name="ln174">}</a>
+<a name="ln175"> </a>
+<a name="ln176">} // namespace rawspeed</a>
+
+</code></pre>
+<div class="balloon" rel="1"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v002/" target="_blank">V002</a> Some diagnostic messages may contain incorrect line number in this file.</p></div>
+
+<link rel="stylesheet" href="highlight.css">
+<script src="highlight.pack.js"></script>
+<script src="highlightjs-line-numbers.js"></script>
+<script>hljs.initHighlightingOnLoad();</script>
+<script>hljs.initLineNumbersOnLoad();</script>
+<script>
+  $(document).ready(function() {
+      $('.balloon').each(function () {
+          var bl = $(this);
+          var line = bl.attr('rel');
+          var text = $('a[name="ln'+line+'"]').text();
+
+          var space_count = 0;
+          for(var i = 0; i<text.length; i++){
+              var char = text[i];
+              if((char !== ' ')&&(char !== '\t'))break;
+              if(char === '\t')space_count++;
+              space_count++;
+          }
+
+          bl.css('margin-left', space_count*8);
+          $('a[name="ln'+line+'"]').after(bl);
+      });
+
+      window.location = window.location;
+  });
+</script>
+</body>
+</html>

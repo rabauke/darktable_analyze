@@ -1,0 +1,1941 @@
+
+<html>
+<head>
+  <link rel="stylesheet" href="../style.css"/>
+  <script src="../jquery-3.2.1.min.js"></script>
+</head>
+<body>
+<pre><code class = "cpp">
+<a name="ln1">/*</a>
+<a name="ln2">    This file is part of darktable,</a>
+<a name="ln3">    copyright (c) 2009--2011 johannes hanika.</a>
+<a name="ln4"> </a>
+<a name="ln5">    darktable is free software: you can redistribute it and/or modify</a>
+<a name="ln6">    it under the terms of the GNU General Public License as published by</a>
+<a name="ln7">    the Free Software Foundation, either version 3 of the License, or</a>
+<a name="ln8">    (at your option) any later version.</a>
+<a name="ln9"> </a>
+<a name="ln10">    darktable is distributed in the hope that it will be useful,</a>
+<a name="ln11">    but WITHOUT ANY WARRANTY; without even the implied warranty of</a>
+<a name="ln12">    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the</a>
+<a name="ln13">    GNU General Public License for more details.</a>
+<a name="ln14"> </a>
+<a name="ln15">    You should have received a copy of the GNU General Public License</a>
+<a name="ln16">    along with darktable.  If not, see &lt;http://www.gnu.org/licenses/&gt;.</a>
+<a name="ln17">*/</a>
+<a name="ln18">#include &quot;bauhaus/bauhaus.h&quot;</a>
+<a name="ln19">#include &quot;common/debug.h&quot;</a>
+<a name="ln20">#include &quot;common/opencl.h&quot;</a>
+<a name="ln21">#include &quot;control/conf.h&quot;</a>
+<a name="ln22">#include &quot;control/control.h&quot;</a>
+<a name="ln23">#include &quot;develop/imageop.h&quot;</a>
+<a name="ln24">#include &quot;develop/imageop_math.h&quot;</a>
+<a name="ln25">#include &quot;develop/tiling.h&quot;</a>
+<a name="ln26">#include &quot;dtgtk/drawingarea.h&quot;</a>
+<a name="ln27">#include &quot;gui/accelerators.h&quot;</a>
+<a name="ln28">#include &quot;gui/draw.h&quot;</a>
+<a name="ln29">#include &quot;gui/gtk.h&quot;</a>
+<a name="ln30">#include &quot;gui/presets.h&quot;</a>
+<a name="ln31">#include &quot;iop/iop_api.h&quot;</a>
+<a name="ln32"> </a>
+<a name="ln33">#include &lt;math.h&gt;</a>
+<a name="ln34">#include &lt;memory.h&gt;</a>
+<a name="ln35">#include &lt;stdlib.h&gt;</a>
+<a name="ln36">#if defined(__SSE__)</a>
+<a name="ln37">#include &lt;xmmintrin.h&gt;</a>
+<a name="ln38">#endif</a>
+<a name="ln39"> </a>
+<a name="ln40">#define INSET DT_PIXEL_APPLY_DPI(5)</a>
+<a name="ln41">#define INFL .3f</a>
+<a name="ln42"> </a>
+<a name="ln43"> </a>
+<a name="ln44">DT_MODULE_INTROSPECTION(1, dt_iop_atrous_params_t)</a>
+<a name="ln45"> </a>
+<a name="ln46">#define BANDS 6</a>
+<a name="ln47">#define MAX_NUM_SCALES 8 // 2*2^(i+1) + 1 = 1025px support for i = 8</a>
+<a name="ln48">#define RES 64</a>
+<a name="ln49"> </a>
+<a name="ln50">#define dt_atrous_show_upper_label(cr, text, layout, ink)                                                    \</a>
+<a name="ln51">  pango_layout_set_text(layout, text, -1);                                                                   \</a>
+<a name="ln52">  pango_layout_get_pixel_extents(layout, &amp;ink, NULL);                                                        \</a>
+<a name="ln53">  cairo_move_to(cr, .5 * (width - ink.width), (.08 * height) - ink.height);                                  \</a>
+<a name="ln54">  pango_cairo_show_layout(cr, layout);</a>
+<a name="ln55"> </a>
+<a name="ln56"> </a>
+<a name="ln57">#define dt_atrous_show_lower_label(cr, text, layout, ink)                                                    \</a>
+<a name="ln58">  pango_layout_set_text(layout, text, -1);                                                                   \</a>
+<a name="ln59">  pango_layout_get_pixel_extents(layout, &amp;ink, NULL);                                                        \</a>
+<a name="ln60">  cairo_move_to(cr, .5 * (width - ink.width), (.98 * height) - ink.height);                                  \</a>
+<a name="ln61">  pango_cairo_show_layout(cr, layout);</a>
+<a name="ln62"> </a>
+<a name="ln63"> </a>
+<a name="ln64">typedef enum atrous_channel_t</a>
+<a name="ln65">{</a>
+<a name="ln66">  atrous_L = 0,  // luminance boost</a>
+<a name="ln67">  atrous_c = 1,  // chrominance boost</a>
+<a name="ln68">  atrous_s = 2,  // edge sharpness</a>
+<a name="ln69">  atrous_Lt = 3, // luminance noise threshold</a>
+<a name="ln70">  atrous_ct = 4, // chrominance noise threshold</a>
+<a name="ln71">  atrous_none = 5</a>
+<a name="ln72">} atrous_channel_t;</a>
+<a name="ln73"> </a>
+<a name="ln74">typedef struct dt_iop_atrous_params_t</a>
+<a name="ln75">{</a>
+<a name="ln76">  int32_t octaves;</a>
+<a name="ln77">  float x[atrous_none][BANDS], y[atrous_none][BANDS];</a>
+<a name="ln78">} dt_iop_atrous_params_t;</a>
+<a name="ln79"> </a>
+<a name="ln80">typedef struct dt_iop_atrous_gui_data_t</a>
+<a name="ln81">{</a>
+<a name="ln82">  GtkWidget *mix;</a>
+<a name="ln83">  GtkDrawingArea *area;</a>
+<a name="ln84">  GtkNotebook *channel_tabs;</a>
+<a name="ln85">  double mouse_x, mouse_y, mouse_pick;</a>
+<a name="ln86">  float mouse_radius;</a>
+<a name="ln87">  dt_iop_atrous_params_t drag_params;</a>
+<a name="ln88">  int dragging;</a>
+<a name="ln89">  int x_move;</a>
+<a name="ln90">  dt_draw_curve_t *minmax_curve;</a>
+<a name="ln91">  atrous_channel_t channel, channel2;</a>
+<a name="ln92">  float draw_xs[RES], draw_ys[RES];</a>
+<a name="ln93">  float draw_min_xs[RES], draw_min_ys[RES];</a>
+<a name="ln94">  float draw_max_xs[RES], draw_max_ys[RES];</a>
+<a name="ln95">  float band_hist[MAX_NUM_SCALES];</a>
+<a name="ln96">  float band_max;</a>
+<a name="ln97">  float sample[MAX_NUM_SCALES];</a>
+<a name="ln98">  int num_samples;</a>
+<a name="ln99">} dt_iop_atrous_gui_data_t;</a>
+<a name="ln100"> </a>
+<a name="ln101">typedef struct dt_iop_atrous_global_data_t</a>
+<a name="ln102">{</a>
+<a name="ln103">  int kernel_decompose;</a>
+<a name="ln104">  int kernel_synthesize;</a>
+<a name="ln105">} dt_iop_atrous_global_data_t;</a>
+<a name="ln106"> </a>
+<a name="ln107">typedef struct dt_iop_atrous_data_t</a>
+<a name="ln108">{</a>
+<a name="ln109">  // demosaic pattern</a>
+<a name="ln110">  int32_t octaves;</a>
+<a name="ln111">  dt_draw_curve_t *curve[atrous_none];</a>
+<a name="ln112">} dt_iop_atrous_data_t;</a>
+<a name="ln113"> </a>
+<a name="ln114"> </a>
+<a name="ln115">const char *name()</a>
+<a name="ln116">{</a>
+<a name="ln117">  return _(&quot;contrast equalizer&quot;);</a>
+<a name="ln118">}</a>
+<a name="ln119"> </a>
+<a name="ln120">int default_group()</a>
+<a name="ln121">{</a>
+<a name="ln122">  return IOP_GROUP_CORRECT;</a>
+<a name="ln123">}</a>
+<a name="ln124"> </a>
+<a name="ln125">int flags()</a>
+<a name="ln126">{</a>
+<a name="ln127">  return IOP_FLAGS_SUPPORTS_BLENDING | IOP_FLAGS_ALLOW_TILING;</a>
+<a name="ln128">}</a>
+<a name="ln129"> </a>
+<a name="ln130">int default_colorspace(dt_iop_module_t *self, dt_dev_pixelpipe_t *pipe, dt_dev_pixelpipe_iop_t *piece)</a>
+<a name="ln131">{</a>
+<a name="ln132">  return iop_cs_Lab;</a>
+<a name="ln133">}</a>
+<a name="ln134"> </a>
+<a name="ln135">void init_key_accels(dt_iop_module_so_t *self)</a>
+<a name="ln136">{</a>
+<a name="ln137">  dt_accel_register_slider_iop(self, FALSE, NC_(&quot;accel&quot;, &quot;mix&quot;));</a>
+<a name="ln138">}</a>
+<a name="ln139"> </a>
+<a name="ln140">void connect_key_accels(dt_iop_module_t *self)</a>
+<a name="ln141">{</a>
+<a name="ln142">  dt_accel_connect_slider_iop(self, &quot;mix&quot;, ((dt_iop_atrous_gui_data_t *)self-&gt;gui_data)-&gt;mix);</a>
+<a name="ln143">}</a>
+<a name="ln144"> </a>
+<a name="ln145"> </a>
+<a name="ln146">#if defined(__SSE2__)</a>
+<a name="ln147"> </a>
+<a name="ln148">#define ALIGNED(a) __attribute__((aligned(a)))</a>
+<a name="ln149">#define VEC4(a)                                                                                              \</a>
+<a name="ln150">  {                                                                                                          \</a>
+<a name="ln151">    (a), (a), (a), (a)                                                                                       \</a>
+<a name="ln152">  }</a>
+<a name="ln153"> </a>
+<a name="ln154">static const __m128 fone ALIGNED(64) = VEC4(0x3f800000u);</a>
+<a name="ln155">static const __m128 femo ALIGNED(64) = VEC4(0x00adf880u);</a>
+<a name="ln156">static const __m128 ooo1 ALIGNED(64) = { 0.f, 0.f, 0.f, 1.f };</a>
+<a name="ln157"> </a>
+<a name="ln158">/* SSE intrinsics version of dt_fast_expf defined in darktable.h */</a>
+<a name="ln159">static inline __m128 dt_fast_expf_sse2(const __m128 x)</a>
+<a name="ln160">{</a>
+<a name="ln161">  __m128 f = _mm_add_ps(fone, _mm_mul_ps(x, femo)); // f(n) = i1 + x(n)*(i2-i1)</a>
+<a name="ln162">  __m128i i = _mm_cvtps_epi32(f);                   // i(n) = int(f(n))</a>
+<a name="ln163">  __m128i mask = _mm_srai_epi32(i, 31);             // mask(n) = 0xffffffff if i(n) &lt; 0</a>
+<a name="ln164">  i = _mm_andnot_si128(mask, i);                    // i(n) = 0 if i(n) &lt; 0</a>
+<a name="ln165">  return _mm_castsi128_ps(i);                       // return *(float*)&amp;i</a>
+<a name="ln166">}</a>
+<a name="ln167"> </a>
+<a name="ln168">#endif</a>
+<a name="ln169"> </a>
+<a name="ln170">static inline void weight(const float *c1, const float *c2, const float sharpen, float *weight)</a>
+<a name="ln171">{</a>
+<a name="ln172">  float square[3];</a>
+<a name="ln173">  for(int c = 0; c &lt; 3; c++) square[c] = c1[c] - c2[c];</a>
+<a name="ln174">  for(int c = 0; c &lt; 3; c++) square[c] = square[c] * square[c];</a>
+<a name="ln175"> </a>
+<a name="ln176">  const float wl = dt_fast_expf(-sharpen * square[0]);</a>
+<a name="ln177">  const float wc = dt_fast_expf(-sharpen * (square[1] + square[2]));</a>
+<a name="ln178"> </a>
+<a name="ln179">  weight[0] = wl;</a>
+<a name="ln180">  weight[1] = wc;</a>
+<a name="ln181">  weight[2] = wc;</a>
+<a name="ln182">  weight[3] = 1.0f;</a>
+<a name="ln183">}</a>
+<a name="ln184"> </a>
+<a name="ln185">#if defined(__SSE2__)</a>
+<a name="ln186">/* Computes the vector</a>
+<a name="ln187"> * (wl, wc, wc, 1)</a>
+<a name="ln188"> *</a>
+<a name="ln189"> * where:</a>
+<a name="ln190"> * wl = exp(-sharpen*SQR(c1[0] - c2[0]))</a>
+<a name="ln191"> *    = exp(-s*d1) (as noted in code comments below)</a>
+<a name="ln192"> * wc = exp(-sharpen*(SQR(c1[1] - c2[1]) + SQR(c1[2] - c2[2]))</a>
+<a name="ln193"> *    = exp(-s*(d2+d3)) (as noted in code comments below)</a>
+<a name="ln194"> */</a>
+<a name="ln195">static inline __m128 weight_sse2(const __m128 *c1, const __m128 *c2, const float sharpen)</a>
+<a name="ln196">{</a>
+<a name="ln197">  const __m128 vsharpen = _mm_set1_ps(-sharpen); // (-s, -s, -s, -s)</a>
+<a name="ln198">  __m128 diff = _mm_sub_ps(*c1, *c2);</a>
+<a name="ln199">  __m128 square = _mm_mul_ps(diff, diff);                                   // (?, d3, d2, d1)</a>
+<a name="ln200">  __m128 square2 = _mm_shuffle_ps(square, square, _MM_SHUFFLE(3, 1, 2, 0)); // (?, d2, d3, d1)</a>
+<a name="ln201">  __m128 added = _mm_add_ps(square, square2);                               // (?, d2+d3, d2+d3, 2*d1)</a>
+<a name="ln202">  added = _mm_sub_ss(added, square);                                        // (?, d2+d3, d2+d3, d1)</a>
+<a name="ln203">  __m128 sharpened = _mm_mul_ps(added, vsharpen);                   // (?, -s*(d2+d3), -s*(d2+d3), -s*d1)</a>
+<a name="ln204">  __m128 exp = dt_fast_expf_sse2(sharpened);                        // (?, wc, wc, wl)</a>
+<a name="ln205">  exp = _mm_castsi128_ps(_mm_slli_si128(_mm_castps_si128(exp), 4)); // (wc, wc, wl, 0)</a>
+<a name="ln206">  exp = _mm_castsi128_ps(_mm_srli_si128(_mm_castps_si128(exp), 4)); // (0, wc, wc, wl)</a>
+<a name="ln207">  exp = _mm_or_ps(exp, ooo1);                                       // (1, wc, wc, wl)</a>
+<a name="ln208">  return exp;</a>
+<a name="ln209">}</a>
+<a name="ln210">#endif</a>
+<a name="ln211"> </a>
+<a name="ln212">#define SUM_PIXEL_CONTRIBUTION_COMMON(ii, jj)                                                                \</a>
+<a name="ln213">  {                                                                                                          \</a>
+<a name="ln214">    const float f = filter[(ii)] * filter[(jj)];                                                             \</a>
+<a name="ln215">    float wp[4] = { 0.0f, 0.0f, 0.0f, 0.0f };                                                                \</a>
+<a name="ln216">    weight(px, px2, sharpen, wp);                                                                            \</a>
+<a name="ln217">    float w[4] = { 0.0f, 0.0f, 0.0f, 0.0f };                                                                 \</a>
+<a name="ln218">    for(int c = 0; c &lt; 4; c++) w[c] = f * wp[c];                                                             \</a>
+<a name="ln219">    float pd[4] = { 0.0f, 0.0f, 0.0f, 0.0f };                                                                \</a>
+<a name="ln220">    for(int c = 0; c &lt; 4; c++) pd[c] = w[c] * px2[c];                                                        \</a>
+<a name="ln221">    for(int c = 0; c &lt; 4; c++) sum[c] += pd[c];                                                              \</a>
+<a name="ln222">    for(int c = 0; c &lt; 4; c++) wgt[c] += w[c];                                                               \</a>
+<a name="ln223">  }</a>
+<a name="ln224"> </a>
+<a name="ln225">#if defined(__SSE2__)</a>
+<a name="ln226">#define SUM_PIXEL_CONTRIBUTION_COMMON_SSE2(ii, jj)                                                           \</a>
+<a name="ln227">  {                                                                                                          \</a>
+<a name="ln228">    const __m128 f = _mm_set1_ps(filter[(ii)] * filter[(jj)]);                                               \</a>
+<a name="ln229">    const __m128 wp = weight_sse2(px, px2, sharpen);                                                         \</a>
+<a name="ln230">    const __m128 w = _mm_mul_ps(f, wp);                                                                      \</a>
+<a name="ln231">    const __m128 pd = _mm_mul_ps(w, *px2);                                                                   \</a>
+<a name="ln232">    sum = _mm_add_ps(sum, pd);                                                                               \</a>
+<a name="ln233">    wgt = _mm_add_ps(wgt, w);                                                                                \</a>
+<a name="ln234">  }</a>
+<a name="ln235">#endif</a>
+<a name="ln236"> </a>
+<a name="ln237">#define SUM_PIXEL_CONTRIBUTION_WITH_TEST(ii, jj)                                                             \</a>
+<a name="ln238">  do                                                                                                         \</a>
+<a name="ln239">  {                                                                                                          \</a>
+<a name="ln240">    const int iii = (ii)-2;                                                                                  \</a>
+<a name="ln241">    const int jjj = (jj)-2;                                                                                  \</a>
+<a name="ln242">    int x = i + mult * iii;                                                                                  \</a>
+<a name="ln243">    int y = j + mult * jjj;                                                                                  \</a>
+<a name="ln244">                                                                                                             \</a>
+<a name="ln245">    if(x &lt; 0) x = 0;                                                                                         \</a>
+<a name="ln246">    if(x &gt;= width) x = width - 1;                                                                            \</a>
+<a name="ln247">    if(y &lt; 0) y = 0;                                                                                         \</a>
+<a name="ln248">    if(y &gt;= height) y = height - 1;                                                                          \</a>
+<a name="ln249">                                                                                                             \</a>
+<a name="ln250">    px2 = ((float *)in) + 4 * x + (size_t)4 * y * width;                                                     \</a>
+<a name="ln251">                                                                                                             \</a>
+<a name="ln252">    SUM_PIXEL_CONTRIBUTION_COMMON(ii, jj);                                                                   \</a>
+<a name="ln253">  } while(0)</a>
+<a name="ln254"> </a>
+<a name="ln255">#if defined(__SSE2__)</a>
+<a name="ln256">#define SUM_PIXEL_CONTRIBUTION_WITH_TEST_SSE2(ii, jj)                                                        \</a>
+<a name="ln257">  do                                                                                                         \</a>
+<a name="ln258">  {                                                                                                          \</a>
+<a name="ln259">    const int iii = (ii)-2;                                                                                  \</a>
+<a name="ln260">    const int jjj = (jj)-2;                                                                                  \</a>
+<a name="ln261">    int x = i + mult * iii;                                                                                  \</a>
+<a name="ln262">    int y = j + mult * jjj;                                                                                  \</a>
+<a name="ln263">                                                                                                             \</a>
+<a name="ln264">    if(x &lt; 0) x = 0;                                                                                         \</a>
+<a name="ln265">    if(x &gt;= width) x = width - 1;                                                                            \</a>
+<a name="ln266">    if(y &lt; 0) y = 0;                                                                                         \</a>
+<a name="ln267">    if(y &gt;= height) y = height - 1;                                                                          \</a>
+<a name="ln268">                                                                                                             \</a>
+<a name="ln269">    px2 = ((__m128 *)in) + x + (size_t)y * width;                                                            \</a>
+<a name="ln270">                                                                                                             \</a>
+<a name="ln271">    SUM_PIXEL_CONTRIBUTION_COMMON_SSE2(ii, jj);                                                              \</a>
+<a name="ln272">  } while(0)</a>
+<a name="ln273">#endif</a>
+<a name="ln274"> </a>
+<a name="ln275">#define ROW_PROLOGUE                                                                                         \</a>
+<a name="ln276">  const float *px = ((float *)in) + (size_t)4 * j * width;                                                   \</a>
+<a name="ln277">  const float *px2;                                                                                          \</a>
+<a name="ln278">  float *pdetail = detail + (size_t)4 * j * width;                                                           \</a>
+<a name="ln279">  float *pcoarse = out + (size_t)4 * j * width;</a>
+<a name="ln280"> </a>
+<a name="ln281">#if defined(__SSE2__)</a>
+<a name="ln282">#define ROW_PROLOGUE_SSE                                                                                     \</a>
+<a name="ln283">  const __m128 *px = ((__m128 *)in) + (size_t)j * width;                                                     \</a>
+<a name="ln284">  const __m128 *px2;                                                                                         \</a>
+<a name="ln285">  float *pdetail = detail + (size_t)4 * j * width;                                                           \</a>
+<a name="ln286">  float *pcoarse = out + (size_t)4 * j * width;</a>
+<a name="ln287">#endif</a>
+<a name="ln288"> </a>
+<a name="ln289">#define SUM_PIXEL_PROLOGUE                                                                                   \</a>
+<a name="ln290">  float sum[4] = { 0.0f, 0.0f, 0.0f, 0.0f };                                                                 \</a>
+<a name="ln291">  float wgt[4] = { 0.0f, 0.0f, 0.0f, 0.0f };</a>
+<a name="ln292"> </a>
+<a name="ln293">#if defined(__SSE2__)</a>
+<a name="ln294">#define SUM_PIXEL_PROLOGUE_SSE                                                                               \</a>
+<a name="ln295">  __m128 sum = _mm_setzero_ps();                                                                             \</a>
+<a name="ln296">  __m128 wgt = _mm_setzero_ps();</a>
+<a name="ln297">#endif</a>
+<a name="ln298"> </a>
+<a name="ln299">#define SUM_PIXEL_EPILOGUE                                                                                   \</a>
+<a name="ln300">  for(int c = 0; c &lt; 4; c++) sum[c] /= wgt[c];                                                               \</a>
+<a name="ln301">                                                                                                             \</a>
+<a name="ln302">  for(int c = 0; c &lt; 4; c++) pdetail[c] = (px[c] - sum[c]);                                                  \</a>
+<a name="ln303">  for(int c = 0; c &lt; 4; c++) pcoarse[c] = sum[c];                                                            \</a>
+<a name="ln304">  px += 4;                                                                                                   \</a>
+<a name="ln305">  pdetail += 4;                                                                                              \</a>
+<a name="ln306">  pcoarse += 4;</a>
+<a name="ln307"> </a>
+<a name="ln308">#if defined(__SSE2__)</a>
+<a name="ln309">#define SUM_PIXEL_EPILOGUE_SSE                                                                               \</a>
+<a name="ln310">  sum = _mm_mul_ps(sum, _mm_rcp_ps(wgt));                                                                    \</a>
+<a name="ln311">                                                                                                             \</a>
+<a name="ln312">  _mm_stream_ps(pdetail, _mm_sub_ps(*px, sum));                                                              \</a>
+<a name="ln313">  _mm_stream_ps(pcoarse, sum);                                                                               \</a>
+<a name="ln314">  px++;                                                                                                      \</a>
+<a name="ln315">  pdetail += 4;                                                                                              \</a>
+<a name="ln316">  pcoarse += 4;</a>
+<a name="ln317">#endif</a>
+<a name="ln318"> </a>
+<a name="ln319">typedef void((*eaw_decompose_t)(float *const out, const float *const in, float *const detail, const int scale,</a>
+<a name="ln320">                                const float sharpen, const int32_t width, const int32_t height));</a>
+<a name="ln321"> </a>
+<a name="ln322">static void eaw_decompose(float *const out, const float *const in, float *const detail, const int scale,</a>
+<a name="ln323">                          const float sharpen, const int32_t width, const int32_t height)</a>
+<a name="ln324">{</a>
+<a name="ln325">  const int mult = 1 &lt;&lt; scale;</a>
+<a name="ln326">  static const float filter[5] = { 1.0f / 16.0f, 4.0f / 16.0f, 6.0f / 16.0f, 4.0f / 16.0f, 1.0f / 16.0f };</a>
+<a name="ln327"> </a>
+<a name="ln328">/* The first &quot;2*mult&quot; lines use the macro with tests because the 5x5 kernel</a>
+<a name="ln329"> * requires nearest pixel interpolation for at least a pixel in the sum */</a>
+<a name="ln330">#ifdef _OPENMP</a>
+<a name="ln331">#pragma omp parallel for default(none) \</a>
+<a name="ln332">  dt_omp_firstprivate(detail, filter, height, in, mult, out, sharpen, width) \</a>
+<a name="ln333">  schedule(static)</a>
+<a name="ln334">#endif</a>
+<a name="ln335">  for(int j = 0; j &lt; 2 * mult; j++)</a>
+<a name="ln336">  {</a>
+<a name="ln337">    ROW_PROLOGUE</a>
+<a name="ln338"> </a>
+<a name="ln339">    for(int i = 0; i &lt; width; i++)</a>
+<a name="ln340">    {</a>
+<a name="ln341">      SUM_PIXEL_PROLOGUE</a>
+<a name="ln342">      for(int jj = 0; jj &lt; 5; jj++)</a>
+<a name="ln343">      {</a>
+<a name="ln344">        for(int ii = 0; ii &lt; 5; ii++)</a>
+<a name="ln345">        {</a>
+<a name="ln346">          SUM_PIXEL_CONTRIBUTION_WITH_TEST(ii, jj);</a>
+<a name="ln347">        }</a>
+<a name="ln348">      }</a>
+<a name="ln349">      SUM_PIXEL_EPILOGUE</a>
+<a name="ln350">    }</a>
+<a name="ln351">  }</a>
+<a name="ln352"> </a>
+<a name="ln353">#ifdef _OPENMP</a>
+<a name="ln354">#pragma omp parallel for default(none) \</a>
+<a name="ln355">  dt_omp_firstprivate(detail, filter, height, in, mult, out, sharpen, width) \</a>
+<a name="ln356">  schedule(static)</a>
+<a name="ln357">#endif</a>
+<a name="ln358">  for(int j = 2 * mult; j &lt; height - 2 * mult; j++)</a>
+<a name="ln359">  {</a>
+<a name="ln360">    ROW_PROLOGUE</a>
+<a name="ln361"> </a>
+<a name="ln362">    /* The first &quot;2*mult&quot; pixels use the macro with tests because the 5x5 kernel</a>
+<a name="ln363">     * requires nearest pixel interpolation for at least a pixel in the sum */</a>
+<a name="ln364">    for(int i = 0; i &lt; 2 * mult; i++)</a>
+<a name="ln365">    {</a>
+<a name="ln366">      SUM_PIXEL_PROLOGUE</a>
+<a name="ln367">      for(int jj = 0; jj &lt; 5; jj++)</a>
+<a name="ln368">      {</a>
+<a name="ln369">        for(int ii = 0; ii &lt; 5; ii++)</a>
+<a name="ln370">        {</a>
+<a name="ln371">          SUM_PIXEL_CONTRIBUTION_WITH_TEST(ii, jj);</a>
+<a name="ln372">        }</a>
+<a name="ln373">      }</a>
+<a name="ln374">      SUM_PIXEL_EPILOGUE</a>
+<a name="ln375">    }</a>
+<a name="ln376"> </a>
+<a name="ln377">    /* For pixels [2*mult, width-2*mult], we can safely use macro w/o tests</a>
+<a name="ln378">     * to avoid unneeded branching in the inner loops */</a>
+<a name="ln379">    for(int i = 2 * mult; i &lt; width - 2 * mult; i++)</a>
+<a name="ln380">    {</a>
+<a name="ln381">      SUM_PIXEL_PROLOGUE</a>
+<a name="ln382">      px2 = ((float *)in) + (size_t)4 * (i - 2 * mult + (size_t)(j - 2 * mult) * width);</a>
+<a name="ln383">      for(int jj = 0; jj &lt; 5; jj++)</a>
+<a name="ln384">      {</a>
+<a name="ln385">        for(int ii = 0; ii &lt; 5; ii++)</a>
+<a name="ln386">        {</a>
+<a name="ln387">          SUM_PIXEL_CONTRIBUTION_COMMON(ii, jj);</a>
+<a name="ln388">          px2 += (size_t)4 * mult;</a>
+<a name="ln389">        }</a>
+<a name="ln390">        px2 += (size_t)4 * (width - 5) * mult;</a>
+<a name="ln391">      }</a>
+<a name="ln392">      SUM_PIXEL_EPILOGUE</a>
+<a name="ln393">    }</a>
+<a name="ln394"> </a>
+<a name="ln395">    /* Last two pixels in the row require a slow variant... blablabla */</a>
+<a name="ln396">    for(int i = width - 2 * mult; i &lt; width; i++)</a>
+<a name="ln397">    {</a>
+<a name="ln398">      SUM_PIXEL_PROLOGUE</a>
+<a name="ln399">      for(int jj = 0; jj &lt; 5; jj++)</a>
+<a name="ln400">      {</a>
+<a name="ln401">        for(int ii = 0; ii &lt; 5; ii++)</a>
+<a name="ln402">        {</a>
+<a name="ln403">          SUM_PIXEL_CONTRIBUTION_WITH_TEST(ii, jj);</a>
+<a name="ln404">        }</a>
+<a name="ln405">      }</a>
+<a name="ln406">      SUM_PIXEL_EPILOGUE</a>
+<a name="ln407">    }</a>
+<a name="ln408">  }</a>
+<a name="ln409"> </a>
+<a name="ln410">/* The last &quot;2*mult&quot; lines use the macro with tests because the 5x5 kernel</a>
+<a name="ln411"> * requires nearest pixel interpolation for at least a pixel in the sum */</a>
+<a name="ln412">#ifdef _OPENMP</a>
+<a name="ln413">#pragma omp parallel for default(none) \</a>
+<a name="ln414">  dt_omp_firstprivate(detail, filter, height, in, mult, out, sharpen, width) \</a>
+<a name="ln415">  schedule(static)</a>
+<a name="ln416">#endif</a>
+<a name="ln417">  for(int j = height - 2 * mult; j &lt; height; j++)</a>
+<a name="ln418">  {</a>
+<a name="ln419">    ROW_PROLOGUE</a>
+<a name="ln420"> </a>
+<a name="ln421">    for(int i = 0; i &lt; width; i++)</a>
+<a name="ln422">    {</a>
+<a name="ln423">      SUM_PIXEL_PROLOGUE</a>
+<a name="ln424">      for(int jj = 0; jj &lt; 5; jj++)</a>
+<a name="ln425">      {</a>
+<a name="ln426">        for(int ii = 0; ii &lt; 5; ii++)</a>
+<a name="ln427">        {</a>
+<a name="ln428">          SUM_PIXEL_CONTRIBUTION_WITH_TEST(ii, jj);</a>
+<a name="ln429">        }</a>
+<a name="ln430">      }</a>
+<a name="ln431">      SUM_PIXEL_EPILOGUE</a>
+<a name="ln432">    }</a>
+<a name="ln433">  }</a>
+<a name="ln434">}</a>
+<a name="ln435"> </a>
+<a name="ln436">#undef SUM_PIXEL_CONTRIBUTION_COMMON</a>
+<a name="ln437">#undef SUM_PIXEL_CONTRIBUTION_WITH_TEST</a>
+<a name="ln438">#undef ROW_PROLOGUE</a>
+<a name="ln439">#undef SUM_PIXEL_PROLOGUE</a>
+<a name="ln440">#undef SUM_PIXEL_EPILOGUE</a>
+<a name="ln441"> </a>
+<a name="ln442">#if defined(__SSE2__)</a>
+<a name="ln443">static void eaw_decompose_sse2(float *const out, const float *const in, float *const detail, const int scale,</a>
+<a name="ln444">                               const float sharpen, const int32_t width, const int32_t height)</a>
+<a name="ln445">{</a>
+<a name="ln446">  const int mult = 1 &lt;&lt; scale;</a>
+<a name="ln447">  static const float filter[5] = { 1.0f / 16.0f, 4.0f / 16.0f, 6.0f / 16.0f, 4.0f / 16.0f, 1.0f / 16.0f };</a>
+<a name="ln448"> </a>
+<a name="ln449">/* The first &quot;2*mult&quot; lines use the macro with tests because the 5x5 kernel</a>
+<a name="ln450"> * requires nearest pixel interpolation for at least a pixel in the sum */</a>
+<a name="ln451">#ifdef _OPENMP</a>
+<a name="ln452">#pragma omp parallel for default(none) \</a>
+<a name="ln453">  dt_omp_firstprivate(detail, filter, height, in, mult, out, sharpen, width) \</a>
+<a name="ln454">  schedule(static)</a>
+<a name="ln455">#endif</a>
+<a name="ln456">  for(int j = 0; j &lt; 2 * mult; j++)</a>
+<a name="ln457">  {</a>
+<a name="ln458">    ROW_PROLOGUE_SSE</a>
+<a name="ln459"> </a>
+<a name="ln460">    for(int i = 0; i &lt; width; i++)</a>
+<a name="ln461">    {</a>
+<a name="ln462">      SUM_PIXEL_PROLOGUE_SSE</a>
+<a name="ln463">      for(int jj = 0; jj &lt; 5; jj++)</a>
+<a name="ln464">      {</a>
+<a name="ln465">        for(int ii = 0; ii &lt; 5; ii++)</a>
+<a name="ln466">        {</a>
+<a name="ln467">          SUM_PIXEL_CONTRIBUTION_WITH_TEST_SSE2(ii, jj);</a>
+<a name="ln468">        }</a>
+<a name="ln469">      }</a>
+<a name="ln470">      SUM_PIXEL_EPILOGUE_SSE</a>
+<a name="ln471">    }</a>
+<a name="ln472">  }</a>
+<a name="ln473"> </a>
+<a name="ln474">#ifdef _OPENMP</a>
+<a name="ln475">#pragma omp parallel for default(none) \</a>
+<a name="ln476">  dt_omp_firstprivate(detail, filter, height, in, mult, out, sharpen, width) \</a>
+<a name="ln477">  schedule(static)</a>
+<a name="ln478">#endif</a>
+<a name="ln479">  for(int j = 2 * mult; j &lt; height - 2 * mult; j++)</a>
+<a name="ln480">  {</a>
+<a name="ln481">    ROW_PROLOGUE_SSE</a>
+<a name="ln482"> </a>
+<a name="ln483">    /* The first &quot;2*mult&quot; pixels use the macro with tests because the 5x5 kernel</a>
+<a name="ln484">     * requires nearest pixel interpolation for at least a pixel in the sum */</a>
+<a name="ln485">    for(int i = 0; i &lt; 2 * mult; i++)</a>
+<a name="ln486">    {</a>
+<a name="ln487">      SUM_PIXEL_PROLOGUE_SSE</a>
+<a name="ln488">      for(int jj = 0; jj &lt; 5; jj++)</a>
+<a name="ln489">      {</a>
+<a name="ln490">        for(int ii = 0; ii &lt; 5; ii++)</a>
+<a name="ln491">        {</a>
+<a name="ln492">          SUM_PIXEL_CONTRIBUTION_WITH_TEST_SSE2(ii, jj);</a>
+<a name="ln493">        }</a>
+<a name="ln494">      }</a>
+<a name="ln495">      SUM_PIXEL_EPILOGUE_SSE</a>
+<a name="ln496">    }</a>
+<a name="ln497"> </a>
+<a name="ln498">    /* For pixels [2*mult, width-2*mult], we can safely use macro w/o tests</a>
+<a name="ln499">     * to avoid unneeded branching in the inner loops */</a>
+<a name="ln500">    for(int i = 2 * mult; i &lt; width - 2 * mult; i++)</a>
+<a name="ln501">    {</a>
+<a name="ln502">      SUM_PIXEL_PROLOGUE_SSE</a>
+<a name="ln503">      px2 = ((__m128 *)in) + i - 2 * mult + (size_t)(j - 2 * mult) * width;</a>
+<a name="ln504">      for(int jj = 0; jj &lt; 5; jj++)</a>
+<a name="ln505">      {</a>
+<a name="ln506">        for(int ii = 0; ii &lt; 5; ii++)</a>
+<a name="ln507">        {</a>
+<a name="ln508">          SUM_PIXEL_CONTRIBUTION_COMMON_SSE2(ii, jj);</a>
+<a name="ln509">          px2 += mult;</a>
+<a name="ln510">        }</a>
+<a name="ln511">        px2 += (width - 5) * mult;</a>
+<a name="ln512">      }</a>
+<a name="ln513">      SUM_PIXEL_EPILOGUE_SSE</a>
+<a name="ln514">    }</a>
+<a name="ln515"> </a>
+<a name="ln516">    /* Last two pixels in the row require a slow variant... blablabla */</a>
+<a name="ln517">    for(int i = width - 2 * mult; i &lt; width; i++)</a>
+<a name="ln518">    {</a>
+<a name="ln519">      SUM_PIXEL_PROLOGUE_SSE</a>
+<a name="ln520">      for(int jj = 0; jj &lt; 5; jj++)</a>
+<a name="ln521">      {</a>
+<a name="ln522">        for(int ii = 0; ii &lt; 5; ii++)</a>
+<a name="ln523">        {</a>
+<a name="ln524">          SUM_PIXEL_CONTRIBUTION_WITH_TEST_SSE2(ii, jj);</a>
+<a name="ln525">        }</a>
+<a name="ln526">      }</a>
+<a name="ln527">      SUM_PIXEL_EPILOGUE_SSE</a>
+<a name="ln528">    }</a>
+<a name="ln529">  }</a>
+<a name="ln530"> </a>
+<a name="ln531">/* The last &quot;2*mult&quot; lines use the macro with tests because the 5x5 kernel</a>
+<a name="ln532"> * requires nearest pixel interpolation for at least a pixel in the sum */</a>
+<a name="ln533">#ifdef _OPENMP</a>
+<a name="ln534">#pragma omp parallel for default(none) \</a>
+<a name="ln535">  dt_omp_firstprivate(detail, filter, height, in, mult, out, sharpen, width) \</a>
+<a name="ln536">  schedule(static)</a>
+<a name="ln537">#endif</a>
+<a name="ln538">  for(int j = height - 2 * mult; j &lt; height; j++)</a>
+<a name="ln539">  {</a>
+<a name="ln540">    ROW_PROLOGUE_SSE</a>
+<a name="ln541"> </a>
+<a name="ln542">    for(int i = 0; i &lt; width; i++)</a>
+<a name="ln543">    {</a>
+<a name="ln544">      SUM_PIXEL_PROLOGUE_SSE</a>
+<a name="ln545">      for(int jj = 0; jj &lt; 5; jj++)</a>
+<a name="ln546">      {</a>
+<a name="ln547">        for(int ii = 0; ii &lt; 5; ii++)</a>
+<a name="ln548">        {</a>
+<a name="ln549">          SUM_PIXEL_CONTRIBUTION_WITH_TEST_SSE2(ii, jj);</a>
+<a name="ln550">        }</a>
+<a name="ln551">      }</a>
+<a name="ln552">      SUM_PIXEL_EPILOGUE_SSE</a>
+<a name="ln553">    }</a>
+<a name="ln554">  }</a>
+<a name="ln555"> </a>
+<a name="ln556">  _mm_sfence();</a>
+<a name="ln557">}</a>
+<a name="ln558"> </a>
+<a name="ln559">#undef SUM_PIXEL_CONTRIBUTION_COMMON_SSE2</a>
+<a name="ln560">#undef SUM_PIXEL_CONTRIBUTION_WITH_TEST_SSE2</a>
+<a name="ln561">#undef ROW_PROLOGUE_SSE</a>
+<a name="ln562">#undef SUM_PIXEL_PROLOGUE_SSE</a>
+<a name="ln563">#undef SUM_PIXEL_EPILOGUE_SSE</a>
+<a name="ln564">#endif</a>
+<a name="ln565"> </a>
+<a name="ln566">typedef void((*eaw_synthesize_t)(float *const out, const float *const in, const float *const detail,</a>
+<a name="ln567">                                 const float *thrsf, const float *boostf, const int32_t width,</a>
+<a name="ln568">                                 const int32_t height));</a>
+<a name="ln569"> </a>
+<a name="ln570">static void eaw_synthesize(float *const out, const float *const in, const float *const detail,</a>
+<a name="ln571">                           const float *thrsf, const float *boostf, const int32_t width, const int32_t height)</a>
+<a name="ln572">{</a>
+<a name="ln573">  const float threshold[4] = { thrsf[0], thrsf[1], thrsf[2], thrsf[3] };</a>
+<a name="ln574">  const float boost[4] = { boostf[0], boostf[1], boostf[2], boostf[3] };</a>
+<a name="ln575"> </a>
+<a name="ln576">#ifdef _OPENMP</a>
+<a name="ln577">#pragma omp parallel for SIMD() default(none) \</a>
+<a name="ln578">  dt_omp_firstprivate(boost, detail, height, in, out, width, threshold) \</a>
+<a name="ln579">  schedule(static) \</a>
+<a name="ln580">  collapse(2)</a>
+<a name="ln581">#endif</a>
+<a name="ln582">  for(size_t k = 0; k &lt; (size_t)4 * width * height; k += 4)</a>
+<a name="ln583">  {</a>
+<a name="ln584">    for(size_t c = 0; c &lt; 4; c++)</a>
+<a name="ln585">    {</a>
+<a name="ln586">      const float absamt = fmaxf(0.0f, (fabsf(detail[k + c]) - threshold[c]));</a>
+<a name="ln587">      const float amount = copysignf(absamt, detail[k + c]);</a>
+<a name="ln588">      out[k + c] = in[k + c] + (boost[c] * amount);</a>
+<a name="ln589">    }</a>
+<a name="ln590">  }</a>
+<a name="ln591">}</a>
+<a name="ln592"> </a>
+<a name="ln593">#if defined(__SSE2__)</a>
+<a name="ln594">static void eaw_synthesize_sse2(float *const out, const float *const in, const float *const detail,</a>
+<a name="ln595">                                const float *thrsf, const float *boostf, const int32_t width,</a>
+<a name="ln596">                                const int32_t height)</a>
+<a name="ln597">{</a>
+<a name="ln598">  const __m128 threshold = _mm_set_ps(thrsf[3], thrsf[2], thrsf[1], thrsf[0]);</a>
+<a name="ln599">  const __m128 boost = _mm_set_ps(boostf[3], boostf[2], boostf[1], boostf[0]);</a>
+<a name="ln600"> </a>
+<a name="ln601">#ifdef _OPENMP</a>
+<a name="ln602">#pragma omp parallel for default(none) \</a>
+<a name="ln603">  dt_omp_firstprivate(boost, detail, height, in, out, threshold, width) \</a>
+<a name="ln604">  schedule(static)</a>
+<a name="ln605">#endif</a>
+<a name="ln606">  for(int j = 0; j &lt; height; j++)</a>
+<a name="ln607">  {</a>
+<a name="ln608">    // TODO: prefetch? _mm_prefetch()</a>
+<a name="ln609">    const __m128 *pin = (__m128 *)in + (size_t)j * width;</a>
+<a name="ln610">    __m128 *pdetail = (__m128 *)detail + (size_t)j * width;</a>
+<a name="ln611">    float *pout = out + (size_t)4 * j * width;</a>
+<a name="ln612">    for(int i = 0; i &lt; width; i++)</a>
+<a name="ln613">    {</a>
+<a name="ln614">      const __m128i maski = _mm_set1_epi32(0x80000000u);</a>
+<a name="ln615">      const __m128 *mask = (__m128 *)&amp;maski;</a>
+<a name="ln616">      const __m128 absamt</a>
+<a name="ln617">          = _mm_max_ps(_mm_setzero_ps(), _mm_sub_ps(_mm_andnot_ps(*mask, *pdetail), threshold));</a>
+<a name="ln618">      const __m128 amount = _mm_or_ps(_mm_and_ps(*pdetail, *mask), absamt);</a>
+<a name="ln619">      _mm_stream_ps(pout, _mm_add_ps(*pin, _mm_mul_ps(boost, amount)));</a>
+<a name="ln620">      pdetail++;</a>
+<a name="ln621">      pin++;</a>
+<a name="ln622">      pout += 4;</a>
+<a name="ln623">    }</a>
+<a name="ln624">  }</a>
+<a name="ln625">  _mm_sfence();</a>
+<a name="ln626">}</a>
+<a name="ln627">#endif</a>
+<a name="ln628"> </a>
+<a name="ln629">static int get_samples(float *t, const dt_iop_atrous_data_t *const d, const dt_iop_roi_t *roi_in,</a>
+<a name="ln630">                       const dt_dev_pixelpipe_iop_t *const piece)</a>
+<a name="ln631">{</a>
+<a name="ln632">  const float scale = roi_in-&gt;scale;</a>
+<a name="ln633">  const float supp0</a>
+<a name="ln634">      = MIN(2 * (2 &lt;&lt; (MAX_NUM_SCALES - 1)) + 1, MAX(piece-&gt;buf_in.height, piece-&gt;buf_in.width) * 0.2f);</a>
+<a name="ln635">  const float i0 = dt_log2f((supp0 - 1.0f) * .5f);</a>
+<a name="ln636">  int i = 0;</a>
+<a name="ln637">  for(; i &lt; MAX_NUM_SCALES; i++)</a>
+<a name="ln638">  {</a>
+<a name="ln639">    // actual filter support on scaled buffer</a>
+<a name="ln640">    const float supp = 2 * (2 &lt;&lt; i) + 1;</a>
+<a name="ln641">    // approximates this filter size on unscaled input image:</a>
+<a name="ln642">    const float supp_in = supp * (1.0f / scale);</a>
+<a name="ln643">    const float i_in = dt_log2f((supp_in - 1) * .5f) - 1.0f;</a>
+<a name="ln644">    t[i] = 1.0f - (i_in + .5f) / i0;</a>
+<a name="ln645">    if(t[i] &lt; 0.0f) break;</a>
+<a name="ln646">  }</a>
+<a name="ln647">  return i;</a>
+<a name="ln648">}</a>
+<a name="ln649"> </a>
+<a name="ln650">static int get_scales(float (*thrs)[4], float (*boost)[4], float *sharp, const dt_iop_atrous_data_t *const d,</a>
+<a name="ln651">                      const dt_iop_roi_t *roi_in, const dt_dev_pixelpipe_iop_t *const piece)</a>
+<a name="ln652">{</a>
+<a name="ln653">  // we want coeffs to span max 20% of the image</a>
+<a name="ln654">  // finest is 5x5 filter</a>
+<a name="ln655">  //</a>
+<a name="ln656">  // 1:1 : w=20% buf_in.width                     w=5x5</a>
+<a name="ln657">  //     : ^ ...            ....            ....  ^</a>
+<a name="ln658">  // buf :  17x17  9x9  5x5     2*2^k+1</a>
+<a name="ln659">  // .....</a>
+<a name="ln660">  // . . . . .</a>
+<a name="ln661">  // .   .   .   .   .</a>
+<a name="ln662">  // cut off too fine ones, if image is not detailed enough (due to roi_in-&gt;scale)</a>
+<a name="ln663">  const float scale = roi_in-&gt;scale / piece-&gt;iscale;</a>
+<a name="ln664">  // largest desired filter on input buffer (20% of input dim)</a>
+<a name="ln665">  const float supp0</a>
+<a name="ln666">      = MIN(2 * (2 &lt;&lt; (MAX_NUM_SCALES - 1)) + 1,</a>
+<a name="ln667">            MAX(piece-&gt;buf_in.height * piece-&gt;iscale, piece-&gt;buf_in.width * piece-&gt;iscale) * 0.2f);</a>
+<a name="ln668">  const float i0 = dt_log2f((supp0 - 1.0f) * .5f);</a>
+<a name="ln669">  int i = 0;</a>
+<a name="ln670">  for(; i &lt; MAX_NUM_SCALES; i++)</a>
+<a name="ln671">  {</a>
+<a name="ln672">    // actual filter support on scaled buffer</a>
+<a name="ln673">    const float supp = 2 * (2 &lt;&lt; i) + 1;</a>
+<a name="ln674">    // approximates this filter size on unscaled input image:</a>
+<a name="ln675">    const float supp_in = supp * (1.0f / scale);</a>
+<a name="ln676">    const float i_in = dt_log2f((supp_in - 1) * .5f) - 1.0f;</a>
+<a name="ln677">    // i_in = max_scale .. .. .. 0</a>
+<a name="ln678">    const float t = 1.0f - (i_in + .5f) / i0;</a>
+<a name="ln679">    boost[i][3] = boost[i][0] = 2.0f * dt_draw_curve_calc_value(d-&gt;curve[atrous_L], t);</a>
+<a name="ln680">    boost[i][1] = boost[i][2] = 2.0f * dt_draw_curve_calc_value(d-&gt;curve[atrous_c], t);</a>
+<a name="ln681">    for(int k = 0; k &lt; 4; k++) boost[i][k] *= boost[i][k];</a>
+<a name="ln682">    thrs[i][0] = thrs[i][3] = powf(2.0f, -7.0f * (1.0f - t)) * 10.0f</a>
+<a name="ln683">                              * dt_draw_curve_calc_value(d-&gt;curve[atrous_Lt], t);</a>
+<a name="ln684">    thrs[i][1] = thrs[i][2] = powf(2.0f, -7.0f * (1.0f - t)) * 20.0f</a>
+<a name="ln685">                              * dt_draw_curve_calc_value(d-&gt;curve[atrous_ct], t);</a>
+<a name="ln686">    sharp[i] = 0.0025f * dt_draw_curve_calc_value(d-&gt;curve[atrous_s], t);</a>
+<a name="ln687">    // printf(&quot;scale %d boost %f %f thrs %f %f sharpen %f\n&quot;, i, boost[i][0], boost[i][2], thrs[i][0],</a>
+<a name="ln688">    // thrs[i][1], sharp[i]);</a>
+<a name="ln689">    if(t &lt; 0.0f) break;</a>
+<a name="ln690">  }</a>
+<a name="ln691">  // ensure that return value max_scale is such that</a>
+<a name="ln692">  // 2 * 2 *(1 &lt;&lt; max_scale) &lt;= min(width, height)</a>
+<a name="ln693">  const int max_scale_roi = (int)floorf(dt_log2f((float)MIN(roi_in-&gt;width, roi_in-&gt;height))) - 2;</a>
+<a name="ln694">  return MIN(max_scale_roi, i);</a>
+<a name="ln695">}</a>
+<a name="ln696"> </a>
+<a name="ln697">/* just process the supplied image buffer, upstream default_process_tiling() does the rest */</a>
+<a name="ln698">static void process_wavelets(struct dt_iop_module_t *self, struct dt_dev_pixelpipe_iop_t *piece,</a>
+<a name="ln699">                             const void *const i, void *const o, const dt_iop_roi_t *const roi_in,</a>
+<a name="ln700">                             const dt_iop_roi_t *const roi_out, const eaw_decompose_t decompose,</a>
+<a name="ln701">                             const eaw_synthesize_t synthesize)</a>
+<a name="ln702">{</a>
+<a name="ln703">  dt_iop_atrous_data_t *d = (dt_iop_atrous_data_t *)piece-&gt;data;</a>
+<a name="ln704">  float thrs[MAX_NUM_SCALES][4];</a>
+<a name="ln705">  float boost[MAX_NUM_SCALES][4];</a>
+<a name="ln706">  float sharp[MAX_NUM_SCALES];</a>
+<a name="ln707">  const int max_scale = get_scales(thrs, boost, sharp, d, roi_in, piece);</a>
+<a name="ln708"> </a>
+<a name="ln709">  if(self-&gt;dev-&gt;gui_attached &amp;&amp; piece-&gt;pipe-&gt;type == DT_DEV_PIXELPIPE_FULL)</a>
+<a name="ln710">  {</a>
+<a name="ln711">    dt_iop_atrous_gui_data_t *g = (dt_iop_atrous_gui_data_t *)self-&gt;gui_data;</a>
+<a name="ln712">    g-&gt;num_samples = get_samples(g-&gt;sample, d, roi_in, piece);</a>
+<a name="ln713">    // tries to acquire gdk lock and this prone to deadlock:</a>
+<a name="ln714">    // dt_control_queue_draw(GTK_WIDGET(g-&gt;area));</a>
+<a name="ln715">  }</a>
+<a name="ln716"> </a>
+<a name="ln717">  float *detail[MAX_NUM_SCALES] = { NULL };</a>
+<a name="ln718">  float *tmp = NULL;</a>
+<a name="ln719">  float *buf2 = NULL;</a>
+<a name="ln720">  float *buf1 = NULL;</a>
+<a name="ln721"> </a>
+<a name="ln722">  const int width = roi_out-&gt;width;</a>
+<a name="ln723">  const int height = roi_out-&gt;height;</a>
+<a name="ln724"> </a>
+<a name="ln725">  tmp = (float *)dt_alloc_align(64, (size_t)sizeof(float) * 4 * width * height);</a>
+<a name="ln726">  if(tmp == NULL)</a>
+<a name="ln727">  {</a>
+<a name="ln728">    fprintf(stderr, &quot;[atrous] failed to allocate coarse buffer!\n&quot;);</a>
+<a name="ln729">    goto error;</a>
+<a name="ln730">  }</a>
+<a name="ln731"> </a>
+<a name="ln732">  for(int k = 0; k &lt; max_scale; k++)</a>
+<a name="ln733">  {</a>
+<a name="ln734">    detail[k] = (float *)dt_alloc_align(64, (size_t)sizeof(float) * 4 * width * height);</a>
+<a name="ln735">    if(detail[k] == NULL)</a>
+<a name="ln736">    {</a>
+<a name="ln737">      fprintf(stderr, &quot;[atrous] failed to allocate one of the detail buffers!\n&quot;);</a>
+<a name="ln738">      goto error;</a>
+<a name="ln739">    }</a>
+<a name="ln740">  }</a>
+<a name="ln741"> </a>
+<a name="ln742">  buf1 = (float *)i;</a>
+<a name="ln743">  buf2 = tmp;</a>
+<a name="ln744"> </a>
+<a name="ln745">  for(int scale = 0; scale &lt; max_scale; scale++)</a>
+<a name="ln746">  {</a>
+<a name="ln747">    decompose(buf2, buf1, detail[scale], scale, sharp[scale], width, height);</a>
+<a name="ln748">    if(scale == 0) buf1 = (float *)o; // now switch to (float *)o for buffer ping-pong between buf1 and buf2</a>
+<a name="ln749">    float *buf3 = buf2;</a>
+<a name="ln750">    buf2 = buf1;</a>
+<a name="ln751">    buf1 = buf3;</a>
+<a name="ln752">  }</a>
+<a name="ln753"> </a>
+<a name="ln754">  for(int scale = max_scale - 1; scale &gt;= 0; scale--)</a>
+<a name="ln755">  {</a>
+<a name="ln756">    synthesize(buf2, buf1, detail[scale], thrs[scale], boost[scale], width, height);</a>
+<a name="ln757">    float *buf3 = buf2;</a>
+<a name="ln758">    buf2 = buf1;</a>
+<a name="ln759">    buf1 = buf3;</a>
+<a name="ln760">  }</a>
+<a name="ln761">  /* due to symmetric processing, output will be left in (float *)o */</a>
+<a name="ln762"> </a>
+<a name="ln763">  for(int k = 0; k &lt; max_scale; k++) dt_free_align(detail[k]);</a>
+<a name="ln764">  dt_free_align(tmp);</a>
+<a name="ln765"> </a>
+<a name="ln766">  if(piece-&gt;pipe-&gt;mask_display &amp; DT_DEV_PIXELPIPE_DISPLAY_MASK) dt_iop_alpha_copy(i, o, width, height);</a>
+<a name="ln767"> </a>
+<a name="ln768">  return;</a>
+<a name="ln769"> </a>
+<a name="ln770">error:</a>
+<a name="ln771">  for(int k = 0; k &lt; max_scale; k++)</a>
+<a name="ln772">    if(detail[k] != NULL) dt_free_align(detail[k]);</a>
+<a name="ln773">  if(tmp != NULL) dt_free_align(tmp);</a>
+<a name="ln774">  return;</a>
+<a name="ln775">}</a>
+<a name="ln776"> </a>
+<a name="ln777">void process(struct dt_iop_module_t *self, struct dt_dev_pixelpipe_iop_t *piece, const void *const i,</a>
+<a name="ln778">             void *const o, const dt_iop_roi_t *const roi_in, const dt_iop_roi_t *const roi_out)</a>
+<a name="ln779">{</a>
+<a name="ln780">  process_wavelets(self, piece, i, o, roi_in, roi_out, eaw_decompose, eaw_synthesize);</a>
+<a name="ln781">}</a>
+<a name="ln782"> </a>
+<a name="ln783">#if defined(__SSE2__)</a>
+<a name="ln784">void process_sse2(struct dt_iop_module_t *self, struct dt_dev_pixelpipe_iop_t *piece, const void *const i,</a>
+<a name="ln785">                  void *const o, const dt_iop_roi_t *const roi_in, const dt_iop_roi_t *const roi_out)</a>
+<a name="ln786">{</a>
+<a name="ln787">  process_wavelets(self, piece, i, o, roi_in, roi_out, eaw_decompose_sse2, eaw_synthesize_sse2);</a>
+<a name="ln788">}</a>
+<a name="ln789">#endif</a>
+<a name="ln790"> </a>
+<a name="ln791">#ifdef HAVE_OPENCL</a>
+<a name="ln792">/* this version is adapted to the new global tiling mechanism. it no longer does tiling by itself. */</a>
+<a name="ln793">int process_cl(struct dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, cl_mem dev_in, cl_mem dev_out,</a>
+<a name="ln794">               const dt_iop_roi_t *const roi_in, const dt_iop_roi_t *const roi_out)</a>
+<a name="ln795">{</a>
+<a name="ln796">  dt_iop_atrous_data_t *d = (dt_iop_atrous_data_t *)piece-&gt;data;</a>
+<a name="ln797">  float thrs[MAX_NUM_SCALES][4];</a>
+<a name="ln798">  float boost[MAX_NUM_SCALES][4];</a>
+<a name="ln799">  float sharp[MAX_NUM_SCALES];</a>
+<a name="ln800">  const int max_scale = get_scales(thrs, boost, sharp, d, roi_in, piece);</a>
+<a name="ln801"> </a>
+<a name="ln802">  if(self-&gt;dev-&gt;gui_attached &amp;&amp; piece-&gt;pipe-&gt;type == DT_DEV_PIXELPIPE_FULL)</a>
+<a name="ln803">  {</a>
+<a name="ln804">    dt_iop_atrous_gui_data_t *g = (dt_iop_atrous_gui_data_t *)self-&gt;gui_data;</a>
+<a name="ln805">    g-&gt;num_samples = get_samples(g-&gt;sample, d, roi_in, piece);</a>
+<a name="ln806">    // dt_control_queue_redraw_widget(GTK_WIDGET(g-&gt;area));</a>
+<a name="ln807">    // tries to acquire gdk lock and this prone to deadlock:</a>
+<a name="ln808">    // dt_control_queue_draw(GTK_WIDGET(g-&gt;area));</a>
+<a name="ln809">  }</a>
+<a name="ln810"> </a>
+<a name="ln811">  dt_iop_atrous_global_data_t *gd = (dt_iop_atrous_global_data_t *)self-&gt;global_data;</a>
+<a name="ln812"> </a>
+<a name="ln813">  const int devid = piece-&gt;pipe-&gt;devid;</a>
+<a name="ln814">  cl_int err = -999;</a>
+<a name="ln815">  cl_mem dev_filter = NULL;</a>
+<a name="ln816">  cl_mem dev_tmp = NULL;</a>
+<a name="ln817">  cl_mem *dev_detail = calloc(max_scale, sizeof(cl_mem));</a>
+<a name="ln818"> </a>
+<a name="ln819">  float m[] = { 0.0625f, 0.25f, 0.375f, 0.25f, 0.0625f }; // 1/16, 4/16, 6/16, 4/16, 1/16</a>
+<a name="ln820">  float mm[5][5];</a>
+<a name="ln821">  for(int j = 0; j &lt; 5; j++)</a>
+<a name="ln822">    for(int i = 0; i &lt; 5; i++) mm[j][i] = m[i] * m[j];</a>
+<a name="ln823"> </a>
+<a name="ln824">  dev_filter = dt_opencl_copy_host_to_device_constant(devid, sizeof(float) * 25, mm);</a>
+<a name="ln825">  if(dev_filter == NULL) goto error;</a>
+<a name="ln826"> </a>
+<a name="ln827">  /* allocate space for a temporary buffer. we don't want to use dev_in in the buffer ping-pong below, as we</a>
+<a name="ln828">     need to keep it for blendops */</a>
+<a name="ln829">  dev_tmp = dt_opencl_alloc_device(devid, roi_out-&gt;width, roi_out-&gt;height, 4 * sizeof(float));</a>
+<a name="ln830">  if(dev_tmp == NULL) goto error;</a>
+<a name="ln831"> </a>
+<a name="ln832">  /* allocate space to store detail information. Requires a number of additional buffers, each with full image</a>
+<a name="ln833">   * size */</a>
+<a name="ln834">  for(int k = 0; k &lt; max_scale; k++)</a>
+<a name="ln835">  {</a>
+<a name="ln836">    dev_detail[k] = dt_opencl_alloc_device(devid, roi_out-&gt;width, roi_out-&gt;height, 4 * sizeof(float));</a>
+<a name="ln837">    if(dev_detail[k] == NULL) goto error;</a>
+<a name="ln838">  }</a>
+<a name="ln839"> </a>
+<a name="ln840">  const int width = roi_out-&gt;width;</a>
+<a name="ln841">  const int height = roi_out-&gt;height;</a>
+<a name="ln842">  size_t sizes[] = { ROUNDUPWD(width), ROUNDUPHT(height), 1 };</a>
+<a name="ln843">  size_t origin[] = { 0, 0, 0 };</a>
+<a name="ln844">  size_t region[] = { width, height, 1 };</a>
+<a name="ln845"> </a>
+<a name="ln846">  // copy original input from dev_in -&gt; dev_out as starting point</a>
+<a name="ln847">  err = dt_opencl_enqueue_copy_image(devid, dev_in, dev_out, origin, origin, region);</a>
+<a name="ln848">  if(err != CL_SUCCESS) goto error;</a>
+<a name="ln849"> </a>
+<a name="ln850">  /* decompose image into detail scales and coarse (the latter is left in dev_tmp or dev_out) */</a>
+<a name="ln851">  for(int s = 0; s &lt; max_scale; s++)</a>
+<a name="ln852">  {</a>
+<a name="ln853">    const int scale = s;</a>
+<a name="ln854"> </a>
+<a name="ln855">    if(s &amp; 1)</a>
+<a name="ln856">    {</a>
+<a name="ln857">      dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_decompose, 0, sizeof(cl_mem), (void *)&amp;dev_tmp);</a>
+<a name="ln858">      dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_decompose, 1, sizeof(cl_mem), (void *)&amp;dev_out);</a>
+<a name="ln859">    }</a>
+<a name="ln860">    else</a>
+<a name="ln861">    {</a>
+<a name="ln862">      dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_decompose, 0, sizeof(cl_mem), (void *)&amp;dev_out);</a>
+<a name="ln863">      dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_decompose, 1, sizeof(cl_mem), (void *)&amp;dev_tmp);</a>
+<a name="ln864">    }</a>
+<a name="ln865">    dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_decompose, 2, sizeof(cl_mem), (void *)&amp;dev_detail[s]);</a>
+<a name="ln866">    dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_decompose, 3, sizeof(int), (void *)&amp;width);</a>
+<a name="ln867">    dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_decompose, 4, sizeof(int), (void *)&amp;height);</a>
+<a name="ln868">    dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_decompose, 5, sizeof(unsigned int), (void *)&amp;scale);</a>
+<a name="ln869">    dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_decompose, 6, sizeof(float), (void *)&amp;sharp[s]);</a>
+<a name="ln870">    dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_decompose, 7, sizeof(cl_mem), (void *)&amp;dev_filter);</a>
+<a name="ln871"> </a>
+<a name="ln872">    err = dt_opencl_enqueue_kernel_2d(devid, gd-&gt;kernel_decompose, sizes);</a>
+<a name="ln873">    if(err != CL_SUCCESS) goto error;</a>
+<a name="ln874"> </a>
+<a name="ln875">    // indirectly give gpu some air to breathe (and to do display related stuff)</a>
+<a name="ln876">    dt_iop_nap(darktable.opencl-&gt;micro_nap);</a>
+<a name="ln877">  }</a>
+<a name="ln878"> </a>
+<a name="ln879">  /* now synthesize again */</a>
+<a name="ln880">  for(int scale = max_scale - 1; scale &gt;= 0; scale--)</a>
+<a name="ln881">  {</a>
+<a name="ln882">    if(scale &amp; 1)</a>
+<a name="ln883">    {</a>
+<a name="ln884">      dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_synthesize, 0, sizeof(cl_mem), (void *)&amp;dev_tmp);</a>
+<a name="ln885">      dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_synthesize, 1, sizeof(cl_mem), (void *)&amp;dev_out);</a>
+<a name="ln886">    }</a>
+<a name="ln887">    else</a>
+<a name="ln888">    {</a>
+<a name="ln889">      dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_synthesize, 0, sizeof(cl_mem), (void *)&amp;dev_out);</a>
+<a name="ln890">      dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_synthesize, 1, sizeof(cl_mem), (void *)&amp;dev_tmp);</a>
+<a name="ln891">    }</a>
+<a name="ln892"> </a>
+<a name="ln893">    dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_synthesize, 2, sizeof(cl_mem), (void *)&amp;dev_detail[scale]);</a>
+<a name="ln894">    dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_synthesize, 3, sizeof(int), (void *)&amp;width);</a>
+<a name="ln895">    dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_synthesize, 4, sizeof(int), (void *)&amp;height);</a>
+<a name="ln896">    dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_synthesize, 5, sizeof(float), (void *)&amp;thrs[scale][0]);</a>
+<a name="ln897">    dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_synthesize, 6, sizeof(float), (void *)&amp;thrs[scale][1]);</a>
+<a name="ln898">    dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_synthesize, 7, sizeof(float), (void *)&amp;thrs[scale][2]);</a>
+<a name="ln899">    dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_synthesize, 8, sizeof(float), (void *)&amp;thrs[scale][3]);</a>
+<a name="ln900">    dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_synthesize, 9, sizeof(float), (void *)&amp;boost[scale][0]);</a>
+<a name="ln901">    dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_synthesize, 10, sizeof(float), (void *)&amp;boost[scale][1]);</a>
+<a name="ln902">    dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_synthesize, 11, sizeof(float), (void *)&amp;boost[scale][2]);</a>
+<a name="ln903">    dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_synthesize, 12, sizeof(float), (void *)&amp;boost[scale][3]);</a>
+<a name="ln904"> </a>
+<a name="ln905">    err = dt_opencl_enqueue_kernel_2d(devid, gd-&gt;kernel_synthesize, sizes);</a>
+<a name="ln906">    if(err != CL_SUCCESS) goto error;</a>
+<a name="ln907"> </a>
+<a name="ln908">    // indirectly give gpu some air to breathe (and to do display related stuff)</a>
+<a name="ln909">    dt_iop_nap(darktable.opencl-&gt;micro_nap);</a>
+<a name="ln910">  }</a>
+<a name="ln911"> </a>
+<a name="ln912">  if(!darktable.opencl-&gt;async_pixelpipe || piece-&gt;pipe-&gt;type == DT_DEV_PIXELPIPE_EXPORT)</a>
+<a name="ln913">    dt_opencl_finish(devid);</a>
+<a name="ln914"> </a>
+<a name="ln915">  dt_opencl_release_mem_object(dev_filter);</a>
+<a name="ln916">  dt_opencl_release_mem_object(dev_tmp);</a>
+<a name="ln917">  for(int k = 0; k &lt; max_scale; k++)</a>
+<a name="ln918">    dt_opencl_release_mem_object(dev_detail[k]);</a>
+<a name="ln919">  free(dev_detail);</a>
+<a name="ln920">  return TRUE;</a>
+<a name="ln921"> </a>
+<a name="ln922">error:</a>
+<a name="ln923">  dt_opencl_release_mem_object(dev_filter);</a>
+<a name="ln924">  dt_opencl_release_mem_object(dev_tmp);</a>
+<a name="ln925">  for(int k = 0; k &lt; max_scale; k++)</a>
+<a name="ln926">    dt_opencl_release_mem_object(dev_detail[k]);</a>
+<a name="ln927">  free(dev_detail);</a>
+<a name="ln928">  dt_print(DT_DEBUG_OPENCL, &quot;[opencl_atrous] couldn't enqueue kernel! %d\n&quot;, err);</a>
+<a name="ln929">  return FALSE;</a>
+<a name="ln930">}</a>
+<a name="ln931">#endif</a>
+<a name="ln932"> </a>
+<a name="ln933">void tiling_callback(struct dt_iop_module_t *self, struct dt_dev_pixelpipe_iop_t *piece,</a>
+<a name="ln934">                     const dt_iop_roi_t *roi_in, const dt_iop_roi_t *roi_out,</a>
+<a name="ln935">                     struct dt_develop_tiling_t *tiling)</a>
+<a name="ln936">{</a>
+<a name="ln937">  dt_iop_atrous_data_t *d = (dt_iop_atrous_data_t *)piece-&gt;data;</a>
+<a name="ln938">  float thrs[MAX_NUM_SCALES][4];</a>
+<a name="ln939">  float boost[MAX_NUM_SCALES][4];</a>
+<a name="ln940">  float sharp[MAX_NUM_SCALES];</a>
+<a name="ln941">  const int max_scale = get_scales(thrs, boost, sharp, d, roi_in, piece);</a>
+<a name="ln942">  const int max_filter_radius = 2 * (1 &lt;&lt; max_scale); // 2 * 2^max_scale</a>
+<a name="ln943"> </a>
+<a name="ln944">  tiling-&gt;factor = 3.0f + max_scale; // in + out + tmp + scale buffers</a>
+<a name="ln945">  tiling-&gt;maxbuf = 1.0f;</a>
+<a name="ln946">  tiling-&gt;overhead = 0;</a>
+<a name="ln947">  tiling-&gt;overlap = max_filter_radius;</a>
+<a name="ln948">  tiling-&gt;xalign = 1;</a>
+<a name="ln949">  tiling-&gt;yalign = 1;</a>
+<a name="ln950">  return;</a>
+<a name="ln951">}</a>
+<a name="ln952"> </a>
+<a name="ln953">void init(dt_iop_module_t *module)</a>
+<a name="ln954">{</a>
+<a name="ln955">  module-&gt;params = calloc(1, sizeof(dt_iop_atrous_params_t));</a>
+<a name="ln956">  module-&gt;default_params = calloc(1, sizeof(dt_iop_atrous_params_t));</a>
+<a name="ln957">  module-&gt;default_enabled = 0;</a>
+<a name="ln958">  module-&gt;params_size = sizeof(dt_iop_atrous_params_t);</a>
+<a name="ln959">  module-&gt;gui_data = NULL;</a>
+<a name="ln960">  dt_iop_atrous_params_t tmp;</a>
+<a name="ln961">  tmp.octaves = 3;</a>
+<a name="ln962">  for(int k = 0; k &lt; BANDS; k++)</a>
+<a name="ln963">  {</a>
+<a name="ln964">    tmp.y[atrous_L][k] = tmp.y[atrous_s][k] = tmp.y[atrous_c][k] = 0.5f;</a>
+<a name="ln965">    tmp.x[atrous_L][k] = tmp.x[atrous_s][k] = tmp.x[atrous_c][k] = k / (BANDS - 1.0f);</a>
+<a name="ln966">    tmp.y[atrous_Lt][k] = tmp.y[atrous_ct][k] = 0.0f;</a>
+<a name="ln967">    tmp.x[atrous_Lt][k] = tmp.x[atrous_ct][k] = k / (BANDS - 1.0f);</a>
+<a name="ln968">  }</a>
+<a name="ln969">  memcpy(module-&gt;params, &amp;tmp, sizeof(dt_iop_atrous_params_t));</a>
+<a name="ln970">  memcpy(module-&gt;default_params, &amp;tmp, sizeof(dt_iop_atrous_params_t));</a>
+<a name="ln971">}</a>
+<a name="ln972"> </a>
+<a name="ln973">void init_global(dt_iop_module_so_t *module)</a>
+<a name="ln974">{</a>
+<a name="ln975">  const int program = 1; // from programs.conf</a>
+<a name="ln976">  dt_iop_atrous_global_data_t *gd</a>
+<a name="ln977">      = (dt_iop_atrous_global_data_t *)malloc(sizeof(dt_iop_atrous_global_data_t));</a>
+<a name="ln978">  module-&gt;data = gd;</a>
+<a name="ln979">  gd-&gt;kernel_decompose = dt_opencl_create_kernel(program, &quot;eaw_decompose&quot;);</a>
+<a name="ln980">  gd-&gt;kernel_synthesize = dt_opencl_create_kernel(program, &quot;eaw_synthesize&quot;);</a>
+<a name="ln981">}</a>
+<a name="ln982"> </a>
+<a name="ln983">void cleanup(dt_iop_module_t *module)</a>
+<a name="ln984">{</a>
+<a name="ln985">  free(module-&gt;params);</a>
+<a name="ln986">  module-&gt;params = NULL;</a>
+<a name="ln987">}</a>
+<a name="ln988"> </a>
+<a name="ln989">void cleanup_global(dt_iop_module_so_t *module)</a>
+<a name="ln990">{</a>
+<a name="ln991">  dt_iop_atrous_global_data_t *gd = (dt_iop_atrous_global_data_t *)module-&gt;data;</a>
+<a name="ln992">  dt_opencl_free_kernel(gd-&gt;kernel_decompose);</a>
+<a name="ln993">  dt_opencl_free_kernel(gd-&gt;kernel_synthesize);</a>
+<a name="ln994">  free(module-&gt;data);</a>
+<a name="ln995">  module-&gt;data = NULL;</a>
+<a name="ln996">}</a>
+<a name="ln997"> </a>
+<a name="ln998">void commit_params(struct dt_iop_module_t *self, dt_iop_params_t *params, dt_dev_pixelpipe_t *pipe,</a>
+<a name="ln999">                   dt_dev_pixelpipe_iop_t *piece)</a>
+<a name="ln1000">{</a>
+<a name="ln1001">  dt_iop_atrous_params_t *p = (dt_iop_atrous_params_t *)params;</a>
+<a name="ln1002">  dt_iop_atrous_data_t *d = (dt_iop_atrous_data_t *)piece-&gt;data;</a>
+<a name="ln1003">#if 0</a>
+<a name="ln1004">  printf(&quot;---------- atrous preset begin\n&quot;);</a>
+<a name="ln1005">  printf(&quot;p.octaves = %d;\n&quot;, p-&gt;octaves);</a>
+<a name="ln1006">  for(int ch=0; ch&lt;atrous_none; ch++) for(int k=0; k&lt;BANDS; k++)</a>
+<a name="ln1007">    {</a>
+<a name="ln1008">      printf(&quot;p.x[%d][%d] = %f;\n&quot;, ch, k, p-&gt;x[ch][k]);</a>
+<a name="ln1009">      printf(&quot;p.y[%d][%d] = %f;\n&quot;, ch, k, p-&gt;y[ch][k]);</a>
+<a name="ln1010">    }</a>
+<a name="ln1011">  printf(&quot;---------- atrous preset end\n&quot;);</a>
+<a name="ln1012">#endif</a>
+<a name="ln1013">  d-&gt;octaves = p-&gt;octaves;</a>
+<a name="ln1014">  for(int ch = 0; ch &lt; atrous_none; ch++)</a>
+<a name="ln1015">    for(int k = 0; k &lt; BANDS; k++) dt_draw_curve_set_point(d-&gt;curve[ch], k, p-&gt;x[ch][k], p-&gt;y[ch][k]);</a>
+<a name="ln1016">  int l = 0;</a>
+<a name="ln1017">  for(int k = (int)MIN(pipe-&gt;iwidth * pipe-&gt;iscale, pipe-&gt;iheight * pipe-&gt;iscale); k; k &gt;&gt;= 1) l++;</a>
+<a name="ln1018">  d-&gt;octaves = MIN(BANDS, l);</a>
+<a name="ln1019">}</a>
+<a name="ln1020"> </a>
+<a name="ln1021">void init_pipe(struct dt_iop_module_t *self, dt_dev_pixelpipe_t *pipe, dt_dev_pixelpipe_iop_t *piece)</a>
+<a name="ln1022">{</a>
+<a name="ln1023">  dt_iop_atrous_data_t *d = (dt_iop_atrous_data_t *)malloc(sizeof(dt_iop_atrous_data_t));</a>
+<a name="ln1024">  dt_iop_atrous_params_t *default_params = (dt_iop_atrous_params_t *)self-&gt;default_params;</a>
+<a name="ln1025">  piece-&gt;data = (void *)d;</a>
+<a name="ln1026">  for(int ch = 0; ch &lt; atrous_none; ch++)</a>
+<a name="ln1027">  {</a>
+<a name="ln1028">    d-&gt;curve[ch] = dt_draw_curve_new(0.0, 1.0, CATMULL_ROM);</a>
+<a name="ln1029">    for(int k = 0; k &lt; BANDS; k++)</a>
+<a name="ln1030">      (void)dt_draw_curve_add_point(d-&gt;curve[ch], default_params-&gt;x[ch][k], default_params-&gt;y[ch][k]);</a>
+<a name="ln1031">  }</a>
+<a name="ln1032">  int l = 0;</a>
+<a name="ln1033">  for(int k = (int)MIN(pipe-&gt;iwidth * pipe-&gt;iscale, pipe-&gt;iheight * pipe-&gt;iscale); k; k &gt;&gt;= 1) l++;</a>
+<a name="ln1034">  d-&gt;octaves = MIN(BANDS, l);</a>
+<a name="ln1035">}</a>
+<a name="ln1036"> </a>
+<a name="ln1037">void cleanup_pipe(struct dt_iop_module_t *self, dt_dev_pixelpipe_t *pipe, dt_dev_pixelpipe_iop_t *piece)</a>
+<a name="ln1038">{</a>
+<a name="ln1039">  dt_iop_atrous_data_t *d = (dt_iop_atrous_data_t *)(piece-&gt;data);</a>
+<a name="ln1040">  for(int ch = 0; ch &lt; atrous_none; ch++) dt_draw_curve_destroy(d-&gt;curve[ch]);</a>
+<a name="ln1041">  free(piece-&gt;data);</a>
+<a name="ln1042">  piece-&gt;data = NULL;</a>
+<a name="ln1043">}</a>
+<a name="ln1044"> </a>
+<a name="ln1045">#define GAUSS(x, sigma) expf( -(1.0f - x) * (1.0f - x) / (sigma * sigma)) / (2.0 * sigma * powf(M_PI, 0.5f))</a>
+<a name="ln1046"> </a>
+<a name="ln1047">void init_presets(dt_iop_module_so_t *self)</a>
+<a name="ln1048">{</a>
+<a name="ln1049">  DT_DEBUG_SQLITE3_EXEC(dt_database_get(darktable.db), &quot;BEGIN&quot;, NULL, NULL, NULL);</a>
+<a name="ln1050">  dt_iop_atrous_params_t p;</a>
+<a name="ln1051">  p.octaves = 7;</a>
+<a name="ln1052"> </a>
+<a name="ln1053">  for(int k = 0; k &lt; BANDS; k++)</a>
+<a name="ln1054">  {</a>
+<a name="ln1055">    p.x[atrous_L][k] = k / (BANDS - 1.0);</a>
+<a name="ln1056">    p.x[atrous_c][k] = k / (BANDS - 1.0);</a>
+<a name="ln1057">    p.x[atrous_s][k] = k / (BANDS - 1.0);</a>
+<a name="ln1058">    p.y[atrous_L][k] = fmaxf(.5f, .75f - .5f * k / (BANDS - 1.0));</a>
+<a name="ln1059">    p.y[atrous_c][k] = fmaxf(.5f, .55f - .5f * k / (BANDS - 1.0));</a>
+<a name="ln1060">    p.y[atrous_s][k] = fminf(.5f, .2f + .35f * k / (BANDS - 1.0));</a>
+<a name="ln1061">    p.x[atrous_Lt][k] = k / (BANDS - 1.0);</a>
+<a name="ln1062">    p.x[atrous_ct][k] = k / (BANDS - 1.0);</a>
+<a name="ln1063">    p.y[atrous_Lt][k] = 0.0f;</a>
+<a name="ln1064">    p.y[atrous_ct][k] = 0.0f;</a>
+<a name="ln1065">  }</a>
+<a name="ln1066">  dt_gui_presets_add_generic(C_(&quot;eq_preset&quot;, &quot;coarse&quot;), self-&gt;op, self-&gt;version(), &amp;p, sizeof(p), 1);</a>
+<a name="ln1067">  for(int k = 0; k &lt; BANDS; k++)</a>
+<a name="ln1068">  {</a>
+<a name="ln1069">    p.x[atrous_L][k] = k / (BANDS - 1.0);</a>
+<a name="ln1070">    p.x[atrous_c][k] = k / (BANDS - 1.0);</a>
+<a name="ln1071">    p.x[atrous_s][k] = k / (BANDS - 1.0);</a>
+<a name="ln1072">    p.y[atrous_L][k] = .5f + .25f * k / (float)BANDS;</a>
+<a name="ln1073">    p.y[atrous_c][k] = .5f;</a>
+<a name="ln1074">    p.y[atrous_s][k] = .5f;</a>
+<a name="ln1075">    p.x[atrous_Lt][k] = k / (BANDS - 1.0);</a>
+<a name="ln1076">    p.x[atrous_ct][k] = k / (BANDS - 1.0);</a>
+<a name="ln1077">    p.y[atrous_Lt][k] = .2f * k / (float)BANDS;</a>
+<a name="ln1078">    p.y[atrous_ct][k] = .3f * k / (float)BANDS;</a>
+<a name="ln1079">  }</a>
+<a name="ln1080">  dt_gui_presets_add_generic(_(&quot;denoise &amp; sharpen&quot;), self-&gt;op, self-&gt;version(), &amp;p, sizeof(p), 1);</a>
+<a name="ln1081">  for(int k = 0; k &lt; BANDS; k++)</a>
+<a name="ln1082">  {</a>
+<a name="ln1083">    p.x[atrous_L][k] = k / (BANDS - 1.0);</a>
+<a name="ln1084">    p.x[atrous_c][k] = k / (BANDS - 1.0);</a>
+<a name="ln1085">    p.x[atrous_s][k] = k / (BANDS - 1.0);</a>
+<a name="ln1086">    p.y[atrous_L][k] = .5f + .25f * k / (float)BANDS;</a>
+<a name="ln1087">    p.y[atrous_c][k] = .5f;</a>
+<a name="ln1088">    p.y[atrous_s][k] = .5f;</a>
+<a name="ln1089">    p.x[atrous_Lt][k] = k / (BANDS - 1.0);</a>
+<a name="ln1090">    p.x[atrous_ct][k] = k / (BANDS - 1.0);</a>
+<a name="ln1091">    p.y[atrous_Lt][k] = 0.0f;</a>
+<a name="ln1092">    p.y[atrous_ct][k] = 0.0f;</a>
+<a name="ln1093">  }</a>
+<a name="ln1094">  dt_gui_presets_add_generic(C_(&quot;atrous&quot;, &quot;sharpen&quot;), self-&gt;op, self-&gt;version(), &amp;p, sizeof(p), 1);</a>
+<a name="ln1095">  for(int k = 0; k &lt; BANDS; k++)</a>
+<a name="ln1096">  {</a>
+<a name="ln1097">    p.x[atrous_L][k] = k / (BANDS - 1.0);</a>
+<a name="ln1098">    p.x[atrous_c][k] = k / (BANDS - 1.0);</a>
+<a name="ln1099">    p.x[atrous_s][k] = k / (BANDS - 1.0);</a>
+<a name="ln1100">    p.y[atrous_L][k] = .5f;</a>
+<a name="ln1101">    p.y[atrous_c][k] = .5f;</a>
+<a name="ln1102">    p.y[atrous_s][k] = .0f;</a>
+<a name="ln1103">    p.x[atrous_Lt][k] = k / (BANDS - 1.0);</a>
+<a name="ln1104">    p.x[atrous_ct][k] = k / (BANDS - 1.0);</a>
+<a name="ln1105">    p.y[atrous_Lt][k] = .0f;</a>
+<a name="ln1106">    p.y[atrous_ct][k] = fmaxf(0.0f, (.60f * k / (float)BANDS) - 0.30f);</a>
+<a name="ln1107">  }</a>
+<a name="ln1108">  dt_gui_presets_add_generic(_(&quot;denoise chroma&quot;), self-&gt;op, self-&gt;version(), &amp;p, sizeof(p), 1);</a>
+<a name="ln1109">  for(int k = 0; k &lt; BANDS; k++)</a>
+<a name="ln1110">  {</a>
+<a name="ln1111">    p.x[atrous_L][k] = k / (BANDS - 1.0);</a>
+<a name="ln1112">    p.x[atrous_c][k] = k / (BANDS - 1.0);</a>
+<a name="ln1113">    p.x[atrous_s][k] = k / (BANDS - 1.0);</a>
+<a name="ln1114">    p.y[atrous_L][k] = .5f; //-.2f*k/(float)BANDS;</a>
+<a name="ln1115">    p.y[atrous_c][k] = .5f; // fmaxf(0.0f, .5f-.3f*k/(float)BANDS);</a>
+<a name="ln1116">    p.y[atrous_s][k] = .5f;</a>
+<a name="ln1117">    p.x[atrous_Lt][k] = k / (BANDS - 1.0);</a>
+<a name="ln1118">    p.x[atrous_ct][k] = k / (BANDS - 1.0);</a>
+<a name="ln1119">    p.y[atrous_Lt][k] = .2f * k / (float)BANDS;</a>
+<a name="ln1120">    p.y[atrous_ct][k] = .3f * k / (float)BANDS;</a>
+<a name="ln1121">  }</a>
+<a name="ln1122">  dt_gui_presets_add_generic(_(&quot;denoise&quot;), self-&gt;op, self-&gt;version(), &amp;p, sizeof(p), 1);</a>
+<a name="ln1123">  for(int k = 0; k &lt; BANDS; k++)</a>
+<a name="ln1124">  {</a>
+<a name="ln1125">    p.x[atrous_L][k] = k / (BANDS - 1.0);</a>
+<a name="ln1126">    p.x[atrous_c][k] = k / (BANDS - 1.0);</a>
+<a name="ln1127">    p.x[atrous_s][k] = k / (BANDS - 1.0);</a>
+<a name="ln1128">    p.y[atrous_L][k] = fminf(.5f, .3f + .35f * k / (BANDS - 1.0));</a>
+<a name="ln1129">    p.y[atrous_c][k] = .5f;</a>
+<a name="ln1130">    p.y[atrous_s][k] = .0f;</a>
+<a name="ln1131">    p.x[atrous_Lt][k] = k / (BANDS - 1.0);</a>
+<a name="ln1132">    p.x[atrous_ct][k] = k / (BANDS - 1.0);</a>
+<a name="ln1133">    p.y[atrous_Lt][k] = 0.0f;</a>
+<a name="ln1134">    p.y[atrous_ct][k] = 0.0f;</a>
+<a name="ln1135">  }</a>
+<a name="ln1136">  p.y[atrous_L][0] = .5f;</a>
+<a name="ln1137">  dt_gui_presets_add_generic(_(&quot;bloom&quot;), self-&gt;op, self-&gt;version(), &amp;p, sizeof(p), 1);</a>
+<a name="ln1138">  for(int k = 0; k &lt; BANDS; k++)</a>
+<a name="ln1139">  {</a>
+<a name="ln1140">    p.x[atrous_L][k] = k / (BANDS - 1.0);</a>
+<a name="ln1141">    p.x[atrous_c][k] = k / (BANDS - 1.0);</a>
+<a name="ln1142">    p.x[atrous_s][k] = k / (BANDS - 1.0);</a>
+<a name="ln1143">    p.y[atrous_L][k] = 0.6f;</a>
+<a name="ln1144">    p.y[atrous_c][k] = .55f;</a>
+<a name="ln1145">    p.y[atrous_s][k] = .0f;</a>
+<a name="ln1146">    p.x[atrous_Lt][k] = k / (BANDS - 1.0);</a>
+<a name="ln1147">    p.x[atrous_ct][k] = k / (BANDS - 1.0);</a>
+<a name="ln1148">    p.y[atrous_Lt][k] = 0.0f;</a>
+<a name="ln1149">    p.y[atrous_ct][k] = 0.0f;</a>
+<a name="ln1150">  }</a>
+<a name="ln1151">  dt_gui_presets_add_generic(_(&quot;clarity&quot;), self-&gt;op, self-&gt;version(), &amp;p, sizeof(p), 1);</a>
+<a name="ln1152"> </a>
+<a name="ln1153">  float sigma = 1 / (BANDS - 1.0);</a>
+<a name="ln1154"> </a>
+<a name="ln1155">  for(int k = 0; k &lt; BANDS; k++)</a>
+<a name="ln1156">  {</a>
+<a name="ln1157">    float x = log2f(128.0 * k / (BANDS - 1.0) + 1.0) / log2f(129.0);</a>
+<a name="ln1158">    float fine = GAUSS(x, 0.5 * sigma);</a>
+<a name="ln1159">    float medium = GAUSS(x, sigma);</a>
+<a name="ln1160">    float coarse = GAUSS(x, 2 * sigma);</a>
+<a name="ln1161">    float coeff = 0.5f + (coarse + medium + fine) / 18.0f;</a>
+<a name="ln1162">    float noise = (coarse + medium + fine) / 810;</a>
+<a name="ln1163"> </a>
+<a name="ln1164">    p.x[atrous_L][k] = p.x[atrous_c][k] = p.x[atrous_s][k] = x;</a>
+<a name="ln1165">    p.y[atrous_L][k] = p.y[atrous_c][k] = p.y[atrous_s][k] = coeff;</a>
+<a name="ln1166">    p.x[atrous_Lt][k] = p.x[atrous_ct][k] = x;</a>
+<a name="ln1167">    p.y[atrous_Lt][k] = p.y[atrous_ct][k] = noise;</a>
+<a name="ln1168">  }</a>
+<a name="ln1169">  dt_gui_presets_add_generic(_(&quot;deblur: large blur, strength 4&quot;), self-&gt;op, self-&gt;version(), &amp;p, sizeof(p), 1);</a>
+<a name="ln1170"> </a>
+<a name="ln1171">  for(int k = 0; k &lt; BANDS; k++)</a>
+<a name="ln1172">  {</a>
+<a name="ln1173">    float x = log2f(128.0 * k / (BANDS - 1.0) + 1.0) / log2f(129.0);</a>
+<a name="ln1174">    float fine = GAUSS(x, 0.5 * sigma);</a>
+<a name="ln1175">    float medium = GAUSS(x, sigma);</a>
+<a name="ln1176">    float coarse = GAUSS(x, 2 * sigma);</a>
+<a name="ln1177">    float coeff = 0.5f + (coarse + medium + fine) / 24.0f;</a>
+<a name="ln1178">    float noise = (coarse + medium + fine) / 1080;</a>
+<a name="ln1179"> </a>
+<a name="ln1180">    p.x[atrous_L][k] = p.x[atrous_c][k] = p.x[atrous_s][k] = x;</a>
+<a name="ln1181">    p.y[atrous_L][k] = p.y[atrous_c][k] = p.y[atrous_s][k] = coeff;</a>
+<a name="ln1182">    p.x[atrous_Lt][k] = p.x[atrous_ct][k] = x;</a>
+<a name="ln1183">    p.y[atrous_Lt][k] = p.y[atrous_ct][k] = noise;</a>
+<a name="ln1184">  }</a>
+<a name="ln1185">  dt_gui_presets_add_generic(_(&quot;deblur: large blur, strength 3&quot;), self-&gt;op, self-&gt;version(), &amp;p, sizeof(p), 1);</a>
+<a name="ln1186">  for(int k = 0; k &lt; BANDS; k++)</a>
+<a name="ln1187">  {</a>
+<a name="ln1188">    float x = log2f(128.0 * k / (BANDS - 1.0) + 1.0) / log2f(129.0);</a>
+<a name="ln1189">    float fine = GAUSS(x, 0.5 * sigma);</a>
+<a name="ln1190">    float medium = GAUSS(x, sigma);</a>
+<a name="ln1191">    float coeff = 0.5f + (medium + fine) / 21.0f;</a>
+<a name="ln1192">    float noise = (medium + fine) / 720;</a>
+<a name="ln1193"> </a>
+<a name="ln1194">    p.x[atrous_L][k] = p.x[atrous_c][k] = p.x[atrous_s][k] = x;</a>
+<a name="ln1195">    p.y[atrous_L][k] = p.y[atrous_c][k] = p.y[atrous_s][k] = coeff;</a>
+<a name="ln1196">    p.x[atrous_Lt][k] = p.x[atrous_ct][k] = x;</a>
+<a name="ln1197">    p.y[atrous_Lt][k] = p.y[atrous_ct][k] = noise;</a>
+<a name="ln1198">  }</a>
+<a name="ln1199">  dt_gui_presets_add_generic(_(&quot;deblur: medium blur, strength 3&quot;), self-&gt;op, self-&gt;version(), &amp;p, sizeof(p), 1);</a>
+<a name="ln1200">  for(int k = 0; k &lt; BANDS; k++)</a>
+<a name="ln1201">  {</a>
+<a name="ln1202">    float x = log2f(128.0 * k / (BANDS - 1.0) + 1.0) / log2f(129.0);</a>
+<a name="ln1203">    float fine = GAUSS(x, 0.5 * sigma);</a>
+<a name="ln1204">    float coeff = 0.5f + fine / 14.25f;</a>
+<a name="ln1205">    float noise = fine / 360;</a>
+<a name="ln1206"> </a>
+<a name="ln1207">    p.x[atrous_L][k] = p.x[atrous_c][k] = p.x[atrous_s][k] = x;</a>
+<a name="ln1208">    p.y[atrous_L][k] = p.y[atrous_c][k] = p.y[atrous_s][k] = coeff;</a>
+<a name="ln1209">    p.x[atrous_Lt][k] = p.x[atrous_ct][k] = x;</a>
+<a name="ln1210">    p.y[atrous_Lt][k] = p.y[atrous_ct][k] = noise;</a>
+<a name="ln1211">  }</a>
+<a name="ln1212">  dt_gui_presets_add_generic(_(&quot;deblur: fine blur, strength 3&quot;), self-&gt;op, self-&gt;version(), &amp;p, sizeof(p), 1);</a>
+<a name="ln1213"> </a>
+<a name="ln1214"> </a>
+<a name="ln1215">  for(int k = 0; k &lt; BANDS; k++)</a>
+<a name="ln1216">  {</a>
+<a name="ln1217">    float x = log2f(128.0 * k / (BANDS - 1.0) + 1.0) / log2f(129.0);</a>
+<a name="ln1218">    float fine = GAUSS(x, 0.5 * sigma);</a>
+<a name="ln1219">    float medium = GAUSS(x, sigma);</a>
+<a name="ln1220">    float coarse = GAUSS(x, 2 * sigma);</a>
+<a name="ln1221">    float coeff = 0.5f + (coarse + medium + fine) / 32.0f;</a>
+<a name="ln1222">    float noise = (coarse + medium + fine) / 1440;</a>
+<a name="ln1223"> </a>
+<a name="ln1224">    p.x[atrous_L][k] = p.x[atrous_c][k] = p.x[atrous_s][k] = x;</a>
+<a name="ln1225">    p.y[atrous_L][k] = p.y[atrous_c][k] = p.y[atrous_s][k] = coeff;</a>
+<a name="ln1226">    p.x[atrous_Lt][k] = p.x[atrous_ct][k] = x;</a>
+<a name="ln1227">    p.y[atrous_Lt][k] = p.y[atrous_ct][k] = noise;</a>
+<a name="ln1228">  }</a>
+<a name="ln1229">  dt_gui_presets_add_generic(_(&quot;deblur: large blur, strength 2&quot;), self-&gt;op, self-&gt;version(), &amp;p, sizeof(p), 1);</a>
+<a name="ln1230">  for(int k = 0; k &lt; BANDS; k++)</a>
+<a name="ln1231">  {</a>
+<a name="ln1232">    float x = log2f(128.0 * k / (BANDS - 1.0) + 1.0) / log2f(129.0);</a>
+<a name="ln1233">    float fine = GAUSS(x, 0.5 * sigma);</a>
+<a name="ln1234">    float medium = GAUSS(x, sigma);</a>
+<a name="ln1235">    float coeff = 0.5f + (medium + fine) / 28.0f;</a>
+<a name="ln1236">    float noise = (medium + fine) / 960;</a>
+<a name="ln1237"> </a>
+<a name="ln1238">    p.x[atrous_L][k] = p.x[atrous_c][k] = p.x[atrous_s][k] = x;</a>
+<a name="ln1239">    p.y[atrous_L][k] = p.y[atrous_c][k] = p.y[atrous_s][k] = coeff;</a>
+<a name="ln1240">    p.x[atrous_Lt][k] = p.x[atrous_ct][k] = x;</a>
+<a name="ln1241">    p.y[atrous_Lt][k] = p.y[atrous_ct][k] = noise;</a>
+<a name="ln1242">  }</a>
+<a name="ln1243">  dt_gui_presets_add_generic(_(&quot;deblur: medium blur, strength 2&quot;), self-&gt;op, self-&gt;version(), &amp;p, sizeof(p), 1);</a>
+<a name="ln1244">  for(int k = 0; k &lt; BANDS; k++)</a>
+<a name="ln1245">  {</a>
+<a name="ln1246">    float x = log2f(128.0 * k / (BANDS - 1.0) + 1.0) / log2f(129.0);</a>
+<a name="ln1247">    float fine = GAUSS(x, 0.5 * sigma);</a>
+<a name="ln1248">    float coeff = 0.5f + fine / 19.0f;</a>
+<a name="ln1249">    float noise = fine / 480;</a>
+<a name="ln1250"> </a>
+<a name="ln1251">    p.x[atrous_L][k] = p.x[atrous_c][k] = p.x[atrous_s][k] = x;</a>
+<a name="ln1252">    p.y[atrous_L][k] = p.y[atrous_c][k] = p.y[atrous_s][k] = coeff;</a>
+<a name="ln1253">    p.x[atrous_Lt][k] = p.x[atrous_ct][k] = x;</a>
+<a name="ln1254">    p.y[atrous_Lt][k] = p.y[atrous_ct][k] = noise;</a>
+<a name="ln1255">  }</a>
+<a name="ln1256">  dt_gui_presets_add_generic(_(&quot;deblur: fine blur, strength 2&quot;), self-&gt;op, self-&gt;version(), &amp;p, sizeof(p), 1);</a>
+<a name="ln1257"> </a>
+<a name="ln1258"> </a>
+<a name="ln1259">  for(int k = 0; k &lt; BANDS; k++)</a>
+<a name="ln1260">  {</a>
+<a name="ln1261">    float x = log2f(128.0 * k / (BANDS - 1.0) + 1.0) / log2f(129.0);</a>
+<a name="ln1262">    float fine = GAUSS(x, 0.5 * sigma);</a>
+<a name="ln1263">    float medium = GAUSS(x, sigma);</a>
+<a name="ln1264">    float coarse = GAUSS(x, 2 * sigma);</a>
+<a name="ln1265">    float coeff = 0.5f + (coarse + medium + fine) / 48.0f;</a>
+<a name="ln1266">    float noise = (coarse + medium + fine) / 2160;</a>
+<a name="ln1267"> </a>
+<a name="ln1268">    p.x[atrous_L][k] = p.x[atrous_c][k] = p.x[atrous_s][k] = x;</a>
+<a name="ln1269">    p.y[atrous_L][k] = p.y[atrous_c][k] = p.y[atrous_s][k] = coeff;</a>
+<a name="ln1270">    p.x[atrous_Lt][k] = p.x[atrous_ct][k] = x;</a>
+<a name="ln1271">    p.y[atrous_Lt][k] = p.y[atrous_ct][k] = noise;</a>
+<a name="ln1272">  }</a>
+<a name="ln1273">  dt_gui_presets_add_generic(_(&quot;deblur: large blur, strength 1&quot;), self-&gt;op, self-&gt;version(), &amp;p, sizeof(p), 1);</a>
+<a name="ln1274">  for(int k = 0; k &lt; BANDS; k++)</a>
+<a name="ln1275">  {</a>
+<a name="ln1276">    float x = log2f(128.0 * k / (BANDS - 1.0) + 1.0) / log2f(129.0);</a>
+<a name="ln1277">    float fine = GAUSS(x, 0.5 * sigma);</a>
+<a name="ln1278">    float medium = GAUSS(x, sigma);</a>
+<a name="ln1279">    float coeff = 0.5f + (medium + fine) / 42.0f;</a>
+<a name="ln1280">    float noise = (medium + fine) / 1440;</a>
+<a name="ln1281"> </a>
+<a name="ln1282">    p.x[atrous_L][k] = p.x[atrous_c][k] = p.x[atrous_s][k] = x;</a>
+<a name="ln1283">    p.y[atrous_L][k] = p.y[atrous_c][k] = p.y[atrous_s][k] = coeff;</a>
+<a name="ln1284">    p.x[atrous_Lt][k] = p.x[atrous_ct][k] = x;</a>
+<a name="ln1285">    p.y[atrous_Lt][k] = p.y[atrous_ct][k] = noise;</a>
+<a name="ln1286">  }</a>
+<a name="ln1287">  dt_gui_presets_add_generic(_(&quot;deblur: medium blur, strength 1&quot;), self-&gt;op, self-&gt;version(), &amp;p, sizeof(p), 1);</a>
+<a name="ln1288">  for(int k = 0; k &lt; BANDS; k++)</a>
+<a name="ln1289">  {</a>
+<a name="ln1290">    float x = log2f(128.0 * k / (BANDS - 1.0) + 1.0) / log2f(129.0);</a>
+<a name="ln1291">    float fine = GAUSS(x, 0.5 * sigma);</a>
+<a name="ln1292">    float coeff = 0.5f + fine / 28.5f;</a>
+<a name="ln1293">    float noise = fine / 720;</a>
+<a name="ln1294"> </a>
+<a name="ln1295">    p.x[atrous_L][k] = p.x[atrous_c][k] = p.x[atrous_s][k] = x;</a>
+<a name="ln1296">    p.y[atrous_L][k] = p.y[atrous_c][k] = p.y[atrous_s][k] = coeff;</a>
+<a name="ln1297">    p.x[atrous_Lt][k] = p.x[atrous_ct][k] = x;</a>
+<a name="ln1298">    p.y[atrous_Lt][k] = p.y[atrous_ct][k] = noise;</a>
+<a name="ln1299">  }</a>
+<a name="ln1300">  dt_gui_presets_add_generic(_(&quot;deblur: fine blur, strength 1&quot;), self-&gt;op, self-&gt;version(), &amp;p, sizeof(p), 1);</a>
+<a name="ln1301"> </a>
+<a name="ln1302">  DT_DEBUG_SQLITE3_EXEC(dt_database_get(darktable.db), &quot;COMMIT&quot;, NULL, NULL, NULL);</a>
+<a name="ln1303">}</a>
+<a name="ln1304"> </a>
+<a name="ln1305">static void reset_mix(dt_iop_module_t *self)</a>
+<a name="ln1306">{</a>
+<a name="ln1307">  dt_iop_atrous_gui_data_t *c = (dt_iop_atrous_gui_data_t *)self-&gt;gui_data;</a>
+<a name="ln1308">  c-&gt;drag_params = *(dt_iop_atrous_params_t *)self-&gt;params;</a>
+<a name="ln1309">  const int reset = darktable.gui-&gt;reset;</a>
+<a name="ln1310">  darktable.gui-&gt;reset = 1;</a>
+<a name="ln1311">  dt_bauhaus_slider_set(c-&gt;mix, 1.0f);</a>
+<a name="ln1312">  darktable.gui-&gt;reset = reset;</a>
+<a name="ln1313">}</a>
+<a name="ln1314"> </a>
+<a name="ln1315">void gui_update(struct dt_iop_module_t *self)</a>
+<a name="ln1316">{</a>
+<a name="ln1317">  reset_mix(self);</a>
+<a name="ln1318">  gtk_widget_queue_draw(self-&gt;widget);</a>
+<a name="ln1319">}</a>
+<a name="ln1320"> </a>
+<a name="ln1321"> </a>
+<a name="ln1322">// gui stuff:</a>
+<a name="ln1323"> </a>
+<a name="ln1324">static gboolean area_enter_notify(GtkWidget *widget, GdkEventCrossing *event, gpointer user_data)</a>
+<a name="ln1325">{</a>
+<a name="ln1326">  dt_iop_module_t *self = (dt_iop_module_t *)user_data;</a>
+<a name="ln1327">  dt_iop_atrous_gui_data_t *c = (dt_iop_atrous_gui_data_t *)self-&gt;gui_data;</a>
+<a name="ln1328">  if(!c-&gt;dragging) c-&gt;mouse_y = fabs(c-&gt;mouse_y);</a>
+<a name="ln1329">  gtk_widget_queue_draw(widget);</a>
+<a name="ln1330">  return TRUE;</a>
+<a name="ln1331">}</a>
+<a name="ln1332"> </a>
+<a name="ln1333">static gboolean area_leave_notify(GtkWidget *widget, GdkEventCrossing *event, gpointer user_data)</a>
+<a name="ln1334">{</a>
+<a name="ln1335">  dt_iop_module_t *self = (dt_iop_module_t *)user_data;</a>
+<a name="ln1336">  dt_iop_atrous_gui_data_t *c = (dt_iop_atrous_gui_data_t *)self-&gt;gui_data;</a>
+<a name="ln1337">  if(!c-&gt;dragging) c-&gt;mouse_y = -fabs(c-&gt;mouse_y);</a>
+<a name="ln1338">  gtk_widget_queue_draw(widget);</a>
+<a name="ln1339">  return TRUE;</a>
+<a name="ln1340">}</a>
+<a name="ln1341"> </a>
+<a name="ln1342">// fills in new parameters based on mouse position (in 0,1)</a>
+<a name="ln1343">static void get_params(dt_iop_atrous_params_t *p, const int ch, const double mouse_x, const double mouse_y,</a>
+<a name="ln1344">                       const float rad)</a>
+<a name="ln1345">{</a>
+<a name="ln1346">  for(int k = 0; k &lt; BANDS; k++)</a>
+<a name="ln1347">  {</a>
+<a name="ln1348">    const float f = expf(-(mouse_x - p-&gt;x[ch][k]) * (mouse_x - p-&gt;x[ch][k]) / (rad * rad));</a>
+<a name="ln1349">    p-&gt;y[ch][k] = MAX(0.0f, MIN(1.0f, (1 - f) * p-&gt;y[ch][k] + f * mouse_y));</a>
+<a name="ln1350">  }</a>
+<a name="ln1351">}</a>
+<a name="ln1352"> </a>
+<a name="ln1353">static gboolean area_draw(GtkWidget *widget, cairo_t *crf, gpointer user_data)</a>
+<a name="ln1354">{</a>
+<a name="ln1355">  dt_iop_module_t *self = (dt_iop_module_t *)user_data;</a>
+<a name="ln1356">  dt_iop_atrous_gui_data_t *c = (dt_iop_atrous_gui_data_t *)self-&gt;gui_data;</a>
+<a name="ln1357">  dt_iop_atrous_params_t p = *(dt_iop_atrous_params_t *)self-&gt;params;</a>
+<a name="ln1358"> </a>
+<a name="ln1359">  for(int k = 0; k &lt; BANDS; k++)</a>
+<a name="ln1360">    dt_draw_curve_set_point(c-&gt;minmax_curve, k, p.x[(int)c-&gt;channel2][k], p.y[(int)c-&gt;channel2][k]);</a>
+<a name="ln1361">  const int inset = INSET;</a>
+<a name="ln1362">  GtkAllocation allocation;</a>
+<a name="ln1363">  gtk_widget_get_allocation(widget, &amp;allocation);</a>
+<a name="ln1364">  int width = allocation.width, height = allocation.height;</a>
+<a name="ln1365">  cairo_surface_t *cst = dt_cairo_image_surface_create(CAIRO_FORMAT_ARGB32, width, height);</a>
+<a name="ln1366">  cairo_t *cr = cairo_create(cst);</a>
+<a name="ln1367">  // clear bg, match color of the notebook tabs:</a>
+<a name="ln1368">  GdkRGBA bright_bg_color, really_dark_bg_color;</a>
+<a name="ln1369">  GtkStyleContext *context = gtk_widget_get_style_context(self-&gt;expander);</a>
+<a name="ln1370">  gboolean color_found = gtk_style_context_lookup_color (context, &quot;selected_bg_color&quot;, &amp;bright_bg_color);</a>
+<a name="ln1371">  if(!color_found)</a>
+<a name="ln1372">  {</a>
+<a name="ln1373">    bright_bg_color.red = 1.0;</a>
+<a name="ln1374">    bright_bg_color.green = 0.0;</a>
+<a name="ln1375">    bright_bg_color.blue = 0.0;</a>
+<a name="ln1376">    bright_bg_color.alpha = 1.0;</a>
+<a name="ln1377">  }</a>
+<a name="ln1378"> </a>
+<a name="ln1379">  color_found = gtk_style_context_lookup_color (context, &quot;really_dark_bg_color&quot;, &amp;really_dark_bg_color);</a>
+<a name="ln1380">  if(!color_found)</a>
+<a name="ln1381">  {</a>
+<a name="ln1382">    really_dark_bg_color.red = 1.0;</a>
+<a name="ln1383">    really_dark_bg_color.green = 0.0;</a>
+<a name="ln1384">    really_dark_bg_color.blue = 0.0;</a>
+<a name="ln1385">    really_dark_bg_color.alpha = 1.0;</a>
+<a name="ln1386">  }</a>
+<a name="ln1387"> </a>
+<a name="ln1388">  gdk_cairo_set_source_rgba(cr, &amp;bright_bg_color);</a>
+<a name="ln1389">  cairo_paint(cr);</a>
+<a name="ln1390"> </a>
+<a name="ln1391">  cairo_translate(cr, inset, inset);</a>
+<a name="ln1392">  width -= 2 * inset;</a>
+<a name="ln1393">  height -= 2 * inset;</a>
+<a name="ln1394"> </a>
+<a name="ln1395">  cairo_set_line_width(cr, DT_PIXEL_APPLY_DPI(1.0));</a>
+<a name="ln1396">  gdk_cairo_set_source_rgba(cr, &amp;really_dark_bg_color);</a>
+<a name="ln1397">  cairo_rectangle(cr, 0, 0, width, height);</a>
+<a name="ln1398">  cairo_stroke(cr);</a>
+<a name="ln1399"> </a>
+<a name="ln1400">  gdk_cairo_set_source_rgba(cr, &amp;bright_bg_color);</a>
+<a name="ln1401">  cairo_rectangle(cr, 0, 0, width, height);</a>
+<a name="ln1402">  cairo_fill(cr);</a>
+<a name="ln1403"> </a>
+<a name="ln1404">  if(c-&gt;mouse_y &gt; 0 || c-&gt;dragging)</a>
+<a name="ln1405">  {</a>
+<a name="ln1406">    int ch2 = (int)c-&gt;channel2;</a>
+<a name="ln1407"> </a>
+<a name="ln1408">    // draw min/max curves:</a>
+<a name="ln1409">    get_params(&amp;p, ch2, c-&gt;mouse_x, 1., c-&gt;mouse_radius);</a>
+<a name="ln1410">    for(int k = 0; k &lt; BANDS; k++) dt_draw_curve_set_point(c-&gt;minmax_curve, k, p.x[ch2][k], p.y[ch2][k]);</a>
+<a name="ln1411">    dt_draw_curve_calc_values(c-&gt;minmax_curve, 0.0, 1.0, RES, c-&gt;draw_min_xs, c-&gt;draw_min_ys);</a>
+<a name="ln1412"> </a>
+<a name="ln1413">    p = *(dt_iop_atrous_params_t *)self-&gt;params;</a>
+<a name="ln1414">    get_params(&amp;p, ch2, c-&gt;mouse_x, .0, c-&gt;mouse_radius);</a>
+<a name="ln1415">    for(int k = 0; k &lt; BANDS; k++) dt_draw_curve_set_point(c-&gt;minmax_curve, k, p.x[ch2][k], p.y[ch2][k]);</a>
+<a name="ln1416">    dt_draw_curve_calc_values(c-&gt;minmax_curve, 0.0, 1.0, RES, c-&gt;draw_max_xs, c-&gt;draw_max_ys);</a>
+<a name="ln1417">  }</a>
+<a name="ln1418"> </a>
+<a name="ln1419">  // draw grid</a>
+<a name="ln1420">  cairo_set_line_width(cr, DT_PIXEL_APPLY_DPI(.4));</a>
+<a name="ln1421">  gdk_cairo_set_source_rgba(cr, &amp;really_dark_bg_color);</a>
+<a name="ln1422">  dt_draw_grid(cr, 8, 0, 0, width, height);</a>
+<a name="ln1423"> </a>
+<a name="ln1424">  cairo_save(cr);</a>
+<a name="ln1425"> </a>
+<a name="ln1426">  // draw selected cursor</a>
+<a name="ln1427">  cairo_set_line_width(cr, DT_PIXEL_APPLY_DPI(1.));</a>
+<a name="ln1428">  cairo_translate(cr, 0, height);</a>
+<a name="ln1429"> </a>
+<a name="ln1430">// draw frequency histogram in bg.</a>
+<a name="ln1431">#if 1</a>
+<a name="ln1432">  if(c-&gt;num_samples &gt; 0)</a>
+<a name="ln1433">  {</a>
+<a name="ln1434">    cairo_save(cr);</a>
+<a name="ln1435">    for(int k = 1; k &lt; c-&gt;num_samples; k += 2)</a>
+<a name="ln1436">    {</a>
+<a name="ln1437">      cairo_set_source_rgba(cr, really_dark_bg_color.red, really_dark_bg_color.green, really_dark_bg_color.blue, .3);</a>
+<a name="ln1438">      cairo_move_to(cr, width * c-&gt;sample[k - 1], 0.0f);</a>
+<a name="ln1439">      cairo_line_to(cr, width * c-&gt;sample[k - 1], -height);</a>
+<a name="ln1440">      cairo_line_to(cr, width * c-&gt;sample[k], -height);</a>
+<a name="ln1441">      cairo_line_to(cr, width * c-&gt;sample[k], 0.0f);</a>
+<a name="ln1442">      cairo_fill(cr);</a>
+<a name="ln1443">    }</a>
+<a name="ln1444">    if(c-&gt;num_samples &amp; 1)</a>
+<a name="ln1445">    {</a>
+<a name="ln1446">      cairo_move_to(cr, width * c-&gt;sample[c-&gt;num_samples - 1], 0.0f);</a>
+<a name="ln1447">      cairo_line_to(cr, width * c-&gt;sample[c-&gt;num_samples - 1], -height);</a>
+<a name="ln1448">      cairo_line_to(cr, 0.0f, -height);</a>
+<a name="ln1449">      cairo_line_to(cr, 0.0f, 0.0f);</a>
+<a name="ln1450">      cairo_fill(cr);</a>
+<a name="ln1451">    }</a>
+<a name="ln1452">    cairo_restore(cr);</a>
+<a name="ln1453">  }</a>
+<a name="ln1454">  if(c-&gt;band_max &gt; 0)</a>
+<a name="ln1455">  {</a>
+<a name="ln1456">    cairo_save(cr);</a>
+<a name="ln1457">    cairo_scale(cr, width / (BANDS - 1.0), -(height - DT_PIXEL_APPLY_DPI(5)) / c-&gt;band_max);</a>
+<a name="ln1458">    cairo_set_source_rgba(cr, really_dark_bg_color.red, really_dark_bg_color.green, really_dark_bg_color.blue, .3);</a>
+<a name="ln1459">    cairo_move_to(cr, 0, 0);</a>
+<a name="ln1460">    for(int k = 0; k &lt; BANDS; k++) cairo_line_to(cr, k, c-&gt;band_hist[k]);</a>
+<a name="ln1461">    cairo_line_to(cr, BANDS - 1.0, 0.);</a>
+<a name="ln1462">    cairo_close_path(cr);</a>
+<a name="ln1463">    cairo_fill(cr);</a>
+<a name="ln1464">    cairo_restore(cr);</a>
+<a name="ln1465">  }</a>
+<a name="ln1466">#endif</a>
+<a name="ln1467"> </a>
+<a name="ln1468">  // cairo_set_operator(cr, CAIRO_OPERATOR_ADD);</a>
+<a name="ln1469">  cairo_set_operator(cr, CAIRO_OPERATOR_OVER);</a>
+<a name="ln1470">  cairo_set_line_width(cr, DT_PIXEL_APPLY_DPI(2.));</a>
+<a name="ln1471">  for(int i = 0; i &lt;= atrous_s; i++)</a>
+<a name="ln1472">  {</a>
+<a name="ln1473">    // draw curves, selected last.</a>
+<a name="ln1474">    int ch = ((int)c-&gt;channel + i + 1) % (atrous_s + 1);</a>
+<a name="ln1475">    int ch2 = -1;</a>
+<a name="ln1476">    const float bgmul = i &lt; atrous_s ? 0.5f : 1.0f;</a>
+<a name="ln1477">    switch(ch)</a>
+<a name="ln1478">    {</a>
+<a name="ln1479">      case atrous_L:</a>
+<a name="ln1480">        cairo_set_source_rgba(cr, .6, .6, .6, .3 * bgmul);</a>
+<a name="ln1481">        ch2 = atrous_Lt;</a>
+<a name="ln1482">        break;</a>
+<a name="ln1483">      case atrous_c:</a>
+<a name="ln1484">        cairo_set_source_rgba(cr, .4, .2, .0, .4 * bgmul);</a>
+<a name="ln1485">        ch2 = atrous_ct;</a>
+<a name="ln1486">        break;</a>
+<a name="ln1487">      default: // case atrous_s:</a>
+<a name="ln1488">        cairo_set_source_rgba(cr, .1, .2, .3, .4 * bgmul);</a>
+<a name="ln1489">        break;</a>
+<a name="ln1490">    }</a>
+<a name="ln1491">    p = *(dt_iop_atrous_params_t *)self-&gt;params;</a>
+<a name="ln1492"> </a>
+<a name="ln1493">    // reverse order if bottom is active (to end up with correct values in minmax_curve):</a>
+<a name="ln1494">    if(c-&gt;channel2 == ch2)</a>
+<a name="ln1495">    {</a>
+<a name="ln1496">      ch2 = ch;</a>
+<a name="ln1497">      ch = c-&gt;channel2;</a>
+<a name="ln1498">    }</a>
+<a name="ln1499"> </a>
+<a name="ln1500">    if(ch2 &gt;= 0)</a>
+<a name="ln1501">    {</a>
+<a name="ln1502">      for(int k = 0; k &lt; BANDS; k++) dt_draw_curve_set_point(c-&gt;minmax_curve, k, p.x[ch2][k], p.y[ch2][k]);</a>
+<a name="ln1503">      dt_draw_curve_calc_values(c-&gt;minmax_curve, 0.0, 1.0, RES, c-&gt;draw_xs, c-&gt;draw_ys);</a>
+<a name="ln1504">      cairo_move_to(cr, width, -height * p.y[ch2][BANDS - 1]);</a>
+<a name="ln1505">      for(int k = RES - 2; k &gt;= 0; k--)</a>
+<a name="ln1506">        cairo_line_to(cr, k * width / (float)(RES - 1), -height * c-&gt;draw_ys[k]);</a>
+<a name="ln1507">    }</a>
+<a name="ln1508">    else</a>
+<a name="ln1509">      cairo_move_to(cr, 0, 0);</a>
+<a name="ln1510">    for(int k = 0; k &lt; BANDS; k++) dt_draw_curve_set_point(c-&gt;minmax_curve, k, p.x[ch][k], p.y[ch][k]);</a>
+<a name="ln1511">    dt_draw_curve_calc_values(c-&gt;minmax_curve, 0.0, 1.0, RES, c-&gt;draw_xs, c-&gt;draw_ys);</a>
+<a name="ln1512">    for(int k = 0; k &lt; RES; k++) cairo_line_to(cr, k * width / (float)(RES - 1), -height * c-&gt;draw_ys[k]);</a>
+<a name="ln1513">    if(ch2 &lt; 0) cairo_line_to(cr, width, 0);</a>
+<a name="ln1514">    cairo_close_path(cr);</a>
+<a name="ln1515">    cairo_stroke_preserve(cr);</a>
+<a name="ln1516">    cairo_fill(cr);</a>
+<a name="ln1517">  }</a>
+<a name="ln1518"> </a>
+<a name="ln1519">  if(c-&gt;mouse_y &gt; 0 || c-&gt;dragging)</a>
+<a name="ln1520">  {</a>
+<a name="ln1521">    int ch = (int)c-&gt;channel;</a>
+<a name="ln1522">    int ch2 = (int)c-&gt;channel2;</a>
+<a name="ln1523"> </a>
+<a name="ln1524">    // draw dots on knots</a>
+<a name="ln1525">    cairo_save(cr);</a>
+<a name="ln1526">    if(ch != ch2)</a>
+<a name="ln1527">      cairo_set_source_rgb(cr, 0.1, 0.1, 0.1);</a>
+<a name="ln1528">    else</a>
+<a name="ln1529">      cairo_set_source_rgb(cr, 0.7, 0.7, 0.7);</a>
+<a name="ln1530">    cairo_set_line_width(cr, DT_PIXEL_APPLY_DPI(1.));</a>
+<a name="ln1531">    for(int k = 0; k &lt; BANDS; k++)</a>
+<a name="ln1532">    {</a>
+<a name="ln1533">      cairo_arc(cr, width * p.x[ch2][k], -height * p.y[ch2][k], DT_PIXEL_APPLY_DPI(3.0), 0.0, 2.0 * M_PI);</a>
+<a name="ln1534">      if(c-&gt;x_move == k)</a>
+<a name="ln1535">        cairo_fill(cr);</a>
+<a name="ln1536">      else</a>
+<a name="ln1537">        cairo_stroke(cr);</a>
+<a name="ln1538">    }</a>
+<a name="ln1539">    cairo_restore(cr);</a>
+<a name="ln1540">  }</a>
+<a name="ln1541"> </a>
+<a name="ln1542">  if(c-&gt;mouse_y &gt; 0 || c-&gt;dragging)</a>
+<a name="ln1543">  {</a>
+<a name="ln1544">    // draw min/max, if selected</a>
+<a name="ln1545">    // cairo_set_source_rgba(cr, .6, .6, .6, .5);</a>
+<a name="ln1546">    cairo_move_to(cr, 0, -height * c-&gt;draw_min_ys[0]);</a>
+<a name="ln1547">    for(int k = 1; k &lt; RES; k++) cairo_line_to(cr, k * width / (float)(RES - 1), -height * c-&gt;draw_min_ys[k]);</a>
+<a name="ln1548">    for(int k = RES - 1; k &gt;= 0; k--)</a>
+<a name="ln1549">      cairo_line_to(cr, k * width / (float)(RES - 1), -height * c-&gt;draw_max_ys[k]);</a>
+<a name="ln1550">    cairo_close_path(cr);</a>
+<a name="ln1551">    cairo_fill(cr);</a>
+<a name="ln1552">    // draw mouse focus circle</a>
+<a name="ln1553">    cairo_set_source_rgba(cr, .9, .9, .9, .5);</a>
+<a name="ln1554">    const float pos = RES * c-&gt;mouse_x;</a>
+<a name="ln1555">    int k = (int)pos;</a>
+<a name="ln1556">    const float f = k - pos;</a>
+<a name="ln1557">    if(k &gt;= RES - 1) k = RES - 2;</a>
+<a name="ln1558">    float ht = -height * (f * c-&gt;draw_ys[k] + (1 - f) * c-&gt;draw_ys[k + 1]);</a>
+<a name="ln1559">    cairo_arc(cr, c-&gt;mouse_x * width, ht, c-&gt;mouse_radius * width, 0, 2. * M_PI);</a>
+<a name="ln1560">    cairo_stroke(cr);</a>
+<a name="ln1561">  }</a>
+<a name="ln1562"> </a>
+<a name="ln1563">  cairo_set_operator(cr, CAIRO_OPERATOR_SOURCE);</a>
+<a name="ln1564"> </a>
+<a name="ln1565">  // draw x positions</a>
+<a name="ln1566">  cairo_set_line_width(cr, DT_PIXEL_APPLY_DPI(1.));</a>
+<a name="ln1567">  cairo_set_source_rgb(cr, 0.6, 0.6, 0.6);</a>
+<a name="ln1568">  const float arrw = DT_PIXEL_APPLY_DPI(7.0f);</a>
+<a name="ln1569">  for(int k = 1; k &lt; BANDS - 1; k++)</a>
+<a name="ln1570">  {</a>
+<a name="ln1571">    cairo_move_to(cr, width * p.x[(int)c-&gt;channel][k], inset - DT_PIXEL_APPLY_DPI(1));</a>
+<a name="ln1572">    cairo_rel_line_to(cr, -arrw * .5f, 0);</a>
+<a name="ln1573">    cairo_rel_line_to(cr, arrw * .5f, -arrw);</a>
+<a name="ln1574">    cairo_rel_line_to(cr, arrw * .5f, arrw);</a>
+<a name="ln1575">    cairo_close_path(cr);</a>
+<a name="ln1576">    if(c-&gt;x_move == k)</a>
+<a name="ln1577">      cairo_fill(cr);</a>
+<a name="ln1578">    else</a>
+<a name="ln1579">      cairo_stroke(cr);</a>
+<a name="ln1580">  }</a>
+<a name="ln1581"> </a>
+<a name="ln1582">  cairo_restore(cr);</a>
+<a name="ln1583"> </a>
+<a name="ln1584">  if(c-&gt;mouse_y &gt; 0 || c-&gt;dragging)</a>
+<a name="ln1585">  {</a>
+<a name="ln1586">    // draw labels:</a>
+<a name="ln1587">    PangoLayout *layout;</a>
+<a name="ln1588">    PangoRectangle ink;</a>
+<a name="ln1589">    PangoFontDescription *desc = pango_font_description_copy_static(darktable.bauhaus-&gt;pango_font_desc);</a>
+<a name="ln1590">    pango_font_description_set_weight(desc, PANGO_WEIGHT_BOLD);</a>
+<a name="ln1591">    pango_font_description_set_absolute_size(desc, (.06 * height) * PANGO_SCALE);</a>
+<a name="ln1592">    layout = pango_cairo_create_layout(cr);</a>
+<a name="ln1593">    pango_layout_set_font_description(layout, desc);</a>
+<a name="ln1594">    gdk_cairo_set_source_rgba(cr, &amp;really_dark_bg_color);</a>
+<a name="ln1595">    //cairo_select_font_face(cr, &quot;Roboto&quot;, CAIRO_FONT_SLANT_NORMAL, CAIRO_FONT_WEIGHT_BOLD);</a>
+<a name="ln1596">    cairo_set_font_size(cr, .06 * height);</a>
+<a name="ln1597">    pango_layout_set_text(layout, _(&quot;coarse&quot;), -1);</a>
+<a name="ln1598">    pango_layout_get_pixel_extents(layout, &amp;ink, NULL);</a>
+<a name="ln1599">    cairo_move_to(cr, .02 * width - ink.y, .14 * height + ink.width);</a>
+<a name="ln1600">    cairo_save(cr);</a>
+<a name="ln1601">    cairo_rotate(cr, -M_PI * .5f);</a>
+<a name="ln1602">    pango_cairo_show_layout(cr, layout);</a>
+<a name="ln1603">    cairo_restore(cr);</a>
+<a name="ln1604">    pango_layout_set_text(layout, _(&quot;fine&quot;), -1);</a>
+<a name="ln1605">    pango_layout_get_pixel_extents(layout, &amp;ink, NULL);</a>
+<a name="ln1606">    cairo_move_to(cr, .98 * width - ink.height, .14 * height + ink.width);</a>
+<a name="ln1607">    cairo_save(cr);</a>
+<a name="ln1608">    cairo_rotate(cr, -M_PI * .5f);</a>
+<a name="ln1609">    pango_cairo_show_layout(cr, layout);</a>
+<a name="ln1610">    cairo_restore(cr);</a>
+<a name="ln1611"> </a>
+<a name="ln1612">    switch(c-&gt;channel2)</a>
+<a name="ln1613">    {</a>
+<a name="ln1614">      case atrous_L:</a>
+<a name="ln1615">      case atrous_c:</a>
+<a name="ln1616">        dt_atrous_show_upper_label(cr, _(&quot;contrasty&quot;), layout, ink);</a>
+<a name="ln1617">        dt_atrous_show_lower_label(cr, _(&quot;smooth&quot;), layout, ink);</a>
+<a name="ln1618">        break;</a>
+<a name="ln1619">      case atrous_Lt:</a>
+<a name="ln1620">      case atrous_ct:</a>
+<a name="ln1621">        dt_atrous_show_upper_label(cr, _(&quot;smooth&quot;), layout, ink);</a>
+<a name="ln1622">        dt_atrous_show_lower_label(cr, _(&quot;noisy&quot;), layout, ink);</a>
+<a name="ln1623">        break;</a>
+<a name="ln1624">      default: // case atrous_s:</a>
+<a name="ln1625">        dt_atrous_show_upper_label(cr, _(&quot;bold&quot;), layout, ink);</a>
+<a name="ln1626">        dt_atrous_show_lower_label(cr, _(&quot;dull&quot;), layout, ink);</a>
+<a name="ln1627">        break;</a>
+<a name="ln1628">    }</a>
+<a name="ln1629">    pango_font_description_free(desc);</a>
+<a name="ln1630">    g_object_unref(layout);</a>
+<a name="ln1631">  }</a>
+<a name="ln1632"> </a>
+<a name="ln1633"> </a>
+<a name="ln1634">  cairo_destroy(cr);</a>
+<a name="ln1635">  cairo_set_source_surface(crf, cst, 0, 0);</a>
+<a name="ln1636">  cairo_paint(crf);</a>
+<a name="ln1637">  cairo_surface_destroy(cst);</a>
+<a name="ln1638">  return TRUE;</a>
+<a name="ln1639">}</a>
+<a name="ln1640"> </a>
+<a name="ln1641">static gboolean area_motion_notify(GtkWidget *widget, GdkEventMotion *event, gpointer user_data)</a>
+<a name="ln1642">{</a>
+<a name="ln1643">  dt_iop_module_t *self = (dt_iop_module_t *)user_data;</a>
+<a name="ln1644">  dt_iop_atrous_gui_data_t *c = (dt_iop_atrous_gui_data_t *)self-&gt;gui_data;</a>
+<a name="ln1645">  dt_iop_atrous_params_t *p = (dt_iop_atrous_params_t *)self-&gt;params;</a>
+<a name="ln1646">  const int inset = INSET;</a>
+<a name="ln1647">  GtkAllocation allocation;</a>
+<a name="ln1648">  gtk_widget_get_allocation(widget, &amp;allocation);</a>
+<a name="ln1649">  int height = allocation.height - 2 * inset, width = allocation.width - 2 * inset;</a>
+<a name="ln1650">  if(!c-&gt;dragging) c-&gt;mouse_x = CLAMP(event-&gt;x - inset, 0, width) / (float)width;</a>
+<a name="ln1651">  c-&gt;mouse_y = 1.0 - CLAMP(event-&gt;y - inset, 0, height) / (float)height;</a>
+<a name="ln1652">  int ch2 = c-&gt;channel;</a>
+<a name="ln1653">  if(c-&gt;channel == atrous_L) ch2 = atrous_Lt;</a>
+<a name="ln1654">  if(c-&gt;channel == atrous_c) ch2 = atrous_ct;</a>
+<a name="ln1655">  if(c-&gt;dragging)</a>
+<a name="ln1656">  {</a>
+<a name="ln1657">    // drag y-positions</a>
+<a name="ln1658">    *p = c-&gt;drag_params;</a>
+<a name="ln1659">    if(c-&gt;x_move &gt;= 0)</a>
+<a name="ln1660">    {</a>
+<a name="ln1661">      const float mx = CLAMP(event-&gt;x - inset, 0, width) / (float)width;</a>
+<a name="ln1662">      if(c-&gt;x_move &gt; 0 &amp;&amp; c-&gt;x_move &lt; BANDS - 1)</a>
+<a name="ln1663">      {</a>
+<a name="ln1664">        const float minx = p-&gt;x[c-&gt;channel][c-&gt;x_move - 1] + 0.001f;</a>
+<a name="ln1665">        const float maxx = p-&gt;x[c-&gt;channel][c-&gt;x_move + 1] - 0.001f;</a>
+<a name="ln1666">        p-&gt;x[ch2][c-&gt;x_move] = p-&gt;x[c-&gt;channel][c-&gt;x_move] = fminf(maxx, fmaxf(minx, mx));</a>
+<a name="ln1667">      }</a>
+<a name="ln1668">    }</a>
+<a name="ln1669">    else</a>
+<a name="ln1670">    {</a>
+<a name="ln1671">      get_params(p, c-&gt;channel2, c-&gt;mouse_x, c-&gt;mouse_y + c-&gt;mouse_pick, c-&gt;mouse_radius);</a>
+<a name="ln1672">    }</a>
+<a name="ln1673">    dt_dev_add_history_item(darktable.develop, self, TRUE);</a>
+<a name="ln1674">  }</a>
+<a name="ln1675">  else if(event-&gt;y &gt; height)</a>
+<a name="ln1676">  {</a>
+<a name="ln1677">    // move x-positions</a>
+<a name="ln1678">    c-&gt;x_move = 0;</a>
+<a name="ln1679">    float dist = fabs(p-&gt;x[c-&gt;channel][0] - c-&gt;mouse_x);</a>
+<a name="ln1680">    for(int k = 1; k &lt; BANDS; k++)</a>
+<a name="ln1681">    {</a>
+<a name="ln1682">      float d2 = fabs(p-&gt;x[c-&gt;channel][k] - c-&gt;mouse_x);</a>
+<a name="ln1683">      if(d2 &lt; dist)</a>
+<a name="ln1684">      {</a>
+<a name="ln1685">        c-&gt;x_move = k;</a>
+<a name="ln1686">        dist = d2;</a>
+<a name="ln1687">      }</a>
+<a name="ln1688">    }</a>
+<a name="ln1689">  }</a>
+<a name="ln1690">  else</a>
+<a name="ln1691">  {</a>
+<a name="ln1692">    // choose between bottom and top curve:</a>
+<a name="ln1693">    int ch = c-&gt;channel;</a>
+<a name="ln1694">    float dist = 1000000.0f;</a>
+<a name="ln1695">    for(int k = 0; k &lt; BANDS; k++)</a>
+<a name="ln1696">    {</a>
+<a name="ln1697">      float d2 = fabs(p-&gt;x[c-&gt;channel][k] - c-&gt;mouse_x);</a>
+<a name="ln1698">      if(d2 &lt; dist)</a>
+<a name="ln1699">      {</a>
+<a name="ln1700">        if(fabs(c-&gt;mouse_y - p-&gt;y[ch][k]) &lt; fabs(c-&gt;mouse_y - p-&gt;y[ch2][k]))</a>
+<a name="ln1701">          c-&gt;channel2 = ch;</a>
+<a name="ln1702">        else</a>
+<a name="ln1703">          c-&gt;channel2 = ch2;</a>
+<a name="ln1704">        dist = d2;</a>
+<a name="ln1705">      }</a>
+<a name="ln1706">    }</a>
+<a name="ln1707">    // don't move x-positions:</a>
+<a name="ln1708">    c-&gt;x_move = -1;</a>
+<a name="ln1709">  }</a>
+<a name="ln1710">  gtk_widget_queue_draw(widget);</a>
+<a name="ln1711">  gint x, y;</a>
+<a name="ln1712">#if GTK_CHECK_VERSION(3, 20, 0)</a>
+<a name="ln1713">  gdk_window_get_device_position(event-&gt;window,</a>
+<a name="ln1714">      gdk_seat_get_pointer(gdk_display_get_default_seat(gtk_widget_get_display(widget))),</a>
+<a name="ln1715">      &amp;x, &amp;y, 0);</a>
+<a name="ln1716">#else</a>
+<a name="ln1717">  gdk_window_get_device_position(event-&gt;window,</a>
+<a name="ln1718">                                 gdk_device_manager_get_client_pointer(</a>
+<a name="ln1719">                                     gdk_display_get_device_manager(gdk_window_get_display(event-&gt;window))),</a>
+<a name="ln1720">                                 &amp;x, &amp;y, NULL);</a>
+<a name="ln1721">#endif</a>
+<a name="ln1722">  return TRUE;</a>
+<a name="ln1723">}</a>
+<a name="ln1724"> </a>
+<a name="ln1725">static gboolean area_button_press(GtkWidget *widget, GdkEventButton *event, gpointer user_data)</a>
+<a name="ln1726">{</a>
+<a name="ln1727">  dt_iop_module_t *self = (dt_iop_module_t *)user_data;</a>
+<a name="ln1728">  if(event-&gt;button == 1 &amp;&amp; event-&gt;type == GDK_2BUTTON_PRESS)</a>
+<a name="ln1729">  {</a>
+<a name="ln1730">    // reset current curve</a>
+<a name="ln1731">    dt_iop_atrous_params_t *p = (dt_iop_atrous_params_t *)self-&gt;params;</a>
+<a name="ln1732">    dt_iop_atrous_params_t *d = (dt_iop_atrous_params_t *)self-&gt;default_params;</a>
+<a name="ln1733">    dt_iop_atrous_gui_data_t *c = (dt_iop_atrous_gui_data_t *)self-&gt;gui_data;</a>
+<a name="ln1734">    reset_mix(self);</a>
+<a name="ln1735">    for(int k = 0; k &lt; BANDS; k++)</a>
+<a name="ln1736">    {</a>
+<a name="ln1737">      p-&gt;x[c-&gt;channel2][k] = d-&gt;x[c-&gt;channel2][k];</a>
+<a name="ln1738">      p-&gt;y[c-&gt;channel2][k] = d-&gt;y[c-&gt;channel2][k];</a>
+<a name="ln1739">    }</a>
+<a name="ln1740">    dt_dev_add_history_item(darktable.develop, self, TRUE);</a>
+<a name="ln1741">    gtk_widget_queue_draw(self-&gt;widget);</a>
+<a name="ln1742">  }</a>
+<a name="ln1743">  else if(event-&gt;button == 1)</a>
+<a name="ln1744">  {</a>
+<a name="ln1745">    // set active point</a>
+<a name="ln1746">    dt_iop_atrous_gui_data_t *c = (dt_iop_atrous_gui_data_t *)self-&gt;gui_data;</a>
+<a name="ln1747">    reset_mix(self);</a>
+<a name="ln1748">    const int inset = INSET;</a>
+<a name="ln1749">    GtkAllocation allocation;</a>
+<a name="ln1750">    gtk_widget_get_allocation(widget, &amp;allocation);</a>
+<a name="ln1751">    int height = allocation.height - 2 * inset, width = allocation.width - 2 * inset;</a>
+<a name="ln1752">    c-&gt;mouse_pick</a>
+<a name="ln1753">        = dt_draw_curve_calc_value(c-&gt;minmax_curve, CLAMP(event-&gt;x - inset, 0, width) / (float)width);</a>
+<a name="ln1754">    c-&gt;mouse_pick -= 1.0 - CLAMP(event-&gt;y - inset, 0, height) / (float)height;</a>
+<a name="ln1755">    c-&gt;dragging = 1;</a>
+<a name="ln1756">    return TRUE;</a>
+<a name="ln1757">  }</a>
+<a name="ln1758">  return FALSE;</a>
+<a name="ln1759">}</a>
+<a name="ln1760"> </a>
+<a name="ln1761">static gboolean area_button_release(GtkWidget *widget, GdkEventButton *event, gpointer user_data)</a>
+<a name="ln1762">{</a>
+<a name="ln1763">  if(event-&gt;button == 1)</a>
+<a name="ln1764">  {</a>
+<a name="ln1765">    dt_iop_module_t *self = (dt_iop_module_t *)user_data;</a>
+<a name="ln1766">    dt_iop_atrous_gui_data_t *c = (dt_iop_atrous_gui_data_t *)self-&gt;gui_data;</a>
+<a name="ln1767">    c-&gt;dragging = 0;</a>
+<a name="ln1768">    reset_mix(self);</a>
+<a name="ln1769">    return TRUE;</a>
+<a name="ln1770">  }</a>
+<a name="ln1771">  return FALSE;</a>
+<a name="ln1772">}</a>
+<a name="ln1773"> </a>
+<a name="ln1774">static gboolean area_scrolled(GtkWidget *widget, GdkEventScroll *event, gpointer user_data)</a>
+<a name="ln1775">{</a>
+<a name="ln1776">  dt_iop_module_t *self = (dt_iop_module_t *)user_data;</a>
+<a name="ln1777">  dt_iop_atrous_gui_data_t *c = (dt_iop_atrous_gui_data_t *)self-&gt;gui_data;</a>
+<a name="ln1778"> </a>
+<a name="ln1779">  if(((event-&gt;state &amp; gtk_accelerator_get_default_mod_mask()) == darktable.gui-&gt;sidebar_scroll_mask) != dt_conf_get_bool(&quot;darkroom/ui/sidebar_scroll_default&quot;)) return FALSE;</a>
+<a name="ln1780">  gdouble delta_y;</a>
+<a name="ln1781">  if(dt_gui_get_scroll_deltas(event, NULL, &amp;delta_y))</a>
+<a name="ln1782">  {</a>
+<a name="ln1783">    c-&gt;mouse_radius = CLAMP(c-&gt;mouse_radius * (1.0 + 0.1 * delta_y), 0.25 / BANDS, 1.0);</a>
+<a name="ln1784">    gtk_widget_queue_draw(widget);</a>
+<a name="ln1785">  }</a>
+<a name="ln1786">  return TRUE;</a>
+<a name="ln1787">}</a>
+<a name="ln1788"> </a>
+<a name="ln1789">static void tab_switch(GtkNotebook *notebook, GtkWidget *page, guint page_num, gpointer user_data)</a>
+<a name="ln1790">{</a>
+<a name="ln1791">  dt_iop_module_t *self = (dt_iop_module_t *)user_data;</a>
+<a name="ln1792">  dt_iop_atrous_gui_data_t *c = (dt_iop_atrous_gui_data_t *)self-&gt;gui_data;</a>
+<a name="ln1793">  if(self-&gt;dt-&gt;gui-&gt;reset) return;</a>
+<a name="ln1794">  c-&gt;channel = c-&gt;channel2 = (atrous_channel_t)page_num;</a>
+<a name="ln1795">  gtk_widget_queue_draw(self-&gt;widget);</a>
+<a name="ln1796">}</a>
+<a name="ln1797"> </a>
+<a name="ln1798">static void mix_callback(GtkWidget *slider, gpointer user_data)</a>
+<a name="ln1799">{</a>
+<a name="ln1800">  dt_iop_module_t *self = (dt_iop_module_t *)user_data;</a>
+<a name="ln1801">  if(self-&gt;dt-&gt;gui-&gt;reset) return;</a>
+<a name="ln1802">  dt_iop_atrous_params_t *p = (dt_iop_atrous_params_t *)self-&gt;params;</a>
+<a name="ln1803">  dt_iop_atrous_params_t *d = (dt_iop_atrous_params_t *)self-&gt;default_params;</a>
+<a name="ln1804">  dt_iop_atrous_gui_data_t *c = (dt_iop_atrous_gui_data_t *)self-&gt;gui_data;</a>
+<a name="ln1805">  const float mix = dt_bauhaus_slider_get(slider);</a>
+<a name="ln1806">  for(int ch = 0; ch &lt; atrous_none; ch++)</a>
+<a name="ln1807">    for(int k = 0; k &lt; BANDS; k++)</a>
+<a name="ln1808">    {</a>
+<a name="ln1809">      p-&gt;x[ch][k] = fminf(1.0f, fmaxf(0.0f, d-&gt;x[ch][k] + mix * (c-&gt;drag_params.x[ch][k] - d-&gt;x[ch][k])));</a>
+<a name="ln1810">      p-&gt;y[ch][k] = fminf(1.0f, fmaxf(0.0f, d-&gt;y[ch][k] + mix * (c-&gt;drag_params.y[ch][k] - d-&gt;y[ch][k])));</a>
+<a name="ln1811">    }</a>
+<a name="ln1812">  dt_dev_add_history_item(darktable.develop, self, TRUE);</a>
+<a name="ln1813">  gtk_widget_queue_draw(self-&gt;widget);</a>
+<a name="ln1814">}</a>
+<a name="ln1815"> </a>
+<a name="ln1816">void gui_init(struct dt_iop_module_t *self)</a>
+<a name="ln1817">{</a>
+<a name="ln1818">  self-&gt;gui_data = malloc(sizeof(dt_iop_atrous_gui_data_t));</a>
+<a name="ln1819">  dt_iop_atrous_gui_data_t *c = (dt_iop_atrous_gui_data_t *)self-&gt;gui_data;</a>
+<a name="ln1820">  dt_iop_atrous_params_t *p = (dt_iop_atrous_params_t *)self-&gt;params;</a>
+<a name="ln1821"> </a>
+<a name="ln1822">  c-&gt;num_samples = 0;</a>
+<a name="ln1823">  c-&gt;band_max = 0;</a>
+<a name="ln1824">  c-&gt;channel = c-&gt;channel2 = dt_conf_get_int(&quot;plugins/darkroom/atrous/gui_channel&quot;);</a>
+<a name="ln1825">  int ch = (int)c-&gt;channel;</a>
+<a name="ln1826">  c-&gt;minmax_curve = dt_draw_curve_new(0.0, 1.0, CATMULL_ROM);</a>
+<a name="ln1827">  for(int k = 0; k &lt; BANDS; k++) (void)dt_draw_curve_add_point(c-&gt;minmax_curve, p-&gt;x[ch][k], p-&gt;y[ch][k]);</a>
+<a name="ln1828">  c-&gt;mouse_x = c-&gt;mouse_y = c-&gt;mouse_pick = -1.0;</a>
+<a name="ln1829">  c-&gt;dragging = 0;</a>
+<a name="ln1830">  c-&gt;x_move = -1;</a>
+<a name="ln1831">  c-&gt;mouse_radius = 1.0 / BANDS;</a>
+<a name="ln1832">  self-&gt;widget = gtk_box_new(GTK_ORIENTATION_VERTICAL, DT_BAUHAUS_SPACE);</a>
+<a name="ln1833">  dt_gui_add_help_link(self-&gt;widget, dt_get_help_url(self-&gt;op));</a>
+<a name="ln1834">  GtkWidget *vbox = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);</a>
+<a name="ln1835">  gtk_box_pack_start(GTK_BOX(self-&gt;widget), vbox, FALSE, FALSE, 0);</a>
+<a name="ln1836"> </a>
+<a name="ln1837">  c-&gt;channel_tabs = GTK_NOTEBOOK(gtk_notebook_new());</a>
+<a name="ln1838"> </a>
+<a name="ln1839">  gtk_notebook_append_page(GTK_NOTEBOOK(c-&gt;channel_tabs),</a>
+<a name="ln1840">                           GTK_WIDGET(gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0)), gtk_label_new(_(&quot;luma&quot;)));</a>
+<a name="ln1841">  gtk_widget_set_tooltip_text(gtk_notebook_get_tab_label(c-&gt;channel_tabs, gtk_notebook_get_nth_page(c-&gt;channel_tabs, -1)),</a>
+<a name="ln1842">                              _(&quot;change lightness at each feature size&quot;));</a>
+<a name="ln1843">  gtk_notebook_append_page(GTK_NOTEBOOK(c-&gt;channel_tabs),</a>
+<a name="ln1844">                           GTK_WIDGET(gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0)),</a>
+<a name="ln1845">                           gtk_label_new(_(&quot;chroma&quot;)));</a>
+<a name="ln1846">  gtk_widget_set_tooltip_text(gtk_notebook_get_tab_label(c-&gt;channel_tabs, gtk_notebook_get_nth_page(c-&gt;channel_tabs, -1)),</a>
+<a name="ln1847">                              _(&quot;change color saturation at each feature size&quot;));</a>
+<a name="ln1848">  gtk_notebook_append_page(GTK_NOTEBOOK(c-&gt;channel_tabs),</a>
+<a name="ln1849">                           GTK_WIDGET(gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0)), gtk_label_new(_(&quot;edges&quot;)));</a>
+<a name="ln1850">  gtk_widget_set_tooltip_text(gtk_notebook_get_tab_label(c-&gt;channel_tabs, gtk_notebook_get_nth_page(c-&gt;channel_tabs, -1)),</a>
+<a name="ln1851">                              _(&quot;change edge halos at each feature size\nonly changes results of luma and chroma tabs&quot;));</a>
+<a name="ln1852"> </a>
+<a name="ln1853">  gtk_widget_show_all(GTK_WIDGET(gtk_notebook_get_nth_page(c-&gt;channel_tabs, c-&gt;channel)));</a>
+<a name="ln1854">  gtk_notebook_set_current_page(GTK_NOTEBOOK(c-&gt;channel_tabs), c-&gt;channel);</a>
+<a name="ln1855"> </a>
+<a name="ln1856">  gtk_box_pack_start(GTK_BOX(vbox), GTK_WIDGET(c-&gt;channel_tabs), FALSE, FALSE, 0);</a>
+<a name="ln1857"> </a>
+<a name="ln1858">  g_signal_connect(G_OBJECT(c-&gt;channel_tabs), &quot;switch_page&quot;, G_CALLBACK(tab_switch), self);</a>
+<a name="ln1859"> </a>
+<a name="ln1860">  // graph</a>
+<a name="ln1861">  c-&gt;area = GTK_DRAWING_AREA(dtgtk_drawing_area_new_with_aspect_ratio(0.75));</a>
+<a name="ln1862">  gtk_box_pack_start(GTK_BOX(vbox), GTK_WIDGET(c-&gt;area), TRUE, TRUE, 0);</a>
+<a name="ln1863"> </a>
+<a name="ln1864">  gtk_widget_add_events(GTK_WIDGET(c-&gt;area), GDK_POINTER_MOTION_MASK | GDK_POINTER_MOTION_HINT_MASK</a>
+<a name="ln1865">                                             | GDK_BUTTON_PRESS_MASK | GDK_BUTTON_RELEASE_MASK</a>
+<a name="ln1866">                                             | GDK_LEAVE_NOTIFY_MASK | darktable.gui-&gt;scroll_mask);</a>
+<a name="ln1867">  g_signal_connect(G_OBJECT(c-&gt;area), &quot;draw&quot;, G_CALLBACK(area_draw), self);</a>
+<a name="ln1868">  g_signal_connect(G_OBJECT(c-&gt;area), &quot;button-press-event&quot;, G_CALLBACK(area_button_press), self);</a>
+<a name="ln1869">  g_signal_connect(G_OBJECT(c-&gt;area), &quot;button-release-event&quot;, G_CALLBACK(area_button_release), self);</a>
+<a name="ln1870">  g_signal_connect(G_OBJECT(c-&gt;area), &quot;motion-notify-event&quot;, G_CALLBACK(area_motion_notify), self);</a>
+<a name="ln1871">  g_signal_connect(G_OBJECT(c-&gt;area), &quot;leave-notify-event&quot;, G_CALLBACK(area_leave_notify), self);</a>
+<a name="ln1872">  g_signal_connect(G_OBJECT(c-&gt;area), &quot;enter-notify-event&quot;, G_CALLBACK(area_enter_notify), self);</a>
+<a name="ln1873">  g_signal_connect(G_OBJECT(c-&gt;area), &quot;scroll-event&quot;, G_CALLBACK(area_scrolled), self);</a>
+<a name="ln1874"> </a>
+<a name="ln1875">  // mix slider</a>
+<a name="ln1876">  c-&gt;mix = dt_bauhaus_slider_new_with_range(self, -2.0f, 2.0f, 0.1f, 1.0f, 3);</a>
+<a name="ln1877">  dt_bauhaus_widget_set_label(c-&gt;mix, NULL, _(&quot;mix&quot;));</a>
+<a name="ln1878">  gtk_widget_set_tooltip_text(c-&gt;mix, _(&quot;make effect stronger or weaker&quot;));</a>
+<a name="ln1879">  gtk_box_pack_start(GTK_BOX(self-&gt;widget), c-&gt;mix, TRUE, TRUE, 0);</a>
+<a name="ln1880">  g_signal_connect(G_OBJECT(c-&gt;mix), &quot;value-changed&quot;, G_CALLBACK(mix_callback), self);</a>
+<a name="ln1881">}</a>
+<a name="ln1882"> </a>
+<a name="ln1883">void gui_cleanup(struct dt_iop_module_t *self)</a>
+<a name="ln1884">{</a>
+<a name="ln1885">  dt_iop_atrous_gui_data_t *c = (dt_iop_atrous_gui_data_t *)self-&gt;gui_data;</a>
+<a name="ln1886">  dt_conf_set_int(&quot;plugins/darkroom/atrous/gui_channel&quot;, c-&gt;channel);</a>
+<a name="ln1887">  dt_draw_curve_destroy(c-&gt;minmax_curve);</a>
+<a name="ln1888">  free(self-&gt;gui_data);</a>
+<a name="ln1889">  self-&gt;gui_data = NULL;</a>
+<a name="ln1890">}</a>
+<a name="ln1891"> </a>
+<a name="ln1892">// modelines: These editor modelines have been set for all relevant files by tools/update_modelines.sh</a>
+<a name="ln1893">// vim: shiftwidth=2 expandtab tabstop=2 cindent</a>
+<a name="ln1894">// kate: tab-indents: off; indent-width 2; replace-tabs on; indent-mode cstyle; remove-trailing-spaces modified;</a>
+
+</code></pre>
+<div class="balloon" rel="836"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v522/" target="_blank">V522</a> There might be dereferencing of a potential null pointer 'dev_detail'. Check lines: 836, 817.</p></div>
+<div class="balloon" rel="969"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v575/" target="_blank">V575</a> The potential null pointer is passed into 'memcpy' function. Inspect the first argument. Check lines: 969, 955.</p></div>
+<div class="balloon" rel="970"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v575/" target="_blank">V575</a> The potential null pointer is passed into 'memcpy' function. Inspect the first argument. Check lines: 970, 956.</p></div>
+<div class="balloon" rel="979"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v522/" target="_blank">V522</a> There might be dereferencing of a potential null pointer 'gd'. Check lines: 979, 977.</p></div>
+<div class="balloon" rel="1028"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v522/" target="_blank">V522</a> There might be dereferencing of a potential null pointer 'd'. Check lines: 1028, 1023.</p></div>
+<div class="balloon" rel="1542"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v581/" target="_blank">V581</a> The conditional expressions of the 'if' statements situated alongside each other are identical. Check lines: 1519, 1542.</p></div>
+<div class="balloon" rel="1822"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v522/" target="_blank">V522</a> There might be dereferencing of a potential null pointer 'c'. Check lines: 1822, 1818.</p></div>
+
+<link rel="stylesheet" href="highlight.css">
+<script src="highlight.pack.js"></script>
+<script src="highlightjs-line-numbers.js"></script>
+<script>hljs.initHighlightingOnLoad();</script>
+<script>hljs.initLineNumbersOnLoad();</script>
+<script>
+  $(document).ready(function() {
+      $('.balloon').each(function () {
+          var bl = $(this);
+          var line = bl.attr('rel');
+          var text = $('a[name="ln'+line+'"]').text();
+
+          var space_count = 0;
+          for(var i = 0; i<text.length; i++){
+              var char = text[i];
+              if((char !== ' ')&&(char !== '\t'))break;
+              if(char === '\t')space_count++;
+              space_count++;
+          }
+
+          bl.css('margin-left', space_count*8);
+          $('a[name="ln'+line+'"]').after(bl);
+      });
+
+      window.location = window.location;
+  });
+</script>
+</body>
+</html>

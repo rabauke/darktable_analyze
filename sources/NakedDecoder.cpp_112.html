@@ -1,0 +1,152 @@
+
+<html>
+<head>
+  <link rel="stylesheet" href="../style.css"/>
+  <script src="../jquery-3.2.1.min.js"></script>
+</head>
+<body>
+<pre><code class = "cpp">
+<a name="ln1">/*</a>
+<a name="ln2">    RawSpeed - RAW file decoder.</a>
+<a name="ln3"> </a>
+<a name="ln4">    Copyright (C) 2009-2014 Klaus Post</a>
+<a name="ln5">    Copyright (C) 2014 Pedro Côrte-Real</a>
+<a name="ln6"> </a>
+<a name="ln7">    This library is free software; you can redistribute it and/or</a>
+<a name="ln8">    modify it under the terms of the GNU Lesser General Public</a>
+<a name="ln9">    License as published by the Free Software Foundation; either</a>
+<a name="ln10">    version 2 of the License, or (at your option) any later version.</a>
+<a name="ln11"> </a>
+<a name="ln12">    This library is distributed in the hope that it will be useful,</a>
+<a name="ln13">    but WITHOUT ANY WARRANTY; without even the implied warranty of</a>
+<a name="ln14">    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU</a>
+<a name="ln15">    Lesser General Public License for more details.</a>
+<a name="ln16"> </a>
+<a name="ln17">    You should have received a copy of the GNU Lesser General Public</a>
+<a name="ln18">    License along with this library; if not, write to the Free Software</a>
+<a name="ln19">    Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA</a>
+<a name="ln20">*/</a>
+<a name="ln21"> </a>
+<a name="ln22">#include &quot;decoders/NakedDecoder.h&quot;</a>
+<a name="ln23">#include &quot;common/Common.h&quot;                          // for BitOrder, BitOrd...</a>
+<a name="ln24">#include &quot;common/Point.h&quot;                           // for iPoint2D</a>
+<a name="ln25">#include &quot;decoders/RawDecoderException.h&quot;           // for RawDecoderExcept...</a>
+<a name="ln26">#include &quot;decompressors/UncompressedDecompressor.h&quot; // for UncompressedDeco...</a>
+<a name="ln27">#include &quot;metadata/Camera.h&quot;                        // for Camera, Hints</a>
+<a name="ln28">#include &lt;map&gt;                                      // for map</a>
+<a name="ln29">#include &lt;stdexcept&gt;                                // for out_of_range</a>
+<a name="ln30">#include &lt;string&gt;                                   // for string, basic_st...</a>
+<a name="ln31"> </a>
+<a name="ln32">using std::map;</a>
+<a name="ln33">using std::string;</a>
+<a name="ln34"> </a>
+<a name="ln35">namespace rawspeed {</a>
+<a name="ln36"> </a>
+<a name="ln37">class Buffer;</a>
+<a name="ln38">class CameraMetaData;</a>
+<a name="ln39"> </a>
+<a name="ln40">NakedDecoder::NakedDecoder(const Buffer* file, const Camera* c)</a>
+<a name="ln41">    : RawDecoder(file), cam(c) {}</a>
+<a name="ln42"> </a>
+<a name="ln43">const map&lt;string, BitOrder&gt; NakedDecoder::order2enum = {</a>
+<a name="ln44">    {&quot;plain&quot;, BitOrder_LSB},</a>
+<a name="ln45">    {&quot;jpeg&quot;, BitOrder_MSB},</a>
+<a name="ln46">    {&quot;jpeg16&quot;, BitOrder_MSB16},</a>
+<a name="ln47">    {&quot;jpeg32&quot;, BitOrder_MSB32},</a>
+<a name="ln48">};</a>
+<a name="ln49"> </a>
+<a name="ln50">void NakedDecoder::parseHints() {</a>
+<a name="ln51">  const auto&amp; cHints = cam-&gt;hints;</a>
+<a name="ln52">  const auto&amp; make = cam-&gt;make.c_str();</a>
+<a name="ln53">  const auto&amp; model = cam-&gt;model.c_str();</a>
+<a name="ln54"> </a>
+<a name="ln55">  auto parseHint = [&amp;cHints, &amp;make, &amp;model](const string&amp; name) {</a>
+<a name="ln56">    if (!cHints.has(name))</a>
+<a name="ln57">      ThrowRDE(&quot;%s %s: couldn't find %s&quot;, make, model, name.c_str());</a>
+<a name="ln58"> </a>
+<a name="ln59">    return cHints.get(name, 0U);</a>
+<a name="ln60">  };</a>
+<a name="ln61"> </a>
+<a name="ln62">  width = parseHint(&quot;full_width&quot;);</a>
+<a name="ln63">  height = parseHint(&quot;full_height&quot;);</a>
+<a name="ln64"> </a>
+<a name="ln65">  if (width == 0 || height == 0)</a>
+<a name="ln66">    ThrowRDE(&quot;%s %s: image is of zero size?&quot;, make, model);</a>
+<a name="ln67"> </a>
+<a name="ln68">  filesize = parseHint(&quot;filesize&quot;);</a>
+<a name="ln69">  offset = cHints.get(&quot;offset&quot;, 0);</a>
+<a name="ln70">  if (filesize == 0 || offset &gt;= filesize)</a>
+<a name="ln71">    ThrowRDE(&quot;%s %s: no image data found&quot;, make, model);</a>
+<a name="ln72"> </a>
+<a name="ln73">  bits = cHints.get(&quot;bits&quot;, (filesize-offset)*8/width/height);</a>
+<a name="ln74">  if (bits == 0)</a>
+<a name="ln75">    ThrowRDE(&quot;%s %s: image bpp is invalid: %u&quot;, make, model, bits);</a>
+<a name="ln76"> </a>
+<a name="ln77">  auto order = cHints.get(&quot;order&quot;, string());</a>
+<a name="ln78">  if (!order.empty()) {</a>
+<a name="ln79">    try {</a>
+<a name="ln80">      bo = order2enum.at(order);</a>
+<a name="ln81">    } catch (std::out_of_range&amp;) {</a>
+<a name="ln82">      ThrowRDE(&quot;%s %s: unknown order: %s&quot;, make, model, order.c_str());</a>
+<a name="ln83">    }</a>
+<a name="ln84">  }</a>
+<a name="ln85">}</a>
+<a name="ln86"> </a>
+<a name="ln87">RawImage NakedDecoder::decodeRawInternal() {</a>
+<a name="ln88">  parseHints();</a>
+<a name="ln89"> </a>
+<a name="ln90">  mRaw-&gt;dim = iPoint2D(width, height);</a>
+<a name="ln91">  mRaw-&gt;createData();</a>
+<a name="ln92"> </a>
+<a name="ln93">  UncompressedDecompressor u(</a>
+<a name="ln94">      ByteStream(DataBuffer(mFile-&gt;getSubView(offset), Endianness::little)),</a>
+<a name="ln95">      mRaw);</a>
+<a name="ln96"> </a>
+<a name="ln97">  iPoint2D pos(0, 0);</a>
+<a name="ln98">  u.readUncompressedRaw(mRaw-&gt;dim, pos, width * bits / 8, bits, bo);</a>
+<a name="ln99"> </a>
+<a name="ln100">  return mRaw;</a>
+<a name="ln101">}</a>
+<a name="ln102"> </a>
+<a name="ln103">void NakedDecoder::checkSupportInternal(const CameraMetaData* meta) {</a>
+<a name="ln104">  this-&gt;checkCameraSupported(meta, cam-&gt;make, cam-&gt;model, cam-&gt;mode);</a>
+<a name="ln105">}</a>
+<a name="ln106"> </a>
+<a name="ln107">void NakedDecoder::decodeMetaDataInternal(const CameraMetaData* meta) {</a>
+<a name="ln108">  setMetaData(meta, cam-&gt;make, cam-&gt;model, cam-&gt;mode, 0);</a>
+<a name="ln109">}</a>
+<a name="ln110"> </a>
+<a name="ln111">} // namespace rawspeed</a>
+
+</code></pre>
+<div class="balloon" rel="73"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v601/" target="_blank">V601</a> The '(filesize - offset) * 8 / width / height' value is implicitly cast to the bool type. Inspect the second argument.</p></div>
+
+<link rel="stylesheet" href="highlight.css">
+<script src="highlight.pack.js"></script>
+<script src="highlightjs-line-numbers.js"></script>
+<script>hljs.initHighlightingOnLoad();</script>
+<script>hljs.initLineNumbersOnLoad();</script>
+<script>
+  $(document).ready(function() {
+      $('.balloon').each(function () {
+          var bl = $(this);
+          var line = bl.attr('rel');
+          var text = $('a[name="ln'+line+'"]').text();
+
+          var space_count = 0;
+          for(var i = 0; i<text.length; i++){
+              var char = text[i];
+              if((char !== ' ')&&(char !== '\t'))break;
+              if(char === '\t')space_count++;
+              space_count++;
+          }
+
+          bl.css('margin-left', space_count*8);
+          $('a[name="ln'+line+'"]').after(bl);
+      });
+
+      window.location = window.location;
+  });
+</script>
+</body>
+</html>

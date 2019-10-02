@@ -1,0 +1,563 @@
+
+<html>
+<head>
+  <link rel="stylesheet" href="../style.css"/>
+  <script src="../jquery-3.2.1.min.js"></script>
+</head>
+<body>
+<pre><code class = "cpp">
+<a name="ln1">/*</a>
+<a name="ln2">    RawSpeed - RAW file decoder.</a>
+<a name="ln3"> </a>
+<a name="ln4">    Copyright (C) 2009-2014 Klaus Post</a>
+<a name="ln5">    Copyright (C) 2015-2017 Roman Lebedev</a>
+<a name="ln6"> </a>
+<a name="ln7">    This library is free software; you can redistribute it and/or</a>
+<a name="ln8">    modify it under the terms of the GNU Lesser General Public</a>
+<a name="ln9">    License as published by the Free Software Foundation; either</a>
+<a name="ln10">    version 2 of the License, or (at your option) any later version.</a>
+<a name="ln11"> </a>
+<a name="ln12">    This library is distributed in the hope that it will be useful,</a>
+<a name="ln13">    but WITHOUT ANY WARRANTY; without even the implied warranty of</a>
+<a name="ln14">    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU</a>
+<a name="ln15">    Lesser General Public License for more details.</a>
+<a name="ln16"> </a>
+<a name="ln17">    You should have received a copy of the GNU Lesser General Public</a>
+<a name="ln18">    License along with this library; if not, write to the Free Software</a>
+<a name="ln19">    Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA</a>
+<a name="ln20">*/</a>
+<a name="ln21"> </a>
+<a name="ln22">#include &quot;interpolators/Cr2sRawInterpolator.h&quot;</a>
+<a name="ln23">#include &quot;common/Common.h&quot;                 // for uint16_t, clampBits</a>
+<a name="ln24">#include &quot;common/Point.h&quot;                  // for iPoint2D</a>
+<a name="ln25">#include &quot;common/RawImage.h&quot;               // for RawImage, RawImageData</a>
+<a name="ln26">#include &quot;decoders/RawDecoderException.h&quot;  // for RawDecoderException (ptr o...</a>
+<a name="ln27">#include &lt;array&gt;                           // for array</a>
+<a name="ln28">#include &lt;cassert&gt;                         // for assert</a>
+<a name="ln29">#include &lt;type_traits&gt;                     // for is_pod</a>
+<a name="ln30"> </a>
+<a name="ln31">using std::is_pod;</a>
+<a name="ln32">using std::array;</a>
+<a name="ln33"> </a>
+<a name="ln34">namespace rawspeed {</a>
+<a name="ln35"> </a>
+<a name="ln36">struct Cr2sRawInterpolator::YCbCr final {</a>
+<a name="ln37">  int Y;</a>
+<a name="ln38">  int Cb;</a>
+<a name="ln39">  int Cr;</a>
+<a name="ln40"> </a>
+<a name="ln41">  inline static void LoadY(YCbCr* dst, const YCbCr&amp; src) {</a>
+<a name="ln42">    assert(dst);</a>
+<a name="ln43"> </a>
+<a name="ln44">    dst-&gt;Y = src.Y;</a>
+<a name="ln45">  }</a>
+<a name="ln46"> </a>
+<a name="ln47">  inline static void LoadY(YCbCr* p, const uint16_t* data) {</a>
+<a name="ln48">    assert(p);</a>
+<a name="ln49">    assert(data);</a>
+<a name="ln50"> </a>
+<a name="ln51">    p-&gt;Y = data[0];</a>
+<a name="ln52">  }</a>
+<a name="ln53"> </a>
+<a name="ln54">  inline static void LoadCbCr(YCbCr* p, const uint16_t* data) {</a>
+<a name="ln55">    assert(p);</a>
+<a name="ln56">    assert(data);</a>
+<a name="ln57"> </a>
+<a name="ln58">    p-&gt;Cb = data[1];</a>
+<a name="ln59">    p-&gt;Cr = data[2];</a>
+<a name="ln60">  }</a>
+<a name="ln61"> </a>
+<a name="ln62">  inline static void Load(YCbCr* p, const uint16_t* data) {</a>
+<a name="ln63">    assert(p);</a>
+<a name="ln64">    assert(data);</a>
+<a name="ln65"> </a>
+<a name="ln66">    LoadY(p, data);</a>
+<a name="ln67">    LoadCbCr(p, data);</a>
+<a name="ln68">  }</a>
+<a name="ln69"> </a>
+<a name="ln70">  YCbCr() = default;</a>
+<a name="ln71"> </a>
+<a name="ln72">  explicit YCbCr(uint16_t* data) {</a>
+<a name="ln73">    static_assert(is_pod&lt;YCbCr&gt;::value, &quot;not a POD&quot;);</a>
+<a name="ln74"> </a>
+<a name="ln75">    assert(data);</a>
+<a name="ln76"> </a>
+<a name="ln77">    Load(this, data);</a>
+<a name="ln78">  }</a>
+<a name="ln79"> </a>
+<a name="ln80">  inline void signExtend() {</a>
+<a name="ln81">    Cb -= 16384;</a>
+<a name="ln82">    Cr -= 16384;</a>
+<a name="ln83">  }</a>
+<a name="ln84"> </a>
+<a name="ln85">  inline void applyHue(int hue_) {</a>
+<a name="ln86">    Cb += hue_;</a>
+<a name="ln87">    Cr += hue_;</a>
+<a name="ln88">  }</a>
+<a name="ln89"> </a>
+<a name="ln90">  inline void process(int hue_) {</a>
+<a name="ln91">    signExtend();</a>
+<a name="ln92">    applyHue(hue_);</a>
+<a name="ln93">  }</a>
+<a name="ln94"> </a>
+<a name="ln95">  inline void interpolate(const YCbCr&amp; p0, const YCbCr&amp; p2) {</a>
+<a name="ln96">    // Y is already good, need to interpolate Cb and Cr</a>
+<a name="ln97">    // FIXME: dcraw does +1 before &gt;&gt; 1</a>
+<a name="ln98">    Cb = (p0.Cb + p2.Cb) &gt;&gt; 1;</a>
+<a name="ln99">    Cr = (p0.Cr + p2.Cr) &gt;&gt; 1;</a>
+<a name="ln100">  }</a>
+<a name="ln101"> </a>
+<a name="ln102">  inline void interpolate(const YCbCr&amp; p0, const YCbCr&amp; p1, const YCbCr&amp; p2,</a>
+<a name="ln103">                          const YCbCr&amp; p3) {</a>
+<a name="ln104">    // Y is already good, need to interpolate Cb and Cr</a>
+<a name="ln105">    // FIXME: dcraw does +1 before &gt;&gt; 1</a>
+<a name="ln106">    Cb = (p0.Cb + p1.Cb + p2.Cb + p3.Cb) &gt;&gt; 2;</a>
+<a name="ln107">    Cr = (p0.Cr + p1.Cr + p2.Cr + p3.Cr) &gt;&gt; 2;</a>
+<a name="ln108">  }</a>
+<a name="ln109">};</a>
+<a name="ln110"> </a>
+<a name="ln111">// NOTE: Thread safe.</a>
+<a name="ln112">template &lt;int version&gt;</a>
+<a name="ln113">inline void Cr2sRawInterpolator::interpolate_422_row(uint16_t* data, int w) {</a>
+<a name="ln114">  assert(data);</a>
+<a name="ln115">  assert(w &gt;= 2);</a>
+<a name="ln116">  assert(w % 2 == 0);</a>
+<a name="ln117"> </a>
+<a name="ln118">  // the format is:</a>
+<a name="ln119">  //   p0             p1             p2             p3</a>
+<a name="ln120">  //  [ Y1 Cb  Cr  ] [ Y2 ... ... ] [ Y1 Cb  Cr  ] [ Y2 ... ... ] ...</a>
+<a name="ln121">  // i.e. even pixels are full, odd pixels need interpolation:</a>
+<a name="ln122">  //   p0             p1             p2             p3</a>
+<a name="ln123">  //  [ Y1 Cb  Cr  ] [ Y2 Cb* Cr* ] [ Y1 Cb  Cr  ] [ Y2 Cb* Cr* ] ...</a>
+<a name="ln124">  // for last (odd) pixel of the line,  just keep Cb/Cr from previous pixel</a>
+<a name="ln125">  // see http://lclevy.free.fr/cr2/#sraw</a>
+<a name="ln126"> </a>
+<a name="ln127">  int x;</a>
+<a name="ln128">  for (x = 0; x &lt; w - 2; x += 2) {</a>
+<a name="ln129">    assert(x + 4 &lt;= w);</a>
+<a name="ln130">    assert(x % 2 == 0);</a>
+<a name="ln131"> </a>
+<a name="ln132">    // load, process and output first pixel, which is full</a>
+<a name="ln133">    YCbCr p0(data);</a>
+<a name="ln134">    p0.process(hue);</a>
+<a name="ln135">    YUV_TO_RGB&lt;version&gt;(p0, data);</a>
+<a name="ln136">    data += 3;</a>
+<a name="ln137"> </a>
+<a name="ln138">    // load Y from second pixel, Cb/Cr need to be interpolated</a>
+<a name="ln139">    YCbCr p;</a>
+<a name="ln140">    YCbCr::LoadY(&amp;p, data);</a>
+<a name="ln141"> </a>
+<a name="ln142">    // load third pixel, which is full, process</a>
+<a name="ln143">    YCbCr p1(data + 3);</a>
+<a name="ln144">    p1.process(hue);</a>
+<a name="ln145"> </a>
+<a name="ln146">    // and finally, interpolate and output the middle pixel</a>
+<a name="ln147">    p.interpolate(p0, p1);</a>
+<a name="ln148">    YUV_TO_RGB&lt;version&gt;(p, data);</a>
+<a name="ln149">    data += 3;</a>
+<a name="ln150">  }</a>
+<a name="ln151"> </a>
+<a name="ln152">  assert(x + 2 == w);</a>
+<a name="ln153">  assert(x % 2 == 0);</a>
+<a name="ln154"> </a>
+<a name="ln155">  // Last two pixels, the format is:</a>
+<a name="ln156">  //      p0             p1</a>
+<a name="ln157">  //  .. [ Y1 Cb  Cr  ] [ Y2 ... ... ]</a>
+<a name="ln158"> </a>
+<a name="ln159">  // load, process and output first pixel, which is full</a>
+<a name="ln160">  YCbCr p(data);</a>
+<a name="ln161">  p.process(hue);</a>
+<a name="ln162">  YUV_TO_RGB&lt;version&gt;(p, data);</a>
+<a name="ln163">  data += 3;</a>
+<a name="ln164"> </a>
+<a name="ln165">  // load Y from second pixel, keep Cb/Cr from previous pixel, and output</a>
+<a name="ln166">  YCbCr::LoadY(&amp;p, data);</a>
+<a name="ln167">  YUV_TO_RGB&lt;version&gt;(p, data);</a>
+<a name="ln168">  data += 3;</a>
+<a name="ln169">}</a>
+<a name="ln170"> </a>
+<a name="ln171">template &lt;int version&gt;</a>
+<a name="ln172">inline void Cr2sRawInterpolator::interpolate_422(int w, int h) {</a>
+<a name="ln173">  assert(w &gt; 0);</a>
+<a name="ln174">  assert(h &gt; 0);</a>
+<a name="ln175"> </a>
+<a name="ln176">  for (int y = 0; y &lt; h; y++) {</a>
+<a name="ln177">    auto data = reinterpret_cast&lt;uint16_t*&gt;(mRaw-&gt;getData(0, y));</a>
+<a name="ln178"> </a>
+<a name="ln179">    interpolate_422_row&lt;version&gt;(data, w);</a>
+<a name="ln180">  }</a>
+<a name="ln181">}</a>
+<a name="ln182"> </a>
+<a name="ln183">// NOTE: Not thread safe, since it writes inplace.</a>
+<a name="ln184">template &lt;int version&gt;</a>
+<a name="ln185">inline void</a>
+<a name="ln186">Cr2sRawInterpolator::interpolate_420_row(std::array&lt;uint16_t*, 3&gt; line, int w) {</a>
+<a name="ln187">  assert(line[0]);</a>
+<a name="ln188">  assert(line[1]);</a>
+<a name="ln189">  assert(line[2]);</a>
+<a name="ln190"> </a>
+<a name="ln191">  // the format is:</a>
+<a name="ln192">  //          p0             p1             p2             p3</a>
+<a name="ln193">  //  row 0: [ Y1 Cb  Cr  ] [ Y2 ... ... ] [ Y1 Cb  Cr  ] [ Y2 ... ... ] ...</a>
+<a name="ln194">  //  row 1: [ Y3 ... ... ] [ Y4 ... ... ] [ Y3 ... ... ] [ Y4 ... ... ] ...</a>
+<a name="ln195">  //  row 2: [ Y1 Cb  Cr  ] [ Y2 ... ... ] [ Y1 Cb  Cr  ] [ Y2 ... ... ] ...</a>
+<a name="ln196">  //  row 3: [ Y3 ... ... ] [ Y4 ... ... ] [ Y3 ... ... ] [ Y4 ... ... ] ...</a>
+<a name="ln197">  //           .. .   .       .. .   .       .. .   .       .. .   .</a>
+<a name="ln198">  // i.e. on even rows, even pixels are full, rest of pixels need interpolation</a>
+<a name="ln199">  // first, on even rows, odd pixels are interpolated using 422 algo (marked *)</a>
+<a name="ln200">  //          p0             p1             p2             p3</a>
+<a name="ln201">  //  row 0: [ Y1 Cb  Cr  ] [ Y2 Cb* Cr* ] [ Y1 Cb  Cr  ] [ Y2 Cb* Cr* ] ...</a>
+<a name="ln202">  //  row 1: [ Y3 ... ... ] [ Y4 ... ... ] [ Y3 ... ... ] [ Y4 ... ... ] ...</a>
+<a name="ln203">  //  row 2: [ Y1 Cb  Cr  ] [ Y2 Cb* Cr* ] [ Y1 Cb  Cr  ] [ Y2 Cb* Cr* ] ...</a>
+<a name="ln204">  //  row 3: [ Y3 ... ... ] [ Y4 ... ... ] [ Y3 ... ... ] [ Y4 ... ... ] ...</a>
+<a name="ln205">  //           .. .   .       .. .   .       .. .   .</a>
+<a name="ln206">  // then,  on odd rows, even pixels are interpolated (marked with #)</a>
+<a name="ln207">  //          p0             p1             p2             p3</a>
+<a name="ln208">  //  row 0: [ Y1 Cb  Cr  ] [ Y2 Cb* Cr* ] [ Y1 Cb  Cr  ] [ Y2 Cb* Cr* ] ...</a>
+<a name="ln209">  //  row 1: [ Y3 Cb# Cr# ] [ Y4 ... ... ] [ Y3 Cb# Cr# ] [ Y4 ... ... ] ...</a>
+<a name="ln210">  //  row 2: [ Y1 Cb  Cr  ] [ Y2 Cb* Cr* ] [ Y1 Cb  Cr  ] [ Y2 Cb* Cr* ] ...</a>
+<a name="ln211">  //  row 3: [ Y3 Cb# Cr# ] [ Y4 ... ... ] [ Y3 Cb# Cr# ] [ Y4 ... ... ] ...</a>
+<a name="ln212">  //           .. .   .       .. .   .       .. .   .</a>
+<a name="ln213">  // and finally, on odd rows, odd pixels are interpolated from * (marked $)</a>
+<a name="ln214">  //          p0             p1             p2             p3</a>
+<a name="ln215">  //  row 0: [ Y1 Cb  Cr  ] [ Y2 Cb* Cr* ] [ Y1 Cb  Cr  ] [ Y2 Cb* Cr* ] ...</a>
+<a name="ln216">  //  row 1: [ Y3 Cb# Cr# ] [ Y4 Cb$ Cr$ ] [ Y3 Cb# Cr# ] [ Y4 Cb$ Cr$ ] ...</a>
+<a name="ln217">  //  row 2: [ Y1 Cb  Cr  ] [ Y2 Cb* Cr* ] [ Y1 Cb  Cr  ] [ Y2 Cb* Cr* ] ...</a>
+<a name="ln218">  //  row 3: [ Y3 Cb# Cr# ] [ Y4 Cb$ Cr$ ] [ Y3 Cb# Cr# ] [ Y4 Cb$ Cr$ ] ...</a>
+<a name="ln219">  //           .. .   .       .. .   .       .. .   .</a>
+<a name="ln220">  // see http://lclevy.free.fr/cr2/#sraw</a>
+<a name="ln221"> </a>
+<a name="ln222">  int x;</a>
+<a name="ln223">  for (x = 0; x &lt; w - 2; x += 2) {</a>
+<a name="ln224">    assert(x + 4 &lt;= w);</a>
+<a name="ln225">    assert(x % 2 == 0);</a>
+<a name="ln226"> </a>
+<a name="ln227">    // load, process and output first pixel of first row, which is full</a>
+<a name="ln228">    YCbCr p0(line[0]);</a>
+<a name="ln229">    p0.process(hue);</a>
+<a name="ln230">    YUV_TO_RGB&lt;version&gt;(p0, line[0]);</a>
+<a name="ln231">    line[0] += 3;</a>
+<a name="ln232"> </a>
+<a name="ln233">    // load Y from second pixel of first row</a>
+<a name="ln234">    YCbCr ph;</a>
+<a name="ln235">    YCbCr::LoadY(&amp;ph, line[0]);</a>
+<a name="ln236"> </a>
+<a name="ln237">    // load Cb/Cr from third pixel of first row</a>
+<a name="ln238">    YCbCr p1;</a>
+<a name="ln239">    YCbCr::LoadCbCr(&amp;p1, line[0] + 3);</a>
+<a name="ln240">    p1.process(hue);</a>
+<a name="ln241"> </a>
+<a name="ln242">    // and finally, interpolate and output the middle pixel of first row</a>
+<a name="ln243">    ph.interpolate(p0, p1);</a>
+<a name="ln244">    YUV_TO_RGB&lt;version&gt;(ph, line[0]);</a>
+<a name="ln245">    line[0] += 3;</a>
+<a name="ln246"> </a>
+<a name="ln247">    // load Y from first pixel of second row</a>
+<a name="ln248">    YCbCr pv;</a>
+<a name="ln249">    YCbCr::LoadY(&amp;pv, line[1]);</a>
+<a name="ln250"> </a>
+<a name="ln251">    // load Cb/Cr from first pixel of third row</a>
+<a name="ln252">    YCbCr p2;</a>
+<a name="ln253">    YCbCr::LoadCbCr(&amp;p2, line[2]);</a>
+<a name="ln254">    p2.process(hue);</a>
+<a name="ln255"> </a>
+<a name="ln256">    // and finally, interpolate and output the first pixel of second row</a>
+<a name="ln257">    pv.interpolate(p0, p2);</a>
+<a name="ln258">    YUV_TO_RGB&lt;version&gt;(pv, line[1]);</a>
+<a name="ln259">    line[1] += 3;</a>
+<a name="ln260">    line[2] += 6;</a>
+<a name="ln261"> </a>
+<a name="ln262">    // load Y from second pixel of second row</a>
+<a name="ln263">    YCbCr p;</a>
+<a name="ln264">    YCbCr::LoadY(&amp;p, line[1]);</a>
+<a name="ln265"> </a>
+<a name="ln266">    // load Cb/Cr from third pixel of third row</a>
+<a name="ln267">    YCbCr p3;</a>
+<a name="ln268">    YCbCr::LoadCbCr(&amp;p3, line[2]);</a>
+<a name="ln269">    p3.process(hue);</a>
+<a name="ln270"> </a>
+<a name="ln271">    // and finally, interpolate and output the second pixel of second row</a>
+<a name="ln272">    // NOTE: we interpolate 4 full pixels here, located on diagonals</a>
+<a name="ln273">    // dcraw interpolates from already interpolated pixels</a>
+<a name="ln274">    p.interpolate(p0, p1, p2, p3);</a>
+<a name="ln275">    YUV_TO_RGB&lt;version&gt;(p, line[1]);</a>
+<a name="ln276">    line[1] += 3;</a>
+<a name="ln277">  }</a>
+<a name="ln278"> </a>
+<a name="ln279">  assert(x + 2 == w);</a>
+<a name="ln280">  assert(x % 2 == 0);</a>
+<a name="ln281"> </a>
+<a name="ln282">  // Last two pixels of the lines, the format is:</a>
+<a name="ln283">  //              p0             p1</a>
+<a name="ln284">  //  row 0: ... [ Y1 Cb  Cr  ] [ Y2 ... ... ]</a>
+<a name="ln285">  //  row 1: ... [ Y3 ... ... ] [ Y4 ... ... ]</a>
+<a name="ln286">  //  row 2: ... [ Y1 Cb  Cr  ] [ Y2 ... ... ]</a>
+<a name="ln287">  //  row 3: ... [ Y3 ... ... ] [ Y4 ... ... ]</a>
+<a name="ln288">  //               .. .   .       .. .   .</a>
+<a name="ln289"> </a>
+<a name="ln290">  // load, process and output first pixel of first row, which is full</a>
+<a name="ln291">  YCbCr p0(line[0]);</a>
+<a name="ln292">  p0.process(hue);</a>
+<a name="ln293">  YUV_TO_RGB&lt;version&gt;(p0, line[0]);</a>
+<a name="ln294">  line[0] += 3;</a>
+<a name="ln295"> </a>
+<a name="ln296">  // keep Cb/Cr from first pixel of first row</a>
+<a name="ln297">  // load Y from second pixel of first row, output</a>
+<a name="ln298">  YCbCr::LoadY(&amp;p0, line[0]);</a>
+<a name="ln299">  YUV_TO_RGB&lt;version&gt;(p0, line[0]);</a>
+<a name="ln300">  line[0] += 3;</a>
+<a name="ln301"> </a>
+<a name="ln302">  // load Y from first pixel of second row</a>
+<a name="ln303">  YCbCr pv;</a>
+<a name="ln304">  YCbCr::LoadY(&amp;pv, line[1]);</a>
+<a name="ln305"> </a>
+<a name="ln306">  // load Cb/Cr from first pixel of third row</a>
+<a name="ln307">  YCbCr p2;</a>
+<a name="ln308">  YCbCr::LoadCbCr(&amp;p2, line[2]);</a>
+<a name="ln309">  p2.process(hue);</a>
+<a name="ln310"> </a>
+<a name="ln311">  // and finally, interpolate and output the first pixel of second row</a>
+<a name="ln312">  pv.interpolate(p0, p2);</a>
+<a name="ln313">  YUV_TO_RGB&lt;version&gt;(pv, line[1]);</a>
+<a name="ln314">  line[1] += 3;</a>
+<a name="ln315"> </a>
+<a name="ln316">  // keep Cb/Cr from first pixel of second row</a>
+<a name="ln317">  // load Y from second pixel of second row, output</a>
+<a name="ln318">  YCbCr::LoadY(&amp;pv, line[1]);</a>
+<a name="ln319">  YUV_TO_RGB&lt;version&gt;(pv, line[1]);</a>
+<a name="ln320">  line[1] += 3;</a>
+<a name="ln321">}</a>
+<a name="ln322"> </a>
+<a name="ln323">// NOTE: Not thread safe, since it writes inplace.</a>
+<a name="ln324">template &lt;int version&gt;</a>
+<a name="ln325">inline void Cr2sRawInterpolator::interpolate_420(int w, int h) {</a>
+<a name="ln326">  assert(w &gt;= 2);</a>
+<a name="ln327">  assert(w % 2 == 0);</a>
+<a name="ln328"> </a>
+<a name="ln329">  assert(h &gt;= 2);</a>
+<a name="ln330">  assert(h % 2 == 0);</a>
+<a name="ln331"> </a>
+<a name="ln332">  array&lt;uint16_t*, 3&gt; line;</a>
+<a name="ln333"> </a>
+<a name="ln334">  int y;</a>
+<a name="ln335">  for (y = 0; y &lt; h - 2; y += 2) {</a>
+<a name="ln336">    assert(y + 4 &lt;= h);</a>
+<a name="ln337">    assert(y % 2 == 0);</a>
+<a name="ln338"> </a>
+<a name="ln339">    line[0] = reinterpret_cast&lt;uint16_t*&gt;(mRaw-&gt;getData(0, y));</a>
+<a name="ln340">    line[1] = reinterpret_cast&lt;uint16_t*&gt;(mRaw-&gt;getData(0, y + 1));</a>
+<a name="ln341">    line[2] = reinterpret_cast&lt;uint16_t*&gt;(mRaw-&gt;getData(0, y + 2));</a>
+<a name="ln342"> </a>
+<a name="ln343">    interpolate_420_row&lt;version&gt;(line, w);</a>
+<a name="ln344">  }</a>
+<a name="ln345"> </a>
+<a name="ln346">  assert(y + 2 == h);</a>
+<a name="ln347">  assert(y % 2 == 0);</a>
+<a name="ln348"> </a>
+<a name="ln349">  line[0] = reinterpret_cast&lt;uint16_t*&gt;(mRaw-&gt;getData(0, y));</a>
+<a name="ln350">  line[1] = reinterpret_cast&lt;uint16_t*&gt;(mRaw-&gt;getData(0, y + 1));</a>
+<a name="ln351">  line[2] = nullptr;</a>
+<a name="ln352"> </a>
+<a name="ln353">  assert(line[0]);</a>
+<a name="ln354">  assert(line[1]);</a>
+<a name="ln355">  assert(line[2] == nullptr);</a>
+<a name="ln356"> </a>
+<a name="ln357">  // Last two lines, the format is:</a>
+<a name="ln358">  //          p0             p1             p2             p3</a>
+<a name="ln359">  //           .. .   .       .. .   .       .. .   .       .. .   .</a>
+<a name="ln360">  //  row 0: [ Y1 Cb  Cr  ] [ Y2 ... ... ] [ Y1 Cb  Cr  ] [ Y2 ... ... ] ...</a>
+<a name="ln361">  //  row 1: [ Y3 ... ... ] [ Y4 ... ... ] [ Y3 ... ... ] [ Y4 ... ... ] ...</a>
+<a name="ln362"> </a>
+<a name="ln363">  int x;</a>
+<a name="ln364">  for (x = 0; x &lt; w - 2; x += 2) {</a>
+<a name="ln365">    assert(x + 4 &lt;= w);</a>
+<a name="ln366">    assert(x % 2 == 0);</a>
+<a name="ln367"> </a>
+<a name="ln368">    // load, process and output first pixel of first row, which is full</a>
+<a name="ln369">    YCbCr p0(line[0]);</a>
+<a name="ln370">    p0.process(hue);</a>
+<a name="ln371">    YUV_TO_RGB&lt;version&gt;(p0, line[0]);</a>
+<a name="ln372">    line[0] += 3;</a>
+<a name="ln373"> </a>
+<a name="ln374">    // load Y from second pixel of first row</a>
+<a name="ln375">    YCbCr ph;</a>
+<a name="ln376">    YCbCr::LoadY(&amp;ph, line[0]);</a>
+<a name="ln377"> </a>
+<a name="ln378">    // load Cb/Cr from third pixel of first row</a>
+<a name="ln379">    YCbCr p1;</a>
+<a name="ln380">    YCbCr::LoadCbCr(&amp;p1, line[0] + 3);</a>
+<a name="ln381">    p1.process(hue);</a>
+<a name="ln382"> </a>
+<a name="ln383">    // and finally, interpolate and output the middle pixel of first row</a>
+<a name="ln384">    ph.interpolate(p0, p1);</a>
+<a name="ln385">    YUV_TO_RGB&lt;version&gt;(ph, line[0]);</a>
+<a name="ln386">    line[0] += 3;</a>
+<a name="ln387"> </a>
+<a name="ln388">    // keep Cb/Cr from first pixel of first row</a>
+<a name="ln389">    // load Y from first pixel of second row; and output</a>
+<a name="ln390">    YCbCr::LoadY(&amp;p0, line[1]);</a>
+<a name="ln391">    YUV_TO_RGB&lt;version&gt;(p0, line[1]);</a>
+<a name="ln392">    line[1] += 3;</a>
+<a name="ln393"> </a>
+<a name="ln394">    // keep Cb/Cr from second pixel of first row</a>
+<a name="ln395">    // load Y from second pixel of second row; and output</a>
+<a name="ln396">    YCbCr::LoadY(&amp;ph, line[1]);</a>
+<a name="ln397">    YUV_TO_RGB&lt;version&gt;(ph, line[1]);</a>
+<a name="ln398">    line[1] += 3;</a>
+<a name="ln399">  }</a>
+<a name="ln400"> </a>
+<a name="ln401">  assert(line[0]);</a>
+<a name="ln402">  assert(line[1]);</a>
+<a name="ln403">  assert(line[2] == nullptr);</a>
+<a name="ln404"> </a>
+<a name="ln405">  assert(y + 2 == h);</a>
+<a name="ln406">  assert(y % 2 == 0);</a>
+<a name="ln407"> </a>
+<a name="ln408">  assert(x + 2 == w);</a>
+<a name="ln409">  assert(x % 2 == 0);</a>
+<a name="ln410"> </a>
+<a name="ln411">  // Last two pixels of last two lines, the format is:</a>
+<a name="ln412">  //               p0             p1</a>
+<a name="ln413">  //                .. .   .       .. .   .</a>
+<a name="ln414">  //  row 0:  ... [ Y1 Cb  Cr  ] [ Y2 ... ... ]</a>
+<a name="ln415">  //  row 1:  ... [ Y3 ... ... ] [ Y4 ... ... ]</a>
+<a name="ln416"> </a>
+<a name="ln417">  // load, process and output first pixel of first row, which is full</a>
+<a name="ln418">  YCbCr p(line[0]);</a>
+<a name="ln419">  p.process(hue);</a>
+<a name="ln420">  YUV_TO_RGB&lt;version&gt;(p, line[0]);</a>
+<a name="ln421">  line[0] += 3;</a>
+<a name="ln422"> </a>
+<a name="ln423">  // rest keeps Cb/Cr from this original pixel, because rest only have Y</a>
+<a name="ln424"> </a>
+<a name="ln425">  // load Y from second pixel of first row, and output</a>
+<a name="ln426">  YCbCr::LoadY(&amp;p, line[0]);</a>
+<a name="ln427">  YUV_TO_RGB&lt;version&gt;(p, line[0]);</a>
+<a name="ln428">  line[0] += 3;</a>
+<a name="ln429"> </a>
+<a name="ln430">  // load Y from first pixel of second row, and output</a>
+<a name="ln431">  YCbCr::LoadY(&amp;p, line[1]);</a>
+<a name="ln432">  YUV_TO_RGB&lt;version&gt;(p, line[1]);</a>
+<a name="ln433">  line[1] += 3;</a>
+<a name="ln434"> </a>
+<a name="ln435">  // load Y from second pixel of second row, and output</a>
+<a name="ln436">  YCbCr::LoadY(&amp;p, line[1]);</a>
+<a name="ln437">  YUV_TO_RGB&lt;version&gt;(p, line[1]);</a>
+<a name="ln438">  line[1] += 3;</a>
+<a name="ln439">}</a>
+<a name="ln440"> </a>
+<a name="ln441">inline void Cr2sRawInterpolator::STORE_RGB(uint16_t* X, int r, int g, int b) {</a>
+<a name="ln442">  assert(X);</a>
+<a name="ln443"> </a>
+<a name="ln444">  X[0] = clampBits(r &gt;&gt; 8, 16);</a>
+<a name="ln445">  X[1] = clampBits(g &gt;&gt; 8, 16);</a>
+<a name="ln446">  X[2] = clampBits(b &gt;&gt; 8, 16);</a>
+<a name="ln447">}</a>
+<a name="ln448"> </a>
+<a name="ln449">template &lt;/* int version */&gt;</a>
+<a name="ln450">/* Algorithm found in EOS 40D */</a>
+<a name="ln451">inline void Cr2sRawInterpolator::YUV_TO_RGB&lt;0&gt;(const YCbCr&amp; p, uint16_t* X) {</a>
+<a name="ln452">  assert(X);</a>
+<a name="ln453"> </a>
+<a name="ln454">  int r = sraw_coeffs[0] * (p.Y + p.Cr - 512);</a>
+<a name="ln455">  int g = sraw_coeffs[1] * (p.Y + ((-778 * p.Cb - (p.Cr * 2048)) &gt;&gt; 12) - 512);</a>
+<a name="ln456">  int b = sraw_coeffs[2] * (p.Y + (p.Cb - 512));</a>
+<a name="ln457">  STORE_RGB(X, r, g, b);</a>
+<a name="ln458">}</a>
+<a name="ln459"> </a>
+<a name="ln460">template &lt;/* int version */&gt;</a>
+<a name="ln461">inline void Cr2sRawInterpolator::YUV_TO_RGB&lt;1&gt;(const YCbCr&amp; p, uint16_t* X) {</a>
+<a name="ln462">  assert(X);</a>
+<a name="ln463"> </a>
+<a name="ln464">  int r = sraw_coeffs[0] * (p.Y + ((50 * p.Cb + 22929 * p.Cr) &gt;&gt; 12));</a>
+<a name="ln465">  int g = sraw_coeffs[1] * (p.Y + ((-5640 * p.Cb - 11751 * p.Cr) &gt;&gt; 12));</a>
+<a name="ln466">  int b = sraw_coeffs[2] * (p.Y + ((29040 * p.Cb - 101 * p.Cr) &gt;&gt; 12));</a>
+<a name="ln467">  STORE_RGB(X, r, g, b);</a>
+<a name="ln468">}</a>
+<a name="ln469"> </a>
+<a name="ln470">template &lt;/* int version */&gt;</a>
+<a name="ln471">/* Algorithm found in EOS 5d Mk III */</a>
+<a name="ln472">inline void Cr2sRawInterpolator::YUV_TO_RGB&lt;2&gt;(const YCbCr&amp; p, uint16_t* X) {</a>
+<a name="ln473">  assert(X);</a>
+<a name="ln474"> </a>
+<a name="ln475">  int r = sraw_coeffs[0] * (p.Y + p.Cr);</a>
+<a name="ln476">  int g = sraw_coeffs[1] * (p.Y + ((-778 * p.Cb - (p.Cr * 2048)) &gt;&gt; 12));</a>
+<a name="ln477">  int b = sraw_coeffs[2] * (p.Y + p.Cb);</a>
+<a name="ln478">  STORE_RGB(X, r, g, b);</a>
+<a name="ln479">}</a>
+<a name="ln480"> </a>
+<a name="ln481">// Interpolate and convert sRaw data.</a>
+<a name="ln482">void Cr2sRawInterpolator::interpolate(int version) {</a>
+<a name="ln483">  assert(version &gt;= 0 &amp;&amp; version &lt;= 2);</a>
+<a name="ln484"> </a>
+<a name="ln485">  const auto&amp; subSampling = mRaw-&gt;metadata.subsampling;</a>
+<a name="ln486">  if (subSampling.y == 1 &amp;&amp; subSampling.x == 2) {</a>
+<a name="ln487">    int width = mRaw-&gt;dim.x;</a>
+<a name="ln488">    int height = mRaw-&gt;dim.y;</a>
+<a name="ln489"> </a>
+<a name="ln490">    switch (version) {</a>
+<a name="ln491">    case 0:</a>
+<a name="ln492">      interpolate_422&lt;0&gt;(width, height);</a>
+<a name="ln493">      break;</a>
+<a name="ln494">    case 1:</a>
+<a name="ln495">      interpolate_422&lt;1&gt;(width, height);</a>
+<a name="ln496">      break;</a>
+<a name="ln497">    case 2:</a>
+<a name="ln498">      interpolate_422&lt;2&gt;(width, height);</a>
+<a name="ln499">      break;</a>
+<a name="ln500">    default:</a>
+<a name="ln501">      __builtin_unreachable();</a>
+<a name="ln502">    }</a>
+<a name="ln503">  } else if (subSampling.y == 2 &amp;&amp; subSampling.x == 2) {</a>
+<a name="ln504">    int width = mRaw-&gt;dim.x;</a>
+<a name="ln505">    int height = mRaw-&gt;dim.y;</a>
+<a name="ln506"> </a>
+<a name="ln507">    switch (version) {</a>
+<a name="ln508">    // no known sraws with &quot;version 0&quot;</a>
+<a name="ln509">    case 1:</a>
+<a name="ln510">      interpolate_420&lt;1&gt;(width, height);</a>
+<a name="ln511">      break;</a>
+<a name="ln512">    case 2:</a>
+<a name="ln513">      interpolate_420&lt;2&gt;(width, height);</a>
+<a name="ln514">      break;</a>
+<a name="ln515">    default:</a>
+<a name="ln516">      __builtin_unreachable();</a>
+<a name="ln517">    }</a>
+<a name="ln518">  } else</a>
+<a name="ln519">    ThrowRDE(&quot;Unknown subsampling: (%i; %i)&quot;, subSampling.x, subSampling.y);</a>
+<a name="ln520">}</a>
+<a name="ln521"> </a>
+<a name="ln522">} // namespace rawspeed</a>
+
+</code></pre>
+<div class="balloon" rel="168"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v1001/" target="_blank">V1001</a> The 'data' variable is assigned but is not used by the end of the function.</p></div>
+
+<link rel="stylesheet" href="highlight.css">
+<script src="highlight.pack.js"></script>
+<script src="highlightjs-line-numbers.js"></script>
+<script>hljs.initHighlightingOnLoad();</script>
+<script>hljs.initLineNumbersOnLoad();</script>
+<script>
+  $(document).ready(function() {
+      $('.balloon').each(function () {
+          var bl = $(this);
+          var line = bl.attr('rel');
+          var text = $('a[name="ln'+line+'"]').text();
+
+          var space_count = 0;
+          for(var i = 0; i<text.length; i++){
+              var char = text[i];
+              if((char !== ' ')&&(char !== '\t'))break;
+              if(char === '\t')space_count++;
+              space_count++;
+          }
+
+          bl.css('margin-left', space_count*8);
+          $('a[name="ln'+line+'"]').after(bl);
+      });
+
+      window.location = window.location;
+  });
+</script>
+</body>
+</html>

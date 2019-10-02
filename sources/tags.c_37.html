@@ -1,0 +1,1670 @@
+
+<html>
+<head>
+  <link rel="stylesheet" href="../style.css"/>
+  <script src="../jquery-3.2.1.min.js"></script>
+</head>
+<body>
+<pre><code class = "cpp">
+<a name="ln1">/*</a>
+<a name="ln2">    This file is part of darktable,</a>
+<a name="ln3">    copyright (c) 2010--2011 henrik andersson.</a>
+<a name="ln4">    copyright (c) 2012 James C. McPherson</a>
+<a name="ln5">    copyright (c) 2019 Philippe Weyland</a>
+<a name="ln6"> </a>
+<a name="ln7">    darktable is free software: you can redistribute it and/or modify</a>
+<a name="ln8">    it under the terms of the GNU General Public License as published by</a>
+<a name="ln9">    the Free Software Foundation, either version 3 of the License, or</a>
+<a name="ln10">    (at your option) any later version.</a>
+<a name="ln11"> </a>
+<a name="ln12">    darktable is distributed in the hope that it will be useful,</a>
+<a name="ln13">    but WITHOUT ANY WARRANTY; without even the implied warranty of</a>
+<a name="ln14">    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the</a>
+<a name="ln15">    GNU General Public License for more details.</a>
+<a name="ln16"> </a>
+<a name="ln17">    You should have received a copy of the GNU General Public License</a>
+<a name="ln18">    along with darktable.  If not, see &lt;http://www.gnu.org/licenses/&gt;.</a>
+<a name="ln19">*/</a>
+<a name="ln20">#include &quot;common/tags.h&quot;</a>
+<a name="ln21">#include &quot;common/collection.h&quot;</a>
+<a name="ln22">#include &quot;common/darktable.h&quot;</a>
+<a name="ln23">#include &quot;common/debug.h&quot;</a>
+<a name="ln24">#include &quot;common/undo.h&quot;</a>
+<a name="ln25">#include &quot;control/conf.h&quot;</a>
+<a name="ln26">#include &quot;control/control.h&quot;</a>
+<a name="ln27">#include &lt;glib.h&gt;</a>
+<a name="ln28">#if defined (_WIN32)</a>
+<a name="ln29">#include &quot;win/getdelim.h&quot;</a>
+<a name="ln30">#endif // defined (_WIN32)</a>
+<a name="ln31"> </a>
+<a name="ln32">typedef struct dt_undo_tags_t</a>
+<a name="ln33">{</a>
+<a name="ln34">  int imgid;</a>
+<a name="ln35">  GList *before; // list of tagid before</a>
+<a name="ln36">  guint tagid;   // tag added or removed from before</a>
+<a name="ln37">  gboolean add;</a>
+<a name="ln38">} dt_undo_tags_t;</a>
+<a name="ln39"> </a>
+<a name="ln40">static void _attach_tag(guint tagid, gint imgid, gboolean undo_actif);</a>
+<a name="ln41">static void _detach_tag(guint tagid, gint imgid, gboolean undo_actif);</a>
+<a name="ln42"> </a>
+<a name="ln43">static void _pop_undo(gpointer user_data, dt_undo_type_t type, dt_undo_data_t data, dt_undo_action_t action)</a>
+<a name="ln44">{</a>
+<a name="ln45">  if(type == DT_UNDO_TAGS)</a>
+<a name="ln46">  {</a>
+<a name="ln47">    sqlite3_stmt *stmt;</a>
+<a name="ln48">    GList *list = (GList *)data;</a>
+<a name="ln49"> </a>
+<a name="ln50">    while(list)</a>
+<a name="ln51">    {</a>
+<a name="ln52">      dt_undo_tags_t *tags = (dt_undo_tags_t *)list-&gt;data;</a>
+<a name="ln53"> </a>
+<a name="ln54">      GList *tag_list = tags-&gt;before;</a>
+<a name="ln55"> </a>
+<a name="ln56">      // remove from tagged_images</a>
+<a name="ln57">      DT_DEBUG_SQLITE3_PREPARE_V2(dt_database_get(darktable.db),</a>
+<a name="ln58">                                  &quot;DELETE FROM main.tagged_images WHERE imgid = ?1&quot;, -1, &amp;stmt, NULL);</a>
+<a name="ln59">      DT_DEBUG_SQLITE3_BIND_INT(stmt, 1, tags-&gt;imgid);</a>
+<a name="ln60">      sqlite3_step(stmt);</a>
+<a name="ln61">      sqlite3_finalize(stmt);</a>
+<a name="ln62"> </a>
+<a name="ln63">      // iterate over tag_list and attach tagid to imgid</a>
+<a name="ln64"> </a>
+<a name="ln65">      while(tag_list)</a>
+<a name="ln66">      {</a>
+<a name="ln67">        const guint tagid = (guint)GPOINTER_TO_INT(tag_list-&gt;data);</a>
+<a name="ln68">        _attach_tag(tagid, tags-&gt;imgid, FALSE);</a>
+<a name="ln69">        tag_list = g_list_next(tag_list);</a>
+<a name="ln70">      }</a>
+<a name="ln71"> </a>
+<a name="ln72">      if(action == DT_ACTION_REDO)</a>
+<a name="ln73">      {</a>
+<a name="ln74">        if(tags-&gt;add)</a>
+<a name="ln75">          _attach_tag(tags-&gt;tagid, tags-&gt;imgid, FALSE);</a>
+<a name="ln76">        else</a>
+<a name="ln77">          _detach_tag(tags-&gt;tagid, tags-&gt;imgid, FALSE);</a>
+<a name="ln78">      }</a>
+<a name="ln79"> </a>
+<a name="ln80">      dt_image_synch_xmp(tags-&gt;imgid);</a>
+<a name="ln81"> </a>
+<a name="ln82">      list = g_list_next(list);</a>
+<a name="ln83">    }</a>
+<a name="ln84"> </a>
+<a name="ln85">    dt_tag_update_used_tags();</a>
+<a name="ln86">    dt_collection_update_query(darktable.collection);</a>
+<a name="ln87">    dt_control_signal_raise(darktable.signals, DT_SIGNAL_TAG_CHANGED);</a>
+<a name="ln88">  }</a>
+<a name="ln89">}</a>
+<a name="ln90"> </a>
+<a name="ln91">static dt_undo_tags_t *_get_tags(int imgid, guint tagid, gboolean add)</a>
+<a name="ln92">{</a>
+<a name="ln93">  dt_undo_tags_t *result = (dt_undo_tags_t *)malloc(sizeof(dt_undo_tags_t));</a>
+<a name="ln94">  result-&gt;imgid  = imgid;</a>
+<a name="ln95">  result-&gt;before = NULL;</a>
+<a name="ln96">  result-&gt;tagid  = tagid;</a>
+<a name="ln97">  result-&gt;add    = add;</a>
+<a name="ln98"> </a>
+<a name="ln99">  sqlite3_stmt *stmt;</a>
+<a name="ln100"> </a>
+<a name="ln101">  DT_DEBUG_SQLITE3_PREPARE_V2(dt_database_get(darktable.db),</a>
+<a name="ln102">                              &quot;SELECT tagid FROM main.tagged_images WHERE imgid=?1&quot;, -1, &amp;stmt, NULL);</a>
+<a name="ln103">  DT_DEBUG_SQLITE3_BIND_INT(stmt, 1, imgid);</a>
+<a name="ln104"> </a>
+<a name="ln105">  while(sqlite3_step(stmt) == SQLITE_ROW)</a>
+<a name="ln106">  {</a>
+<a name="ln107">    const guint tag = sqlite3_column_int(stmt, 0);</a>
+<a name="ln108">    result-&gt;before = g_list_append(result-&gt;before, GINT_TO_POINTER(tag));</a>
+<a name="ln109">  }</a>
+<a name="ln110">  sqlite3_finalize(stmt);</a>
+<a name="ln111"> </a>
+<a name="ln112">  return result;</a>
+<a name="ln113">}</a>
+<a name="ln114"> </a>
+<a name="ln115">GList *_get_tags_selection(guint tagid, gboolean add)</a>
+<a name="ln116">{</a>
+<a name="ln117">  GList *result = NULL;</a>
+<a name="ln118"> </a>
+<a name="ln119">  sqlite3_stmt *stmt;</a>
+<a name="ln120">  DT_DEBUG_SQLITE3_PREPARE_V2(dt_database_get(darktable.db), &quot;SELECT imgid FROM main.selected_images&quot;, -1, &amp;stmt, NULL);</a>
+<a name="ln121"> </a>
+<a name="ln122">  while(sqlite3_step(stmt) == SQLITE_ROW)</a>
+<a name="ln123">  {</a>
+<a name="ln124">    const int imgid = sqlite3_column_int(stmt, 0);</a>
+<a name="ln125">    result = g_list_append(result, _get_tags(imgid, tagid, add));</a>
+<a name="ln126">  }</a>
+<a name="ln127"> </a>
+<a name="ln128">  sqlite3_finalize(stmt);</a>
+<a name="ln129"> </a>
+<a name="ln130">  return result;</a>
+<a name="ln131">}</a>
+<a name="ln132"> </a>
+<a name="ln133">static void _undo_tags_free(gpointer data)</a>
+<a name="ln134">{</a>
+<a name="ln135">  dt_undo_tags_t *tag = (dt_undo_tags_t *)data;</a>
+<a name="ln136">  g_list_free(tag-&gt;before);</a>
+<a name="ln137">}</a>
+<a name="ln138"> </a>
+<a name="ln139">static void _tags_undo_data_free(gpointer data)</a>
+<a name="ln140">{</a>
+<a name="ln141">  GList *l = (GList *)data;</a>
+<a name="ln142">  g_list_free_full(l, _undo_tags_free);</a>
+<a name="ln143">}</a>
+<a name="ln144"> </a>
+<a name="ln145">gboolean dt_tag_new(const char *name, guint *tagid)</a>
+<a name="ln146">{</a>
+<a name="ln147">  int rt;</a>
+<a name="ln148">  sqlite3_stmt *stmt;</a>
+<a name="ln149"> </a>
+<a name="ln150">  if(!name || name[0] == '\0') return FALSE; // no tagid name.</a>
+<a name="ln151"> </a>
+<a name="ln152">  DT_DEBUG_SQLITE3_PREPARE_V2(dt_database_get(darktable.db), &quot;SELECT id FROM data.tags WHERE name = ?1&quot;, -1, &amp;stmt,</a>
+<a name="ln153">                              NULL);</a>
+<a name="ln154">  DT_DEBUG_SQLITE3_BIND_TEXT(stmt, 1, name, -1, SQLITE_TRANSIENT);</a>
+<a name="ln155">  rt = sqlite3_step(stmt);</a>
+<a name="ln156">  if(rt == SQLITE_ROW)</a>
+<a name="ln157">  {</a>
+<a name="ln158">    // tagid already exists.</a>
+<a name="ln159">    if(tagid != NULL) *tagid = sqlite3_column_int64(stmt, 0);</a>
+<a name="ln160">    sqlite3_finalize(stmt);</a>
+<a name="ln161">    return TRUE;</a>
+<a name="ln162">  }</a>
+<a name="ln163">  sqlite3_finalize(stmt);</a>
+<a name="ln164"> </a>
+<a name="ln165">  DT_DEBUG_SQLITE3_PREPARE_V2(dt_database_get(darktable.db), &quot;INSERT INTO data.tags (id, name) VALUES (NULL, ?1)&quot;,</a>
+<a name="ln166">                              -1, &amp;stmt, NULL);</a>
+<a name="ln167">  DT_DEBUG_SQLITE3_BIND_TEXT(stmt, 1, name, -1, SQLITE_TRANSIENT);</a>
+<a name="ln168">  sqlite3_step(stmt);</a>
+<a name="ln169">  sqlite3_finalize(stmt);</a>
+<a name="ln170"> </a>
+<a name="ln171">  if(tagid != NULL)</a>
+<a name="ln172">  {</a>
+<a name="ln173">    *tagid = 0;</a>
+<a name="ln174">    DT_DEBUG_SQLITE3_PREPARE_V2(dt_database_get(darktable.db), &quot;SELECT id FROM data.tags WHERE name = ?1&quot;, -1,</a>
+<a name="ln175">                                &amp;stmt, NULL);</a>
+<a name="ln176">    DT_DEBUG_SQLITE3_BIND_TEXT(stmt, 1, name, -1, SQLITE_TRANSIENT);</a>
+<a name="ln177">    if(sqlite3_step(stmt) == SQLITE_ROW) *tagid = sqlite3_column_int(stmt, 0);</a>
+<a name="ln178">    sqlite3_finalize(stmt);</a>
+<a name="ln179">  }</a>
+<a name="ln180"> </a>
+<a name="ln181">  return TRUE;</a>
+<a name="ln182">}</a>
+<a name="ln183"> </a>
+<a name="ln184">gboolean dt_tag_new_from_gui(const char *name, guint *tagid)</a>
+<a name="ln185">{</a>
+<a name="ln186">  gboolean ret = dt_tag_new(name, tagid);</a>
+<a name="ln187">  /* if everything went fine, raise signal of tags change to refresh keywords module in GUI */</a>
+<a name="ln188">  if(ret) dt_control_signal_raise(darktable.signals, DT_SIGNAL_TAG_CHANGED);</a>
+<a name="ln189">  return ret;</a>
+<a name="ln190">}</a>
+<a name="ln191"> </a>
+<a name="ln192">guint dt_tag_remove(const guint tagid, gboolean final)</a>
+<a name="ln193">{</a>
+<a name="ln194">  int rv, count = -1;</a>
+<a name="ln195">  sqlite3_stmt *stmt;</a>
+<a name="ln196"> </a>
+<a name="ln197">  DT_DEBUG_SQLITE3_PREPARE_V2(dt_database_get(darktable.db),</a>
+<a name="ln198">                              &quot;SELECT COUNT(*) FROM main.tagged_images WHERE tagid=?1&quot;, -1, &amp;stmt, NULL);</a>
+<a name="ln199">  DT_DEBUG_SQLITE3_BIND_INT(stmt, 1, tagid);</a>
+<a name="ln200">  rv = sqlite3_step(stmt);</a>
+<a name="ln201">  if(rv == SQLITE_ROW) count = sqlite3_column_int(stmt, 0);</a>
+<a name="ln202">  sqlite3_finalize(stmt);</a>
+<a name="ln203"> </a>
+<a name="ln204">  if(final == TRUE)</a>
+<a name="ln205">  {</a>
+<a name="ln206">    // let's actually remove the tag</a>
+<a name="ln207">    DT_DEBUG_SQLITE3_PREPARE_V2(dt_database_get(darktable.db), &quot;DELETE FROM data.tags WHERE id=?1&quot;, -1, &amp;stmt,</a>
+<a name="ln208">                                NULL);</a>
+<a name="ln209">    DT_DEBUG_SQLITE3_BIND_INT(stmt, 1, tagid);</a>
+<a name="ln210">    sqlite3_step(stmt);</a>
+<a name="ln211">    sqlite3_finalize(stmt);</a>
+<a name="ln212"> </a>
+<a name="ln213">    DT_DEBUG_SQLITE3_PREPARE_V2(dt_database_get(darktable.db), &quot;DELETE FROM main.used_tags WHERE id=?1&quot;, -1, &amp;stmt,</a>
+<a name="ln214">                                NULL);</a>
+<a name="ln215">    DT_DEBUG_SQLITE3_BIND_INT(stmt, 1, tagid);</a>
+<a name="ln216">    sqlite3_step(stmt);</a>
+<a name="ln217">    sqlite3_finalize(stmt);</a>
+<a name="ln218"> </a>
+<a name="ln219">    DT_DEBUG_SQLITE3_PREPARE_V2(dt_database_get(darktable.db), &quot;DELETE FROM main.tagged_images WHERE tagid=?1&quot;,</a>
+<a name="ln220">                                -1, &amp;stmt, NULL);</a>
+<a name="ln221">    DT_DEBUG_SQLITE3_BIND_INT(stmt, 1, tagid);</a>
+<a name="ln222">    sqlite3_step(stmt);</a>
+<a name="ln223">    sqlite3_finalize(stmt);</a>
+<a name="ln224"> </a>
+<a name="ln225">    /* raise signal of tags change to refresh keywords module */</a>
+<a name="ln226">    dt_control_signal_raise(darktable.signals, DT_SIGNAL_TAG_CHANGED);</a>
+<a name="ln227">  }</a>
+<a name="ln228"> </a>
+<a name="ln229">  return count;</a>
+<a name="ln230">}</a>
+<a name="ln231"> </a>
+<a name="ln232">void dt_tag_delete_tag_batch(const char *flatlist)</a>
+<a name="ln233">{</a>
+<a name="ln234">  sqlite3_stmt *stmt;</a>
+<a name="ln235"> </a>
+<a name="ln236">  char *query = NULL;</a>
+<a name="ln237">  query = dt_util_dstrcat(query, &quot;DELETE FROM data.tags WHERE id IN (%s)&quot;, flatlist);</a>
+<a name="ln238">  DT_DEBUG_SQLITE3_PREPARE_V2(dt_database_get(darktable.db), query, -1, &amp;stmt, NULL);</a>
+<a name="ln239">  sqlite3_step(stmt);</a>
+<a name="ln240">  sqlite3_finalize(stmt);</a>
+<a name="ln241">  g_free(query);</a>
+<a name="ln242"> </a>
+<a name="ln243">  query = NULL;</a>
+<a name="ln244">  query = dt_util_dstrcat(query, &quot;DELETE FROM main.used_tags WHERE id IN (%s)&quot;, flatlist);</a>
+<a name="ln245">  DT_DEBUG_SQLITE3_PREPARE_V2(dt_database_get(darktable.db), query, -1, &amp;stmt, NULL);</a>
+<a name="ln246">  sqlite3_step(stmt);</a>
+<a name="ln247">  sqlite3_finalize(stmt);</a>
+<a name="ln248">  g_free(query);</a>
+<a name="ln249"> </a>
+<a name="ln250">  query = NULL;</a>
+<a name="ln251">  query = dt_util_dstrcat(query, &quot;DELETE FROM main.tagged_images WHERE tagid IN (%s)&quot;, flatlist);</a>
+<a name="ln252">  DT_DEBUG_SQLITE3_PREPARE_V2(dt_database_get(darktable.db), query, -1, &amp;stmt, NULL);</a>
+<a name="ln253">  sqlite3_step(stmt);</a>
+<a name="ln254">  sqlite3_finalize(stmt);</a>
+<a name="ln255">  g_free(query);</a>
+<a name="ln256">}</a>
+<a name="ln257"> </a>
+<a name="ln258">guint dt_tag_remove_list(GList *tag_list)</a>
+<a name="ln259">{</a>
+<a name="ln260">  if (!tag_list) return 0;</a>
+<a name="ln261"> </a>
+<a name="ln262">  char *flatlist = NULL;</a>
+<a name="ln263">  guint count = 0;</a>
+<a name="ln264">  guint tcount = 0;</a>
+<a name="ln265">  for (GList *taglist = tag_list; taglist ; taglist = g_list_next(taglist))</a>
+<a name="ln266">  {</a>
+<a name="ln267">    const guint tagid = ((dt_tag_t *)taglist-&gt;data)-&gt;id;</a>
+<a name="ln268">    flatlist = dt_util_dstrcat(flatlist, &quot;%u,&quot;, tagid);</a>
+<a name="ln269">    count++;</a>
+<a name="ln270">    if(flatlist &amp;&amp; count &gt; 1000)</a>
+<a name="ln271">    {</a>
+<a name="ln272">      flatlist[strlen(flatlist)-1] = '\0';</a>
+<a name="ln273">      dt_tag_delete_tag_batch(flatlist);</a>
+<a name="ln274">      g_free(flatlist);</a>
+<a name="ln275">      flatlist = NULL;</a>
+<a name="ln276">      tcount = tcount + count;</a>
+<a name="ln277">      count = 0;</a>
+<a name="ln278">    }</a>
+<a name="ln279">  }</a>
+<a name="ln280">  if(flatlist)</a>
+<a name="ln281">  {</a>
+<a name="ln282">    flatlist[strlen(flatlist)-1] = '\0';</a>
+<a name="ln283">    dt_tag_delete_tag_batch(flatlist);</a>
+<a name="ln284">    g_free(flatlist);</a>
+<a name="ln285">    tcount = tcount + count;</a>
+<a name="ln286">  }</a>
+<a name="ln287">  /* raise signal of tags change to refresh keywords module */</a>
+<a name="ln288">  dt_control_signal_raise(darktable.signals, DT_SIGNAL_TAG_CHANGED);</a>
+<a name="ln289">  return tcount;</a>
+<a name="ln290">}</a>
+<a name="ln291"> </a>
+<a name="ln292">gchar *dt_tag_get_name(const guint tagid)</a>
+<a name="ln293">{</a>
+<a name="ln294">  int rt;</a>
+<a name="ln295">  char *name = NULL;</a>
+<a name="ln296">  sqlite3_stmt *stmt;</a>
+<a name="ln297">  DT_DEBUG_SQLITE3_PREPARE_V2(dt_database_get(darktable.db), &quot;SELECT name FROM data.tags WHERE id= ?1&quot;, -1, &amp;stmt,</a>
+<a name="ln298">                              NULL);</a>
+<a name="ln299">  DT_DEBUG_SQLITE3_BIND_INT(stmt, 1, tagid);</a>
+<a name="ln300">  rt = sqlite3_step(stmt);</a>
+<a name="ln301">  if(rt == SQLITE_ROW) name = g_strdup((const char *)sqlite3_column_text(stmt, 0));</a>
+<a name="ln302">  sqlite3_finalize(stmt);</a>
+<a name="ln303"> </a>
+<a name="ln304">  return name;</a>
+<a name="ln305">}</a>
+<a name="ln306"> </a>
+<a name="ln307">void dt_tag_reorganize(const gchar *source, const gchar *dest)</a>
+<a name="ln308">{</a>
+<a name="ln309">  sqlite3_stmt *stmt;</a>
+<a name="ln310"> </a>
+<a name="ln311">  if(!strcmp(source, dest)) return;</a>
+<a name="ln312"> </a>
+<a name="ln313">  gchar *tag = g_strrstr(source, &quot;|&quot;);</a>
+<a name="ln314">  gchar *tag_to_free = NULL;</a>
+<a name="ln315">  if(tag == NULL) tag_to_free = tag = g_strconcat(&quot;|&quot;, source, NULL);</a>
+<a name="ln316"> </a>
+<a name="ln317">  if(!strcmp(dest, &quot; &quot;))</a>
+<a name="ln318">  {</a>
+<a name="ln319">    tag++;</a>
+<a name="ln320">    dest++;</a>
+<a name="ln321">  }</a>
+<a name="ln322"> </a>
+<a name="ln323">  gchar *new_expr = g_strconcat(dest, tag, NULL);</a>
+<a name="ln324">  gchar *source_expr = g_strconcat(source, &quot;%&quot;, NULL);</a>
+<a name="ln325"> </a>
+<a name="ln326">  DT_DEBUG_SQLITE3_PREPARE_V2(dt_database_get(darktable.db),</a>
+<a name="ln327">                              &quot;UPDATE data.tags SET name=REPLACE(name,?1,?2) WHERE name LIKE ?3&quot;, -1, &amp;stmt, NULL);</a>
+<a name="ln328">  DT_DEBUG_SQLITE3_BIND_TEXT(stmt, 1, source, -1, SQLITE_TRANSIENT);</a>
+<a name="ln329">  DT_DEBUG_SQLITE3_BIND_TEXT(stmt, 2, new_expr, -1, SQLITE_TRANSIENT);</a>
+<a name="ln330">  DT_DEBUG_SQLITE3_BIND_TEXT(stmt, 3, source_expr, -1, SQLITE_TRANSIENT);</a>
+<a name="ln331">  sqlite3_step(stmt);</a>
+<a name="ln332">  sqlite3_finalize(stmt);</a>
+<a name="ln333"> </a>
+<a name="ln334">  DT_DEBUG_SQLITE3_PREPARE_V2(dt_database_get(darktable.db),</a>
+<a name="ln335">                              &quot;UPDATE main.used_tags SET name=REPLACE(name,?1,?2) WHERE name LIKE ?3&quot;,</a>
+<a name="ln336">                              -1, &amp;stmt, NULL);</a>
+<a name="ln337">  DT_DEBUG_SQLITE3_BIND_TEXT(stmt, 1, source, -1, SQLITE_TRANSIENT);</a>
+<a name="ln338">  DT_DEBUG_SQLITE3_BIND_TEXT(stmt, 2, new_expr, -1, SQLITE_TRANSIENT);</a>
+<a name="ln339">  DT_DEBUG_SQLITE3_BIND_TEXT(stmt, 3, source_expr, -1, SQLITE_TRANSIENT);</a>
+<a name="ln340">  sqlite3_step(stmt);</a>
+<a name="ln341">  sqlite3_finalize(stmt);</a>
+<a name="ln342"> </a>
+<a name="ln343">  g_free(source_expr);</a>
+<a name="ln344">  g_free(new_expr);</a>
+<a name="ln345">  g_free(tag_to_free);</a>
+<a name="ln346"> </a>
+<a name="ln347">  /* raise signal of tags change to refresh keywords module */</a>
+<a name="ln348">  // dt_control_signal_raise(darktable.signals, DT_SIGNAL_TAG_CHANGED);</a>
+<a name="ln349">}</a>
+<a name="ln350"> </a>
+<a name="ln351">void dt_tag_rename(const guint tagid, const gchar *new_tagname)</a>
+<a name="ln352">{</a>
+<a name="ln353">  sqlite3_stmt *stmt;</a>
+<a name="ln354"> </a>
+<a name="ln355">  if(!new_tagname || !new_tagname[0]) return;</a>
+<a name="ln356">  if(dt_tag_exists(new_tagname, NULL)) return;</a>
+<a name="ln357"> </a>
+<a name="ln358">  DT_DEBUG_SQLITE3_PREPARE_V2(dt_database_get(darktable.db),</a>
+<a name="ln359">                              &quot;UPDATE data.tags SET name = ?2 WHERE id = ?1&quot;, -1, &amp;stmt, NULL);</a>
+<a name="ln360">  DT_DEBUG_SQLITE3_BIND_INT(stmt, 1, tagid);</a>
+<a name="ln361">  DT_DEBUG_SQLITE3_BIND_TEXT(stmt, 2, new_tagname, -1, SQLITE_TRANSIENT);</a>
+<a name="ln362">  sqlite3_step(stmt);</a>
+<a name="ln363">  sqlite3_finalize(stmt);</a>
+<a name="ln364"> </a>
+<a name="ln365">  DT_DEBUG_SQLITE3_PREPARE_V2(dt_database_get(darktable.db),</a>
+<a name="ln366">                              &quot;UPDATE main.used_tags SET name = ?2 WHERE id = ?1&quot;, -1, &amp;stmt, NULL);</a>
+<a name="ln367">  DT_DEBUG_SQLITE3_BIND_INT(stmt, 1, tagid);</a>
+<a name="ln368">  DT_DEBUG_SQLITE3_BIND_TEXT(stmt, 2, new_tagname, -1, SQLITE_TRANSIENT);</a>
+<a name="ln369">  sqlite3_step(stmt);</a>
+<a name="ln370">  sqlite3_finalize(stmt);</a>
+<a name="ln371">}</a>
+<a name="ln372"> </a>
+<a name="ln373">gboolean dt_tag_exists(const char *name, guint *tagid)</a>
+<a name="ln374">{</a>
+<a name="ln375">  int rt;</a>
+<a name="ln376">  sqlite3_stmt *stmt;</a>
+<a name="ln377">  DT_DEBUG_SQLITE3_PREPARE_V2(dt_database_get(darktable.db), &quot;SELECT id FROM data.tags WHERE name = ?1&quot;, -1, &amp;stmt,</a>
+<a name="ln378">                              NULL);</a>
+<a name="ln379">  DT_DEBUG_SQLITE3_BIND_TEXT(stmt, 1, name, -1, SQLITE_TRANSIENT);</a>
+<a name="ln380">  rt = sqlite3_step(stmt);</a>
+<a name="ln381"> </a>
+<a name="ln382">  if(rt == SQLITE_ROW)</a>
+<a name="ln383">  {</a>
+<a name="ln384">    if(tagid != NULL) *tagid = sqlite3_column_int64(stmt, 0);</a>
+<a name="ln385">    sqlite3_finalize(stmt);</a>
+<a name="ln386">    return TRUE;</a>
+<a name="ln387">  }</a>
+<a name="ln388"> </a>
+<a name="ln389">  if(tagid != NULL) *tagid = -1;</a>
+<a name="ln390">  sqlite3_finalize(stmt);</a>
+<a name="ln391">  return FALSE;</a>
+<a name="ln392">}</a>
+<a name="ln393"> </a>
+<a name="ln394">// we keep this separate so that updating the gui only happens once (and it's the caller's responsibility)</a>
+<a name="ln395">static void _attach_tag(guint tagid, gint imgid, gboolean undo_actif)</a>
+<a name="ln396">{</a>
+<a name="ln397">  sqlite3_stmt *stmt;</a>
+<a name="ln398">  GList *undo = NULL;</a>
+<a name="ln399"> </a>
+<a name="ln400">  if(undo_actif) dt_undo_start_group(darktable.undo, DT_UNDO_TAGS);</a>
+<a name="ln401"> </a>
+<a name="ln402">  if(imgid &gt; 0)</a>
+<a name="ln403">  {</a>
+<a name="ln404">    if(undo_actif) undo = g_list_append(undo, _get_tags(imgid, tagid, TRUE));</a>
+<a name="ln405"> </a>
+<a name="ln406">    DT_DEBUG_SQLITE3_PREPARE_V2(dt_database_get(darktable.db),</a>
+<a name="ln407">                                &quot;INSERT OR REPLACE INTO main.tagged_images (imgid, tagid) VALUES (?1, ?2)&quot;, -1,</a>
+<a name="ln408">                                &amp;stmt, NULL);</a>
+<a name="ln409">    DT_DEBUG_SQLITE3_BIND_INT(stmt, 1, imgid);</a>
+<a name="ln410">    DT_DEBUG_SQLITE3_BIND_INT(stmt, 2, tagid);</a>
+<a name="ln411">    sqlite3_step(stmt);</a>
+<a name="ln412">    sqlite3_finalize(stmt);</a>
+<a name="ln413">  }</a>
+<a name="ln414">  else</a>
+<a name="ln415">  {</a>
+<a name="ln416">    if(undo_actif) undo = _get_tags_selection(tagid, TRUE);</a>
+<a name="ln417"> </a>
+<a name="ln418">    // insert into tagged_images if not there already.</a>
+<a name="ln419">    DT_DEBUG_SQLITE3_PREPARE_V2(dt_database_get(darktable.db),</a>
+<a name="ln420">                                &quot;INSERT OR REPLACE INTO main.tagged_images SELECT imgid, ?1 &quot;</a>
+<a name="ln421">                                &quot;FROM main.selected_images&quot;,</a>
+<a name="ln422">                                -1, &amp;stmt, NULL);</a>
+<a name="ln423">    DT_DEBUG_SQLITE3_BIND_INT(stmt, 1, tagid);</a>
+<a name="ln424">    sqlite3_step(stmt);</a>
+<a name="ln425">    sqlite3_finalize(stmt);</a>
+<a name="ln426">  }</a>
+<a name="ln427"> </a>
+<a name="ln428">  if(undo_actif)</a>
+<a name="ln429">  {</a>
+<a name="ln430">    dt_undo_record(darktable.undo, NULL, DT_UNDO_TAGS, (dt_undo_data_t)undo, _pop_undo, _tags_undo_data_free);</a>
+<a name="ln431">    dt_undo_end_group(darktable.undo);</a>
+<a name="ln432">  }</a>
+<a name="ln433">}</a>
+<a name="ln434"> </a>
+<a name="ln435">gboolean _tag_is_attached(guint tagid, gint imgid)</a>
+<a name="ln436">{</a>
+<a name="ln437">  gboolean result = FALSE;</a>
+<a name="ln438">  sqlite3_stmt *stmt;</a>
+<a name="ln439"> </a>
+<a name="ln440">  DT_DEBUG_SQLITE3_PREPARE_V2(dt_database_get(darktable.db),</a>
+<a name="ln441">                              &quot;SELECT tagid FROM main.tagged_images WHERE imgid=?1 AND tagid=?2&quot;, -1,</a>
+<a name="ln442">                              &amp;stmt, NULL);</a>
+<a name="ln443">  DT_DEBUG_SQLITE3_BIND_INT(stmt, 1, imgid);</a>
+<a name="ln444">  DT_DEBUG_SQLITE3_BIND_INT(stmt, 2, tagid);</a>
+<a name="ln445"> </a>
+<a name="ln446">  if(sqlite3_step(stmt) == SQLITE_ROW)</a>
+<a name="ln447">    result = TRUE;</a>
+<a name="ln448"> </a>
+<a name="ln449">  sqlite3_finalize(stmt);</a>
+<a name="ln450">  return result;</a>
+<a name="ln451">}</a>
+<a name="ln452"> </a>
+<a name="ln453">gboolean dt_tag_attach(guint tagid, gint imgid)</a>
+<a name="ln454">{</a>
+<a name="ln455">  gboolean attached = FALSE;</a>
+<a name="ln456">  if(!_tag_is_attached(tagid, imgid))</a>
+<a name="ln457">  {</a>
+<a name="ln458">    _attach_tag(tagid, imgid, TRUE);</a>
+<a name="ln459"> </a>
+<a name="ln460">    dt_tag_update_used_tags();</a>
+<a name="ln461"> </a>
+<a name="ln462">    attached = TRUE;</a>
+<a name="ln463">  }</a>
+<a name="ln464">  return attached;</a>
+<a name="ln465">}</a>
+<a name="ln466"> </a>
+<a name="ln467">void dt_tag_attach_from_gui(guint tagid, gint imgid)</a>
+<a name="ln468">{</a>
+<a name="ln469">  if(dt_tag_attach(tagid, imgid))</a>
+<a name="ln470">    dt_collection_update_query(darktable.collection);</a>
+<a name="ln471">}</a>
+<a name="ln472"> </a>
+<a name="ln473">void dt_tag_attach_list(GList *tags, gint imgid)</a>
+<a name="ln474">{</a>
+<a name="ln475">  GList *child = NULL;</a>
+<a name="ln476">  if((child = g_list_first(tags)) != NULL) do</a>
+<a name="ln477">    {</a>
+<a name="ln478">      _attach_tag(GPOINTER_TO_INT(child-&gt;data), imgid, TRUE);</a>
+<a name="ln479">    } while((child = g_list_next(child)) != NULL);</a>
+<a name="ln480"> </a>
+<a name="ln481">  dt_tag_update_used_tags();</a>
+<a name="ln482"> </a>
+<a name="ln483">  dt_collection_update_query(darktable.collection);</a>
+<a name="ln484">}</a>
+<a name="ln485"> </a>
+<a name="ln486">void dt_tag_attach_string_list(const gchar *tags, gint imgid)</a>
+<a name="ln487">{</a>
+<a name="ln488">  gchar **tokens = g_strsplit(tags, &quot;,&quot;, 0);</a>
+<a name="ln489">  if(tokens)</a>
+<a name="ln490">  {</a>
+<a name="ln491">    gchar **entry = tokens;</a>
+<a name="ln492">    while(*entry)</a>
+<a name="ln493">    {</a>
+<a name="ln494">      // remove leading and trailing spaces</a>
+<a name="ln495">      char *e = *entry + strlen(*entry) - 1;</a>
+<a name="ln496">      while(*e == ' ' &amp;&amp; e &gt; *entry)</a>
+<a name="ln497">      {</a>
+<a name="ln498">        *e = '\0';</a>
+<a name="ln499">        e--;</a>
+<a name="ln500">      }</a>
+<a name="ln501">      e = *entry;</a>
+<a name="ln502">      while(*e == ' ' &amp;&amp; *e != '\0') e++;</a>
+<a name="ln503">      if(*e)</a>
+<a name="ln504">      {</a>
+<a name="ln505">        // add the tag to the image</a>
+<a name="ln506">        guint tagid = 0;</a>
+<a name="ln507">        dt_tag_new(e, &amp;tagid);</a>
+<a name="ln508">        _attach_tag(tagid, imgid, TRUE);</a>
+<a name="ln509">      }</a>
+<a name="ln510">      entry++;</a>
+<a name="ln511">    }</a>
+<a name="ln512"> </a>
+<a name="ln513">    dt_tag_update_used_tags();</a>
+<a name="ln514"> </a>
+<a name="ln515">    dt_collection_update_query(darktable.collection);</a>
+<a name="ln516">  }</a>
+<a name="ln517">  g_strfreev(tokens);</a>
+<a name="ln518">}</a>
+<a name="ln519"> </a>
+<a name="ln520">void _detach_tag(guint tagid, gint imgid, gboolean undo_actif)</a>
+<a name="ln521">{</a>
+<a name="ln522">  sqlite3_stmt *stmt;</a>
+<a name="ln523">  GList *undo = NULL;</a>
+<a name="ln524"> </a>
+<a name="ln525">  if(undo_actif) dt_undo_start_group(darktable.undo, DT_UNDO_TAGS);</a>
+<a name="ln526"> </a>
+<a name="ln527">  if(imgid &gt; 0)</a>
+<a name="ln528">  {</a>
+<a name="ln529">    if(undo_actif) undo = g_list_append(undo, _get_tags(imgid, tagid, FALSE));</a>
+<a name="ln530"> </a>
+<a name="ln531">    // remove from tagged_images</a>
+<a name="ln532">    DT_DEBUG_SQLITE3_PREPARE_V2(dt_database_get(darktable.db),</a>
+<a name="ln533">                                &quot;DELETE FROM main.tagged_images WHERE tagid = ?1 AND imgid = ?2&quot;, -1, &amp;stmt, NULL);</a>
+<a name="ln534">    DT_DEBUG_SQLITE3_BIND_INT(stmt, 1, tagid);</a>
+<a name="ln535">    DT_DEBUG_SQLITE3_BIND_INT(stmt, 2, imgid);</a>
+<a name="ln536">    sqlite3_step(stmt);</a>
+<a name="ln537">    sqlite3_finalize(stmt);</a>
+<a name="ln538">  }</a>
+<a name="ln539">  else</a>
+<a name="ln540">  {</a>
+<a name="ln541">    if(undo_actif) undo = _get_tags_selection(tagid, FALSE);</a>
+<a name="ln542"> </a>
+<a name="ln543">    // remove from tagged_images</a>
+<a name="ln544">    DT_DEBUG_SQLITE3_PREPARE_V2(dt_database_get(darktable.db),</a>
+<a name="ln545">                                &quot;DELETE FROM main.tagged_images WHERE tagid = ?1 AND imgid IN &quot;</a>
+<a name="ln546">                                &quot;(SELECT imgid FROM main.selected_images)&quot;,</a>
+<a name="ln547">                                -1, &amp;stmt, NULL);</a>
+<a name="ln548">    DT_DEBUG_SQLITE3_BIND_INT(stmt, 1, tagid);</a>
+<a name="ln549">    sqlite3_step(stmt);</a>
+<a name="ln550">    sqlite3_finalize(stmt);</a>
+<a name="ln551">  }</a>
+<a name="ln552"> </a>
+<a name="ln553">  if(undo_actif)</a>
+<a name="ln554">  {</a>
+<a name="ln555">    dt_undo_record(darktable.undo, NULL, DT_UNDO_TAGS, (dt_undo_data_t)undo, _pop_undo, _tags_undo_data_free);</a>
+<a name="ln556">    dt_undo_end_group(darktable.undo);</a>
+<a name="ln557">  }</a>
+<a name="ln558"> </a>
+<a name="ln559">}</a>
+<a name="ln560"> </a>
+<a name="ln561">void dt_tag_detach(guint tagid, gint imgid)</a>
+<a name="ln562">{</a>
+<a name="ln563">  _detach_tag(tagid, imgid, TRUE);</a>
+<a name="ln564"> </a>
+<a name="ln565">  dt_tag_update_used_tags();</a>
+<a name="ln566"> </a>
+<a name="ln567">}</a>
+<a name="ln568"> </a>
+<a name="ln569">void dt_tag_detach_from_gui(guint tagid, gint imgid)</a>
+<a name="ln570">{</a>
+<a name="ln571">  _detach_tag(tagid, imgid, TRUE);</a>
+<a name="ln572"> </a>
+<a name="ln573">  dt_tag_update_used_tags();</a>
+<a name="ln574"> </a>
+<a name="ln575">  dt_collection_update_query(darktable.collection);</a>
+<a name="ln576">}</a>
+<a name="ln577"> </a>
+<a name="ln578">void dt_tag_detach_by_string(const char *name, gint imgid)</a>
+<a name="ln579">{</a>
+<a name="ln580">  sqlite3_stmt *stmt;</a>
+<a name="ln581">  DT_DEBUG_SQLITE3_PREPARE_V2(dt_database_get(darktable.db),</a>
+<a name="ln582">                              &quot;DELETE FROM main.tagged_images WHERE tagid IN (SELECT id FROM &quot;</a>
+<a name="ln583">                              &quot;data.tags WHERE name LIKE ?1) AND imgid = ?2;&quot;,</a>
+<a name="ln584">                              -1, &amp;stmt, NULL);</a>
+<a name="ln585">  DT_DEBUG_SQLITE3_BIND_TEXT(stmt, 1, name, -1, SQLITE_TRANSIENT);</a>
+<a name="ln586">  DT_DEBUG_SQLITE3_BIND_INT(stmt, 2, imgid);</a>
+<a name="ln587">  sqlite3_step(stmt);</a>
+<a name="ln588">  sqlite3_finalize(stmt);</a>
+<a name="ln589"> </a>
+<a name="ln590">  dt_tag_update_used_tags();</a>
+<a name="ln591">}</a>
+<a name="ln592"> </a>
+<a name="ln593">static void dt_set_darktable_tags()</a>
+<a name="ln594">{</a>
+<a name="ln595">  sqlite3_stmt *stmt;</a>
+<a name="ln596"> </a>
+<a name="ln597">  DT_DEBUG_SQLITE3_PREPARE_V2(dt_database_get(darktable.db),</a>
+<a name="ln598">                              &quot;SELECT COUNT(*) FROM memory.darktable_tags&quot;,</a>
+<a name="ln599">                              -1, &amp;stmt, NULL);</a>
+<a name="ln600">  sqlite3_step(stmt);</a>
+<a name="ln601">  const guint count = sqlite3_column_int(stmt, 0);</a>
+<a name="ln602">  sqlite3_finalize(stmt);</a>
+<a name="ln603"> </a>
+<a name="ln604">  if (!count)</a>
+<a name="ln605">  {</a>
+<a name="ln606">    DT_DEBUG_SQLITE3_PREPARE_V2(dt_database_get(darktable.db),</a>
+<a name="ln607">                                &quot;INSERT INTO memory.darktable_tags (tagid) &quot;</a>
+<a name="ln608">                                &quot;SELECT DISTINCT id &quot;</a>
+<a name="ln609">                                &quot;FROM data.tags &quot;</a>
+<a name="ln610">                                &quot;WHERE name LIKE 'darktable|%%' &quot;,</a>
+<a name="ln611">                                -1, &amp;stmt, NULL);</a>
+<a name="ln612">    sqlite3_step(stmt);</a>
+<a name="ln613">    sqlite3_finalize(stmt);</a>
+<a name="ln614">  }</a>
+<a name="ln615">}</a>
+<a name="ln616"> </a>
+<a name="ln617">uint32_t dt_tag_get_attached(gint imgid, GList **result, gboolean ignore_dt_tags)</a>
+<a name="ln618">{</a>
+<a name="ln619">  sqlite3_stmt *stmt;</a>
+<a name="ln620">  dt_set_darktable_tags();</a>
+<a name="ln621">  if(imgid &gt; 0)</a>
+<a name="ln622">  {</a>
+<a name="ln623">    char query[1024] = { 0 };</a>
+<a name="ln624">    snprintf(query, sizeof(query), &quot;SELECT DISTINCT T.id, T.name, T.flags, T.synonyms, 1 AS inb &quot;</a>
+<a name="ln625">                                   &quot;FROM main.tagged_images AS I &quot;</a>
+<a name="ln626">                                   &quot;JOIN data.tags T on T.id = I.tagid &quot;</a>
+<a name="ln627">                                   &quot;WHERE I.imgid = %d %s ORDER BY T.name&quot;,</a>
+<a name="ln628">             imgid, ignore_dt_tags ? &quot;AND T.id NOT IN memory.darktable_tags&quot; : &quot;&quot;);</a>
+<a name="ln629">    DT_DEBUG_SQLITE3_PREPARE_V2(dt_database_get(darktable.db), query, -1, &amp;stmt, NULL);</a>
+<a name="ln630">  }</a>
+<a name="ln631">  else</a>
+<a name="ln632">  {</a>
+<a name="ln633">    if(ignore_dt_tags)</a>
+<a name="ln634">      DT_DEBUG_SQLITE3_PREPARE_V2(dt_database_get(darktable.db),</a>
+<a name="ln635">              &quot;SELECT DISTINCT I.tagid, T.name, T.flags, T.synonyms, COUNT(DISTINCT S.imgid) AS inb &quot;</a>
+<a name="ln636">              &quot;FROM main.selected_images AS S &quot;</a>
+<a name="ln637">              &quot;LEFT JOIN main.tagged_images AS I ON I.imgid = S.imgid &quot;</a>
+<a name="ln638">              &quot;LEFT JOIN data.tags AS T ON T.id = I.tagid &quot;</a>
+<a name="ln639">              &quot;WHERE T.id NOT IN memory.darktable_tags &quot;</a>
+<a name="ln640">              &quot;GROUP BY I.tagid &quot;</a>
+<a name="ln641">              &quot;ORDER by T.name&quot;,</a>
+<a name="ln642">              -1, &amp;stmt, NULL);</a>
+<a name="ln643">    else</a>
+<a name="ln644">      DT_DEBUG_SQLITE3_PREPARE_V2(dt_database_get(darktable.db),</a>
+<a name="ln645">              &quot;SELECT DISTINCT I.tagid, T.name, T.flags, T.synonyms, COUNT(DISTINCT S.imgid) AS inb &quot;</a>
+<a name="ln646">              &quot;FROM main.selected_images AS S &quot;</a>
+<a name="ln647">              &quot;LEFT JOIN main.tagged_images AS I ON I.imgid = S.imgid &quot;</a>
+<a name="ln648">              &quot;LEFT JOIN data.tags AS T ON T.id = I.tagid &quot;</a>
+<a name="ln649">              &quot;GROUP BY I.tagid &quot;</a>
+<a name="ln650">              &quot;ORDER by T.name&quot;,</a>
+<a name="ln651">              -1, &amp;stmt, NULL);</a>
+<a name="ln652">  }</a>
+<a name="ln653"> </a>
+<a name="ln654">  const uint32_t nb_selected = dt_selected_images_count();</a>
+<a name="ln655"> </a>
+<a name="ln656">  // Create result</a>
+<a name="ln657">  uint32_t count = 0;</a>
+<a name="ln658">  while(sqlite3_step(stmt) == SQLITE_ROW)</a>
+<a name="ln659">  {</a>
+<a name="ln660">    dt_tag_t *t = g_malloc0(sizeof(dt_tag_t));</a>
+<a name="ln661">    t-&gt;id = sqlite3_column_int(stmt, 0);</a>
+<a name="ln662">    t-&gt;tag = g_strdup((char *)sqlite3_column_text(stmt, 1));</a>
+<a name="ln663">    t-&gt;leave = g_strrstr(t-&gt;tag, &quot;|&quot;);</a>
+<a name="ln664">    t-&gt;leave = t-&gt;leave ? t-&gt;leave + 1 : t-&gt;tag;</a>
+<a name="ln665">    t-&gt;flags = sqlite3_column_int(stmt, 2);</a>
+<a name="ln666">    t-&gt;synonym = g_strdup((char *)sqlite3_column_text(stmt, 3));</a>
+<a name="ln667">    uint32_t imgnb = sqlite3_column_int(stmt, 4);</a>
+<a name="ln668">    t-&gt;count = imgnb;</a>
+<a name="ln669">    // 0: no selection or no tag not attached</a>
+<a name="ln670">    // 1: tag attached on some selected images</a>
+<a name="ln671">    // 2: tag attached on all selected images</a>
+<a name="ln672">    t-&gt;select = (nb_selected == 0) ? 0 : (imgnb == nb_selected) ? 2 : (imgnb == 0) ? 0 : 1;</a>
+<a name="ln673">    *result = g_list_append(*result, t);</a>
+<a name="ln674">    count++;</a>
+<a name="ln675">  }</a>
+<a name="ln676">  sqlite3_finalize(stmt);</a>
+<a name="ln677">  return count;</a>
+<a name="ln678">}</a>
+<a name="ln679"> </a>
+<a name="ln680">uint32_t dt_tag_get_attached_export(const gint imgid, GList **result)</a>
+<a name="ln681">{</a>
+<a name="ln682">  sqlite3_stmt *stmt;</a>
+<a name="ln683">  dt_set_darktable_tags();</a>
+<a name="ln684">  if(imgid &gt; 0)</a>
+<a name="ln685">  {</a>
+<a name="ln686">    DT_DEBUG_SQLITE3_PREPARE_V2(dt_database_get(darktable.db),</a>
+<a name="ln687">            &quot;SELECT DISTINCT T.id, T.name, T.flags, T.synonyms, S.selected FROM data.tags AS T &quot;</a>
+<a name="ln688">            &quot;JOIN (SELECT DISTINCT I.tagid, T.name &quot;</a>
+<a name="ln689">              &quot;FROM main.tagged_images AS I  &quot;</a>
+<a name="ln690">              &quot;LEFT JOIN data.tags AS T ON T.id = I.tagid &quot;</a>
+<a name="ln691">              &quot;WHERE I.imgid = ?1 AND T.id NOT IN memory.darktable_tags &quot;</a>
+<a name="ln692">              &quot;ORDER by T.name) AS T1 ON T.name = SUBSTR(T1.name, 1, LENGTH(T.name)) &quot;</a>
+<a name="ln693">            &quot;LEFT JOIN (SELECT DISTINCT I.tagid, 1 as selected &quot;</a>
+<a name="ln694">              &quot;FROM main.tagged_images AS I WHERE I.imgid = ?1 &quot;</a>
+<a name="ln695">              &quot;) AS S ON S.tagid = T.id &quot;,</a>
+<a name="ln696">            -1, &amp;stmt, NULL);</a>
+<a name="ln697">    DT_DEBUG_SQLITE3_BIND_INT(stmt, 1, imgid);</a>
+<a name="ln698">  }</a>
+<a name="ln699">  else</a>
+<a name="ln700">  {</a>
+<a name="ln701">    DT_DEBUG_SQLITE3_PREPARE_V2(dt_database_get(darktable.db),</a>
+<a name="ln702">            &quot;SELECT DISTINCT T.id, T.name, T.flags, T.synonyms, S.selected FROM data.tags AS T &quot;</a>
+<a name="ln703">            &quot;JOIN (SELECT DISTINCT I.tagid, T.name &quot;</a>
+<a name="ln704">              &quot;FROM main.selected_images AS S &quot;</a>
+<a name="ln705">              &quot;LEFT JOIN main.tagged_images AS I ON I.imgid = S.imgid &quot;</a>
+<a name="ln706">              &quot;LEFT JOIN data.tags AS T ON T.id = I.tagid &quot;</a>
+<a name="ln707">              &quot;WHERE T.id NOT IN memory.darktable_tags &quot;</a>
+<a name="ln708">              &quot;ORDER by T.name) AS T1 ON T.name = SUBSTR(T1.name, 1, LENGTH(T.name)) &quot;</a>
+<a name="ln709">            &quot;LEFT JOIN (SELECT DISTINCT I.tagid, 1 as attached &quot;</a>
+<a name="ln710">              &quot;FROM main.selected_images AS S &quot;</a>
+<a name="ln711">              &quot;LEFT JOIN main.tagged_images AS I ON I.imgid = S.imgid &quot;</a>
+<a name="ln712">              &quot;) AS S ON S.tagid = T.id &quot;,</a>
+<a name="ln713">            -1, &amp;stmt, NULL);</a>
+<a name="ln714">  }</a>
+<a name="ln715"> </a>
+<a name="ln716">  // Create result</a>
+<a name="ln717">  uint32_t count = 0;</a>
+<a name="ln718">  while(sqlite3_step(stmt) == SQLITE_ROW)</a>
+<a name="ln719">  {</a>
+<a name="ln720">    dt_tag_t *t = g_malloc0(sizeof(dt_tag_t));</a>
+<a name="ln721">    t-&gt;id = sqlite3_column_int(stmt, 0);</a>
+<a name="ln722">    t-&gt;tag = g_strdup((char *)sqlite3_column_text(stmt, 1));</a>
+<a name="ln723">    t-&gt;leave = g_strrstr(t-&gt;tag, &quot;|&quot;);</a>
+<a name="ln724">    t-&gt;leave = t-&gt;leave ? t-&gt;leave + 1 : t-&gt;tag;</a>
+<a name="ln725">    t-&gt;flags = sqlite3_column_int(stmt, 2);</a>
+<a name="ln726">    t-&gt;synonym = g_strdup((char *)sqlite3_column_text(stmt, 3));</a>
+<a name="ln727">    if (sqlite3_column_int(stmt, 4) != 1)</a>
+<a name="ln728">      t-&gt;flags = t-&gt;flags | DT_TF_PATH; // just to say that this tag is not really attached but is on the path</a>
+<a name="ln729">    *result = g_list_append(*result, t);</a>
+<a name="ln730">    count++;</a>
+<a name="ln731">  }</a>
+<a name="ln732">  sqlite3_finalize(stmt);</a>
+<a name="ln733">  return count;</a>
+<a name="ln734">}</a>
+<a name="ln735"> </a>
+<a name="ln736">static gint sort_tag_by_path(gconstpointer a, gconstpointer b)</a>
+<a name="ln737">{</a>
+<a name="ln738">  const dt_tag_t *tuple_a = (const dt_tag_t *)a;</a>
+<a name="ln739">  const dt_tag_t *tuple_b = (const dt_tag_t *)b;</a>
+<a name="ln740"> </a>
+<a name="ln741">  return g_ascii_strcasecmp(tuple_a-&gt;tag, tuple_b-&gt;tag);</a>
+<a name="ln742">}</a>
+<a name="ln743"> </a>
+<a name="ln744">static gint sort_tag_by_leave(gconstpointer a, gconstpointer b)</a>
+<a name="ln745">{</a>
+<a name="ln746">  const dt_tag_t *tuple_a = (const dt_tag_t *)a;</a>
+<a name="ln747">  const dt_tag_t *tuple_b = (const dt_tag_t *)b;</a>
+<a name="ln748"> </a>
+<a name="ln749">  return g_ascii_strcasecmp(tuple_a-&gt;leave, tuple_b-&gt;leave);</a>
+<a name="ln750">}</a>
+<a name="ln751"> </a>
+<a name="ln752">static gint sort_tag_by_count(gconstpointer a, gconstpointer b)</a>
+<a name="ln753">{</a>
+<a name="ln754">  const dt_tag_t *tuple_a = (const dt_tag_t *)a;</a>
+<a name="ln755">  const dt_tag_t *tuple_b = (const dt_tag_t *)b;</a>
+<a name="ln756"> </a>
+<a name="ln757">  return (tuple_b-&gt;count - tuple_a-&gt;count);</a>
+<a name="ln758">}</a>
+<a name="ln759">// sort_type 0 = path, 1 = leave other = count</a>
+<a name="ln760">GList *dt_sort_tag(GList *tags, gint sort_type)</a>
+<a name="ln761">{</a>
+<a name="ln762">  GList *sorted_tags;</a>
+<a name="ln763">  if (sort_type &lt;= 1)</a>
+<a name="ln764">  {</a>
+<a name="ln765">    for(GList *taglist = tags; taglist; taglist = g_list_next(taglist))</a>
+<a name="ln766">    {</a>
+<a name="ln767">      // order such that sub tags are coming directly behind their parent</a>
+<a name="ln768">      gchar *tag = ((dt_tag_t *)taglist-&gt;data)-&gt;tag;</a>
+<a name="ln769">      for(char *letter = tag; *letter; letter++)</a>
+<a name="ln770">        if(*letter == '|') *letter = '\1';</a>
+<a name="ln771">    }</a>
+<a name="ln772">    sorted_tags = g_list_sort(tags, !sort_type ? sort_tag_by_path : sort_tag_by_leave);</a>
+<a name="ln773">    for(GList *taglist = sorted_tags; taglist; taglist = g_list_next(taglist))</a>
+<a name="ln774">    {</a>
+<a name="ln775">      gchar *tag = ((dt_tag_t *)taglist-&gt;data)-&gt;tag;</a>
+<a name="ln776">      for(char *letter = tag; *letter; letter++)</a>
+<a name="ln777">        if(*letter == '\1') *letter = '|';</a>
+<a name="ln778">    }</a>
+<a name="ln779">  }</a>
+<a name="ln780">  else</a>
+<a name="ln781">  {</a>
+<a name="ln782">    sorted_tags = g_list_sort(tags, sort_tag_by_count);</a>
+<a name="ln783">  }</a>
+<a name="ln784">  return sorted_tags;</a>
+<a name="ln785">}</a>
+<a name="ln786"> </a>
+<a name="ln787">GList *dt_tag_get_list(gint imgid)</a>
+<a name="ln788">{</a>
+<a name="ln789">  GList *taglist = NULL;</a>
+<a name="ln790">  GList *tags = NULL;</a>
+<a name="ln791"> </a>
+<a name="ln792">  gboolean omit_tag_hierarchy = dt_conf_get_bool(&quot;omit_tag_hierarchy&quot;);</a>
+<a name="ln793"> </a>
+<a name="ln794">  uint32_t count = dt_tag_get_attached(imgid, &amp;taglist, TRUE);</a>
+<a name="ln795"> </a>
+<a name="ln796">  if(count &lt; 1) return NULL;</a>
+<a name="ln797"> </a>
+<a name="ln798">  for(; taglist; taglist = g_list_next(taglist))</a>
+<a name="ln799">  {</a>
+<a name="ln800">    dt_tag_t *t = (dt_tag_t *)taglist-&gt;data;</a>
+<a name="ln801">    gchar *value = t-&gt;tag;</a>
+<a name="ln802"> </a>
+<a name="ln803">    size_t j = 0;</a>
+<a name="ln804">    gchar **pch = g_strsplit(value, &quot;|&quot;, -1);</a>
+<a name="ln805"> </a>
+<a name="ln806">    if(pch != NULL)</a>
+<a name="ln807">    {</a>
+<a name="ln808">      if(omit_tag_hierarchy)</a>
+<a name="ln809">      {</a>
+<a name="ln810">        char **iter = pch;</a>
+<a name="ln811">        for(; *iter &amp;&amp; *(iter + 1); iter++);</a>
+<a name="ln812">        if(*iter) tags = g_list_prepend(tags, g_strdup(*iter));</a>
+<a name="ln813">      }</a>
+<a name="ln814">      else</a>
+<a name="ln815">      {</a>
+<a name="ln816">        while(pch[j] != NULL)</a>
+<a name="ln817">        {</a>
+<a name="ln818">          tags = g_list_prepend(tags, g_strdup(pch[j]));</a>
+<a name="ln819">          j++;</a>
+<a name="ln820">        }</a>
+<a name="ln821">      }</a>
+<a name="ln822">      g_strfreev(pch);</a>
+<a name="ln823">    }</a>
+<a name="ln824">  }</a>
+<a name="ln825"> </a>
+<a name="ln826">  g_list_free_full(taglist, g_free);</a>
+<a name="ln827"> </a>
+<a name="ln828">  return dt_util_glist_uniq(tags);</a>
+<a name="ln829">}</a>
+<a name="ln830"> </a>
+<a name="ln831">GList *dt_tag_get_hierarchical(gint imgid)</a>
+<a name="ln832">{</a>
+<a name="ln833">  GList *taglist = NULL;</a>
+<a name="ln834">  GList *tags = NULL;</a>
+<a name="ln835"> </a>
+<a name="ln836">  int count = dt_tag_get_attached(imgid, &amp;taglist, TRUE);</a>
+<a name="ln837"> </a>
+<a name="ln838">  if(count &lt; 1) return NULL;</a>
+<a name="ln839"> </a>
+<a name="ln840">  while(taglist)</a>
+<a name="ln841">  {</a>
+<a name="ln842">    dt_tag_t *t = (dt_tag_t *)taglist-&gt;data;</a>
+<a name="ln843"> </a>
+<a name="ln844">    tags = g_list_prepend(tags, t-&gt;tag);</a>
+<a name="ln845"> </a>
+<a name="ln846">    taglist = g_list_next(taglist);</a>
+<a name="ln847">  }</a>
+<a name="ln848"> </a>
+<a name="ln849">  g_list_free_full(taglist, g_free);</a>
+<a name="ln850"> </a>
+<a name="ln851">  tags = g_list_reverse(tags);</a>
+<a name="ln852">  return tags;</a>
+<a name="ln853">}</a>
+<a name="ln854"> </a>
+<a name="ln855">GList *dt_tag_get_list_export(gint imgid, int32_t flags)</a>
+<a name="ln856">{</a>
+<a name="ln857">  GList *taglist = NULL;</a>
+<a name="ln858">  GList *tags = NULL;</a>
+<a name="ln859"> </a>
+<a name="ln860">  gboolean omit_tag_hierarchy = flags &amp; DT_META_OMIT_HIERARCHY;</a>
+<a name="ln861">  gboolean export_private_tags = flags &amp; DT_META_PRIVATE_TAG;</a>
+<a name="ln862">  gboolean export_tag_synomyms = flags &amp; DT_META_SYNONYMS_TAG;</a>
+<a name="ln863"> </a>
+<a name="ln864">  uint32_t count = dt_tag_get_attached_export(imgid, &amp;taglist);</a>
+<a name="ln865"> </a>
+<a name="ln866">  if(count &lt; 1) return NULL;</a>
+<a name="ln867">  GList *sorted_tags = dt_sort_tag(taglist, 0);</a>
+<a name="ln868"> </a>
+<a name="ln869">  for(; sorted_tags; sorted_tags = g_list_next(sorted_tags))</a>
+<a name="ln870">  {</a>
+<a name="ln871">    dt_tag_t *t = (dt_tag_t *)sorted_tags-&gt;data;</a>
+<a name="ln872">    if ((export_private_tags || !(t-&gt;flags &amp; DT_TF_PRIVATE))</a>
+<a name="ln873">        &amp;&amp; !(t-&gt;flags &amp; DT_TF_CATEGORY)</a>
+<a name="ln874">        &amp;&amp; !(omit_tag_hierarchy &amp;&amp; (t-&gt;flags &amp; DT_TF_PATH)))</a>
+<a name="ln875">    {</a>
+<a name="ln876">      gchar *tagname = t-&gt;leave;</a>
+<a name="ln877">      tags = g_list_prepend(tags, g_strdup(tagname));</a>
+<a name="ln878">      if (export_tag_synomyms)</a>
+<a name="ln879">      {</a>
+<a name="ln880">        gchar *synonyms = t-&gt;synonym;</a>
+<a name="ln881">        if (synonyms &amp;&amp; synonyms[0])</a>
+<a name="ln882">          {</a>
+<a name="ln883">          gchar **tokens = g_strsplit(synonyms, &quot;,&quot;, 0);</a>
+<a name="ln884">          if(tokens)</a>
+<a name="ln885">          {</a>
+<a name="ln886">            gchar **entry = tokens;</a>
+<a name="ln887">            while(*entry)</a>
+<a name="ln888">            {</a>
+<a name="ln889">              char *e = *entry;</a>
+<a name="ln890">              if (*e == ' ') e++;</a>
+<a name="ln891">              tags = g_list_append(tags, g_strdup(e));</a>
+<a name="ln892">              entry++;</a>
+<a name="ln893">            }</a>
+<a name="ln894">          }</a>
+<a name="ln895">          g_strfreev(tokens);</a>
+<a name="ln896">        }</a>
+<a name="ln897">      }</a>
+<a name="ln898">    }</a>
+<a name="ln899">  }</a>
+<a name="ln900">  dt_tag_free_result(&amp;taglist);</a>
+<a name="ln901"> </a>
+<a name="ln902">  return dt_util_glist_uniq(tags);</a>
+<a name="ln903">}</a>
+<a name="ln904"> </a>
+<a name="ln905">GList *dt_tag_get_hierarchical_export(gint imgid, int32_t flags)</a>
+<a name="ln906">{</a>
+<a name="ln907">  GList *taglist = NULL;</a>
+<a name="ln908">  GList *tags = NULL;</a>
+<a name="ln909"> </a>
+<a name="ln910">  const int count = dt_tag_get_attached(imgid, &amp;taglist, TRUE);</a>
+<a name="ln911"> </a>
+<a name="ln912">  if(count &lt; 1) return NULL;</a>
+<a name="ln913">  const gboolean export_private_tags = flags &amp; DT_META_PRIVATE_TAG;</a>
+<a name="ln914"> </a>
+<a name="ln915">  while(taglist)</a>
+<a name="ln916">  {</a>
+<a name="ln917">    dt_tag_t *t = (dt_tag_t *)taglist-&gt;data;</a>
+<a name="ln918">    if (export_private_tags || !(t-&gt;flags &amp; DT_TF_PRIVATE))</a>
+<a name="ln919">    {</a>
+<a name="ln920">      tags = g_list_append(tags, t-&gt;tag);</a>
+<a name="ln921">    }</a>
+<a name="ln922">    taglist = g_list_next(taglist);</a>
+<a name="ln923">  }</a>
+<a name="ln924"> </a>
+<a name="ln925">  dt_tag_free_result(&amp;taglist);</a>
+<a name="ln926"> </a>
+<a name="ln927">  return tags;</a>
+<a name="ln928">}</a>
+<a name="ln929"> </a>
+<a name="ln930">GList *dt_tag_get_images_from_selection(gint imgid, gint tagid)</a>
+<a name="ln931">{</a>
+<a name="ln932">  GList *result = NULL;</a>
+<a name="ln933">  sqlite3_stmt *stmt;</a>
+<a name="ln934"> </a>
+<a name="ln935">  if(imgid &gt; 0)</a>
+<a name="ln936">  {</a>
+<a name="ln937">    DT_DEBUG_SQLITE3_PREPARE_V2(dt_database_get(darktable.db), &quot;SELECT imgid FROM main.tagged_images WHERE &quot;</a>
+<a name="ln938">                                &quot;imgid = ?1 AND tagid = ?2&quot;, -1, &amp;stmt, NULL);</a>
+<a name="ln939">    DT_DEBUG_SQLITE3_BIND_INT(stmt, 1, imgid);</a>
+<a name="ln940">    DT_DEBUG_SQLITE3_BIND_INT(stmt, 2, tagid);</a>
+<a name="ln941">  }</a>
+<a name="ln942">  else</a>
+<a name="ln943">  {</a>
+<a name="ln944">    DT_DEBUG_SQLITE3_PREPARE_V2(dt_database_get(darktable.db), &quot;SELECT imgid FROM main.tagged_images WHERE &quot;</a>
+<a name="ln945">                                &quot;tagid = ?1 AND imgid IN (SELECT imgid FROM main.selected_images)&quot;, -1, &amp;stmt,</a>
+<a name="ln946">                                NULL);</a>
+<a name="ln947">    DT_DEBUG_SQLITE3_BIND_INT(stmt, 1, tagid);</a>
+<a name="ln948">  }</a>
+<a name="ln949"> </a>
+<a name="ln950"> </a>
+<a name="ln951">  while(sqlite3_step(stmt) == SQLITE_ROW)</a>
+<a name="ln952">  {</a>
+<a name="ln953">    int id = sqlite3_column_int(stmt, 0);</a>
+<a name="ln954">    result = g_list_append(result, GINT_TO_POINTER(id));</a>
+<a name="ln955">  }</a>
+<a name="ln956"> </a>
+<a name="ln957">  sqlite3_finalize(stmt);</a>
+<a name="ln958"> </a>
+<a name="ln959">  return result;</a>
+<a name="ln960">}</a>
+<a name="ln961"> </a>
+<a name="ln962">uint32_t dt_tag_get_suggestions(GList **result)</a>
+<a name="ln963">{</a>
+<a name="ln964">  sqlite3_stmt *stmt;</a>
+<a name="ln965"> </a>
+<a name="ln966">  dt_set_darktable_tags();</a>
+<a name="ln967">  /* select tags from selected images */</a>
+<a name="ln968">  DT_DEBUG_SQLITE3_PREPARE_V2(dt_database_get(darktable.db),</a>
+<a name="ln969">                              &quot;INSERT INTO memory.similar_tags (tagid) &quot;</a>
+<a name="ln970">                              &quot;SELECT DISTINCT TI.tagid &quot;</a>
+<a name="ln971">                              &quot;FROM main.selected_images AS S &quot;</a>
+<a name="ln972">                              &quot;JOIN main.tagged_images AS TI ON TI.imgid = S.imgid &quot;</a>
+<a name="ln973">                              &quot;JOIN data.tags AS T ON T.id = TI.tagid &quot;</a>
+<a name="ln974">                              &quot;WHERE TI.tagid NOT IN memory.darktable_tags &quot;,</a>
+<a name="ln975">                              -1, &amp;stmt, NULL);</a>
+<a name="ln976">  sqlite3_step(stmt);</a>
+<a name="ln977">  sqlite3_finalize(stmt);</a>
+<a name="ln978"> </a>
+<a name="ln979">  /* Select tags from tagged images when at least one tag is attached to selected images */</a>
+<a name="ln980">  DT_DEBUG_SQLITE3_PREPARE_V2(dt_database_get(darktable.db),</a>
+<a name="ln981">                              &quot;INSERT INTO memory.tagq (id) &quot;</a>
+<a name="ln982">                              &quot;SELECT TI.tagid &quot;</a>
+<a name="ln983">                              &quot;FROM (SELECT DISTINCT TI.imgid &quot;</a>
+<a name="ln984">                                &quot;FROM memory.similar_tags AS S &quot;</a>
+<a name="ln985">                                &quot;JOIN main.tagged_images AS TI ON TI.tagid = S.tagid) AS S &quot;</a>
+<a name="ln986">                              &quot;JOIN main.tagged_images AS TI ON TI.imgid = S.imgid &quot;,</a>
+<a name="ln987">                              -1, &amp;stmt, NULL);</a>
+<a name="ln988">  sqlite3_step(stmt);</a>
+<a name="ln989">  sqlite3_finalize(stmt);</a>
+<a name="ln990"> </a>
+<a name="ln991">  /* list tags and count */</a>
+<a name="ln992">  DT_DEBUG_SQLITE3_PREPARE_V2(dt_database_get(darktable.db),</a>
+<a name="ln993">                              &quot;INSERT INTO memory.taglist (id, count) &quot;</a>
+<a name="ln994">                              &quot;SELECT S.tagid, COUNT(*) &quot;</a>
+<a name="ln995">                              &quot;FROM main.tagged_images AS S &quot;</a>
+<a name="ln996">                              &quot;WHERE S.tagid NOT IN memory.darktable_tags &quot;</a>
+<a name="ln997">                              &quot;GROUP BY S.tagid &quot;,</a>
+<a name="ln998">                              -1, &amp;stmt, NULL);</a>
+<a name="ln999">  sqlite3_step(stmt);</a>
+<a name="ln1000">  sqlite3_finalize(stmt);</a>
+<a name="ln1001"> </a>
+<a name="ln1002">  const uint32_t nb_selected = dt_selected_images_count();</a>
+<a name="ln1003">  /* Now put all the bits together */</a>
+<a name="ln1004">  DT_DEBUG_SQLITE3_PREPARE_V2(dt_database_get(darktable.db),</a>
+<a name="ln1005">                              &quot;SELECT T.name, T.id, MT.count, CT.imgnb, T.flags, T.synonyms &quot;</a>
+<a name="ln1006">                              &quot;FROM memory.taglist MT &quot;</a>
+<a name="ln1007">                              &quot;JOIN data.tags T ON MT.id = T.id &quot;</a>
+<a name="ln1008">                              &quot;LEFT JOIN (SELECT tagid, COUNT(DISTINCT imgid) AS imgnb FROM main.tagged_images &quot;</a>
+<a name="ln1009">                                &quot;WHERE imgid IN (SELECT imgid FROM main.selected_images) GROUP BY tagid) AS CT &quot;</a>
+<a name="ln1010">                                &quot;ON CT.tagid = MT.id &quot;</a>
+<a name="ln1011">                              &quot;WHERE T.id NOT IN (SELECT DISTINCT tagid &quot;</a>
+<a name="ln1012">                                &quot;FROM (SELECT TI.tagid, COUNT(DISTINCT SI.imgid) AS imgnb &quot;</a>
+<a name="ln1013">                                  &quot;FROM main.selected_images AS SI &quot;</a>
+<a name="ln1014">                                  &quot;JOIN main.tagged_images AS TI ON TI.imgid = SI.imgid &quot;</a>
+<a name="ln1015">                                  &quot;GROUP BY TI.tagid) &quot;</a>
+<a name="ln1016">                                  &quot;WHERE imgnb = ?1) &quot;</a>
+<a name="ln1017">                              &quot;AND (T.flags IS NULL OR (T.flags &amp; 1) = 0) &quot;</a>
+<a name="ln1018">                              &quot;ORDER BY MT.count DESC &quot;</a>
+<a name="ln1019">                              &quot;LIMIT 500&quot;,</a>
+<a name="ln1020">                              -1, &amp;stmt, NULL);</a>
+<a name="ln1021">  DT_DEBUG_SQLITE3_BIND_INT(stmt, 1, nb_selected);</a>
+<a name="ln1022"> </a>
+<a name="ln1023">  /* ... and create the result list to send upwards */</a>
+<a name="ln1024">  uint32_t count = 0;</a>
+<a name="ln1025">  while(sqlite3_step(stmt) == SQLITE_ROW)</a>
+<a name="ln1026">  {</a>
+<a name="ln1027">    dt_tag_t *t = g_malloc0(sizeof(dt_tag_t));</a>
+<a name="ln1028">    t-&gt;tag = g_strdup((char *)sqlite3_column_text(stmt, 0));</a>
+<a name="ln1029">    t-&gt;leave = g_strrstr(t-&gt;tag, &quot;|&quot;);</a>
+<a name="ln1030">    t-&gt;leave = t-&gt;leave ? t-&gt;leave + 1 : t-&gt;tag;</a>
+<a name="ln1031">    t-&gt;id = sqlite3_column_int(stmt, 1);</a>
+<a name="ln1032">    t-&gt;count = sqlite3_column_int(stmt, 2);</a>
+<a name="ln1033">    uint32_t imgnb = sqlite3_column_int(stmt, 3);</a>
+<a name="ln1034">    // 0: no selection or no tag not attached</a>
+<a name="ln1035">    // 1: tag attached on some selected images</a>
+<a name="ln1036">    // 2: tag attached on all selected images</a>
+<a name="ln1037">    t-&gt;select = (nb_selected == 0) ? 0 : (imgnb == nb_selected) ? 2 : (imgnb == 0) ? 0 : 1;</a>
+<a name="ln1038">    t-&gt;flags = sqlite3_column_int(stmt, 4);</a>
+<a name="ln1039">    t-&gt;synonym = g_strdup((char *)sqlite3_column_text(stmt, 5));</a>
+<a name="ln1040">    *result = g_list_append(*result, t);</a>
+<a name="ln1041">    count++;</a>
+<a name="ln1042">  }</a>
+<a name="ln1043"> </a>
+<a name="ln1044">  sqlite3_finalize(stmt);</a>
+<a name="ln1045">  DT_DEBUG_SQLITE3_EXEC(dt_database_get(darktable.db), &quot;DELETE FROM memory.taglist&quot;, NULL, NULL, NULL);</a>
+<a name="ln1046">  DT_DEBUG_SQLITE3_EXEC(dt_database_get(darktable.db), &quot;DELETE FROM memory.tagq&quot;, NULL, NULL, NULL);</a>
+<a name="ln1047">  DT_DEBUG_SQLITE3_EXEC(dt_database_get(darktable.db), &quot;DELETE FROM memory.similar_tags&quot;, NULL, NULL, NULL);</a>
+<a name="ln1048"> </a>
+<a name="ln1049">  return count;</a>
+<a name="ln1050">}</a>
+<a name="ln1051"> </a>
+<a name="ln1052">void dt_tag_count_tags_images(const gchar *keyword, int *tag_count, int *img_count)</a>
+<a name="ln1053">{</a>
+<a name="ln1054">  sqlite3_stmt *stmt;</a>
+<a name="ln1055">  *tag_count = 0;</a>
+<a name="ln1056">  *img_count = 0;</a>
+<a name="ln1057"> </a>
+<a name="ln1058">  if(!keyword) return;</a>
+<a name="ln1059">  gchar *keyword_expr = g_strdup_printf(&quot;%s|&quot;, keyword);</a>
+<a name="ln1060"> </a>
+<a name="ln1061">  /* Only select tags that are equal or child to the one we are looking for once. */</a>
+<a name="ln1062">  DT_DEBUG_SQLITE3_PREPARE_V2(dt_database_get(darktable.db),</a>
+<a name="ln1063">                              &quot;INSERT INTO memory.similar_tags (tagid) SELECT id FROM data.tags &quot;</a>
+<a name="ln1064">                              &quot;WHERE name = ?1 OR SUBSTR(name, 1, LENGTH(?2)) = ?2 &quot;,</a>
+<a name="ln1065">                              -1, &amp;stmt, NULL);</a>
+<a name="ln1066">  DT_DEBUG_SQLITE3_BIND_TEXT(stmt, 1, keyword, -1, SQLITE_TRANSIENT);</a>
+<a name="ln1067">  DT_DEBUG_SQLITE3_BIND_TEXT(stmt, 2, keyword_expr, -1, SQLITE_TRANSIENT);</a>
+<a name="ln1068">  sqlite3_step(stmt);</a>
+<a name="ln1069">  sqlite3_finalize(stmt);</a>
+<a name="ln1070"> </a>
+<a name="ln1071">  g_free(keyword_expr);</a>
+<a name="ln1072"> </a>
+<a name="ln1073">  DT_DEBUG_SQLITE3_PREPARE_V2(dt_database_get(darktable.db),</a>
+<a name="ln1074">                              &quot;SELECT COUNT(DISTINCT tagid) FROM memory.similar_tags&quot;,</a>
+<a name="ln1075">                              -1, &amp;stmt, NULL);</a>
+<a name="ln1076">  sqlite3_step(stmt);</a>
+<a name="ln1077">  *tag_count = sqlite3_column_int(stmt, 0);</a>
+<a name="ln1078">  sqlite3_finalize(stmt);</a>
+<a name="ln1079"> </a>
+<a name="ln1080">  DT_DEBUG_SQLITE3_PREPARE_V2(dt_database_get(darktable.db),</a>
+<a name="ln1081">                              &quot;SELECT COUNT(DISTINCT ti.imgid) FROM main.tagged_images AS ti &quot;</a>
+<a name="ln1082">                              &quot;JOIN memory.similar_tags AS st ON st.tagid = ti.tagid&quot;,</a>
+<a name="ln1083">                              -1, &amp;stmt, NULL);</a>
+<a name="ln1084"> </a>
+<a name="ln1085">  sqlite3_step(stmt);</a>
+<a name="ln1086">  *img_count = sqlite3_column_int(stmt, 0);</a>
+<a name="ln1087">  sqlite3_finalize(stmt);</a>
+<a name="ln1088"> </a>
+<a name="ln1089">  DT_DEBUG_SQLITE3_EXEC(dt_database_get(darktable.db), &quot;DELETE FROM memory.similar_tags&quot;, NULL, NULL, NULL);</a>
+<a name="ln1090">  }</a>
+<a name="ln1091"> </a>
+<a name="ln1092">void dt_tag_get_tags_images(const gchar *keyword, GList **tag_list, GList **img_list)</a>
+<a name="ln1093">{</a>
+<a name="ln1094">  sqlite3_stmt *stmt;</a>
+<a name="ln1095"> </a>
+<a name="ln1096">  if(!keyword) return;</a>
+<a name="ln1097">  gchar *keyword_expr = g_strdup_printf(&quot;%s|&quot;, keyword);</a>
+<a name="ln1098"> </a>
+<a name="ln1099">/* Only select tags that are equal or child to the one we are looking for once. */</a>
+<a name="ln1100">  DT_DEBUG_SQLITE3_PREPARE_V2(dt_database_get(darktable.db),</a>
+<a name="ln1101">                              &quot;INSERT INTO memory.similar_tags (tagid) SELECT id FROM data.tags &quot;</a>
+<a name="ln1102">                              &quot;WHERE name = ?1 OR SUBSTR(name, 1, LENGTH(?2)) = ?2 &quot;,</a>
+<a name="ln1103">                              -1, &amp;stmt, NULL);</a>
+<a name="ln1104">  DT_DEBUG_SQLITE3_BIND_TEXT(stmt, 1, keyword, -1, SQLITE_TRANSIENT);</a>
+<a name="ln1105">  DT_DEBUG_SQLITE3_BIND_TEXT(stmt, 2, keyword_expr, -1, SQLITE_TRANSIENT);</a>
+<a name="ln1106">  sqlite3_step(stmt);</a>
+<a name="ln1107">  sqlite3_finalize(stmt);</a>
+<a name="ln1108"> </a>
+<a name="ln1109">  g_free(keyword_expr);</a>
+<a name="ln1110"> </a>
+<a name="ln1111">  DT_DEBUG_SQLITE3_PREPARE_V2(dt_database_get(darktable.db),</a>
+<a name="ln1112">                              &quot;SELECT ST.tagid, T.name FROM memory.similar_tags ST &quot;</a>
+<a name="ln1113">                              &quot;JOIN data.tags T ON T.id = ST.tagid &quot;,</a>
+<a name="ln1114">                              -1, &amp;stmt, NULL);</a>
+<a name="ln1115"> </a>
+<a name="ln1116">  while(sqlite3_step(stmt) == SQLITE_ROW)</a>
+<a name="ln1117">  {</a>
+<a name="ln1118">    dt_tag_t *t = g_malloc0(sizeof(dt_tag_t));</a>
+<a name="ln1119">    t-&gt;id = sqlite3_column_int(stmt, 0);</a>
+<a name="ln1120">    t-&gt;tag = g_strdup((char *)sqlite3_column_text(stmt, 1));</a>
+<a name="ln1121">    *tag_list = g_list_append((*tag_list), t);</a>
+<a name="ln1122">  }</a>
+<a name="ln1123">  sqlite3_finalize(stmt);</a>
+<a name="ln1124"> </a>
+<a name="ln1125">  DT_DEBUG_SQLITE3_PREPARE_V2(dt_database_get(darktable.db),</a>
+<a name="ln1126">                              &quot;SELECT DISTINCT ti.imgid FROM main.tagged_images AS ti &quot;</a>
+<a name="ln1127">                              &quot;JOIN memory.similar_tags AS st ON st.tagid = ti.tagid&quot;,</a>
+<a name="ln1128">                              -1, &amp;stmt, NULL);</a>
+<a name="ln1129">  while(sqlite3_step(stmt) == SQLITE_ROW)</a>
+<a name="ln1130">  {</a>
+<a name="ln1131">    *img_list = g_list_append((*img_list), GINT_TO_POINTER(sqlite3_column_int(stmt, 0)));</a>
+<a name="ln1132">  }</a>
+<a name="ln1133">  sqlite3_finalize(stmt);</a>
+<a name="ln1134"> </a>
+<a name="ln1135">  DT_DEBUG_SQLITE3_EXEC(dt_database_get(darktable.db), &quot;DELETE FROM memory.similar_tags&quot;, NULL, NULL, NULL);</a>
+<a name="ln1136">}</a>
+<a name="ln1137"> </a>
+<a name="ln1138">uint32_t dt_selected_images_count()</a>
+<a name="ln1139">{</a>
+<a name="ln1140">  sqlite3_stmt *stmt;</a>
+<a name="ln1141"> </a>
+<a name="ln1142">  DT_DEBUG_SQLITE3_PREPARE_V2(dt_database_get(darktable.db),</a>
+<a name="ln1143">                              &quot;SELECT count(*) FROM main.selected_images&quot;,</a>
+<a name="ln1144">                              -1, &amp;stmt, NULL);</a>
+<a name="ln1145">  sqlite3_step(stmt);</a>
+<a name="ln1146">  const uint32_t nb_selected = sqlite3_column_int(stmt, 0);</a>
+<a name="ln1147">  sqlite3_finalize(stmt);</a>
+<a name="ln1148">  return nb_selected;</a>
+<a name="ln1149">}</a>
+<a name="ln1150"> </a>
+<a name="ln1151">uint32_t dt_tag_images_count(gint tagid)</a>
+<a name="ln1152">{</a>
+<a name="ln1153">  sqlite3_stmt *stmt;</a>
+<a name="ln1154"> </a>
+<a name="ln1155">  DT_DEBUG_SQLITE3_PREPARE_V2(dt_database_get(darktable.db),</a>
+<a name="ln1156">                              &quot;SELECT COUNT(DISTINCT imgid) AS imgnb FROM main.tagged_images &quot;</a>
+<a name="ln1157">                              &quot;WHERE tagid = ?1&quot;,</a>
+<a name="ln1158">                              -1, &amp;stmt, NULL);</a>
+<a name="ln1159">  DT_DEBUG_SQLITE3_BIND_INT(stmt, 1, tagid);</a>
+<a name="ln1160">  sqlite3_step(stmt);</a>
+<a name="ln1161">  const uint32_t nb_images = sqlite3_column_int(stmt, 0);</a>
+<a name="ln1162">  sqlite3_finalize(stmt);</a>
+<a name="ln1163">  return nb_images;</a>
+<a name="ln1164">}</a>
+<a name="ln1165"> </a>
+<a name="ln1166">uint32_t dt_tag_get_with_usage(GList **result)</a>
+<a name="ln1167">{</a>
+<a name="ln1168">  sqlite3_stmt *stmt;</a>
+<a name="ln1169"> </a>
+<a name="ln1170">  dt_set_darktable_tags();</a>
+<a name="ln1171"> </a>
+<a name="ln1172">  /* Select tags that are similar to the keyword and are actually used to tag images*/</a>
+<a name="ln1173">  DT_DEBUG_SQLITE3_PREPARE_V2(dt_database_get(darktable.db),</a>
+<a name="ln1174">                              &quot;INSERT INTO memory.taglist (id, count) SELECT tagid, COUNT(*) &quot;</a>
+<a name="ln1175">                              &quot;FROM main.tagged_images &quot;</a>
+<a name="ln1176">                              &quot;GROUP BY tagid&quot;,</a>
+<a name="ln1177">                              -1, &amp;stmt, NULL);</a>
+<a name="ln1178">  sqlite3_step(stmt);</a>
+<a name="ln1179">  sqlite3_finalize(stmt);</a>
+<a name="ln1180"> </a>
+<a name="ln1181">  const uint32_t nb_selected = dt_selected_images_count();</a>
+<a name="ln1182"> </a>
+<a name="ln1183">  /* Now put all the bits together */</a>
+<a name="ln1184">  DT_DEBUG_SQLITE3_PREPARE_V2(dt_database_get(darktable.db),</a>
+<a name="ln1185">                              &quot;SELECT T.name, T.id, MT.count, CT.imgnb, T.flags, T.synonyms &quot;</a>
+<a name="ln1186">                              &quot;FROM data.tags T &quot;</a>
+<a name="ln1187">                              &quot;LEFT JOIN memory.taglist MT ON MT.id = T.id &quot;</a>
+<a name="ln1188">                              &quot;LEFT JOIN (SELECT tagid, COUNT(DISTINCT imgid) AS imgnb FROM main.tagged_images &quot;</a>
+<a name="ln1189">                                &quot;WHERE imgid IN (SELECT imgid FROM main.selected_images) GROUP BY tagid) AS CT &quot;</a>
+<a name="ln1190">                                &quot;ON CT.tagid = T.id &quot;</a>
+<a name="ln1191">                              &quot;WHERE T.id NOT IN memory.darktable_tags &quot;</a>
+<a name="ln1192">                              &quot;ORDER BY T.name &quot;,</a>
+<a name="ln1193">                              -1, &amp;stmt, NULL);</a>
+<a name="ln1194"> </a>
+<a name="ln1195">  /* ... and create the result list to send upwards */</a>
+<a name="ln1196">  uint32_t count = 0;</a>
+<a name="ln1197">  while(sqlite3_step(stmt) == SQLITE_ROW)</a>
+<a name="ln1198">  {</a>
+<a name="ln1199">    dt_tag_t *t = g_malloc0(sizeof(dt_tag_t));</a>
+<a name="ln1200">    t-&gt;tag = g_strdup((char *)sqlite3_column_text(stmt, 0));</a>
+<a name="ln1201">    t-&gt;leave = g_strrstr(t-&gt;tag, &quot;|&quot;);</a>
+<a name="ln1202">    t-&gt;leave = t-&gt;leave ? t-&gt;leave + 1 : t-&gt;tag;</a>
+<a name="ln1203">    t-&gt;id = sqlite3_column_int(stmt, 1);</a>
+<a name="ln1204">    t-&gt;count = sqlite3_column_int(stmt, 2);</a>
+<a name="ln1205">    uint32_t imgnb = sqlite3_column_int(stmt, 3);</a>
+<a name="ln1206">    // 0: no selection or no tag not attached</a>
+<a name="ln1207">    // 1: tag attached on some selected images</a>
+<a name="ln1208">    // 2: tag attached on all selected images</a>
+<a name="ln1209">    t-&gt;select = (nb_selected == 0) ? 0 : (imgnb == nb_selected) ? 2 : (imgnb == 0) ? 0 : 1;</a>
+<a name="ln1210">    t-&gt;flags = sqlite3_column_int(stmt, 4);</a>
+<a name="ln1211">    t-&gt;synonym = g_strdup((char *)sqlite3_column_text(stmt, 5));</a>
+<a name="ln1212">    *result = g_list_append(*result, t);</a>
+<a name="ln1213">    count++;</a>
+<a name="ln1214">  }</a>
+<a name="ln1215"> </a>
+<a name="ln1216">  sqlite3_finalize(stmt);</a>
+<a name="ln1217">  DT_DEBUG_SQLITE3_EXEC(dt_database_get(darktable.db), &quot;DELETE FROM memory.taglist&quot;, NULL, NULL, NULL);</a>
+<a name="ln1218"> </a>
+<a name="ln1219">  return count;</a>
+<a name="ln1220">}</a>
+<a name="ln1221"> </a>
+<a name="ln1222">static gchar *dt_cleanup_synonyms(gchar *synonyms_entry)</a>
+<a name="ln1223">{</a>
+<a name="ln1224">  gchar *synonyms = NULL;</a>
+<a name="ln1225">  for(char *letter = synonyms_entry; *letter; letter++)</a>
+<a name="ln1226">  {</a>
+<a name="ln1227">    if(*letter == ';' || *letter == '\n') *letter = ',';</a>
+<a name="ln1228">    if(*letter == '\r') *letter = ' ';</a>
+<a name="ln1229">  }</a>
+<a name="ln1230">  gchar **tokens = g_strsplit(synonyms_entry, &quot;,&quot;, 0);</a>
+<a name="ln1231">  if(tokens)</a>
+<a name="ln1232">  {</a>
+<a name="ln1233">    gchar **entry = tokens;</a>
+<a name="ln1234">    while (*entry)</a>
+<a name="ln1235">    {</a>
+<a name="ln1236">      // remove leading and trailing spaces</a>
+<a name="ln1237">      char *e = *entry + strlen(*entry) - 1;</a>
+<a name="ln1238">      while(*e == ' ' &amp;&amp; e &gt; *entry)</a>
+<a name="ln1239">      {</a>
+<a name="ln1240">        *e = '\0';</a>
+<a name="ln1241">        e--;</a>
+<a name="ln1242">      }</a>
+<a name="ln1243">      e = *entry;</a>
+<a name="ln1244">      while(*e == ' ' &amp;&amp; *e != '\0') e++;</a>
+<a name="ln1245">      if(*e)</a>
+<a name="ln1246">      {</a>
+<a name="ln1247">        synonyms = dt_util_dstrcat(synonyms, &quot;%s, &quot;, e);</a>
+<a name="ln1248">      }</a>
+<a name="ln1249">      entry++;</a>
+<a name="ln1250">    }</a>
+<a name="ln1251">    if (synonyms)</a>
+<a name="ln1252">      synonyms[strlen(synonyms) - 2] = '\0';</a>
+<a name="ln1253">  }</a>
+<a name="ln1254">  g_strfreev(tokens);</a>
+<a name="ln1255">  return synonyms;</a>
+<a name="ln1256">}</a>
+<a name="ln1257"> </a>
+<a name="ln1258">gchar *dt_tag_get_synonyms(gint tagid)</a>
+<a name="ln1259">{</a>
+<a name="ln1260">  sqlite3_stmt *stmt;</a>
+<a name="ln1261">  gchar *synonyms = NULL;</a>
+<a name="ln1262"> </a>
+<a name="ln1263">  DT_DEBUG_SQLITE3_PREPARE_V2(dt_database_get(darktable.db),</a>
+<a name="ln1264">                              &quot;SELECT synonyms FROM data.tags WHERE id = ?1 &quot;,</a>
+<a name="ln1265">                              -1, &amp;stmt, NULL);</a>
+<a name="ln1266">  DT_DEBUG_SQLITE3_BIND_INT(stmt, 1, tagid);</a>
+<a name="ln1267"> </a>
+<a name="ln1268">  if (sqlite3_step(stmt) == SQLITE_ROW)</a>
+<a name="ln1269">  {</a>
+<a name="ln1270">    synonyms = g_strdup((char *)sqlite3_column_text(stmt, 0));</a>
+<a name="ln1271">  }</a>
+<a name="ln1272">  sqlite3_finalize(stmt);</a>
+<a name="ln1273">  return synonyms;</a>
+<a name="ln1274">}</a>
+<a name="ln1275"> </a>
+<a name="ln1276">void dt_tag_set_synonyms(gint tagid, gchar *synonyms_entry)</a>
+<a name="ln1277">{</a>
+<a name="ln1278">  if (!synonyms_entry) return;</a>
+<a name="ln1279">  char *synonyms = dt_cleanup_synonyms(synonyms_entry);</a>
+<a name="ln1280"> </a>
+<a name="ln1281">  sqlite3_stmt *stmt;</a>
+<a name="ln1282">  DT_DEBUG_SQLITE3_PREPARE_V2(dt_database_get(darktable.db),</a>
+<a name="ln1283">                              &quot;UPDATE data.tags SET synonyms = ?2 WHERE id = ?1 &quot;,</a>
+<a name="ln1284">                              -1, &amp;stmt, NULL);</a>
+<a name="ln1285">  DT_DEBUG_SQLITE3_BIND_INT(stmt, 1, tagid);</a>
+<a name="ln1286">  DT_DEBUG_SQLITE3_BIND_TEXT(stmt, 2, synonyms, -1, SQLITE_TRANSIENT);</a>
+<a name="ln1287">  sqlite3_step(stmt);</a>
+<a name="ln1288">  sqlite3_finalize(stmt);</a>
+<a name="ln1289">  g_free(synonyms);</a>
+<a name="ln1290">}</a>
+<a name="ln1291"> </a>
+<a name="ln1292">gint dt_tag_get_flags(gint tagid)</a>
+<a name="ln1293">{</a>
+<a name="ln1294">  sqlite3_stmt *stmt;</a>
+<a name="ln1295"> </a>
+<a name="ln1296">  DT_DEBUG_SQLITE3_PREPARE_V2(dt_database_get(darktable.db),</a>
+<a name="ln1297">                              &quot;SELECT flags FROM data.tags WHERE id = ?1 &quot;,</a>
+<a name="ln1298">                              -1, &amp;stmt, NULL);</a>
+<a name="ln1299">  DT_DEBUG_SQLITE3_BIND_INT(stmt, 1, tagid);</a>
+<a name="ln1300"> </a>
+<a name="ln1301">  gint flags = 0;</a>
+<a name="ln1302">  if (sqlite3_step(stmt) == SQLITE_ROW)</a>
+<a name="ln1303">  {</a>
+<a name="ln1304">    flags = sqlite3_column_int(stmt, 0);</a>
+<a name="ln1305">  }</a>
+<a name="ln1306">  sqlite3_finalize(stmt);</a>
+<a name="ln1307">  return flags;</a>
+<a name="ln1308">}</a>
+<a name="ln1309"> </a>
+<a name="ln1310">void dt_tag_set_flags(gint tagid, gint flags)</a>
+<a name="ln1311">{</a>
+<a name="ln1312">  sqlite3_stmt *stmt;</a>
+<a name="ln1313"> </a>
+<a name="ln1314">  DT_DEBUG_SQLITE3_PREPARE_V2(dt_database_get(darktable.db),</a>
+<a name="ln1315">                              &quot;UPDATE data.tags SET flags = ?2 WHERE id = ?1 &quot;,</a>
+<a name="ln1316">                              -1, &amp;stmt, NULL);</a>
+<a name="ln1317">  DT_DEBUG_SQLITE3_BIND_INT(stmt, 1, tagid);</a>
+<a name="ln1318">  DT_DEBUG_SQLITE3_BIND_INT(stmt, 2, flags);</a>
+<a name="ln1319">  sqlite3_step(stmt);</a>
+<a name="ln1320">  sqlite3_finalize(stmt);</a>
+<a name="ln1321">}</a>
+<a name="ln1322"> </a>
+<a name="ln1323">void dt_tag_add_synonym(gint tagid, gchar *synonym)</a>
+<a name="ln1324">{</a>
+<a name="ln1325">  char *synonyms = dt_tag_get_synonyms(tagid);</a>
+<a name="ln1326">  if (synonyms)</a>
+<a name="ln1327">  {</a>
+<a name="ln1328">    synonyms = dt_util_dstrcat(synonyms, &quot;, %s&quot;, synonym);</a>
+<a name="ln1329">  }</a>
+<a name="ln1330">  else</a>
+<a name="ln1331">  {</a>
+<a name="ln1332">    synonyms = g_strdup(synonym);</a>
+<a name="ln1333">  }</a>
+<a name="ln1334">  sqlite3_stmt *stmt;</a>
+<a name="ln1335">  DT_DEBUG_SQLITE3_PREPARE_V2(dt_database_get(darktable.db),</a>
+<a name="ln1336">                              &quot;UPDATE data.tags SET synonyms = ?2 WHERE id = ?1 &quot;,</a>
+<a name="ln1337">                              -1, &amp;stmt, NULL);</a>
+<a name="ln1338">  DT_DEBUG_SQLITE3_BIND_INT(stmt, 1, tagid);</a>
+<a name="ln1339">  DT_DEBUG_SQLITE3_BIND_TEXT(stmt, 2, synonyms, -1, SQLITE_TRANSIENT);</a>
+<a name="ln1340">  sqlite3_step(stmt);</a>
+<a name="ln1341">  sqlite3_finalize(stmt);</a>
+<a name="ln1342">  g_free(synonyms);</a>
+<a name="ln1343">}</a>
+<a name="ln1344"> </a>
+<a name="ln1345">static void _free_result_item(dt_tag_t *t, gpointer unused)</a>
+<a name="ln1346">{</a>
+<a name="ln1347">  g_free(t-&gt;tag);</a>
+<a name="ln1348">  g_free(t-&gt;synonym);</a>
+<a name="ln1349">  g_free(t);</a>
+<a name="ln1350">}</a>
+<a name="ln1351"> </a>
+<a name="ln1352">void dt_tag_free_result(GList **result)</a>
+<a name="ln1353">{</a>
+<a name="ln1354">  if(result &amp;&amp; *result)</a>
+<a name="ln1355">  {</a>
+<a name="ln1356">    g_list_free_full(*result, (GDestroyNotify)_free_result_item);</a>
+<a name="ln1357">  }</a>
+<a name="ln1358">}</a>
+<a name="ln1359"> </a>
+<a name="ln1360">uint32_t dt_tag_get_recent_used(GList **result)</a>
+<a name="ln1361">{</a>
+<a name="ln1362">  return 0;</a>
+<a name="ln1363">}</a>
+<a name="ln1364"> </a>
+<a name="ln1365">/*</a>
+<a name="ln1366">  TODO</a>
+<a name="ln1367">  the file format allows to specify {synonyms} that are one hierarchy level deeper than the parent. those are not</a>
+<a name="ln1368">  to be shown in the gui but can be searched. when the parent or a synonym is attached then ALSO the rest of the</a>
+<a name="ln1369">  bunch is to be added.</a>
+<a name="ln1370">  there is also a ~ prefix for tags that indicate that the tag order has to be kept instead of sorting them. that's</a>
+<a name="ln1371">  also not possible at the moment.</a>
+<a name="ln1372">*/</a>
+<a name="ln1373">ssize_t dt_tag_import(const char *filename)</a>
+<a name="ln1374">{</a>
+<a name="ln1375">  FILE *fd = g_fopen(filename, &quot;r&quot;);</a>
+<a name="ln1376">  if(!fd) return -1;</a>
+<a name="ln1377"> </a>
+<a name="ln1378">  GList * hierarchy = NULL;</a>
+<a name="ln1379">  char *line = NULL;</a>
+<a name="ln1380">  size_t len = 0;</a>
+<a name="ln1381">  ssize_t count = 0;</a>
+<a name="ln1382">  guint tagid = 0;</a>
+<a name="ln1383">  guint previous_category_depth = 0;</a>
+<a name="ln1384">  gboolean previous_category = FALSE;</a>
+<a name="ln1385">  gboolean previous_synonym = FALSE;</a>
+<a name="ln1386"> </a>
+<a name="ln1387">  while(getline(&amp;line, &amp;len, fd) != -1)</a>
+<a name="ln1388">  {</a>
+<a name="ln1389">    // remove newlines and set start past the initial tabs</a>
+<a name="ln1390">    char *start = line;</a>
+<a name="ln1391">    while(*start == '\t' || *start == ' ' || *start == ',' || *start == ';') start++;</a>
+<a name="ln1392">    const int depth = start - line;</a>
+<a name="ln1393"> </a>
+<a name="ln1394">    char *end = line + strlen(line) - 1;</a>
+<a name="ln1395">    while((*end == '\n' || *end == '\r' || *end == ',' || *end == ';') &amp;&amp; end &gt;= start)</a>
+<a name="ln1396">    {</a>
+<a name="ln1397">      *end = '\0';</a>
+<a name="ln1398">      end--;</a>
+<a name="ln1399">    }</a>
+<a name="ln1400"> </a>
+<a name="ln1401">    // remove control characters from the string</a>
+<a name="ln1402">    // if no associated synonym the previous category node can be reused</a>
+<a name="ln1403">    gboolean skip = FALSE;</a>
+<a name="ln1404">    gboolean category = FALSE;</a>
+<a name="ln1405">    gboolean synonym = FALSE;</a>
+<a name="ln1406">    if (*start == '[' &amp;&amp; *end == ']') // categories</a>
+<a name="ln1407">    {</a>
+<a name="ln1408">      category = TRUE;</a>
+<a name="ln1409">      start++;</a>
+<a name="ln1410">      *end-- = '\0';</a>
+<a name="ln1411">    }</a>
+<a name="ln1412">    else if (*start == '{' &amp;&amp; *end == '}')  // synonyms</a>
+<a name="ln1413">    {</a>
+<a name="ln1414">      synonym = TRUE;</a>
+<a name="ln1415">      start++;</a>
+<a name="ln1416">      *end-- = '\0';</a>
+<a name="ln1417">    }</a>
+<a name="ln1418">    if(*start == '~') // fixed order. TODO not possible with our db</a>
+<a name="ln1419">    {</a>
+<a name="ln1420">      skip = TRUE;</a>
+<a name="ln1421">      start++;</a>
+<a name="ln1422">    }</a>
+<a name="ln1423"> </a>
+<a name="ln1424">    if (synonym)</a>
+<a name="ln1425">    {</a>
+<a name="ln1426">      // associate the synonym to last tag</a>
+<a name="ln1427">      if (tagid)</a>
+<a name="ln1428">      {</a>
+<a name="ln1429">        char *tagname = g_strdup(start);</a>
+<a name="ln1430">        // clear synonyms before importing the new ones =&gt; allows export, modification and back import</a>
+<a name="ln1431">        if (!previous_synonym) dt_tag_set_synonyms(tagid, &quot;&quot;);</a>
+<a name="ln1432">        dt_tag_add_synonym(tagid, tagname);</a>
+<a name="ln1433">        g_free(tagname);</a>
+<a name="ln1434">      }</a>
+<a name="ln1435">    }</a>
+<a name="ln1436">    else</a>
+<a name="ln1437">    {</a>
+<a name="ln1438">      // remove everything past the current prefix from hierarchy</a>
+<a name="ln1439">      GList *iter = g_list_nth(hierarchy, depth);</a>
+<a name="ln1440">      while(iter)</a>
+<a name="ln1441">      {</a>
+<a name="ln1442">        GList *current = iter;</a>
+<a name="ln1443">        iter = g_list_next(iter);</a>
+<a name="ln1444">        hierarchy = g_list_delete_link(hierarchy, current);</a>
+<a name="ln1445">      }</a>
+<a name="ln1446"> </a>
+<a name="ln1447">      // add the current level</a>
+<a name="ln1448">      hierarchy = g_list_append(hierarchy, g_strdup(start));</a>
+<a name="ln1449"> </a>
+<a name="ln1450">      // add tag to db iff it's not something to be ignored</a>
+<a name="ln1451">      if(!skip)</a>
+<a name="ln1452">      {</a>
+<a name="ln1453">        char *tag = dt_util_glist_to_str(&quot;|&quot;, hierarchy);</a>
+<a name="ln1454">        if (previous_category &amp;&amp; (depth &gt; previous_category_depth + 1))</a>
+<a name="ln1455">        {</a>
+<a name="ln1456">          // reuse previous tag</a>
+<a name="ln1457">          dt_tag_rename(tagid, tag);</a>
+<a name="ln1458">          if (!category)</a>
+<a name="ln1459">            dt_tag_set_flags(tagid, 0);</a>
+<a name="ln1460">        }</a>
+<a name="ln1461">        else</a>
+<a name="ln1462">        {</a>
+<a name="ln1463">          // create a new tag</a>
+<a name="ln1464">          count++;</a>
+<a name="ln1465">          tagid = 1;  // if 0, dt_tag_new creates a new one even if  the tag already exists</a>
+<a name="ln1466">          dt_tag_new(tag, &amp;tagid);</a>
+<a name="ln1467">          if (category)</a>
+<a name="ln1468">            dt_tag_set_flags(tagid, DT_TF_CATEGORY);</a>
+<a name="ln1469">        }</a>
+<a name="ln1470">        g_free(tag);</a>
+<a name="ln1471">      }</a>
+<a name="ln1472">    }</a>
+<a name="ln1473">    previous_category_depth = category ? depth : 0;</a>
+<a name="ln1474">    previous_category = category;</a>
+<a name="ln1475">    previous_synonym = synonym;</a>
+<a name="ln1476">  }</a>
+<a name="ln1477"> </a>
+<a name="ln1478">  free(line);</a>
+<a name="ln1479">  g_list_free_full(hierarchy, g_free);</a>
+<a name="ln1480">  fclose(fd);</a>
+<a name="ln1481"> </a>
+<a name="ln1482">  dt_control_signal_raise(darktable.signals, DT_SIGNAL_TAG_CHANGED);</a>
+<a name="ln1483"> </a>
+<a name="ln1484">  return count;</a>
+<a name="ln1485">}</a>
+<a name="ln1486"> </a>
+<a name="ln1487">/*</a>
+<a name="ln1488">  TODO: there is one corner case where i am not sure if we are doing the correct thing. some examples i found</a>
+<a name="ln1489">  on the internet agreed with this version, some used an alternative:</a>
+<a name="ln1490">  consider two tags like &quot;foo|bar&quot; and &quot;foo|bar|baz&quot;. the &quot;foo|bar&quot; part is both a regular tag (from the 1st tag)</a>
+<a name="ln1491">  and also a category (from the 2nd tag). the two way to output are</a>
+<a name="ln1492"> </a>
+<a name="ln1493">  [foo]</a>
+<a name="ln1494">      bar</a>
+<a name="ln1495">          baz</a>
+<a name="ln1496"> </a>
+<a name="ln1497">  and</a>
+<a name="ln1498"> </a>
+<a name="ln1499">  [foo]</a>
+<a name="ln1500">      bar</a>
+<a name="ln1501">      [bar]</a>
+<a name="ln1502">          baz</a>
+<a name="ln1503"> </a>
+<a name="ln1504">  we are using the first (mostly because it was easier to implement ;)). if this poses problems with other programs</a>
+<a name="ln1505">  supporting these files then we should fix that.</a>
+<a name="ln1506">*/</a>
+<a name="ln1507">ssize_t dt_tag_export(const char *filename)</a>
+<a name="ln1508">{</a>
+<a name="ln1509">  FILE *fd = g_fopen(filename, &quot;w&quot;);</a>
+<a name="ln1510"> </a>
+<a name="ln1511">  if(!fd) return -1;</a>
+<a name="ln1512"> </a>
+<a name="ln1513">  GList *tags = NULL;</a>
+<a name="ln1514">  gint count = 0;</a>
+<a name="ln1515">  dt_tag_get_with_usage(&amp;tags);</a>
+<a name="ln1516">  GList *sorted_tags = dt_sort_tag(tags, 0);</a>
+<a name="ln1517"> </a>
+<a name="ln1518">  gchar **hierarchy = NULL;</a>
+<a name="ln1519">  for(GList *tag_elt = sorted_tags; tag_elt; tag_elt = g_list_next(tag_elt))</a>
+<a name="ln1520">  {</a>
+<a name="ln1521">    const gchar *tag = ((dt_tag_t *)tag_elt-&gt;data)-&gt;tag;</a>
+<a name="ln1522">    const char *synonyms = ((dt_tag_t *)tag_elt-&gt;data)-&gt;synonym;</a>
+<a name="ln1523">    const guint flags = ((dt_tag_t *)tag_elt-&gt;data)-&gt;flags;</a>
+<a name="ln1524">    gchar **tokens = g_strsplit(tag, &quot;|&quot;, -1);</a>
+<a name="ln1525"> </a>
+<a name="ln1526">    // find how many common levels are shared with the last tag</a>
+<a name="ln1527">    int common_start;</a>
+<a name="ln1528">    for(common_start = 0; hierarchy &amp;&amp; hierarchy[common_start] &amp;&amp; tokens &amp;&amp; tokens[common_start]; common_start++)</a>
+<a name="ln1529">    {</a>
+<a name="ln1530">      if(g_strcmp0(hierarchy[common_start], tokens[common_start])) break;</a>
+<a name="ln1531">    }</a>
+<a name="ln1532"> </a>
+<a name="ln1533">    g_strfreev(hierarchy);</a>
+<a name="ln1534">    hierarchy = tokens;</a>
+<a name="ln1535"> </a>
+<a name="ln1536">    int tabs = common_start;</a>
+<a name="ln1537">    for(size_t i = common_start; tokens &amp;&amp; tokens[i]; i++, tabs++)</a>
+<a name="ln1538">    {</a>
+<a name="ln1539">      for(int j = 0; j &lt; tabs; j++) fputc('\t', fd);</a>
+<a name="ln1540">      if(!tokens[i + 1])</a>
+<a name="ln1541">      {</a>
+<a name="ln1542">        count++;</a>
+<a name="ln1543">        if (flags &amp; DT_TF_CATEGORY)</a>
+<a name="ln1544">          fprintf(fd, &quot;[%s]\n&quot;, tokens[i]);</a>
+<a name="ln1545">        else</a>
+<a name="ln1546">          fprintf(fd, &quot;%s\n&quot;, tokens[i]);</a>
+<a name="ln1547">        if (synonyms &amp;&amp; synonyms[0])</a>
+<a name="ln1548">        {</a>
+<a name="ln1549">          gchar **tokens2 = g_strsplit(synonyms, &quot;,&quot;, 0);</a>
+<a name="ln1550">          if(tokens2)</a>
+<a name="ln1551">          {</a>
+<a name="ln1552">            gchar **entry = tokens2;</a>
+<a name="ln1553">            while(*entry)</a>
+<a name="ln1554">            {</a>
+<a name="ln1555">              char *e = *entry;</a>
+<a name="ln1556">              if (*e == ' ') e++;</a>
+<a name="ln1557">              for(int j = 0; j &lt; tabs+1; j++) fputc('\t', fd);</a>
+<a name="ln1558">              fprintf(fd, &quot;{%s}\n&quot;, e);</a>
+<a name="ln1559">              entry++;</a>
+<a name="ln1560">            }</a>
+<a name="ln1561">          }</a>
+<a name="ln1562">          g_strfreev(tokens2);</a>
+<a name="ln1563">        }</a>
+<a name="ln1564">      }</a>
+<a name="ln1565">      else</a>
+<a name="ln1566">        fprintf(fd, &quot;[%s]\n&quot;, tokens[i]);</a>
+<a name="ln1567">    }</a>
+<a name="ln1568">  }</a>
+<a name="ln1569"> </a>
+<a name="ln1570">  g_strfreev(hierarchy);</a>
+<a name="ln1571"> </a>
+<a name="ln1572">  dt_tag_free_result(&amp;tags);</a>
+<a name="ln1573"> </a>
+<a name="ln1574">  fclose(fd);</a>
+<a name="ln1575"> </a>
+<a name="ln1576">  return count;</a>
+<a name="ln1577">}</a>
+<a name="ln1578"> </a>
+<a name="ln1579">void dt_tag_update_used_tags()</a>
+<a name="ln1580">{</a>
+<a name="ln1581">  DT_DEBUG_SQLITE3_EXEC(dt_database_get(darktable.db), &quot;DELETE FROM main.used_tags WHERE id NOT IN &quot;</a>
+<a name="ln1582">                                                       &quot;(SELECT tagid FROM main.tagged_images GROUP BY tagid)&quot;,</a>
+<a name="ln1583">                        NULL, NULL, NULL);</a>
+<a name="ln1584"> </a>
+<a name="ln1585">  DT_DEBUG_SQLITE3_EXEC(dt_database_get(darktable.db), &quot;INSERT OR IGNORE INTO main.used_tags (id, name) &quot;</a>
+<a name="ln1586">                                                       &quot;SELECT t.id, t.name &quot;</a>
+<a name="ln1587">                                                       &quot;FROM data.tags AS t, main.tagged_images AS i &quot;</a>
+<a name="ln1588">                                                       &quot;ON t.id = i.tagid GROUP BY t.id&quot;,</a>
+<a name="ln1589">                        NULL, NULL, NULL);</a>
+<a name="ln1590">}</a>
+<a name="ln1591"> </a>
+<a name="ln1592">char *dt_tag_get_subtag(const gint imgid, const char *category, const int level)</a>
+<a name="ln1593">{</a>
+<a name="ln1594">  if (!category) return NULL;</a>
+<a name="ln1595">  const guint rootnb = dt_util_string_count_char(category, '|');</a>
+<a name="ln1596">  char *result = NULL;</a>
+<a name="ln1597">  sqlite3_stmt *stmt;</a>
+<a name="ln1598">  DT_DEBUG_SQLITE3_PREPARE_V2(dt_database_get(darktable.db),</a>
+<a name="ln1599">          &quot;SELECT DISTINCT T.name FROM main.tagged_images AS I &quot;</a>
+<a name="ln1600">          &quot;INNER JOIN data.tags AS T &quot;</a>
+<a name="ln1601">          &quot;ON T.id = I.tagid AND SUBSTR(T.name, 1, LENGTH(?2)) = ?2 &quot;</a>
+<a name="ln1602">          &quot;WHERE I.imgid = ?1&quot;,</a>
+<a name="ln1603">          -1, &amp;stmt, NULL);</a>
+<a name="ln1604">  DT_DEBUG_SQLITE3_BIND_INT(stmt, 1, imgid);</a>
+<a name="ln1605">  DT_DEBUG_SQLITE3_BIND_TEXT(stmt, 2, category, -1, SQLITE_TRANSIENT);</a>
+<a name="ln1606">  while(sqlite3_step(stmt) == SQLITE_ROW)</a>
+<a name="ln1607">  {</a>
+<a name="ln1608">    char *tag = (char *)sqlite3_column_text(stmt, 0);</a>
+<a name="ln1609">    const guint tagnb = dt_util_string_count_char(tag, '|');</a>
+<a name="ln1610">    if (tagnb &gt;= rootnb + level)</a>
+<a name="ln1611">    {</a>
+<a name="ln1612">      gchar **pch = g_strsplit(tag, &quot;|&quot;, -1);</a>
+<a name="ln1613">      result = g_strdup(pch[rootnb + level]);</a>
+<a name="ln1614">      g_strfreev(pch);</a>
+<a name="ln1615">      break;</a>
+<a name="ln1616">    }</a>
+<a name="ln1617">  }</a>
+<a name="ln1618">  sqlite3_finalize(stmt);</a>
+<a name="ln1619">  return result;</a>
+<a name="ln1620">}</a>
+<a name="ln1621"> </a>
+<a name="ln1622">// modelines: These editor modelines have been set for all relevant files by tools/update_modelines.sh</a>
+<a name="ln1623">// vim: shiftwidth=2 expandtab tabstop=2 cindent</a>
+<a name="ln1624">// kate: tab-indents: off; indent-width 2; replace-tabs on; indent-mode cstyle; remove-trailing-spaces modified;</a>
+
+</code></pre>
+<div class="balloon" rel="94"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v522/" target="_blank">V522</a> There might be dereferencing of a potential null pointer 'result'. Check lines: 94, 93.</p></div>
+<div class="balloon" rel="502"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v590/" target="_blank">V590</a> Consider inspecting the '* e == ' ' && * e != '\0'' expression. The expression is excessive or contains a misprint.</p></div>
+<div class="balloon" rel="826"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v575/" target="_blank">V575</a> The null pointer is passed into 'g_list_free_full' function. Inspect the first argument.</p></div>
+<div class="balloon" rel="849"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v575/" target="_blank">V575</a> The null pointer is passed into 'g_list_free_full' function. Inspect the first argument.</p></div>
+<div class="balloon" rel="1244"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v590/" target="_blank">V590</a> Consider inspecting the '* e == ' ' && * e != '\0'' expression. The expression is excessive or contains a misprint.</p></div>
+<div class="balloon" rel="1439"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v575/" target="_blank">V575</a> The null pointer is passed into 'g_list_nth' function. Inspect the first argument.</p></div>
+
+<link rel="stylesheet" href="highlight.css">
+<script src="highlight.pack.js"></script>
+<script src="highlightjs-line-numbers.js"></script>
+<script>hljs.initHighlightingOnLoad();</script>
+<script>hljs.initLineNumbersOnLoad();</script>
+<script>
+  $(document).ready(function() {
+      $('.balloon').each(function () {
+          var bl = $(this);
+          var line = bl.attr('rel');
+          var text = $('a[name="ln'+line+'"]').text();
+
+          var space_count = 0;
+          for(var i = 0; i<text.length; i++){
+              var char = text[i];
+              if((char !== ' ')&&(char !== '\t'))break;
+              if(char === '\t')space_count++;
+              space_count++;
+          }
+
+          bl.css('margin-left', space_count*8);
+          $('a[name="ln'+line+'"]').after(bl);
+      });
+
+      window.location = window.location;
+  });
+</script>
+</body>
+</html>

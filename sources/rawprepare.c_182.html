@@ -1,0 +1,941 @@
+
+<html>
+<head>
+  <link rel="stylesheet" href="../style.css"/>
+  <script src="../jquery-3.2.1.min.js"></script>
+</head>
+<body>
+<pre><code class = "cpp">
+<a name="ln1">/*</a>
+<a name="ln2">    This file is part of darktable,</a>
+<a name="ln3">    copyright (c) 2014-2017 Roman Lebedev.</a>
+<a name="ln4"> </a>
+<a name="ln5">    (based on code by johannes hanika)</a>
+<a name="ln6"> </a>
+<a name="ln7">    darktable is free software: you can redistribute it and/or modify</a>
+<a name="ln8">    it under the terms of the GNU General Public License as published by</a>
+<a name="ln9">    the Free Software Foundation, either version 3 of the License, or</a>
+<a name="ln10">    (at your option) any later version.</a>
+<a name="ln11"> </a>
+<a name="ln12">    darktable is distributed in the hope that it will be useful,</a>
+<a name="ln13">    but WITHOUT ANY WARRANTY; without even the implied warranty of</a>
+<a name="ln14">    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the</a>
+<a name="ln15">    GNU General Public License for more details.</a>
+<a name="ln16"> </a>
+<a name="ln17">    You should have received a copy of the GNU General Public License</a>
+<a name="ln18">    along with darktable.  If not, see &lt;http://www.gnu.org/licenses/&gt;.</a>
+<a name="ln19">*/</a>
+<a name="ln20">#ifdef HAVE_CONFIG_H</a>
+<a name="ln21">#include &quot;config.h&quot;</a>
+<a name="ln22">#endif</a>
+<a name="ln23">#include &quot;bauhaus/bauhaus.h&quot;</a>
+<a name="ln24">#include &quot;common/imageio_rawspeed.h&quot; // for dt_rawspeed_crop_dcraw_filters</a>
+<a name="ln25">#include &quot;common/opencl.h&quot;</a>
+<a name="ln26">#include &quot;develop/imageop.h&quot;</a>
+<a name="ln27">#include &quot;develop/tiling.h&quot;</a>
+<a name="ln28">#include &quot;gui/accelerators.h&quot;</a>
+<a name="ln29">#include &quot;gui/gtk.h&quot;</a>
+<a name="ln30">#include &quot;gui/presets.h&quot;</a>
+<a name="ln31">#include &quot;iop/iop_api.h&quot;</a>
+<a name="ln32"> </a>
+<a name="ln33">#include &lt;gtk/gtk.h&gt;</a>
+<a name="ln34">#include &lt;stdint.h&gt;</a>
+<a name="ln35">#include &lt;stdlib.h&gt;</a>
+<a name="ln36">#if defined(__SSE__)</a>
+<a name="ln37">#include &lt;xmmintrin.h&gt;</a>
+<a name="ln38">#endif</a>
+<a name="ln39"> </a>
+<a name="ln40">DT_MODULE_INTROSPECTION(1, dt_iop_rawprepare_params_t)</a>
+<a name="ln41"> </a>
+<a name="ln42">static const struct</a>
+<a name="ln43">{</a>
+<a name="ln44">  const char *label;</a>
+<a name="ln45">  const char *tooltip;</a>
+<a name="ln46">} crop_labels[4] = { { N_(&quot;crop x&quot;), N_(&quot;crop from left border&quot;) },</a>
+<a name="ln47">                     { N_(&quot;crop y&quot;), N_(&quot;crop from top&quot;) },</a>
+<a name="ln48">                     { N_(&quot;crop width&quot;), N_(&quot;crop from right border&quot;) },</a>
+<a name="ln49">                     { N_(&quot;crop height&quot;), N_(&quot;crop from bottom&quot;) } };</a>
+<a name="ln50"> </a>
+<a name="ln51">typedef struct dt_iop_rawprepare_params_t</a>
+<a name="ln52">{</a>
+<a name="ln53">  union {</a>
+<a name="ln54">    struct</a>
+<a name="ln55">    {</a>
+<a name="ln56">      int32_t x, y, width, height;</a>
+<a name="ln57">    } named;</a>
+<a name="ln58">    int32_t array[4];</a>
+<a name="ln59">  } crop;</a>
+<a name="ln60">  uint16_t raw_black_level_separate[4];</a>
+<a name="ln61">  uint16_t raw_white_point;</a>
+<a name="ln62">} dt_iop_rawprepare_params_t;</a>
+<a name="ln63"> </a>
+<a name="ln64">typedef struct dt_iop_rawprepare_gui_data_t</a>
+<a name="ln65">{</a>
+<a name="ln66">  GtkWidget *box_raw;</a>
+<a name="ln67">  GtkWidget *black_level_separate[4];</a>
+<a name="ln68">  GtkWidget *white_point;</a>
+<a name="ln69">  GtkWidget *crop[4];</a>
+<a name="ln70">  GtkWidget *label_non_raw;</a>
+<a name="ln71">} dt_iop_rawprepare_gui_data_t;</a>
+<a name="ln72"> </a>
+<a name="ln73">typedef struct dt_iop_rawprepare_data_t</a>
+<a name="ln74">{</a>
+<a name="ln75">  int32_t x, y, width, height; // crop, now unused, for future expansion</a>
+<a name="ln76">  float sub[4];</a>
+<a name="ln77">  float div[4];</a>
+<a name="ln78"> </a>
+<a name="ln79">  // cached for dt_iop_buffer_dsc_t::rawprepare</a>
+<a name="ln80">  struct</a>
+<a name="ln81">  {</a>
+<a name="ln82">    uint16_t raw_black_level;</a>
+<a name="ln83">    uint16_t raw_white_point;</a>
+<a name="ln84">  } rawprepare;</a>
+<a name="ln85">} dt_iop_rawprepare_data_t;</a>
+<a name="ln86"> </a>
+<a name="ln87">typedef struct dt_iop_rawprepare_global_data_t</a>
+<a name="ln88">{</a>
+<a name="ln89">  int kernel_rawprepare_1f;</a>
+<a name="ln90">  int kernel_rawprepare_1f_unnormalized;</a>
+<a name="ln91">  int kernel_rawprepare_4f;</a>
+<a name="ln92">} dt_iop_rawprepare_global_data_t;</a>
+<a name="ln93"> </a>
+<a name="ln94"> </a>
+<a name="ln95">const char *name()</a>
+<a name="ln96">{</a>
+<a name="ln97">  return C_(&quot;modulename&quot;, &quot;raw black/white point&quot;);</a>
+<a name="ln98">}</a>
+<a name="ln99"> </a>
+<a name="ln100">int operation_tags()</a>
+<a name="ln101">{</a>
+<a name="ln102">  return IOP_TAG_DISTORT;</a>
+<a name="ln103">}</a>
+<a name="ln104"> </a>
+<a name="ln105">int flags()</a>
+<a name="ln106">{</a>
+<a name="ln107">  return IOP_FLAGS_ALLOW_TILING | IOP_FLAGS_TILING_FULL_ROI | IOP_FLAGS_ONE_INSTANCE;</a>
+<a name="ln108">}</a>
+<a name="ln109"> </a>
+<a name="ln110">int default_group()</a>
+<a name="ln111">{</a>
+<a name="ln112">  return IOP_GROUP_BASIC;</a>
+<a name="ln113">}</a>
+<a name="ln114"> </a>
+<a name="ln115">int default_colorspace(dt_iop_module_t *self, dt_dev_pixelpipe_t *pipe, dt_dev_pixelpipe_iop_t *piece)</a>
+<a name="ln116">{</a>
+<a name="ln117">  return iop_cs_RAW;</a>
+<a name="ln118">}</a>
+<a name="ln119"> </a>
+<a name="ln120">void init_presets(dt_iop_module_so_t *self)</a>
+<a name="ln121">{</a>
+<a name="ln122">  DT_DEBUG_SQLITE3_EXEC(dt_database_get(darktable.db), &quot;BEGIN&quot;, NULL, NULL, NULL);</a>
+<a name="ln123"> </a>
+<a name="ln124">  dt_gui_presets_add_generic(_(&quot;passthrough&quot;), self-&gt;op, self-&gt;version(),</a>
+<a name="ln125">                             &amp;(dt_iop_rawprepare_params_t){.crop.array = { 0, 0, 0, 0 },</a>
+<a name="ln126">                                                           .raw_black_level_separate[0] = 0,</a>
+<a name="ln127">                                                           .raw_black_level_separate[1] = 0,</a>
+<a name="ln128">                                                           .raw_black_level_separate[2] = 0,</a>
+<a name="ln129">                                                           .raw_black_level_separate[3] = 0,</a>
+<a name="ln130">                                                           .raw_white_point = UINT16_MAX },</a>
+<a name="ln131">                             sizeof(dt_iop_rawprepare_params_t), 1);</a>
+<a name="ln132"> </a>
+<a name="ln133">  DT_DEBUG_SQLITE3_EXEC(dt_database_get(darktable.db), &quot;COMMIT&quot;, NULL, NULL, NULL);</a>
+<a name="ln134">}</a>
+<a name="ln135"> </a>
+<a name="ln136">void init_key_accels(dt_iop_module_so_t *self)</a>
+<a name="ln137">{</a>
+<a name="ln138">  for(int i = 0; i &lt; 4; i++)</a>
+<a name="ln139">  {</a>
+<a name="ln140">    gchar *label = g_strdup_printf(_(&quot;black level %i&quot;), i);</a>
+<a name="ln141">    dt_accel_register_slider_iop(self, FALSE, NC_(&quot;accel&quot;, label));</a>
+<a name="ln142">    g_free(label);</a>
+<a name="ln143">  }</a>
+<a name="ln144"> </a>
+<a name="ln145">  if(dt_conf_get_bool(&quot;plugins/darkroom/rawprepare/allow_editing_crop&quot;))</a>
+<a name="ln146">  {</a>
+<a name="ln147">    for(int i = 0; i &lt; 4; i++)</a>
+<a name="ln148">    {</a>
+<a name="ln149">      dt_accel_register_slider_iop(self, FALSE, NC_(&quot;accel&quot;, gettext(crop_labels[i].label)));</a>
+<a name="ln150">    }</a>
+<a name="ln151">  }</a>
+<a name="ln152"> </a>
+<a name="ln153">  dt_accel_register_slider_iop(self, FALSE, NC_(&quot;accel&quot;, &quot;white point&quot;));</a>
+<a name="ln154">}</a>
+<a name="ln155"> </a>
+<a name="ln156">void connect_key_accels(dt_iop_module_t *self)</a>
+<a name="ln157">{</a>
+<a name="ln158">  dt_iop_rawprepare_gui_data_t *g = (dt_iop_rawprepare_gui_data_t *)self-&gt;gui_data;</a>
+<a name="ln159"> </a>
+<a name="ln160">  for(int i = 0; i &lt; 4; i++)</a>
+<a name="ln161">  {</a>
+<a name="ln162">    gchar *label = g_strdup_printf(_(&quot;black level %i&quot;), i);</a>
+<a name="ln163">    dt_accel_connect_slider_iop(self, label, g-&gt;black_level_separate[i]);</a>
+<a name="ln164">    g_free(label);</a>
+<a name="ln165">  }</a>
+<a name="ln166"> </a>
+<a name="ln167">  dt_accel_connect_slider_iop(self, _(&quot;white point&quot;), GTK_WIDGET(g-&gt;white_point));</a>
+<a name="ln168"> </a>
+<a name="ln169">  if(dt_conf_get_bool(&quot;plugins/darkroom/rawprepare/allow_editing_crop&quot;))</a>
+<a name="ln170">  {</a>
+<a name="ln171">    for(int i = 0; i &lt; 4; i++)</a>
+<a name="ln172">    {</a>
+<a name="ln173">      dt_accel_connect_slider_iop(self, gettext(crop_labels[i].label), g-&gt;crop[i]);</a>
+<a name="ln174">    }</a>
+<a name="ln175">  }</a>
+<a name="ln176">}</a>
+<a name="ln177"> </a>
+<a name="ln178">// value to round,   reference on how to round:</a>
+<a name="ln179">//  if ref was even, returned value will be even</a>
+<a name="ln180">//  if ref was odd,  returned value will be odd</a>
+<a name="ln181">static int round_smart(float val, int ref)</a>
+<a name="ln182">{</a>
+<a name="ln183">  // first, just round it</a>
+<a name="ln184">  int round = (int)roundf(val);</a>
+<a name="ln185"> </a>
+<a name="ln186">  if((ref &amp; 1) ^ (round &amp; 1)) round++;</a>
+<a name="ln187"> </a>
+<a name="ln188">  return round;</a>
+<a name="ln189">}</a>
+<a name="ln190"> </a>
+<a name="ln191">static int compute_proper_crop(dt_dev_pixelpipe_iop_t *piece, const dt_iop_roi_t *const roi_in, int value)</a>
+<a name="ln192">{</a>
+<a name="ln193">  const float scale = roi_in-&gt;scale / piece-&gt;iscale;</a>
+<a name="ln194"> </a>
+<a name="ln195">  return round_smart((float)value * scale, value);</a>
+<a name="ln196">}</a>
+<a name="ln197"> </a>
+<a name="ln198">int distort_transform(dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, float *points, size_t points_count)</a>
+<a name="ln199">{</a>
+<a name="ln200">  dt_iop_rawprepare_data_t *d = (dt_iop_rawprepare_data_t *)piece-&gt;data;</a>
+<a name="ln201"> </a>
+<a name="ln202">  const float scale = piece-&gt;buf_in.scale / piece-&gt;iscale;</a>
+<a name="ln203"> </a>
+<a name="ln204">  const float x = (float)d-&gt;x * scale, y = (float)d-&gt;y * scale;</a>
+<a name="ln205"> </a>
+<a name="ln206">  for(size_t i = 0; i &lt; points_count * 2; i += 2)</a>
+<a name="ln207">  {</a>
+<a name="ln208">    points[i] -= x;</a>
+<a name="ln209">    points[i + 1] -= y;</a>
+<a name="ln210">  }</a>
+<a name="ln211"> </a>
+<a name="ln212">  return 1;</a>
+<a name="ln213">}</a>
+<a name="ln214"> </a>
+<a name="ln215">int distort_backtransform(dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, float *points,</a>
+<a name="ln216">                          size_t points_count)</a>
+<a name="ln217">{</a>
+<a name="ln218">  dt_iop_rawprepare_data_t *d = (dt_iop_rawprepare_data_t *)piece-&gt;data;</a>
+<a name="ln219"> </a>
+<a name="ln220">  const float scale = piece-&gt;buf_in.scale / piece-&gt;iscale;</a>
+<a name="ln221"> </a>
+<a name="ln222">  const float x = (float)d-&gt;x * scale, y = (float)d-&gt;y * scale;</a>
+<a name="ln223"> </a>
+<a name="ln224">  for(size_t i = 0; i &lt; points_count * 2; i += 2)</a>
+<a name="ln225">  {</a>
+<a name="ln226">    points[i] += x;</a>
+<a name="ln227">    points[i + 1] += y;</a>
+<a name="ln228">  }</a>
+<a name="ln229"> </a>
+<a name="ln230">  return 1;</a>
+<a name="ln231">}</a>
+<a name="ln232"> </a>
+<a name="ln233">void distort_mask(struct dt_iop_module_t *self, struct dt_dev_pixelpipe_iop_t *piece, const float *const in,</a>
+<a name="ln234">                  float *const out, const dt_iop_roi_t *const roi_in, const dt_iop_roi_t *const roi_out)</a>
+<a name="ln235">{</a>
+<a name="ln236">  // TODO</a>
+<a name="ln237">  memset(out, 0, sizeof(float) * roi_out-&gt;width * roi_out-&gt;height);</a>
+<a name="ln238">  fprintf(stderr, &quot;TODO: implement %s() in %s\n&quot;, __FUNCTION__, __FILE__);</a>
+<a name="ln239">}</a>
+<a name="ln240"> </a>
+<a name="ln241">// we're not scaling here (bayer input), so just crop borders</a>
+<a name="ln242">void modify_roi_out(dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, dt_iop_roi_t *roi_out,</a>
+<a name="ln243">                    const dt_iop_roi_t *const roi_in)</a>
+<a name="ln244">{</a>
+<a name="ln245">  *roi_out = *roi_in;</a>
+<a name="ln246">  dt_iop_rawprepare_data_t *d = (dt_iop_rawprepare_data_t *)piece-&gt;data;</a>
+<a name="ln247"> </a>
+<a name="ln248">  roi_out-&gt;x = roi_out-&gt;y = 0;</a>
+<a name="ln249"> </a>
+<a name="ln250">  int32_t x = d-&gt;x + d-&gt;width, y = d-&gt;y + d-&gt;height;</a>
+<a name="ln251"> </a>
+<a name="ln252">  const float scale = roi_in-&gt;scale / piece-&gt;iscale;</a>
+<a name="ln253">  roi_out-&gt;width -= round_smart((float)x * scale, x);</a>
+<a name="ln254">  roi_out-&gt;height -= round_smart((float)y * scale, y);</a>
+<a name="ln255">}</a>
+<a name="ln256"> </a>
+<a name="ln257">void modify_roi_in(dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, const dt_iop_roi_t *const roi_out,</a>
+<a name="ln258">                   dt_iop_roi_t *roi_in)</a>
+<a name="ln259">{</a>
+<a name="ln260">  *roi_in = *roi_out;</a>
+<a name="ln261">  dt_iop_rawprepare_data_t *d = (dt_iop_rawprepare_data_t *)piece-&gt;data;</a>
+<a name="ln262"> </a>
+<a name="ln263">  int32_t x = d-&gt;x + d-&gt;width, y = d-&gt;y + d-&gt;height;</a>
+<a name="ln264"> </a>
+<a name="ln265">  const float scale = roi_in-&gt;scale / piece-&gt;iscale;</a>
+<a name="ln266">  roi_in-&gt;width += round_smart((float)x * scale, x);</a>
+<a name="ln267">  roi_in-&gt;height += round_smart((float)y * scale, y);</a>
+<a name="ln268">}</a>
+<a name="ln269"> </a>
+<a name="ln270">void output_format(dt_iop_module_t *self, dt_dev_pixelpipe_t *pipe, dt_dev_pixelpipe_iop_t *piece,</a>
+<a name="ln271">                   dt_iop_buffer_dsc_t *dsc)</a>
+<a name="ln272">{</a>
+<a name="ln273">  default_output_format(self, pipe, piece, dsc);</a>
+<a name="ln274"> </a>
+<a name="ln275">  dt_iop_rawprepare_data_t *d = (dt_iop_rawprepare_data_t *)piece-&gt;data;</a>
+<a name="ln276"> </a>
+<a name="ln277">  dsc-&gt;rawprepare.raw_black_level = d-&gt;rawprepare.raw_black_level;</a>
+<a name="ln278">  dsc-&gt;rawprepare.raw_white_point = d-&gt;rawprepare.raw_white_point;</a>
+<a name="ln279">}</a>
+<a name="ln280"> </a>
+<a name="ln281">static void adjust_xtrans_filters(dt_dev_pixelpipe_t *pipe,</a>
+<a name="ln282">                                  uint32_t crop_x, uint32_t crop_y)</a>
+<a name="ln283">{</a>
+<a name="ln284">  for(int i = 0; i &lt; 6; ++i)</a>
+<a name="ln285">  {</a>
+<a name="ln286">    for(int j = 0; j &lt; 6; ++j)</a>
+<a name="ln287">    {</a>
+<a name="ln288">      pipe-&gt;dsc.xtrans[j][i] = pipe-&gt;image.buf_dsc.xtrans[(j + crop_y) % 6][(i + crop_x) % 6];</a>
+<a name="ln289">    }</a>
+<a name="ln290">  }</a>
+<a name="ln291">}</a>
+<a name="ln292"> </a>
+<a name="ln293">static int BL(const dt_iop_roi_t *const roi_out, const dt_iop_rawprepare_data_t *const d, const int row,</a>
+<a name="ln294">              const int col)</a>
+<a name="ln295">{</a>
+<a name="ln296">  return ((((row + roi_out-&gt;y + d-&gt;y) &amp; 1) &lt;&lt; 1) + ((col + roi_out-&gt;x + d-&gt;x) &amp; 1));</a>
+<a name="ln297">}</a>
+<a name="ln298"> </a>
+<a name="ln299">void process(struct dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, const void *const ivoid,</a>
+<a name="ln300">             void *const ovoid, const dt_iop_roi_t *const roi_in, const dt_iop_roi_t *const roi_out)</a>
+<a name="ln301">{</a>
+<a name="ln302">  const dt_iop_rawprepare_data_t *const d = (dt_iop_rawprepare_data_t *)piece-&gt;data;</a>
+<a name="ln303"> </a>
+<a name="ln304">  // fprintf(stderr, &quot;roi in %d %d %d %d\n&quot;, roi_in-&gt;x, roi_in-&gt;y, roi_in-&gt;width, roi_in-&gt;height);</a>
+<a name="ln305">  // fprintf(stderr, &quot;roi out %d %d %d %d\n&quot;, roi_out-&gt;x, roi_out-&gt;y, roi_out-&gt;width, roi_out-&gt;height);</a>
+<a name="ln306"> </a>
+<a name="ln307">  const int csx = compute_proper_crop(piece, roi_in, d-&gt;x), csy = compute_proper_crop(piece, roi_in, d-&gt;y);</a>
+<a name="ln308"> </a>
+<a name="ln309">  if(piece-&gt;pipe-&gt;dsc.filters &amp;&amp; piece-&gt;dsc_in.channels == 1 &amp;&amp; piece-&gt;dsc_in.datatype == TYPE_UINT16)</a>
+<a name="ln310">  { // raw mosaic</a>
+<a name="ln311"> </a>
+<a name="ln312">    const uint16_t *const in = (const uint16_t *const)ivoid;</a>
+<a name="ln313">    float *const out = (float *const)ovoid;</a>
+<a name="ln314"> </a>
+<a name="ln315">#ifdef _OPENMP</a>
+<a name="ln316">#pragma omp parallel for SIMD() default(none) \</a>
+<a name="ln317">    dt_omp_firstprivate(csx, csy, d, in, out, roi_in, roi_out) \</a>
+<a name="ln318">    schedule(static) \</a>
+<a name="ln319">    collapse(2)</a>
+<a name="ln320">#endif</a>
+<a name="ln321">    for(int j = 0; j &lt; roi_out-&gt;height; j++)</a>
+<a name="ln322">    {</a>
+<a name="ln323">      for(int i = 0; i &lt; roi_out-&gt;width; i++)</a>
+<a name="ln324">      {</a>
+<a name="ln325">        const size_t pin = (size_t)(roi_in-&gt;width * (j + csy) + csx) + i;</a>
+<a name="ln326">        const size_t pout = (size_t)j * roi_out-&gt;width + i;</a>
+<a name="ln327"> </a>
+<a name="ln328">        const int id = BL(roi_out, d, j, i);</a>
+<a name="ln329">        out[pout] = (in[pin] - d-&gt;sub[id]) / d-&gt;div[id];</a>
+<a name="ln330">      }</a>
+<a name="ln331">    }</a>
+<a name="ln332"> </a>
+<a name="ln333">    piece-&gt;pipe-&gt;dsc.filters = dt_rawspeed_crop_dcraw_filters(self-&gt;dev-&gt;image_storage.buf_dsc.filters, csx, csy);</a>
+<a name="ln334">    adjust_xtrans_filters(piece-&gt;pipe, csx, csy);</a>
+<a name="ln335">  }</a>
+<a name="ln336">  else if(piece-&gt;pipe-&gt;dsc.filters &amp;&amp; piece-&gt;dsc_in.channels == 1 &amp;&amp; piece-&gt;dsc_in.datatype == TYPE_FLOAT)</a>
+<a name="ln337">  { // raw mosaic, fp, unnormalized</a>
+<a name="ln338"> </a>
+<a name="ln339">    const float *const in = (const float *const)ivoid;</a>
+<a name="ln340">    float *const out = (float *const)ovoid;</a>
+<a name="ln341"> </a>
+<a name="ln342">#ifdef _OPENMP</a>
+<a name="ln343">#pragma omp parallel for SIMD() default(none) \</a>
+<a name="ln344">    dt_omp_firstprivate(csx, csy, d, in, out, roi_in, roi_out) \</a>
+<a name="ln345">    schedule(static) \</a>
+<a name="ln346">    collapse(2)</a>
+<a name="ln347">#endif</a>
+<a name="ln348">    for(int j = 0; j &lt; roi_out-&gt;height; j++)</a>
+<a name="ln349">    {</a>
+<a name="ln350">      for(int i = 0; i &lt; roi_out-&gt;width; i++)</a>
+<a name="ln351">      {</a>
+<a name="ln352">        const size_t pin = (size_t)(roi_in-&gt;width * (j + csy) + csx) + i;</a>
+<a name="ln353">        const size_t pout = (size_t)j * roi_out-&gt;width + i;</a>
+<a name="ln354"> </a>
+<a name="ln355">        const int id = BL(roi_out, d, j, i);</a>
+<a name="ln356">        out[pout] = (in[pin] - d-&gt;sub[id]) / d-&gt;div[id];</a>
+<a name="ln357">      }</a>
+<a name="ln358">    }</a>
+<a name="ln359"> </a>
+<a name="ln360">    piece-&gt;pipe-&gt;dsc.filters = dt_rawspeed_crop_dcraw_filters(self-&gt;dev-&gt;image_storage.buf_dsc.filters, csx, csy);</a>
+<a name="ln361">    adjust_xtrans_filters(piece-&gt;pipe, csx, csy);</a>
+<a name="ln362">  }</a>
+<a name="ln363">  else</a>
+<a name="ln364">  { // pre-downsampled buffer that needs black/white scaling</a>
+<a name="ln365"> </a>
+<a name="ln366">    const float *const in = (const float *const)ivoid;</a>
+<a name="ln367">    float *const out = (float *const)ovoid;</a>
+<a name="ln368"> </a>
+<a name="ln369">    const float sub = d-&gt;sub[0], div = d-&gt;div[0];</a>
+<a name="ln370"> </a>
+<a name="ln371">    const int ch = piece-&gt;colors;</a>
+<a name="ln372"> </a>
+<a name="ln373">#ifdef _OPENMP</a>
+<a name="ln374">#pragma omp parallel for SIMD() default(none) \</a>
+<a name="ln375">    dt_omp_firstprivate(ch, csx, csy, div, in, out, roi_in, roi_out, sub) \</a>
+<a name="ln376">    schedule(static) collapse(3)</a>
+<a name="ln377">#endif</a>
+<a name="ln378">    for(int j = 0; j &lt; roi_out-&gt;height; j++)</a>
+<a name="ln379">    {</a>
+<a name="ln380">      for(int i = 0; i &lt; roi_out-&gt;width; i++)</a>
+<a name="ln381">      {</a>
+<a name="ln382">        for(int c = 0; c &lt; ch; c++)</a>
+<a name="ln383">        {</a>
+<a name="ln384">          const size_t pin = (size_t)ch * (roi_in-&gt;width * (j + csy) + csx + i) + c;</a>
+<a name="ln385">          const size_t pout = (size_t)ch * (j * roi_out-&gt;width + i) + c;</a>
+<a name="ln386"> </a>
+<a name="ln387">          out[pout] = (in[pin] - sub) / div;</a>
+<a name="ln388">        }</a>
+<a name="ln389">      }</a>
+<a name="ln390">    }</a>
+<a name="ln391">  }</a>
+<a name="ln392"> </a>
+<a name="ln393">  for(int k = 0; k &lt; 4; k++) piece-&gt;pipe-&gt;dsc.processed_maximum[k] = 1.0f;</a>
+<a name="ln394">}</a>
+<a name="ln395"> </a>
+<a name="ln396">#if defined(__SSE2__)</a>
+<a name="ln397">void process_sse2(dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, const void *const ivoid,</a>
+<a name="ln398">                  void *const ovoid, const dt_iop_roi_t *const roi_in, const dt_iop_roi_t *const roi_out)</a>
+<a name="ln399">{</a>
+<a name="ln400">  const dt_iop_rawprepare_data_t *const d = (dt_iop_rawprepare_data_t *)piece-&gt;data;</a>
+<a name="ln401"> </a>
+<a name="ln402">  // fprintf(stderr, &quot;roi in %d %d %d %d\n&quot;, roi_in-&gt;x, roi_in-&gt;y, roi_in-&gt;width, roi_in-&gt;height);</a>
+<a name="ln403">  // fprintf(stderr, &quot;roi out %d %d %d %d\n&quot;, roi_out-&gt;x, roi_out-&gt;y, roi_out-&gt;width, roi_out-&gt;height);</a>
+<a name="ln404"> </a>
+<a name="ln405">  const int csx = compute_proper_crop(piece, roi_in, d-&gt;x), csy = compute_proper_crop(piece, roi_in, d-&gt;y);</a>
+<a name="ln406"> </a>
+<a name="ln407">  if(piece-&gt;pipe-&gt;dsc.filters &amp;&amp; piece-&gt;dsc_in.channels == 1 &amp;&amp; piece-&gt;dsc_in.datatype == TYPE_UINT16)</a>
+<a name="ln408">  { // raw mosaic</a>
+<a name="ln409">#ifdef _OPENMP</a>
+<a name="ln410">#pragma omp parallel for default(none) \</a>
+<a name="ln411">    dt_omp_firstprivate(csx, csy, d, ivoid, ovoid, roi_in, roi_out) \</a>
+<a name="ln412">    schedule(static)</a>
+<a name="ln413">#endif</a>
+<a name="ln414">    for(int j = 0; j &lt; roi_out-&gt;height; j++)</a>
+<a name="ln415">    {</a>
+<a name="ln416">      const uint16_t *in = ((uint16_t *)ivoid) + ((size_t)roi_in-&gt;width * (j + csy) + csx);</a>
+<a name="ln417">      float *out = ((float *)ovoid) + (size_t)roi_out-&gt;width * j;</a>
+<a name="ln418"> </a>
+<a name="ln419">      int i = 0;</a>
+<a name="ln420"> </a>
+<a name="ln421">      // FIXME: figure alignment!  !!! replace with for !!!</a>
+<a name="ln422">      while((!dt_is_aligned(in, 16) || !dt_is_aligned(out, 16)) &amp;&amp; (i &lt; roi_out-&gt;width))</a>
+<a name="ln423">      {</a>
+<a name="ln424">        const int id = BL(roi_out, d, j, i);</a>
+<a name="ln425">        *out = (((float)(*in)) - d-&gt;sub[id]) / d-&gt;div[id];</a>
+<a name="ln426">        i++;</a>
+<a name="ln427">        in++;</a>
+<a name="ln428">        out++;</a>
+<a name="ln429">      }</a>
+<a name="ln430"> </a>
+<a name="ln431">      const __m128 sub = _mm_set_ps(d-&gt;sub[BL(roi_out, d, j, i + 3)], d-&gt;sub[BL(roi_out, d, j, i + 2)],</a>
+<a name="ln432">                                    d-&gt;sub[BL(roi_out, d, j, i + 1)], d-&gt;sub[BL(roi_out, d, j, i)]);</a>
+<a name="ln433"> </a>
+<a name="ln434">      const __m128 div = _mm_set_ps(d-&gt;div[BL(roi_out, d, j, i + 3)], d-&gt;div[BL(roi_out, d, j, i + 2)],</a>
+<a name="ln435">                                    d-&gt;div[BL(roi_out, d, j, i + 1)], d-&gt;div[BL(roi_out, d, j, i)]);</a>
+<a name="ln436"> </a>
+<a name="ln437">      // process aligned pixels with SSE</a>
+<a name="ln438">      for(; i &lt; roi_out-&gt;width - (8 - 1); i += 8, in += 8)</a>
+<a name="ln439">      {</a>
+<a name="ln440">        const __m128i input = _mm_load_si128((__m128i *)in);</a>
+<a name="ln441"> </a>
+<a name="ln442">        __m128i ilo = _mm_unpacklo_epi16(input, _mm_set1_epi16(0));</a>
+<a name="ln443">        __m128i ihi = _mm_unpackhi_epi16(input, _mm_set1_epi16(0));</a>
+<a name="ln444"> </a>
+<a name="ln445">        __m128 flo = _mm_cvtepi32_ps(ilo);</a>
+<a name="ln446">        __m128 fhi = _mm_cvtepi32_ps(ihi);</a>
+<a name="ln447"> </a>
+<a name="ln448">        flo = _mm_div_ps(_mm_sub_ps(flo, sub), div);</a>
+<a name="ln449">        fhi = _mm_div_ps(_mm_sub_ps(fhi, sub), div);</a>
+<a name="ln450"> </a>
+<a name="ln451">        _mm_stream_ps(out, flo);</a>
+<a name="ln452">        out += 4;</a>
+<a name="ln453">        _mm_stream_ps(out, fhi);</a>
+<a name="ln454">        out += 4;</a>
+<a name="ln455">      }</a>
+<a name="ln456"> </a>
+<a name="ln457">      // process the rest</a>
+<a name="ln458">      for(; i &lt; roi_out-&gt;width; i++, in++, out++)</a>
+<a name="ln459">      {</a>
+<a name="ln460">        const int id = BL(roi_out, d, j, i);</a>
+<a name="ln461">        *out = (((float)(*in)) - d-&gt;sub[id]) / d-&gt;div[id];</a>
+<a name="ln462">      }</a>
+<a name="ln463">    }</a>
+<a name="ln464"> </a>
+<a name="ln465">    piece-&gt;pipe-&gt;dsc.filters = dt_rawspeed_crop_dcraw_filters(self-&gt;dev-&gt;image_storage.buf_dsc.filters, csx, csy);</a>
+<a name="ln466">    adjust_xtrans_filters(piece-&gt;pipe, csx, csy);</a>
+<a name="ln467">  }</a>
+<a name="ln468">  else if(piece-&gt;pipe-&gt;dsc.filters &amp;&amp; piece-&gt;dsc_in.channels == 1 &amp;&amp; piece-&gt;dsc_in.datatype == TYPE_FLOAT)</a>
+<a name="ln469">  { // raw mosaic, fp, unnormalized</a>
+<a name="ln470">#ifdef _OPENMP</a>
+<a name="ln471">#pragma omp parallel for default(none) \</a>
+<a name="ln472">    dt_omp_firstprivate(d, csx, csy, ivoid, ovoid, roi_in, roi_out) \</a>
+<a name="ln473">    schedule(static)</a>
+<a name="ln474">#endif</a>
+<a name="ln475">    for(int j = 0; j &lt; roi_out-&gt;height; j++)</a>
+<a name="ln476">    {</a>
+<a name="ln477">      const float *in = ((float *)ivoid) + ((size_t)roi_in-&gt;width * (j + csy) + csx);</a>
+<a name="ln478">      float *out = ((float *)ovoid) + (size_t)roi_out-&gt;width * j;</a>
+<a name="ln479"> </a>
+<a name="ln480">      int i = 0;</a>
+<a name="ln481"> </a>
+<a name="ln482">      // FIXME: figure alignment!  !!! replace with for !!!</a>
+<a name="ln483">      while((!dt_is_aligned(in, 16) || !dt_is_aligned(out, 16)) &amp;&amp; (i &lt; roi_out-&gt;width))</a>
+<a name="ln484">      {</a>
+<a name="ln485">        const int id = BL(roi_out, d, j, i);</a>
+<a name="ln486">        *out = (*in - d-&gt;sub[id]) / d-&gt;div[id];</a>
+<a name="ln487">        i++;</a>
+<a name="ln488">        in++;</a>
+<a name="ln489">        out++;</a>
+<a name="ln490">      }</a>
+<a name="ln491"> </a>
+<a name="ln492">      const __m128 sub = _mm_set_ps(d-&gt;sub[BL(roi_out, d, j, i + 3)], d-&gt;sub[BL(roi_out, d, j, i + 2)],</a>
+<a name="ln493">                                    d-&gt;sub[BL(roi_out, d, j, i + 1)], d-&gt;sub[BL(roi_out, d, j, i)]);</a>
+<a name="ln494"> </a>
+<a name="ln495">      const __m128 div = _mm_set_ps(d-&gt;div[BL(roi_out, d, j, i + 3)], d-&gt;div[BL(roi_out, d, j, i + 2)],</a>
+<a name="ln496">                                    d-&gt;div[BL(roi_out, d, j, i + 1)], d-&gt;div[BL(roi_out, d, j, i)]);</a>
+<a name="ln497"> </a>
+<a name="ln498">      // process aligned pixels with SSE</a>
+<a name="ln499">      for(; i &lt; roi_out-&gt;width - (4 - 1); i += 4, in += 4, out += 4)</a>
+<a name="ln500">      {</a>
+<a name="ln501">        const __m128 input = _mm_load_ps(in);</a>
+<a name="ln502"> </a>
+<a name="ln503">        const __m128 scaled = _mm_div_ps(_mm_sub_ps(input, sub), div);</a>
+<a name="ln504"> </a>
+<a name="ln505">        _mm_stream_ps(out, scaled);</a>
+<a name="ln506">      }</a>
+<a name="ln507"> </a>
+<a name="ln508">      // process the rest</a>
+<a name="ln509">      for(; i &lt; roi_out-&gt;width; i++, in++, out++)</a>
+<a name="ln510">      {</a>
+<a name="ln511">        const int id = BL(roi_out, d, j, i);</a>
+<a name="ln512">        *out = (*in - d-&gt;sub[id]) / d-&gt;div[id];</a>
+<a name="ln513">      }</a>
+<a name="ln514">    }</a>
+<a name="ln515"> </a>
+<a name="ln516">    piece-&gt;pipe-&gt;dsc.filters = dt_rawspeed_crop_dcraw_filters(self-&gt;dev-&gt;image_storage.buf_dsc.filters, csx, csy);</a>
+<a name="ln517">    adjust_xtrans_filters(piece-&gt;pipe, csx, csy);</a>
+<a name="ln518">  }</a>
+<a name="ln519">  else</a>
+<a name="ln520">  { // pre-downsampled buffer that needs black/white scaling</a>
+<a name="ln521"> </a>
+<a name="ln522">    const __m128 sub = _mm_load_ps(d-&gt;sub), div = _mm_load_ps(d-&gt;div);</a>
+<a name="ln523"> </a>
+<a name="ln524">#ifdef _OPENMP</a>
+<a name="ln525">#pragma omp parallel for default(none) \</a>
+<a name="ln526">    dt_omp_firstprivate(csx, csy, div, ivoid, ovoid, roi_in, roi_out, sub) \</a>
+<a name="ln527">    schedule(static)</a>
+<a name="ln528">#endif</a>
+<a name="ln529">    for(int j = 0; j &lt; roi_out-&gt;height; j++)</a>
+<a name="ln530">    {</a>
+<a name="ln531">      const float *in = ((float *)ivoid) + (size_t)4 * (roi_in-&gt;width * (j + csy) + csx);</a>
+<a name="ln532">      float *out = ((float *)ovoid) + (size_t)4 * roi_out-&gt;width * j;</a>
+<a name="ln533"> </a>
+<a name="ln534">      // process aligned pixels with SSE</a>
+<a name="ln535">      for(int i = 0; i &lt; roi_out-&gt;width; i++, in += 4, out += 4)</a>
+<a name="ln536">      {</a>
+<a name="ln537">        const __m128 input = _mm_load_ps(in);</a>
+<a name="ln538"> </a>
+<a name="ln539">        const __m128 scaled = _mm_div_ps(_mm_sub_ps(input, sub), div);</a>
+<a name="ln540"> </a>
+<a name="ln541">        _mm_stream_ps(out, scaled);</a>
+<a name="ln542">      }</a>
+<a name="ln543">    }</a>
+<a name="ln544">  }</a>
+<a name="ln545"> </a>
+<a name="ln546">  for(int k = 0; k &lt; 4; k++) piece-&gt;pipe-&gt;dsc.processed_maximum[k] = 1.0f;</a>
+<a name="ln547"> </a>
+<a name="ln548">  _mm_sfence();</a>
+<a name="ln549">}</a>
+<a name="ln550">#endif</a>
+<a name="ln551"> </a>
+<a name="ln552">#ifdef HAVE_OPENCL</a>
+<a name="ln553">int process_cl(dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, cl_mem dev_in, cl_mem dev_out,</a>
+<a name="ln554">               const dt_iop_roi_t *const roi_in, const dt_iop_roi_t *const roi_out)</a>
+<a name="ln555">{</a>
+<a name="ln556">  dt_iop_rawprepare_data_t *d = (dt_iop_rawprepare_data_t *)piece-&gt;data;</a>
+<a name="ln557">  dt_iop_rawprepare_global_data_t *gd = (dt_iop_rawprepare_global_data_t *)self-&gt;global_data;</a>
+<a name="ln558"> </a>
+<a name="ln559">  const int devid = piece-&gt;pipe-&gt;devid;</a>
+<a name="ln560">  cl_mem dev_sub = NULL;</a>
+<a name="ln561">  cl_mem dev_div = NULL;</a>
+<a name="ln562">  cl_int err = -999;</a>
+<a name="ln563"> </a>
+<a name="ln564">  int kernel = -1;</a>
+<a name="ln565"> </a>
+<a name="ln566">  if(piece-&gt;pipe-&gt;dsc.filters &amp;&amp; piece-&gt;dsc_in.channels == 1 &amp;&amp; piece-&gt;dsc_in.datatype == TYPE_UINT16)</a>
+<a name="ln567">  {</a>
+<a name="ln568">    kernel = gd-&gt;kernel_rawprepare_1f;</a>
+<a name="ln569">  }</a>
+<a name="ln570">  else if(piece-&gt;pipe-&gt;dsc.filters &amp;&amp; piece-&gt;dsc_in.channels == 1 &amp;&amp; piece-&gt;dsc_in.datatype == TYPE_FLOAT)</a>
+<a name="ln571">  {</a>
+<a name="ln572">    kernel = gd-&gt;kernel_rawprepare_1f_unnormalized;</a>
+<a name="ln573">  }</a>
+<a name="ln574">  else</a>
+<a name="ln575">  {</a>
+<a name="ln576">    kernel = gd-&gt;kernel_rawprepare_4f;</a>
+<a name="ln577">  }</a>
+<a name="ln578"> </a>
+<a name="ln579">  const int csx = compute_proper_crop(piece, roi_in, d-&gt;x), csy = compute_proper_crop(piece, roi_in, d-&gt;y);</a>
+<a name="ln580"> </a>
+<a name="ln581">  dev_sub = dt_opencl_copy_host_to_device_constant(devid, sizeof(float) * 4, d-&gt;sub);</a>
+<a name="ln582">  if(dev_sub == NULL) goto error;</a>
+<a name="ln583"> </a>
+<a name="ln584">  dev_div = dt_opencl_copy_host_to_device_constant(devid, sizeof(float) * 4, d-&gt;div);</a>
+<a name="ln585">  if(dev_div == NULL) goto error;</a>
+<a name="ln586"> </a>
+<a name="ln587">  const int width = roi_out-&gt;width;</a>
+<a name="ln588">  const int height = roi_out-&gt;height;</a>
+<a name="ln589"> </a>
+<a name="ln590">  size_t sizes[] = { ROUNDUPWD(roi_in-&gt;width), ROUNDUPHT(roi_in-&gt;height), 1 };</a>
+<a name="ln591">  dt_opencl_set_kernel_arg(devid, kernel, 0, sizeof(cl_mem), (void *)&amp;dev_in);</a>
+<a name="ln592">  dt_opencl_set_kernel_arg(devid, kernel, 1, sizeof(cl_mem), (void *)&amp;dev_out);</a>
+<a name="ln593">  dt_opencl_set_kernel_arg(devid, kernel, 2, sizeof(int), (void *)&amp;(width));</a>
+<a name="ln594">  dt_opencl_set_kernel_arg(devid, kernel, 3, sizeof(int), (void *)&amp;(height));</a>
+<a name="ln595">  dt_opencl_set_kernel_arg(devid, kernel, 4, sizeof(int), (void *)&amp;csx);</a>
+<a name="ln596">  dt_opencl_set_kernel_arg(devid, kernel, 5, sizeof(int), (void *)&amp;csy);</a>
+<a name="ln597">  dt_opencl_set_kernel_arg(devid, kernel, 6, sizeof(cl_mem), (void *)&amp;dev_sub);</a>
+<a name="ln598">  dt_opencl_set_kernel_arg(devid, kernel, 7, sizeof(cl_mem), (void *)&amp;dev_div);</a>
+<a name="ln599">  dt_opencl_set_kernel_arg(devid, kernel, 8, sizeof(uint32_t), (void *)&amp;roi_out-&gt;x);</a>
+<a name="ln600">  dt_opencl_set_kernel_arg(devid, kernel, 9, sizeof(uint32_t), (void *)&amp;roi_out-&gt;y);</a>
+<a name="ln601">  err = dt_opencl_enqueue_kernel_2d(devid, kernel, sizes);</a>
+<a name="ln602">  if(err != CL_SUCCESS) goto error;</a>
+<a name="ln603"> </a>
+<a name="ln604">  dt_opencl_release_mem_object(dev_sub);</a>
+<a name="ln605">  dt_opencl_release_mem_object(dev_div);</a>
+<a name="ln606"> </a>
+<a name="ln607">  if(piece-&gt;pipe-&gt;dsc.filters)</a>
+<a name="ln608">  {</a>
+<a name="ln609">    piece-&gt;pipe-&gt;dsc.filters = dt_rawspeed_crop_dcraw_filters(self-&gt;dev-&gt;image_storage.buf_dsc.filters, csx, csy);</a>
+<a name="ln610">    adjust_xtrans_filters(piece-&gt;pipe, csx, csy);</a>
+<a name="ln611">  }</a>
+<a name="ln612"> </a>
+<a name="ln613">  for(int k = 0; k &lt; 4; k++) piece-&gt;pipe-&gt;dsc.processed_maximum[k] = 1.0f;</a>
+<a name="ln614"> </a>
+<a name="ln615">  return TRUE;</a>
+<a name="ln616"> </a>
+<a name="ln617">error:</a>
+<a name="ln618">  dt_opencl_release_mem_object(dev_sub);</a>
+<a name="ln619">  dt_opencl_release_mem_object(dev_div);</a>
+<a name="ln620">  dt_print(DT_DEBUG_OPENCL, &quot;[opencl_rawprepare] couldn't enqueue kernel! %d\n&quot;, err);</a>
+<a name="ln621">  return FALSE;</a>
+<a name="ln622">}</a>
+<a name="ln623">#endif</a>
+<a name="ln624"> </a>
+<a name="ln625">static int image_is_normalized(const dt_image_t *const image)</a>
+<a name="ln626">{</a>
+<a name="ln627">  // if raw with floating-point data, if not special magic whitelevel, then it needs normalization</a>
+<a name="ln628">  if((image-&gt;flags &amp; DT_IMAGE_HDR) == DT_IMAGE_HDR)</a>
+<a name="ln629">  {</a>
+<a name="ln630">    union {</a>
+<a name="ln631">        float f;</a>
+<a name="ln632">        uint32_t u;</a>
+<a name="ln633">    } normalized;</a>
+<a name="ln634">    normalized.f = 1.0f;</a>
+<a name="ln635"> </a>
+<a name="ln636">    // dng spec is just broken here.</a>
+<a name="ln637">    return image-&gt;raw_white_point == normalized.u;</a>
+<a name="ln638">  }</a>
+<a name="ln639"> </a>
+<a name="ln640">  // else, assume normalized</a>
+<a name="ln641">  return image-&gt;buf_dsc.channels == 1 &amp;&amp; image-&gt;buf_dsc.datatype == TYPE_FLOAT;</a>
+<a name="ln642">}</a>
+<a name="ln643"> </a>
+<a name="ln644">void commit_params(dt_iop_module_t *self, dt_iop_params_t *params, dt_dev_pixelpipe_t *pipe,</a>
+<a name="ln645">                   dt_dev_pixelpipe_iop_t *piece)</a>
+<a name="ln646">{</a>
+<a name="ln647">  const dt_iop_rawprepare_params_t *const p = (dt_iop_rawprepare_params_t *)params;</a>
+<a name="ln648">  dt_iop_rawprepare_data_t *d = (dt_iop_rawprepare_data_t *)piece-&gt;data;</a>
+<a name="ln649"> </a>
+<a name="ln650">  d-&gt;x = p-&gt;crop.named.x;</a>
+<a name="ln651">  d-&gt;y = p-&gt;crop.named.y;</a>
+<a name="ln652">  d-&gt;width = p-&gt;crop.named.width;</a>
+<a name="ln653">  d-&gt;height = p-&gt;crop.named.height;</a>
+<a name="ln654"> </a>
+<a name="ln655">  if(piece-&gt;pipe-&gt;dsc.filters)</a>
+<a name="ln656">  {</a>
+<a name="ln657">    const float white = (float)p-&gt;raw_white_point;</a>
+<a name="ln658"> </a>
+<a name="ln659">    for(int i = 0; i &lt; 4; i++)</a>
+<a name="ln660">    {</a>
+<a name="ln661">      d-&gt;sub[i] = (float)p-&gt;raw_black_level_separate[i];</a>
+<a name="ln662">      d-&gt;div[i] = (white - d-&gt;sub[i]);</a>
+<a name="ln663">    }</a>
+<a name="ln664">  }</a>
+<a name="ln665">  else</a>
+<a name="ln666">  {</a>
+<a name="ln667">    const float white = (float)p-&gt;raw_white_point / (float)UINT16_MAX;</a>
+<a name="ln668">    float black = 0;</a>
+<a name="ln669">    for(int i = 0; i &lt; 4; i++)</a>
+<a name="ln670">    {</a>
+<a name="ln671">      black += p-&gt;raw_black_level_separate[i] / (float)UINT16_MAX;</a>
+<a name="ln672">    }</a>
+<a name="ln673">    black /= 4.0f;</a>
+<a name="ln674"> </a>
+<a name="ln675">    for(int i = 0; i &lt; 4; i++)</a>
+<a name="ln676">    {</a>
+<a name="ln677">      d-&gt;sub[i] = black;</a>
+<a name="ln678">      d-&gt;div[i] = (white - black);</a>
+<a name="ln679">    }</a>
+<a name="ln680">  }</a>
+<a name="ln681"> </a>
+<a name="ln682">  float black = 0.0f;</a>
+<a name="ln683">  for(uint8_t i = 0; i &lt; 4; i++)</a>
+<a name="ln684">  {</a>
+<a name="ln685">    black += (float)p-&gt;raw_black_level_separate[i];</a>
+<a name="ln686">  }</a>
+<a name="ln687">  d-&gt;rawprepare.raw_black_level = (uint16_t)(black / 4.0f);</a>
+<a name="ln688">  d-&gt;rawprepare.raw_white_point = p-&gt;raw_white_point;</a>
+<a name="ln689"> </a>
+<a name="ln690">  if(!dt_image_is_raw(&amp;piece-&gt;pipe-&gt;image) || image_is_normalized(&amp;piece-&gt;pipe-&gt;image)) piece-&gt;enabled = 0;</a>
+<a name="ln691">}</a>
+<a name="ln692"> </a>
+<a name="ln693">void init_pipe(dt_iop_module_t *self, dt_dev_pixelpipe_t *pipe, dt_dev_pixelpipe_iop_t *piece)</a>
+<a name="ln694">{</a>
+<a name="ln695">  piece-&gt;data = calloc(1, sizeof(dt_iop_rawprepare_data_t));</a>
+<a name="ln696">  self-&gt;commit_params(self, self-&gt;default_params, pipe, piece);</a>
+<a name="ln697">}</a>
+<a name="ln698"> </a>
+<a name="ln699">void cleanup_pipe(dt_iop_module_t *self, dt_dev_pixelpipe_t *pipe, dt_dev_pixelpipe_iop_t *piece)</a>
+<a name="ln700">{</a>
+<a name="ln701">  free(piece-&gt;data);</a>
+<a name="ln702">  piece-&gt;data = NULL;</a>
+<a name="ln703">}</a>
+<a name="ln704"> </a>
+<a name="ln705">void reload_defaults(dt_iop_module_t *self)</a>
+<a name="ln706">{</a>
+<a name="ln707">  dt_iop_rawprepare_params_t tmp = { { { 0 } } };</a>
+<a name="ln708"> </a>
+<a name="ln709">  // we might be called from presets update infrastructure =&gt; there is no image</a>
+<a name="ln710">  if(!self-&gt;dev) goto end;</a>
+<a name="ln711"> </a>
+<a name="ln712">  const dt_image_t *const image = &amp;(self-&gt;dev-&gt;image_storage);</a>
+<a name="ln713"> </a>
+<a name="ln714">  tmp = (dt_iop_rawprepare_params_t){.crop.named.x = image-&gt;crop_x,</a>
+<a name="ln715">                                     .crop.named.y = image-&gt;crop_y,</a>
+<a name="ln716">                                     .crop.named.width = image-&gt;crop_width,</a>
+<a name="ln717">                                     .crop.named.height = image-&gt;crop_height,</a>
+<a name="ln718">                                     .raw_black_level_separate[0] = image-&gt;raw_black_level_separate[0],</a>
+<a name="ln719">                                     .raw_black_level_separate[1] = image-&gt;raw_black_level_separate[1],</a>
+<a name="ln720">                                     .raw_black_level_separate[2] = image-&gt;raw_black_level_separate[2],</a>
+<a name="ln721">                                     .raw_black_level_separate[3] = image-&gt;raw_black_level_separate[3],</a>
+<a name="ln722">                                     .raw_white_point = image-&gt;raw_white_point };</a>
+<a name="ln723"> </a>
+<a name="ln724">  self-&gt;default_enabled = dt_image_is_raw(image) &amp;&amp; !image_is_normalized(image);</a>
+<a name="ln725"> </a>
+<a name="ln726">end:</a>
+<a name="ln727">  memcpy(self-&gt;params, &amp;tmp, sizeof(dt_iop_rawprepare_params_t));</a>
+<a name="ln728">  memcpy(self-&gt;default_params, &amp;tmp, sizeof(dt_iop_rawprepare_params_t));</a>
+<a name="ln729">}</a>
+<a name="ln730"> </a>
+<a name="ln731">void init_global(dt_iop_module_so_t *self)</a>
+<a name="ln732">{</a>
+<a name="ln733">  const int program = 2; // basic.cl, from programs.conf</a>
+<a name="ln734">  self-&gt;data = malloc(sizeof(dt_iop_rawprepare_global_data_t));</a>
+<a name="ln735"> </a>
+<a name="ln736">  dt_iop_rawprepare_global_data_t *gd = self-&gt;data;</a>
+<a name="ln737">  gd-&gt;kernel_rawprepare_1f = dt_opencl_create_kernel(program, &quot;rawprepare_1f&quot;);</a>
+<a name="ln738">  gd-&gt;kernel_rawprepare_1f_unnormalized = dt_opencl_create_kernel(program, &quot;rawprepare_1f_unnormalized&quot;);</a>
+<a name="ln739">  gd-&gt;kernel_rawprepare_4f = dt_opencl_create_kernel(program, &quot;rawprepare_4f&quot;);</a>
+<a name="ln740">}</a>
+<a name="ln741"> </a>
+<a name="ln742">void init(dt_iop_module_t *self)</a>
+<a name="ln743">{</a>
+<a name="ln744"> </a>
+<a name="ln745">  self-&gt;params = calloc(1, sizeof(dt_iop_rawprepare_params_t));</a>
+<a name="ln746">  self-&gt;default_params = calloc(1, sizeof(dt_iop_rawprepare_params_t));</a>
+<a name="ln747">  self-&gt;hide_enable_button = 1;</a>
+<a name="ln748">  self-&gt;default_enabled = 0;</a>
+<a name="ln749">  if(self-&gt;dev)</a>
+<a name="ln750">  { // just being extra careful here, because there is a case when old presets</a>
+<a name="ln751">    // are upgraded and temporary modules are constructed for this, with a 0x0 dev</a>
+<a name="ln752">    // pointer. i suppose the can be solved more elegantly on the other side.</a>
+<a name="ln753">    const dt_image_t *const image = &amp;(self-&gt;dev-&gt;image_storage);</a>
+<a name="ln754">    self-&gt;default_enabled = dt_image_is_raw(image) &amp;&amp; !image_is_normalized(image);</a>
+<a name="ln755">  }</a>
+<a name="ln756">  self-&gt;params_size = sizeof(dt_iop_rawprepare_params_t);</a>
+<a name="ln757">  self-&gt;gui_data = NULL;</a>
+<a name="ln758">}</a>
+<a name="ln759"> </a>
+<a name="ln760">void cleanup(dt_iop_module_t *self)</a>
+<a name="ln761">{</a>
+<a name="ln762">  free(self-&gt;params);</a>
+<a name="ln763">  self-&gt;params = NULL;</a>
+<a name="ln764">}</a>
+<a name="ln765"> </a>
+<a name="ln766">void cleanup_global(dt_iop_module_so_t *self)</a>
+<a name="ln767">{</a>
+<a name="ln768">  dt_iop_rawprepare_global_data_t *gd = (dt_iop_rawprepare_global_data_t *)self-&gt;data;</a>
+<a name="ln769">  dt_opencl_free_kernel(gd-&gt;kernel_rawprepare_4f);</a>
+<a name="ln770">  dt_opencl_free_kernel(gd-&gt;kernel_rawprepare_1f_unnormalized);</a>
+<a name="ln771">  dt_opencl_free_kernel(gd-&gt;kernel_rawprepare_1f);</a>
+<a name="ln772">  free(self-&gt;data);</a>
+<a name="ln773">  self-&gt;data = NULL;</a>
+<a name="ln774">}</a>
+<a name="ln775"> </a>
+<a name="ln776">void gui_update(dt_iop_module_t *self)</a>
+<a name="ln777">{</a>
+<a name="ln778">  dt_iop_rawprepare_gui_data_t *g = (dt_iop_rawprepare_gui_data_t *)self-&gt;gui_data;</a>
+<a name="ln779">  dt_iop_rawprepare_params_t *p = (dt_iop_rawprepare_params_t *)self-&gt;params;</a>
+<a name="ln780"> </a>
+<a name="ln781">  for(int i = 0; i &lt; 4; i++)</a>
+<a name="ln782">  {</a>
+<a name="ln783">    dt_bauhaus_slider_set_soft(g-&gt;black_level_separate[i], p-&gt;raw_black_level_separate[i]);</a>
+<a name="ln784">    dt_bauhaus_slider_set_default(g-&gt;black_level_separate[i], p-&gt;raw_black_level_separate[i]);</a>
+<a name="ln785">  }</a>
+<a name="ln786"> </a>
+<a name="ln787">  dt_bauhaus_slider_set_soft(g-&gt;white_point, p-&gt;raw_white_point);</a>
+<a name="ln788">  dt_bauhaus_slider_set_default(g-&gt;white_point, p-&gt;raw_white_point);</a>
+<a name="ln789"> </a>
+<a name="ln790">  if(dt_conf_get_bool(&quot;plugins/darkroom/rawprepare/allow_editing_crop&quot;))</a>
+<a name="ln791">  {</a>
+<a name="ln792">    for(int i = 0; i &lt; 4; i++)</a>
+<a name="ln793">    {</a>
+<a name="ln794">      dt_bauhaus_slider_set_soft(g-&gt;crop[i], p-&gt;crop.array[i]);</a>
+<a name="ln795">      dt_bauhaus_slider_set_default(g-&gt;crop[i], p-&gt;crop.array[i]);</a>
+<a name="ln796">    }</a>
+<a name="ln797">  }</a>
+<a name="ln798"> </a>
+<a name="ln799">  if(self-&gt;default_enabled)</a>
+<a name="ln800">  {</a>
+<a name="ln801">    gtk_widget_show(g-&gt;box_raw);</a>
+<a name="ln802">    gtk_widget_hide(g-&gt;label_non_raw);</a>
+<a name="ln803">  }</a>
+<a name="ln804">  else</a>
+<a name="ln805">  {</a>
+<a name="ln806">    gtk_widget_hide(g-&gt;box_raw);</a>
+<a name="ln807">    gtk_widget_show(g-&gt;label_non_raw);</a>
+<a name="ln808">  }</a>
+<a name="ln809">}</a>
+<a name="ln810"> </a>
+<a name="ln811">static void callback(GtkWidget *widget, gpointer *user_data)</a>
+<a name="ln812">{</a>
+<a name="ln813">  dt_iop_module_t *self = (dt_iop_module_t *)user_data;</a>
+<a name="ln814">  if(self-&gt;dt-&gt;gui-&gt;reset) return;</a>
+<a name="ln815"> </a>
+<a name="ln816">  dt_iop_rawprepare_gui_data_t *g = (dt_iop_rawprepare_gui_data_t *)self-&gt;gui_data;</a>
+<a name="ln817">  dt_iop_rawprepare_params_t *p = (dt_iop_rawprepare_params_t *)self-&gt;params;</a>
+<a name="ln818"> </a>
+<a name="ln819">  for(int i = 0; i &lt; 4; i++)</a>
+<a name="ln820">    p-&gt;raw_black_level_separate[i] = dt_bauhaus_slider_get(g-&gt;black_level_separate[i]);</a>
+<a name="ln821">  p-&gt;raw_white_point = dt_bauhaus_slider_get(g-&gt;white_point);</a>
+<a name="ln822"> </a>
+<a name="ln823">  if(dt_conf_get_bool(&quot;plugins/darkroom/rawprepare/allow_editing_crop&quot;))</a>
+<a name="ln824">  {</a>
+<a name="ln825">    for(int i = 0; i &lt; 4; i++)</a>
+<a name="ln826">    {</a>
+<a name="ln827">      p-&gt;crop.array[i] = dt_bauhaus_slider_get(g-&gt;crop[i]);</a>
+<a name="ln828">    }</a>
+<a name="ln829">  }</a>
+<a name="ln830"> </a>
+<a name="ln831">  dt_dev_add_history_item(darktable.develop, self, TRUE);</a>
+<a name="ln832">}</a>
+<a name="ln833"> </a>
+<a name="ln834">void gui_init(dt_iop_module_t *self)</a>
+<a name="ln835">{</a>
+<a name="ln836">  self-&gt;gui_data = malloc(sizeof(dt_iop_rawprepare_gui_data_t));</a>
+<a name="ln837"> </a>
+<a name="ln838">  dt_iop_rawprepare_gui_data_t *g = (dt_iop_rawprepare_gui_data_t *)self-&gt;gui_data;</a>
+<a name="ln839">  dt_iop_rawprepare_params_t *p = (dt_iop_rawprepare_params_t *)self-&gt;params;</a>
+<a name="ln840"> </a>
+<a name="ln841">  self-&gt;widget = gtk_box_new(GTK_ORIENTATION_VERTICAL, DT_BAUHAUS_SPACE);</a>
+<a name="ln842">  dt_gui_add_help_link(self-&gt;widget, dt_get_help_url(self-&gt;op));</a>
+<a name="ln843"> </a>
+<a name="ln844">  g-&gt;box_raw = gtk_box_new(GTK_ORIENTATION_VERTICAL, DT_BAUHAUS_SPACE);</a>
+<a name="ln845"> </a>
+<a name="ln846">  for(int i = 0; i &lt; 4; i++)</a>
+<a name="ln847">  {</a>
+<a name="ln848">    gchar *label = g_strdup_printf(_(&quot;black level %i&quot;), i);</a>
+<a name="ln849"> </a>
+<a name="ln850">    g-&gt;black_level_separate[i]</a>
+<a name="ln851">        = dt_bauhaus_slider_new_with_range(self, 0, 16384, 1, p-&gt;raw_black_level_separate[i], 0);</a>
+<a name="ln852">    dt_bauhaus_widget_set_label(g-&gt;black_level_separate[i], NULL, label);</a>
+<a name="ln853">    gtk_widget_set_tooltip_text(g-&gt;black_level_separate[i], label);</a>
+<a name="ln854">    gtk_box_pack_start(GTK_BOX(g-&gt;box_raw), g-&gt;black_level_separate[i], FALSE, FALSE, 0);</a>
+<a name="ln855">    dt_bauhaus_slider_enable_soft_boundaries(g-&gt;black_level_separate[i], 0, UINT16_MAX);</a>
+<a name="ln856">    g_signal_connect(G_OBJECT(g-&gt;black_level_separate[i]), &quot;value-changed&quot;, G_CALLBACK(callback), self);</a>
+<a name="ln857"> </a>
+<a name="ln858">    g_free(label);</a>
+<a name="ln859">  }</a>
+<a name="ln860"> </a>
+<a name="ln861">  g-&gt;white_point = dt_bauhaus_slider_new_with_range(self, 0, 16384, 1, p-&gt;raw_white_point, 0);</a>
+<a name="ln862">  dt_bauhaus_widget_set_label(g-&gt;white_point, NULL, _(&quot;white point&quot;));</a>
+<a name="ln863">  gtk_widget_set_tooltip_text(g-&gt;white_point, _(&quot;white point&quot;));</a>
+<a name="ln864">  gtk_box_pack_start(GTK_BOX(g-&gt;box_raw), g-&gt;white_point, FALSE, FALSE, 0);</a>
+<a name="ln865">  dt_bauhaus_slider_enable_soft_boundaries(g-&gt;white_point, 0, UINT16_MAX);</a>
+<a name="ln866">  g_signal_connect(G_OBJECT(g-&gt;white_point), &quot;value-changed&quot;, G_CALLBACK(callback), self);</a>
+<a name="ln867"> </a>
+<a name="ln868">  if(dt_conf_get_bool(&quot;plugins/darkroom/rawprepare/allow_editing_crop&quot;))</a>
+<a name="ln869">  {</a>
+<a name="ln870">    for(int i = 0; i &lt; 4; i++)</a>
+<a name="ln871">    {</a>
+<a name="ln872">      g-&gt;crop[i] = dt_bauhaus_slider_new_with_range(self, 0, 256, 1, p-&gt;crop.array[i], 0);</a>
+<a name="ln873">      dt_bauhaus_widget_set_label(g-&gt;crop[i], NULL, gettext(crop_labels[i].label));</a>
+<a name="ln874">      gtk_widget_set_tooltip_text(g-&gt;crop[i], gettext(crop_labels[i].tooltip));</a>
+<a name="ln875">      gtk_box_pack_start(GTK_BOX(g-&gt;box_raw), g-&gt;crop[i], FALSE, FALSE, 0);</a>
+<a name="ln876">      dt_bauhaus_slider_enable_soft_boundaries(g-&gt;crop[i], 0, UINT16_MAX);</a>
+<a name="ln877">      g_signal_connect(G_OBJECT(g-&gt;crop[i]), &quot;value-changed&quot;, G_CALLBACK(callback), self);</a>
+<a name="ln878">    }</a>
+<a name="ln879">  }</a>
+<a name="ln880"> </a>
+<a name="ln881">  gtk_box_pack_start(GTK_BOX(self-&gt;widget), g-&gt;box_raw, FALSE, FALSE, 0);</a>
+<a name="ln882"> </a>
+<a name="ln883">  g-&gt;label_non_raw</a>
+<a name="ln884">      = gtk_label_new(_(&quot;raw black/white point correction\nonly works for the sensors that need it.&quot;));</a>
+<a name="ln885">  gtk_widget_set_halign(g-&gt;label_non_raw, GTK_ALIGN_START);</a>
+<a name="ln886">  gtk_box_pack_start(GTK_BOX(self-&gt;widget), g-&gt;label_non_raw, FALSE, FALSE, 0);</a>
+<a name="ln887">}</a>
+<a name="ln888"> </a>
+<a name="ln889">void gui_cleanup(dt_iop_module_t *self)</a>
+<a name="ln890">{</a>
+<a name="ln891">  free(self-&gt;gui_data);</a>
+<a name="ln892">  self-&gt;gui_data = NULL;</a>
+<a name="ln893">}</a>
+<a name="ln894"> </a>
+<a name="ln895">// modelines: These editor modelines have been set for all relevant files by tools/update_modelines.sh</a>
+<a name="ln896">// vim: shiftwidth=2 expandtab tabstop=2 cindent</a>
+<a name="ln897">// kate: tab-indents: off; indent-width 2; replace-tabs on; indent-mode cstyle; remove-trailing-spaces modified;</a>
+
+</code></pre>
+<div class="balloon" rel="325"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v1028/" target="_blank">V1028</a> Possible overflow. Consider casting operands, not the result.</p></div>
+<div class="balloon" rel="352"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v1028/" target="_blank">V1028</a> Possible overflow. Consider casting operands, not the result.</p></div>
+<div class="balloon" rel="737"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v522/" target="_blank">V522</a> There might be dereferencing of a potential null pointer 'gd'. Check lines: 737, 734.</p></div>
+<div class="balloon" rel="844"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v522/" target="_blank">V522</a> There might be dereferencing of a potential null pointer 'g'. Check lines: 844, 836.</p></div>
+
+<link rel="stylesheet" href="highlight.css">
+<script src="highlight.pack.js"></script>
+<script src="highlightjs-line-numbers.js"></script>
+<script>hljs.initHighlightingOnLoad();</script>
+<script>hljs.initLineNumbersOnLoad();</script>
+<script>
+  $(document).ready(function() {
+      $('.balloon').each(function () {
+          var bl = $(this);
+          var line = bl.attr('rel');
+          var text = $('a[name="ln'+line+'"]').text();
+
+          var space_count = 0;
+          for(var i = 0; i<text.length; i++){
+              var char = text[i];
+              if((char !== ' ')&&(char !== '\t'))break;
+              if(char === '\t')space_count++;
+              space_count++;
+          }
+
+          bl.css('margin-left', space_count*8);
+          $('a[name="ln'+line+'"]').after(bl);
+      });
+
+      window.location = window.location;
+  });
+</script>
+</body>
+</html>

@@ -1,0 +1,1246 @@
+
+<html>
+<head>
+  <link rel="stylesheet" href="../style.css"/>
+  <script src="../jquery-3.2.1.min.js"></script>
+</head>
+<body>
+<pre><code class = "cpp">
+<a name="ln1">/*</a>
+<a name="ln2">    This file is part of darktable,</a>
+<a name="ln3">    copyright (c) 2009--2013 johannes hanika.</a>
+<a name="ln4">    copyright (c) 2013 Ulrich Pegelow.</a>
+<a name="ln5"> </a>
+<a name="ln6">    darktable is free software: you can redistribute it and/or modify</a>
+<a name="ln7">    it under the terms of the GNU General Public License as published by</a>
+<a name="ln8">    the Free Software Foundation, either version 3 of the License, or</a>
+<a name="ln9">    (at your option) any later version.</a>
+<a name="ln10"> </a>
+<a name="ln11">    darktable is distributed in the hope that it will be useful,</a>
+<a name="ln12">    but WITHOUT ANY WARRANTY; without even the implied warranty of</a>
+<a name="ln13">    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the</a>
+<a name="ln14">    GNU General Public License for more details.</a>
+<a name="ln15"> </a>
+<a name="ln16">    You should have received a copy of the GNU General Public License</a>
+<a name="ln17">    along with darktable.  If not, see &lt;http://www.gnu.org/licenses/&gt;.</a>
+<a name="ln18">*/</a>
+<a name="ln19">#ifdef HAVE_CONFIG_H</a>
+<a name="ln20">#include &quot;config.h&quot;</a>
+<a name="ln21">#endif</a>
+<a name="ln22">#include &quot;bauhaus/bauhaus.h&quot;</a>
+<a name="ln23">#include &quot;common/bilateral.h&quot;</a>
+<a name="ln24">#include &quot;common/bilateralcl.h&quot;</a>
+<a name="ln25">#include &quot;common/colorspaces.h&quot;</a>
+<a name="ln26">#include &quot;common/opencl.h&quot;</a>
+<a name="ln27">#include &quot;common/points.h&quot;</a>
+<a name="ln28">#include &quot;control/control.h&quot;</a>
+<a name="ln29">#include &quot;develop/develop.h&quot;</a>
+<a name="ln30">#include &quot;develop/imageop.h&quot;</a>
+<a name="ln31">#include &quot;develop/tiling.h&quot;</a>
+<a name="ln32">#include &quot;dtgtk/drawingarea.h&quot;</a>
+<a name="ln33">#include &quot;dtgtk/resetlabel.h&quot;</a>
+<a name="ln34">#include &quot;gui/accelerators.h&quot;</a>
+<a name="ln35">#include &quot;gui/gtk.h&quot;</a>
+<a name="ln36">#include &quot;iop/iop_api.h&quot;</a>
+<a name="ln37"> </a>
+<a name="ln38">#include &lt;gtk/gtk.h&gt;</a>
+<a name="ln39">#include &lt;inttypes.h&gt;</a>
+<a name="ln40">#include &lt;math.h&gt;</a>
+<a name="ln41">#include &lt;stdlib.h&gt;</a>
+<a name="ln42">#include &lt;string.h&gt;</a>
+<a name="ln43">#include &lt;strings.h&gt;</a>
+<a name="ln44"> </a>
+<a name="ln45">/**</a>
+<a name="ln46"> * color transfer somewhat based on the glorious paper `color transfer between images'</a>
+<a name="ln47"> * by erik reinhard, michael ashikhmin, bruce gooch, and peter shirley, 2001.</a>
+<a name="ln48"> * chosen because it officially cites the playboy.</a>
+<a name="ln49"> *</a>
+<a name="ln50"> * workflow:</a>
+<a name="ln51"> * - open the target image, press acquire button</a>
+<a name="ln52"> * - right click store as preset</a>
+<a name="ln53"> * - open image you want to transfer the color to</a>
+<a name="ln54"> * - right click and apply the preset</a>
+<a name="ln55"> */</a>
+<a name="ln56"> </a>
+<a name="ln57">DT_MODULE_INTROSPECTION(1, dt_iop_colormapping_params_t)</a>
+<a name="ln58"> </a>
+<a name="ln59">#define HISTN (1 &lt;&lt; 11)</a>
+<a name="ln60">#define MAXN 5</a>
+<a name="ln61"> </a>
+<a name="ln62">typedef enum dt_iop_colormapping_flags_t</a>
+<a name="ln63">{</a>
+<a name="ln64">  NEUTRAL = 0,</a>
+<a name="ln65">  HAS_SOURCE = 1 &lt;&lt; 0,</a>
+<a name="ln66">  HAS_TARGET = 1 &lt;&lt; 1,</a>
+<a name="ln67">  ACQUIRE = 1 &lt;&lt; 2,</a>
+<a name="ln68">  GET_SOURCE = 1 &lt;&lt; 3,</a>
+<a name="ln69">  GET_TARGET = 1 &lt;&lt; 4</a>
+<a name="ln70">} dt_iop_colormapping_flags_t;</a>
+<a name="ln71"> </a>
+<a name="ln72">typedef struct dt_iop_colormapping_flowback_t</a>
+<a name="ln73">{</a>
+<a name="ln74">  float hist[HISTN];</a>
+<a name="ln75">  // n-means (max 5?) with mean/variance</a>
+<a name="ln76">  float mean[MAXN][2];</a>
+<a name="ln77">  float var[MAXN][2];</a>
+<a name="ln78">  float weight[MAXN];</a>
+<a name="ln79">  // number of gaussians used.</a>
+<a name="ln80">  int n;</a>
+<a name="ln81">} dt_iop_colormapping_flowback_t;</a>
+<a name="ln82"> </a>
+<a name="ln83">typedef struct dt_iop_colormapping_params_t</a>
+<a name="ln84">{</a>
+<a name="ln85">  dt_iop_colormapping_flags_t flag;</a>
+<a name="ln86">  // number of gaussians used.</a>
+<a name="ln87">  int n;</a>
+<a name="ln88"> </a>
+<a name="ln89">  // relative importance of color dominance vs. color proximity</a>
+<a name="ln90">  float dominance;</a>
+<a name="ln91"> </a>
+<a name="ln92">  // level of histogram equalization</a>
+<a name="ln93">  float equalization;</a>
+<a name="ln94"> </a>
+<a name="ln95">  // hist matching table for source image</a>
+<a name="ln96">  float source_ihist[HISTN];</a>
+<a name="ln97">  // n-means (max 5) with mean/variance for source image</a>
+<a name="ln98">  float source_mean[MAXN][2];</a>
+<a name="ln99">  float source_var[MAXN][2];</a>
+<a name="ln100">  float source_weight[MAXN];</a>
+<a name="ln101"> </a>
+<a name="ln102">  // hist matching table for destination image</a>
+<a name="ln103">  int target_hist[HISTN];</a>
+<a name="ln104">  // n-means (max 5) with mean/variance for source image</a>
+<a name="ln105">  float target_mean[MAXN][2];</a>
+<a name="ln106">  float target_var[MAXN][2];</a>
+<a name="ln107">  float target_weight[MAXN];</a>
+<a name="ln108">} dt_iop_colormapping_params_t;</a>
+<a name="ln109"> </a>
+<a name="ln110">/** and pixelpipe data is just the same */</a>
+<a name="ln111">typedef struct dt_iop_colormapping_params_t dt_iop_colormapping_data_t;</a>
+<a name="ln112"> </a>
+<a name="ln113"> </a>
+<a name="ln114">typedef struct dt_iop_colormapping_gui_data_t</a>
+<a name="ln115">{</a>
+<a name="ln116">  int flag;</a>
+<a name="ln117">  float *buffer;</a>
+<a name="ln118">  int width;</a>
+<a name="ln119">  int height;</a>
+<a name="ln120">  int ch;</a>
+<a name="ln121">  int flowback_set;</a>
+<a name="ln122">  dt_iop_colormapping_flowback_t flowback;</a>
+<a name="ln123">  GtkWidget *acquire_source_button;</a>
+<a name="ln124">  GtkWidget *acquire_target_button;</a>
+<a name="ln125">  GtkWidget *source_area;</a>
+<a name="ln126">  GtkWidget *target_area;</a>
+<a name="ln127">  GtkWidget *clusters;</a>
+<a name="ln128">  GtkWidget *dominance;</a>
+<a name="ln129">  GtkWidget *equalization;</a>
+<a name="ln130">  cmsHTRANSFORM xform;</a>
+<a name="ln131">  dt_pthread_mutex_t lock;</a>
+<a name="ln132">} dt_iop_colormapping_gui_data_t;</a>
+<a name="ln133"> </a>
+<a name="ln134">typedef struct dt_iop_colormapping_global_data_t</a>
+<a name="ln135">{</a>
+<a name="ln136">  int kernel_histogram;</a>
+<a name="ln137">  int kernel_mapping;</a>
+<a name="ln138">} dt_iop_colormapping_global_data_t;</a>
+<a name="ln139"> </a>
+<a name="ln140"> </a>
+<a name="ln141">const char *name()</a>
+<a name="ln142">{</a>
+<a name="ln143">  return _(&quot;color mapping&quot;);</a>
+<a name="ln144">}</a>
+<a name="ln145"> </a>
+<a name="ln146">int default_group()</a>
+<a name="ln147">{</a>
+<a name="ln148">  return IOP_GROUP_EFFECT;</a>
+<a name="ln149">}</a>
+<a name="ln150"> </a>
+<a name="ln151">int flags()</a>
+<a name="ln152">{</a>
+<a name="ln153">  return IOP_FLAGS_ONE_INSTANCE | IOP_FLAGS_SUPPORTS_BLENDING;</a>
+<a name="ln154">}</a>
+<a name="ln155"> </a>
+<a name="ln156">int default_colorspace(dt_iop_module_t *self, dt_dev_pixelpipe_t *pipe, dt_dev_pixelpipe_iop_t *piece)</a>
+<a name="ln157">{</a>
+<a name="ln158">  return iop_cs_Lab;</a>
+<a name="ln159">}</a>
+<a name="ln160"> </a>
+<a name="ln161"> </a>
+<a name="ln162">void init_key_accels(dt_iop_module_so_t *self)</a>
+<a name="ln163">{</a>
+<a name="ln164">  dt_accel_register_iop(self, FALSE, NC_(&quot;accel&quot;, &quot;acquire as source&quot;), 0, 0);</a>
+<a name="ln165">  dt_accel_register_iop(self, FALSE, NC_(&quot;accel&quot;, &quot;acquire as target&quot;), 0, 0);</a>
+<a name="ln166">}</a>
+<a name="ln167"> </a>
+<a name="ln168">void connect_key_accels(dt_iop_module_t *self)</a>
+<a name="ln169">{</a>
+<a name="ln170">  dt_iop_colormapping_gui_data_t *g = (dt_iop_colormapping_gui_data_t *)self-&gt;gui_data;</a>
+<a name="ln171"> </a>
+<a name="ln172">  dt_accel_connect_button_iop(self, &quot;acquire as source&quot;, g-&gt;acquire_source_button);</a>
+<a name="ln173">  dt_accel_connect_button_iop(self, &quot;acquire as target&quot;, g-&gt;acquire_target_button);</a>
+<a name="ln174">}</a>
+<a name="ln175"> </a>
+<a name="ln176"> </a>
+<a name="ln177">static void capture_histogram(const float *col, const int width, const int height, int *hist)</a>
+<a name="ln178">{</a>
+<a name="ln179">  // build separate histogram</a>
+<a name="ln180">  memset(hist, 0, HISTN * sizeof(int));</a>
+<a name="ln181">  for(int k = 0; k &lt; height; k++)</a>
+<a name="ln182">    for(int i = 0; i &lt; width; i++)</a>
+<a name="ln183">    {</a>
+<a name="ln184">      const int bin = CLAMP(HISTN * col[4 * (k * width + i) + 0] / 100.0, 0, HISTN - 1);</a>
+<a name="ln185">      hist[bin]++;</a>
+<a name="ln186">    }</a>
+<a name="ln187"> </a>
+<a name="ln188">  // accumulated start distribution of G1 G2</a>
+<a name="ln189">  for(int k = 1; k &lt; HISTN; k++) hist[k] += hist[k - 1];</a>
+<a name="ln190">  for(int k = 0; k &lt; HISTN; k++)</a>
+<a name="ln191">    hist[k] = (int)CLAMP(hist[k] * (HISTN / (float)hist[HISTN - 1]), 0, HISTN - 1);</a>
+<a name="ln192">  // for(int i=0;i&lt;100;i++) printf(&quot;#[%d] %d \n&quot;, (int)CLAMP(HISTN*i/100.0, 0, HISTN-1),</a>
+<a name="ln193">  // hist[(int)CLAMP(HISTN*i/100.0, 0, HISTN-1)]);</a>
+<a name="ln194">}</a>
+<a name="ln195"> </a>
+<a name="ln196">static void invert_histogram(const int *hist, float *inv_hist)</a>
+<a name="ln197">{</a>
+<a name="ln198">// invert non-normalised accumulated hist</a>
+<a name="ln199">#if 0</a>
+<a name="ln200">  int last = 0;</a>
+<a name="ln201">  for(int i=0; i&lt;HISTN; i++) for(int k=last; k&lt;HISTN; k++)</a>
+<a name="ln202">      if(hist[k] &gt;= i)</a>
+<a name="ln203">      {</a>
+<a name="ln204">        last = k;</a>
+<a name="ln205">        inv_hist[i] = 100.0*k/(float)HISTN;</a>
+<a name="ln206">        break;</a>
+<a name="ln207">      }</a>
+<a name="ln208">#else</a>
+<a name="ln209">  int last = 31;</a>
+<a name="ln210">  for(int i = 0; i &lt;= last; i++) inv_hist[i] = 100.0f * i / (float)HISTN;</a>
+<a name="ln211">  for(int i = last + 1; i &lt; HISTN; i++)</a>
+<a name="ln212">    for(int k = last; k &lt; HISTN; k++)</a>
+<a name="ln213">      if(hist[k] &gt;= i)</a>
+<a name="ln214">      {</a>
+<a name="ln215">        last = k;</a>
+<a name="ln216">        inv_hist[i] = 100.0f * k / (float)HISTN;</a>
+<a name="ln217">        break;</a>
+<a name="ln218">      }</a>
+<a name="ln219">#endif</a>
+<a name="ln220"> </a>
+<a name="ln221">  // printf(&quot;inv histogram debug:\n&quot;);</a>
+<a name="ln222">  // for(int i=0;i&lt;100;i++) printf(&quot;%d =&gt; %f\n&quot;, i, inv_hist[hist[(int)CLAMP(HISTN*i/100.0, 0, HISTN-1)]]);</a>
+<a name="ln223">  // for(int i=0;i&lt;100;i++) printf(&quot;[%d] %f =&gt; %f\n&quot;, (int)CLAMP(HISTN*i/100.0, 0, HISTN-1),</a>
+<a name="ln224">  // hist[(int)CLAMP(HISTN*i/100.0, 0, HISTN-1)]/(float)HISTN, inv_hist[(int)CLAMP(HISTN*i/100.0, 0,</a>
+<a name="ln225">  // HISTN-1)]);</a>
+<a name="ln226">}</a>
+<a name="ln227"> </a>
+<a name="ln228">#pragma GCC diagnostic push</a>
+<a name="ln229">#pragma GCC diagnostic ignored &quot;-Wvla&quot;</a>
+<a name="ln230"> </a>
+<a name="ln231">static void get_cluster_mapping(const int n, float mi[n][2], const float wi[n], float mo[n][2], const float wo[n],</a>
+<a name="ln232">                                const float dominance, int mapio[n])</a>
+<a name="ln233">{</a>
+<a name="ln234">  const float weightscale = 10000.0f;</a>
+<a name="ln235"> </a>
+<a name="ln236">  for(int ki = 0; ki &lt; n; ki++)</a>
+<a name="ln237">  {</a>
+<a name="ln238">    // for each input cluster</a>
+<a name="ln239">    float mdist = FLT_MAX;</a>
+<a name="ln240">    for(int ko = 0; ko &lt; n; ko++)</a>
+<a name="ln241">    {</a>
+<a name="ln242">      // find the best target cluster (the same could be used more than once)</a>
+<a name="ln243">      const float colordist = (mo[ko][0] - mi[ki][0]) * (mo[ko][0] - mi[ki][0])</a>
+<a name="ln244">                              + (mo[ko][1] - mi[ki][1]) * (mo[ko][1] - mi[ki][1]);</a>
+<a name="ln245">      const float weightdist = weightscale * (wo[ko] - wi[ki]) * (wo[ko] - wi[ki]);</a>
+<a name="ln246">      const float dist = colordist * (1.0f - dominance) + weightdist * dominance;</a>
+<a name="ln247">      if(dist &lt; mdist)</a>
+<a name="ln248">      {</a>
+<a name="ln249">        // printf(&quot;[%d] =&gt; [%d] dominance: %f, colordist: %f, weightdist: %f, dist: %f\n&quot;, ki, ko, dominance,</a>
+<a name="ln250">        // colordist, weightdist, dist);</a>
+<a name="ln251">        mdist = dist;</a>
+<a name="ln252">        mapio[ki] = ko;</a>
+<a name="ln253">      }</a>
+<a name="ln254">    }</a>
+<a name="ln255">  }</a>
+<a name="ln256"> </a>
+<a name="ln257">  // printf(&quot;cluster mapping:\n&quot;);</a>
+<a name="ln258">  // for(int i=0;i&lt;n;i++) printf(&quot;[%d] =&gt; [%d]\n&quot;, i, mapio[i]);</a>
+<a name="ln259">}</a>
+<a name="ln260"> </a>
+<a name="ln261"> </a>
+<a name="ln262">// inverse distant weighting according to D. Shepard's method; with power parameter 2.0</a>
+<a name="ln263">static void get_clusters(const float *col, const int n, float mean[n][2], float *weight)</a>
+<a name="ln264">{</a>
+<a name="ln265">  float mdist = FLT_MAX;</a>
+<a name="ln266">  for(int k = 0; k &lt; n; k++)</a>
+<a name="ln267">  {</a>
+<a name="ln268">    const float dist2 = (col[1] - mean[k][0]) * (col[1] - mean[k][0])</a>
+<a name="ln269">                        + (col[2] - mean[k][1]) * (col[2] - mean[k][1]); // dist^2</a>
+<a name="ln270">    weight[k] = dist2 &gt; 1.0e-6f ? 1.0f / dist2 : -1.0f;                  // direct hits marked as -1</a>
+<a name="ln271">    if(dist2 &lt; mdist) mdist = dist2;</a>
+<a name="ln272">  }</a>
+<a name="ln273">  if(mdist &lt; 1.0e-6f)</a>
+<a name="ln274">    for(int k = 0; k &lt; n; k++)</a>
+<a name="ln275">      weight[k] = weight[k] &lt; 0.0f ? 1.0f : 0.0f; // correction in case of direct hits</a>
+<a name="ln276">  float sum = 0.0f;</a>
+<a name="ln277">  for(int k = 0; k &lt; n; k++) sum += weight[k];</a>
+<a name="ln278">  if(sum &gt; 0.0f)</a>
+<a name="ln279">    for(int k = 0; k &lt; n; k++) weight[k] /= sum;</a>
+<a name="ln280">}</a>
+<a name="ln281"> </a>
+<a name="ln282"> </a>
+<a name="ln283">static int get_cluster(const float *col, const int n, float mean[n][2])</a>
+<a name="ln284">{</a>
+<a name="ln285">  float mdist = FLT_MAX;</a>
+<a name="ln286">  int cluster = 0;</a>
+<a name="ln287">  for(int k = 0; k &lt; n; k++)</a>
+<a name="ln288">  {</a>
+<a name="ln289">    const float dist = (col[1] - mean[k][0]) * (col[1] - mean[k][0])</a>
+<a name="ln290">                       + (col[2] - mean[k][1]) * (col[2] - mean[k][1]);</a>
+<a name="ln291">    if(dist &lt; mdist)</a>
+<a name="ln292">    {</a>
+<a name="ln293">      mdist = dist;</a>
+<a name="ln294">      cluster = k;</a>
+<a name="ln295">    }</a>
+<a name="ln296">  }</a>
+<a name="ln297">  return cluster;</a>
+<a name="ln298">}</a>
+<a name="ln299"> </a>
+<a name="ln300">static void kmeans(const float *col, const int width, const int height, const int n, float mean_out[n][2],</a>
+<a name="ln301">                   float var_out[n][2], float weight_out[n])</a>
+<a name="ln302">{</a>
+<a name="ln303">  const int nit = 40;                       // number of iterations</a>
+<a name="ln304">  const int samples = width * height * 0.2; // samples: only a fraction of the buffer.</a>
+<a name="ln305"> </a>
+<a name="ln306">  float(*const mean)[2] = malloc(2 * n * sizeof(float));</a>
+<a name="ln307">  float(*const var)[2] = malloc(2 * n * sizeof(float));</a>
+<a name="ln308">  int *const cnt = malloc(n * sizeof(int));</a>
+<a name="ln309">  int count;</a>
+<a name="ln310"> </a>
+<a name="ln311">  float a_min = FLT_MAX, b_min = FLT_MAX, a_max = FLT_MIN, b_max = FLT_MIN;</a>
+<a name="ln312"> </a>
+<a name="ln313">  for(int s = 0; s &lt; samples; s++)</a>
+<a name="ln314">  {</a>
+<a name="ln315">    const int j = CLAMP(dt_points_get() * height, 0, height - 1);</a>
+<a name="ln316">    const int i = CLAMP(dt_points_get() * width, 0, width - 1);</a>
+<a name="ln317"> </a>
+<a name="ln318">    const float a = col[4 * (width * j + i) + 1];</a>
+<a name="ln319">    const float b = col[4 * (width * j + i) + 2];</a>
+<a name="ln320"> </a>
+<a name="ln321">    a_min = fminf(a, a_min);</a>
+<a name="ln322">    a_max = fmaxf(a, a_max);</a>
+<a name="ln323">    b_min = fminf(b, b_min);</a>
+<a name="ln324">    b_max = fmaxf(b, b_max);</a>
+<a name="ln325">  }</a>
+<a name="ln326"> </a>
+<a name="ln327">  // init n clusters for a, b channels at random</a>
+<a name="ln328">  for(int k = 0; k &lt; n; k++)</a>
+<a name="ln329">  {</a>
+<a name="ln330">    mean_out[k][0] = 0.9f * (a_min + (a_max - a_min) * dt_points_get());</a>
+<a name="ln331">    mean_out[k][1] = 0.9f * (b_min + (b_max - b_min) * dt_points_get());</a>
+<a name="ln332">    var_out[k][0] = var_out[k][1] = weight_out[k] = 0.0f;</a>
+<a name="ln333">    mean[k][0] = mean[k][1] = var[k][0] = var[k][1] = 0.0f;</a>
+<a name="ln334">  }</a>
+<a name="ln335">  for(int it = 0; it &lt; nit; it++)</a>
+<a name="ln336">  {</a>
+<a name="ln337">    for(int k = 0; k &lt; n; k++) cnt[k] = 0;</a>
+<a name="ln338">// randomly sample col positions inside roi</a>
+<a name="ln339">#ifdef _OPENMP</a>
+<a name="ln340">#pragma omp parallel for default(none) \</a>
+<a name="ln341">    dt_omp_firstprivate(cnt, height, mean, n, samples, var, width) \</a>
+<a name="ln342">    shared(col, mean_out) \</a>
+<a name="ln343">    schedule(static)</a>
+<a name="ln344">#endif</a>
+<a name="ln345">    for(int s = 0; s &lt; samples; s++)</a>
+<a name="ln346">    {</a>
+<a name="ln347">      const int j = CLAMP(dt_points_get() * height, 0, height - 1);</a>
+<a name="ln348">      const int i = CLAMP(dt_points_get() * width, 0, width - 1);</a>
+<a name="ln349">      // for each sample: determine cluster, update new mean, update var</a>
+<a name="ln350">      for(int k = 0; k &lt; n; k++)</a>
+<a name="ln351">      {</a>
+<a name="ln352">        const float L = col[4 * (width * j + i)];</a>
+<a name="ln353">        const float Lab[3] = { L, col[4 * (width * j + i) + 1], col[4 * (width * j + i) + 2] };</a>
+<a name="ln354">        // determine dist to mean_out</a>
+<a name="ln355">        const int c = get_cluster(Lab, n, mean_out);</a>
+<a name="ln356">#ifdef _OPENMP</a>
+<a name="ln357">#pragma omp atomic</a>
+<a name="ln358">#endif</a>
+<a name="ln359">        cnt[c]++;</a>
+<a name="ln360">// update mean, var</a>
+<a name="ln361">#ifdef _OPENMP</a>
+<a name="ln362">#pragma omp atomic</a>
+<a name="ln363">#endif</a>
+<a name="ln364">        var[c][0] += Lab[1] * Lab[1];</a>
+<a name="ln365">#ifdef _OPENMP</a>
+<a name="ln366">#pragma omp atomic</a>
+<a name="ln367">#endif</a>
+<a name="ln368">        var[c][1] += Lab[2] * Lab[2];</a>
+<a name="ln369">#ifdef _OPENMP</a>
+<a name="ln370">#pragma omp atomic</a>
+<a name="ln371">#endif</a>
+<a name="ln372">        mean[c][0] += Lab[1];</a>
+<a name="ln373">#ifdef _OPENMP</a>
+<a name="ln374">#pragma omp atomic</a>
+<a name="ln375">#endif</a>
+<a name="ln376">        mean[c][1] += Lab[2];</a>
+<a name="ln377">      }</a>
+<a name="ln378">    }</a>
+<a name="ln379">    // swap old/new means</a>
+<a name="ln380">    for(int k = 0; k &lt; n; k++)</a>
+<a name="ln381">    {</a>
+<a name="ln382">      if(cnt[k] == 0) continue;</a>
+<a name="ln383">      mean_out[k][0] = mean[k][0] / cnt[k];</a>
+<a name="ln384">      mean_out[k][1] = mean[k][1] / cnt[k];</a>
+<a name="ln385">      var_out[k][0] = var[k][0] / cnt[k] - mean_out[k][0] * mean_out[k][0];</a>
+<a name="ln386">      var_out[k][1] = var[k][1] / cnt[k] - mean_out[k][1] * mean_out[k][1];</a>
+<a name="ln387">      mean[k][0] = mean[k][1] = var[k][0] = var[k][1] = 0.0f;</a>
+<a name="ln388">    }</a>
+<a name="ln389"> </a>
+<a name="ln390">    // determine weight of clusters</a>
+<a name="ln391">    count = 0;</a>
+<a name="ln392">    for(int k = 0; k &lt; n; k++) count += cnt[k];</a>
+<a name="ln393">    for(int k = 0; k &lt; n; k++) weight_out[k] = (count &gt; 0) ? (float)cnt[k] / count : 0.0f;</a>
+<a name="ln394"> </a>
+<a name="ln395">    // printf(&quot;it %d  %d means:\n&quot;, it, n);</a>
+<a name="ln396">    // for(int k=0;k&lt;n;k++) printf(&quot;mean %f %f -- var %f %f -- weight %f\n&quot;, mean_out[k][0], mean_out[k][1],</a>
+<a name="ln397">    // var_out[k][0], var_out[k][1], weight_out[k]);</a>
+<a name="ln398">  }</a>
+<a name="ln399"> </a>
+<a name="ln400">  free(cnt);</a>
+<a name="ln401">  free(var);</a>
+<a name="ln402">  free(mean);</a>
+<a name="ln403"> </a>
+<a name="ln404">  for(int k = 0; k &lt; n; k++)</a>
+<a name="ln405">  {</a>
+<a name="ln406">    // &quot;eliminate&quot; clusters with a variance of zero</a>
+<a name="ln407">    if(var_out[k][0] == 0.0f || var_out[k][1] == 0.0f)</a>
+<a name="ln408">      mean_out[k][0] = mean_out[k][1] = var_out[k][0] = var_out[k][1] = weight_out[k] = 0;</a>
+<a name="ln409"> </a>
+<a name="ln410">    // we actually want the std deviation.</a>
+<a name="ln411">    var_out[k][0] = sqrtf(var_out[k][0]);</a>
+<a name="ln412">    var_out[k][1] = sqrtf(var_out[k][1]);</a>
+<a name="ln413">  }</a>
+<a name="ln414"> </a>
+<a name="ln415">  // simple bubblesort of clusters in order of ascending weight: just a convenience for the user to keep</a>
+<a name="ln416">  // cluster display a bit more consistent in GUI</a>
+<a name="ln417">  for(int i = 0; i &lt; n - 1; i++)</a>
+<a name="ln418">  {</a>
+<a name="ln419">    for(int j = 0; j &lt; n - 1 - i; j++)</a>
+<a name="ln420">    {</a>
+<a name="ln421">      if(weight_out[j] &gt; weight_out[j + 1])</a>
+<a name="ln422">      {</a>
+<a name="ln423">        float temp_mean[2] = { mean_out[j + 1][0], mean_out[j + 1][1] };</a>
+<a name="ln424">        float temp_var[2] = { var_out[j + 1][0], var_out[j + 1][1] };</a>
+<a name="ln425">        float temp_weight = weight_out[j + 1];</a>
+<a name="ln426"> </a>
+<a name="ln427">        mean_out[j + 1][0] = mean_out[j][0];</a>
+<a name="ln428">        mean_out[j + 1][1] = mean_out[j][1];</a>
+<a name="ln429">        var_out[j + 1][0] = var_out[j][0];</a>
+<a name="ln430">        var_out[j + 1][1] = var_out[j][1];</a>
+<a name="ln431">        weight_out[j + 1] = weight_out[j];</a>
+<a name="ln432"> </a>
+<a name="ln433">        mean_out[j][0] = temp_mean[0];</a>
+<a name="ln434">        mean_out[j][1] = temp_mean[1];</a>
+<a name="ln435">        var_out[j][0] = temp_var[0];</a>
+<a name="ln436">        var_out[j][1] = temp_var[1];</a>
+<a name="ln437">        weight_out[j] = temp_weight;</a>
+<a name="ln438">      }</a>
+<a name="ln439">    }</a>
+<a name="ln440">  }</a>
+<a name="ln441">}</a>
+<a name="ln442"> </a>
+<a name="ln443">#pragma GCC diagnostic pop</a>
+<a name="ln444"> </a>
+<a name="ln445">void process(struct dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, const void *const ivoid,</a>
+<a name="ln446">             void *const ovoid, const dt_iop_roi_t *const roi_in, const dt_iop_roi_t *const roi_out)</a>
+<a name="ln447">{</a>
+<a name="ln448">  dt_iop_colormapping_data_t *data = (dt_iop_colormapping_data_t *)piece-&gt;data;</a>
+<a name="ln449">  dt_iop_colormapping_gui_data_t *g = (dt_iop_colormapping_gui_data_t *)self-&gt;gui_data;</a>
+<a name="ln450">  float *in = (float *)ivoid;</a>
+<a name="ln451">  float *out = (float *)ovoid;</a>
+<a name="ln452"> </a>
+<a name="ln453">  const int width = roi_in-&gt;width;</a>
+<a name="ln454">  const int height = roi_in-&gt;height;</a>
+<a name="ln455">  const int ch = piece-&gt;colors;</a>
+<a name="ln456"> </a>
+<a name="ln457">  const float scale = piece-&gt;iscale / roi_in-&gt;scale;</a>
+<a name="ln458">  const float sigma_s = 50.0f / scale;</a>
+<a name="ln459">  const float sigma_r = 8.0f; // does not depend on scale</a>
+<a name="ln460"> </a>
+<a name="ln461">  // save a copy of preview input buffer so we can get histogram and color statistics out of it</a>
+<a name="ln462">  if(self-&gt;dev-&gt;gui_attached &amp;&amp; g &amp;&amp; piece-&gt;pipe-&gt;type == DT_DEV_PIXELPIPE_PREVIEW &amp;&amp; (data-&gt;flag &amp; ACQUIRE))</a>
+<a name="ln463">  {</a>
+<a name="ln464">    dt_pthread_mutex_lock(&amp;g-&gt;lock);</a>
+<a name="ln465">    if(g-&gt;buffer) free(g-&gt;buffer);</a>
+<a name="ln466"> </a>
+<a name="ln467">    g-&gt;buffer = malloc((size_t)width * height * ch * sizeof(float));</a>
+<a name="ln468">    g-&gt;width = width;</a>
+<a name="ln469">    g-&gt;height = height;</a>
+<a name="ln470">    g-&gt;ch = ch;</a>
+<a name="ln471"> </a>
+<a name="ln472">    if(g-&gt;buffer) memcpy(g-&gt;buffer, in, (size_t)width * height * ch * sizeof(float));</a>
+<a name="ln473"> </a>
+<a name="ln474">    dt_pthread_mutex_unlock(&amp;g-&gt;lock);</a>
+<a name="ln475">  }</a>
+<a name="ln476"> </a>
+<a name="ln477">  // process image if all mapping information is present in the parameter set</a>
+<a name="ln478">  if(data-&gt;flag &amp; HAS_TARGET &amp;&amp; data-&gt;flag &amp; HAS_SOURCE)</a>
+<a name="ln479">  {</a>
+<a name="ln480">    // for all pixels: find input cluster, transfer to mapped target cluster and apply histogram</a>
+<a name="ln481"> </a>
+<a name="ln482">    float dominance = data-&gt;dominance / 100.0f;</a>
+<a name="ln483">    float equalization = data-&gt;equalization / 100.0f;</a>
+<a name="ln484"> </a>
+<a name="ln485">    // get mapping from input clusters to target clusters</a>
+<a name="ln486">    int *const mapio = malloc(data-&gt;n * sizeof(int));</a>
+<a name="ln487"> </a>
+<a name="ln488">    get_cluster_mapping(data-&gt;n, data-&gt;target_mean, data-&gt;target_weight, data-&gt;source_mean,</a>
+<a name="ln489">                        data-&gt;source_weight, dominance, mapio);</a>
+<a name="ln490"> </a>
+<a name="ln491">    float(*const var_ratio)[2] = malloc(2 * data-&gt;n * sizeof(float));</a>
+<a name="ln492"> </a>
+<a name="ln493">    for(int i = 0; i &lt; data-&gt;n; i++)</a>
+<a name="ln494">    {</a>
+<a name="ln495">      var_ratio[i][0]</a>
+<a name="ln496">          = (data-&gt;target_var[i][0] &gt; 0.0f) ? data-&gt;source_var[mapio[i]][0] / data-&gt;target_var[i][0] : 0.0f;</a>
+<a name="ln497">      var_ratio[i][1]</a>
+<a name="ln498">          = (data-&gt;target_var[i][1] &gt; 0.0f) ? data-&gt;source_var[mapio[i]][1] / data-&gt;target_var[i][1] : 0.0f;</a>
+<a name="ln499">    }</a>
+<a name="ln500"> </a>
+<a name="ln501">// first get delta L of equalized L minus original image L, scaled to fit into [0 .. 100]</a>
+<a name="ln502">#ifdef _OPENMP</a>
+<a name="ln503">#pragma omp parallel for default(none) \</a>
+<a name="ln504">    dt_omp_firstprivate(ch, height, width) \</a>
+<a name="ln505">    shared(data, in, out, equalization) \</a>
+<a name="ln506">    schedule(static)</a>
+<a name="ln507">#endif</a>
+<a name="ln508">    for(int k = 0; k &lt; height; k++)</a>
+<a name="ln509">    {</a>
+<a name="ln510">      size_t j = (size_t)ch * width * k;</a>
+<a name="ln511">      for(int i = 0; i &lt; width; i++)</a>
+<a name="ln512">      {</a>
+<a name="ln513">        const float L = in[j];</a>
+<a name="ln514">        out[j] = 0.5f * ((L * (1.0f - equalization)</a>
+<a name="ln515">                          + data-&gt;source_ihist[data-&gt;target_hist[(int)CLAMP(</a>
+<a name="ln516">                                HISTN * L / 100.0f, 0.0f, (float)HISTN - 1.0f)]] * equalization) - L) + 50.0f;</a>
+<a name="ln517">        out[j] = CLAMP(out[j], 0.0f, 100.0f);</a>
+<a name="ln518">        j += ch;</a>
+<a name="ln519">      }</a>
+<a name="ln520">    }</a>
+<a name="ln521"> </a>
+<a name="ln522">    if(equalization &gt; 0.001f)</a>
+<a name="ln523">    {</a>
+<a name="ln524">      // bilateral blur of delta L to avoid artifacts caused by limited histogram resolution</a>
+<a name="ln525">      dt_bilateral_t *b = dt_bilateral_init(width, height, sigma_s, sigma_r);</a>
+<a name="ln526">      if(!b)</a>
+<a name="ln527">      {</a>
+<a name="ln528">        free(var_ratio);</a>
+<a name="ln529">        free(mapio);</a>
+<a name="ln530">        return;</a>
+<a name="ln531">      }</a>
+<a name="ln532">      dt_bilateral_splat(b, out);</a>
+<a name="ln533">      dt_bilateral_blur(b);</a>
+<a name="ln534">      dt_bilateral_slice(b, out, out, -1.0f);</a>
+<a name="ln535">      dt_bilateral_free(b);</a>
+<a name="ln536">    }</a>
+<a name="ln537"> </a>
+<a name="ln538">    float *const weight_buf = malloc(data-&gt;n * dt_get_num_threads() * sizeof(float));</a>
+<a name="ln539"> </a>
+<a name="ln540">#ifdef _OPENMP</a>
+<a name="ln541">#pragma omp parallel for default(none) \</a>
+<a name="ln542">    dt_omp_firstprivate(ch, height, mapio, var_ratio, weight_buf, width) \</a>
+<a name="ln543">    shared(data, in, out, equalization) \</a>
+<a name="ln544">    schedule(static)</a>
+<a name="ln545">#endif</a>
+<a name="ln546">    for(int k = 0; k &lt; height; k++)</a>
+<a name="ln547">    {</a>
+<a name="ln548">      float *weight = weight_buf + data-&gt;n * dt_get_thread_num();</a>
+<a name="ln549">      size_t j = (size_t)ch * width * k;</a>
+<a name="ln550">      for(int i = 0; i &lt; width; i++)</a>
+<a name="ln551">      {</a>
+<a name="ln552">        const float L = in[j];</a>
+<a name="ln553">        const float Lab[3] = { L, in[j + 1], in[j + 2] };</a>
+<a name="ln554"> </a>
+<a name="ln555">        // transfer back scaled and blurred delta L to output L</a>
+<a name="ln556">        out[j] = 2.0f * (out[j] - 50.0f) + L;</a>
+<a name="ln557">        out[j] = CLAMP(out[j], 0.0f, 100.0f);</a>
+<a name="ln558"> </a>
+<a name="ln559">        get_clusters(in + j, data-&gt;n, data-&gt;target_mean, weight);</a>
+<a name="ln560">        out[j + 1] = out[j + 2] = 0.0f;</a>
+<a name="ln561">        for(int c = 0; c &lt; data-&gt;n; c++)</a>
+<a name="ln562">        {</a>
+<a name="ln563">          out[j + 1] += weight[c] * ((Lab[1] - data-&gt;target_mean[c][0]) * var_ratio[c][0]</a>
+<a name="ln564">                                     + data-&gt;source_mean[mapio[c]][0]);</a>
+<a name="ln565">          out[j + 2] += weight[c] * ((Lab[2] - data-&gt;target_mean[c][1]) * var_ratio[c][1]</a>
+<a name="ln566">                                     + data-&gt;source_mean[mapio[c]][1]);</a>
+<a name="ln567">        }</a>
+<a name="ln568">        out[j + 3] = in[j + 3];</a>
+<a name="ln569">        j += ch;</a>
+<a name="ln570">      }</a>
+<a name="ln571">    }</a>
+<a name="ln572"> </a>
+<a name="ln573">    free(weight_buf);</a>
+<a name="ln574">    free(var_ratio);</a>
+<a name="ln575">    free(mapio);</a>
+<a name="ln576">  }</a>
+<a name="ln577">  // incomplete parameter set -&gt; do nothing</a>
+<a name="ln578">  else</a>
+<a name="ln579">  {</a>
+<a name="ln580">    memcpy(out, in, (size_t)sizeof(float) * ch * width * height);</a>
+<a name="ln581">  }</a>
+<a name="ln582">}</a>
+<a name="ln583"> </a>
+<a name="ln584"> </a>
+<a name="ln585">#ifdef HAVE_OPENCL</a>
+<a name="ln586">int process_cl(struct dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, cl_mem dev_in, cl_mem dev_out,</a>
+<a name="ln587">               const dt_iop_roi_t *const roi_in, const dt_iop_roi_t *const roi_out)</a>
+<a name="ln588">{</a>
+<a name="ln589">  dt_iop_colormapping_data_t *data = (dt_iop_colormapping_data_t *)piece-&gt;data;</a>
+<a name="ln590">  dt_iop_colormapping_global_data_t *gd = (dt_iop_colormapping_global_data_t *)self-&gt;global_data;</a>
+<a name="ln591">  dt_iop_colormapping_gui_data_t *g = (dt_iop_colormapping_gui_data_t *)self-&gt;gui_data;</a>
+<a name="ln592"> </a>
+<a name="ln593">  cl_int err = -999;</a>
+<a name="ln594">  const int devid = piece-&gt;pipe-&gt;devid;</a>
+<a name="ln595"> </a>
+<a name="ln596">  const int width = roi_in-&gt;width;</a>
+<a name="ln597">  const int height = roi_in-&gt;height;</a>
+<a name="ln598">  const int ch = piece-&gt;colors;</a>
+<a name="ln599"> </a>
+<a name="ln600">  const float scale = piece-&gt;iscale / roi_in-&gt;scale;</a>
+<a name="ln601">  const float sigma_s = 50.0f / scale;</a>
+<a name="ln602">  const float sigma_r = 8.0f; // does not depend on scale</a>
+<a name="ln603"> </a>
+<a name="ln604">  float dominance = data-&gt;dominance / 100.0f;</a>
+<a name="ln605">  float equalization = data-&gt;equalization / 100.0f;</a>
+<a name="ln606"> </a>
+<a name="ln607">  dt_bilateral_cl_t *b = NULL;</a>
+<a name="ln608">  cl_mem dev_tmp = NULL;</a>
+<a name="ln609">  cl_mem dev_target_hist = NULL;</a>
+<a name="ln610">  cl_mem dev_source_ihist = NULL;</a>
+<a name="ln611">  cl_mem dev_target_mean = NULL;</a>
+<a name="ln612">  cl_mem dev_source_mean = NULL;</a>
+<a name="ln613">  cl_mem dev_var_ratio = NULL;</a>
+<a name="ln614">  cl_mem dev_mapio = NULL;</a>
+<a name="ln615"> </a>
+<a name="ln616"> </a>
+<a name="ln617">  // save a copy of preview input buffer so we can get histogram and color statistics out of it</a>
+<a name="ln618">  if(self-&gt;dev-&gt;gui_attached &amp;&amp; g &amp;&amp; piece-&gt;pipe-&gt;type == DT_DEV_PIXELPIPE_PREVIEW &amp;&amp; (data-&gt;flag &amp; ACQUIRE))</a>
+<a name="ln619">  {</a>
+<a name="ln620">    dt_pthread_mutex_lock(&amp;g-&gt;lock);</a>
+<a name="ln621">    free(g-&gt;buffer);</a>
+<a name="ln622"> </a>
+<a name="ln623">    g-&gt;buffer = malloc(width * height * ch * sizeof(float));</a>
+<a name="ln624">    g-&gt;width = width;</a>
+<a name="ln625">    g-&gt;height = height;</a>
+<a name="ln626">    g-&gt;ch = ch;</a>
+<a name="ln627"> </a>
+<a name="ln628">    if(g-&gt;buffer)</a>
+<a name="ln629">      err = dt_opencl_copy_device_to_host(devid, g-&gt;buffer, dev_in, width, height, ch * sizeof(float));</a>
+<a name="ln630"> </a>
+<a name="ln631">    dt_pthread_mutex_unlock(&amp;g-&gt;lock);</a>
+<a name="ln632"> </a>
+<a name="ln633">    if(err != CL_SUCCESS) goto error;</a>
+<a name="ln634">  }</a>
+<a name="ln635"> </a>
+<a name="ln636"> </a>
+<a name="ln637">  // process image if all mapping information is present in the parameter set</a>
+<a name="ln638">  if(data-&gt;flag &amp; HAS_TARGET &amp;&amp; data-&gt;flag &amp; HAS_SOURCE)</a>
+<a name="ln639">  {</a>
+<a name="ln640">    // get mapping from input clusters to target clusters</a>
+<a name="ln641">    int mapio[MAXN];</a>
+<a name="ln642">    get_cluster_mapping(data-&gt;n, data-&gt;target_mean, data-&gt;target_weight, data-&gt;source_mean,</a>
+<a name="ln643">                        data-&gt;source_weight, dominance, mapio);</a>
+<a name="ln644"> </a>
+<a name="ln645">    float var_ratio[MAXN][2];</a>
+<a name="ln646">    for(int i = 0; i &lt; data-&gt;n; i++)</a>
+<a name="ln647">    {</a>
+<a name="ln648">      var_ratio[i][0]</a>
+<a name="ln649">          = (data-&gt;target_var[i][0] &gt; 0.0f) ? data-&gt;source_var[mapio[i]][0] / data-&gt;target_var[i][0] : 0.0f;</a>
+<a name="ln650">      var_ratio[i][1]</a>
+<a name="ln651">          = (data-&gt;target_var[i][1] &gt; 0.0f) ? data-&gt;source_var[mapio[i]][1] / data-&gt;target_var[i][1] : 0.0f;</a>
+<a name="ln652">    }</a>
+<a name="ln653"> </a>
+<a name="ln654">    dev_tmp = dt_opencl_alloc_device(devid, width, height, 4 * sizeof(float));</a>
+<a name="ln655">    if(dev_tmp == NULL) goto error;</a>
+<a name="ln656"> </a>
+<a name="ln657">    dev_target_hist = dt_opencl_copy_host_to_device_constant(devid, sizeof(int) * HISTN, data-&gt;target_hist);</a>
+<a name="ln658">    if(dev_target_hist == NULL) goto error;</a>
+<a name="ln659"> </a>
+<a name="ln660">    dev_source_ihist</a>
+<a name="ln661">        = dt_opencl_copy_host_to_device_constant(devid, sizeof(float) * HISTN, data-&gt;source_ihist);</a>
+<a name="ln662">    if(dev_source_ihist == NULL) goto error;</a>
+<a name="ln663"> </a>
+<a name="ln664">    dev_target_mean</a>
+<a name="ln665">        = dt_opencl_copy_host_to_device_constant(devid, sizeof(float) * MAXN * 2, data-&gt;target_mean);</a>
+<a name="ln666">    if(dev_target_mean == NULL) goto error;</a>
+<a name="ln667"> </a>
+<a name="ln668">    dev_source_mean</a>
+<a name="ln669">        = dt_opencl_copy_host_to_device_constant(devid, sizeof(float) * MAXN * 2, data-&gt;source_mean);</a>
+<a name="ln670">    if(dev_source_mean == NULL) goto error;</a>
+<a name="ln671"> </a>
+<a name="ln672">    dev_var_ratio = dt_opencl_copy_host_to_device_constant(devid, sizeof(float) * MAXN * 2, var_ratio);</a>
+<a name="ln673">    if(dev_var_ratio == NULL) goto error;</a>
+<a name="ln674"> </a>
+<a name="ln675">    dev_mapio = dt_opencl_copy_host_to_device_constant(devid, sizeof(int) * MAXN, mapio);</a>
+<a name="ln676">    if(dev_mapio == NULL) goto error;</a>
+<a name="ln677"> </a>
+<a name="ln678">    size_t sizes[3] = { ROUNDUPWD(width), ROUNDUPHT(height), 1 };</a>
+<a name="ln679"> </a>
+<a name="ln680">    dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_histogram, 0, sizeof(cl_mem), (void *)&amp;dev_in);</a>
+<a name="ln681">    dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_histogram, 1, sizeof(cl_mem), (void *)&amp;dev_out);</a>
+<a name="ln682">    dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_histogram, 2, sizeof(int), (void *)&amp;width);</a>
+<a name="ln683">    dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_histogram, 3, sizeof(int), (void *)&amp;height);</a>
+<a name="ln684">    dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_histogram, 4, sizeof(float), (void *)&amp;equalization);</a>
+<a name="ln685">    dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_histogram, 5, sizeof(cl_mem), (void *)&amp;dev_target_hist);</a>
+<a name="ln686">    dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_histogram, 6, sizeof(cl_mem), (void *)&amp;dev_source_ihist);</a>
+<a name="ln687">    err = dt_opencl_enqueue_kernel_2d(devid, gd-&gt;kernel_histogram, sizes);</a>
+<a name="ln688">    if(err != CL_SUCCESS) goto error;</a>
+<a name="ln689"> </a>
+<a name="ln690">    if(equalization &gt; 0.001f)</a>
+<a name="ln691">    {</a>
+<a name="ln692">      b = dt_bilateral_init_cl(devid, width, height, sigma_s, sigma_r);</a>
+<a name="ln693">      if(!b) goto error;</a>
+<a name="ln694">      err = dt_bilateral_splat_cl(b, dev_out);</a>
+<a name="ln695">      if(err != CL_SUCCESS) goto error;</a>
+<a name="ln696">      err = dt_bilateral_blur_cl(b);</a>
+<a name="ln697">      if(err != CL_SUCCESS) goto error;</a>
+<a name="ln698">      err = dt_bilateral_slice_cl(b, dev_out, dev_tmp, -1.0f);</a>
+<a name="ln699">      if(err != CL_SUCCESS) goto error;</a>
+<a name="ln700">      dt_bilateral_free_cl(b);</a>
+<a name="ln701">      b = NULL; // make sure we don't clean it up twice</a>
+<a name="ln702">    }</a>
+<a name="ln703">    else</a>
+<a name="ln704">    {</a>
+<a name="ln705">      size_t origin[] = { 0, 0, 0 };</a>
+<a name="ln706">      size_t region[] = { width, height, 1 };</a>
+<a name="ln707">      err = dt_opencl_enqueue_copy_image(devid, dev_out, dev_tmp, origin, origin, region);</a>
+<a name="ln708">      if(err != CL_SUCCESS) goto error;</a>
+<a name="ln709">    }</a>
+<a name="ln710"> </a>
+<a name="ln711">    dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_mapping, 0, sizeof(cl_mem), (void *)&amp;dev_in);</a>
+<a name="ln712">    dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_mapping, 1, sizeof(cl_mem), (void *)&amp;dev_tmp);</a>
+<a name="ln713">    dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_mapping, 2, sizeof(cl_mem), (void *)&amp;dev_out);</a>
+<a name="ln714">    dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_mapping, 3, sizeof(int), (void *)&amp;width);</a>
+<a name="ln715">    dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_mapping, 4, sizeof(int), (void *)&amp;height);</a>
+<a name="ln716">    dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_mapping, 5, sizeof(int), (void *)&amp;data-&gt;n);</a>
+<a name="ln717">    dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_mapping, 6, sizeof(cl_mem), (void *)&amp;dev_target_mean);</a>
+<a name="ln718">    dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_mapping, 7, sizeof(cl_mem), (void *)&amp;dev_source_mean);</a>
+<a name="ln719">    dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_mapping, 8, sizeof(cl_mem), (void *)&amp;dev_var_ratio);</a>
+<a name="ln720">    dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_mapping, 9, sizeof(cl_mem), (void *)&amp;dev_mapio);</a>
+<a name="ln721">    err = dt_opencl_enqueue_kernel_2d(devid, gd-&gt;kernel_mapping, sizes);</a>
+<a name="ln722">    if(err != CL_SUCCESS) goto error;</a>
+<a name="ln723"> </a>
+<a name="ln724">    dt_opencl_release_mem_object(dev_tmp);</a>
+<a name="ln725">    dt_opencl_release_mem_object(dev_target_hist);</a>
+<a name="ln726">    dt_opencl_release_mem_object(dev_source_ihist);</a>
+<a name="ln727">    dt_opencl_release_mem_object(dev_target_mean);</a>
+<a name="ln728">    dt_opencl_release_mem_object(dev_source_mean);</a>
+<a name="ln729">    dt_opencl_release_mem_object(dev_var_ratio);</a>
+<a name="ln730">    dt_opencl_release_mem_object(dev_mapio);</a>
+<a name="ln731">    return TRUE;</a>
+<a name="ln732">  }</a>
+<a name="ln733">  else</a>
+<a name="ln734">  {</a>
+<a name="ln735">    size_t origin[] = { 0, 0, 0 };</a>
+<a name="ln736">    size_t region[] = { width, height, 1 };</a>
+<a name="ln737">    err = dt_opencl_enqueue_copy_image(devid, dev_in, dev_out, origin, origin, region);</a>
+<a name="ln738">    if(err != CL_SUCCESS) goto error;</a>
+<a name="ln739">    return TRUE;</a>
+<a name="ln740">  }</a>
+<a name="ln741"> </a>
+<a name="ln742">error:</a>
+<a name="ln743">  if(b != NULL) dt_bilateral_free_cl(b);</a>
+<a name="ln744">  dt_opencl_release_mem_object(dev_tmp);</a>
+<a name="ln745">  dt_opencl_release_mem_object(dev_target_hist);</a>
+<a name="ln746">  dt_opencl_release_mem_object(dev_source_ihist);</a>
+<a name="ln747">  dt_opencl_release_mem_object(dev_target_mean);</a>
+<a name="ln748">  dt_opencl_release_mem_object(dev_source_mean);</a>
+<a name="ln749">  dt_opencl_release_mem_object(dev_var_ratio);</a>
+<a name="ln750">  dt_opencl_release_mem_object(dev_mapio);</a>
+<a name="ln751">  dt_print(DT_DEBUG_OPENCL, &quot;[opencl_colormapping] couldn't enqueue kernel! %d\n&quot;, err);</a>
+<a name="ln752">  return FALSE;</a>
+<a name="ln753">}</a>
+<a name="ln754">#endif</a>
+<a name="ln755"> </a>
+<a name="ln756"> </a>
+<a name="ln757">void tiling_callback(struct dt_iop_module_t *self, struct dt_dev_pixelpipe_iop_t *piece,</a>
+<a name="ln758">                     const dt_iop_roi_t *roi_in, const dt_iop_roi_t *roi_out,</a>
+<a name="ln759">                     struct dt_develop_tiling_t *tiling)</a>
+<a name="ln760">{</a>
+<a name="ln761">  const float scale = piece-&gt;iscale / roi_in-&gt;scale;</a>
+<a name="ln762">  const float sigma_s = 50.0f / scale;</a>
+<a name="ln763">  const float sigma_r = 8.0f; // does not depend on scale</a>
+<a name="ln764"> </a>
+<a name="ln765">  const int width = roi_in-&gt;width;</a>
+<a name="ln766">  const int height = roi_in-&gt;height;</a>
+<a name="ln767">  const int channels = piece-&gt;colors;</a>
+<a name="ln768"> </a>
+<a name="ln769">  const size_t basebuffer = width * height * channels * sizeof(float);</a>
+<a name="ln770"> </a>
+<a name="ln771">  tiling-&gt;factor = 3.0f + (float)dt_bilateral_memory_use(width, height, sigma_s, sigma_r) / basebuffer;</a>
+<a name="ln772">  tiling-&gt;maxbuf</a>
+<a name="ln773">      = fmaxf(1.0f, (float)dt_bilateral_singlebuffer_size(width, height, sigma_s, sigma_r) / basebuffer);</a>
+<a name="ln774">  tiling-&gt;overhead = 0;</a>
+<a name="ln775">  tiling-&gt;overlap = ceilf(4 * sigma_s);</a>
+<a name="ln776">  tiling-&gt;xalign = 1;</a>
+<a name="ln777">  tiling-&gt;yalign = 1;</a>
+<a name="ln778">}</a>
+<a name="ln779"> </a>
+<a name="ln780">void commit_params(struct dt_iop_module_t *self, dt_iop_params_t *p1, dt_dev_pixelpipe_t *pipe,</a>
+<a name="ln781">                   dt_dev_pixelpipe_iop_t *piece)</a>
+<a name="ln782">{</a>
+<a name="ln783">  dt_iop_colormapping_params_t *p = (dt_iop_colormapping_params_t *)p1;</a>
+<a name="ln784">  dt_iop_colormapping_data_t *d = (dt_iop_colormapping_data_t *)piece-&gt;data;</a>
+<a name="ln785"> </a>
+<a name="ln786">  memcpy(d, p, sizeof(dt_iop_colormapping_params_t));</a>
+<a name="ln787">#ifdef HAVE_OPENCL</a>
+<a name="ln788">  if(d-&gt;equalization &gt; 0.1f)</a>
+<a name="ln789">    piece-&gt;process_cl_ready = (piece-&gt;process_cl_ready &amp;&amp; !(darktable.opencl-&gt;avoid_atomics));</a>
+<a name="ln790">#endif</a>
+<a name="ln791">}</a>
+<a name="ln792"> </a>
+<a name="ln793"> </a>
+<a name="ln794">static void clusters_changed(GtkWidget *slider, dt_iop_module_t *self)</a>
+<a name="ln795">{</a>
+<a name="ln796">  if(darktable.gui-&gt;reset) return;</a>
+<a name="ln797">  dt_iop_colormapping_params_t *p = (dt_iop_colormapping_params_t *)self-&gt;params;</a>
+<a name="ln798">  dt_iop_colormapping_gui_data_t *g = (dt_iop_colormapping_gui_data_t *)self-&gt;gui_data;</a>
+<a name="ln799"> </a>
+<a name="ln800">  int new = (int)dt_bauhaus_slider_get(slider);</a>
+<a name="ln801">  if(new != p-&gt;n)</a>
+<a name="ln802">  {</a>
+<a name="ln803">    p-&gt;n = new;</a>
+<a name="ln804">    memset(p-&gt;source_ihist, 0, sizeof(float) * HISTN);</a>
+<a name="ln805">    memset(p-&gt;source_mean, 0, sizeof(float) * MAXN * 2);</a>
+<a name="ln806">    memset(p-&gt;source_var, 0, sizeof(float) * MAXN * 2);</a>
+<a name="ln807">    memset(p-&gt;source_weight, 0, sizeof(float) * MAXN);</a>
+<a name="ln808">    memset(p-&gt;target_hist, 0, sizeof(int) * HISTN);</a>
+<a name="ln809">    memset(p-&gt;target_mean, 0, sizeof(float) * MAXN * 2);</a>
+<a name="ln810">    memset(p-&gt;target_var, 0, sizeof(float) * MAXN * 2);</a>
+<a name="ln811">    memset(p-&gt;target_weight, 0, sizeof(float) * MAXN);</a>
+<a name="ln812">    p-&gt;flag = NEUTRAL;</a>
+<a name="ln813">    dt_dev_add_history_item(darktable.develop, self, TRUE);</a>
+<a name="ln814">    dt_control_queue_redraw_widget(g-&gt;source_area);</a>
+<a name="ln815">    dt_control_queue_redraw_widget(g-&gt;target_area);</a>
+<a name="ln816">  }</a>
+<a name="ln817">}</a>
+<a name="ln818"> </a>
+<a name="ln819">static void dominance_changed(GtkWidget *slider, dt_iop_module_t *self)</a>
+<a name="ln820">{</a>
+<a name="ln821">  if(self-&gt;dt-&gt;gui-&gt;reset) return;</a>
+<a name="ln822">  dt_iop_colormapping_params_t *p = (dt_iop_colormapping_params_t *)self-&gt;params;</a>
+<a name="ln823">  p-&gt;dominance = dt_bauhaus_slider_get(slider);</a>
+<a name="ln824">  dt_dev_add_history_item(darktable.develop, self, TRUE);</a>
+<a name="ln825">}</a>
+<a name="ln826"> </a>
+<a name="ln827">static void equalization_changed(GtkWidget *slider, dt_iop_module_t *self)</a>
+<a name="ln828">{</a>
+<a name="ln829">  if(self-&gt;dt-&gt;gui-&gt;reset) return;</a>
+<a name="ln830">  dt_iop_colormapping_params_t *p = (dt_iop_colormapping_params_t *)self-&gt;params;</a>
+<a name="ln831">  p-&gt;equalization = dt_bauhaus_slider_get(slider);</a>
+<a name="ln832">  dt_dev_add_history_item(darktable.develop, self, TRUE);</a>
+<a name="ln833">}</a>
+<a name="ln834"> </a>
+<a name="ln835">static void acquire_source_button_pressed(GtkButton *button, dt_iop_module_t *self)</a>
+<a name="ln836">{</a>
+<a name="ln837">  if(darktable.gui-&gt;reset) return;</a>
+<a name="ln838">  dt_iop_colormapping_params_t *p = (dt_iop_colormapping_params_t *)self-&gt;params;</a>
+<a name="ln839">  p-&gt;flag |= ACQUIRE;</a>
+<a name="ln840">  p-&gt;flag |= GET_SOURCE;</a>
+<a name="ln841">  p-&gt;flag &amp;= ~HAS_SOURCE;</a>
+<a name="ln842">  dt_iop_request_focus(self);</a>
+<a name="ln843">  dt_dev_add_history_item(darktable.develop, self, TRUE);</a>
+<a name="ln844">}</a>
+<a name="ln845"> </a>
+<a name="ln846">static void acquire_target_button_pressed(GtkButton *button, dt_iop_module_t *self)</a>
+<a name="ln847">{</a>
+<a name="ln848">  if(darktable.gui-&gt;reset) return;</a>
+<a name="ln849">  dt_iop_colormapping_params_t *p = (dt_iop_colormapping_params_t *)self-&gt;params;</a>
+<a name="ln850">  p-&gt;flag |= ACQUIRE;</a>
+<a name="ln851">  p-&gt;flag |= GET_TARGET;</a>
+<a name="ln852">  p-&gt;flag &amp;= ~HAS_TARGET;</a>
+<a name="ln853">  dt_iop_request_focus(self);</a>
+<a name="ln854">  dt_dev_add_history_item(darktable.develop, self, TRUE);</a>
+<a name="ln855">}</a>
+<a name="ln856"> </a>
+<a name="ln857">void init_pipe(struct dt_iop_module_t *self, dt_dev_pixelpipe_t *pipe, dt_dev_pixelpipe_iop_t *piece)</a>
+<a name="ln858">{</a>
+<a name="ln859">  piece-&gt;data = malloc(sizeof(dt_iop_colormapping_data_t));</a>
+<a name="ln860">  self-&gt;commit_params(self, self-&gt;default_params, pipe, piece);</a>
+<a name="ln861">}</a>
+<a name="ln862"> </a>
+<a name="ln863">void cleanup_pipe(struct dt_iop_module_t *self, dt_dev_pixelpipe_t *pipe, dt_dev_pixelpipe_iop_t *piece)</a>
+<a name="ln864">{</a>
+<a name="ln865">  free(piece-&gt;data);</a>
+<a name="ln866">  piece-&gt;data = NULL;</a>
+<a name="ln867">}</a>
+<a name="ln868"> </a>
+<a name="ln869">void gui_update(struct dt_iop_module_t *self)</a>
+<a name="ln870">{</a>
+<a name="ln871">  dt_iop_colormapping_params_t *p = (dt_iop_colormapping_params_t *)self-&gt;params;</a>
+<a name="ln872">  dt_iop_colormapping_gui_data_t *g = (dt_iop_colormapping_gui_data_t *)self-&gt;gui_data;</a>
+<a name="ln873">  dt_bauhaus_slider_set(g-&gt;clusters, p-&gt;n);</a>
+<a name="ln874">  dt_bauhaus_slider_set(g-&gt;dominance, p-&gt;dominance);</a>
+<a name="ln875">  dt_bauhaus_slider_set(g-&gt;equalization, p-&gt;equalization);</a>
+<a name="ln876">  dt_control_queue_redraw_widget(self-&gt;widget);</a>
+<a name="ln877">}</a>
+<a name="ln878"> </a>
+<a name="ln879">void init(dt_iop_module_t *module)</a>
+<a name="ln880">{</a>
+<a name="ln881">  module-&gt;params = calloc(1, sizeof(dt_iop_colormapping_params_t));</a>
+<a name="ln882">  module-&gt;default_params = calloc(1, sizeof(dt_iop_colormapping_params_t));</a>
+<a name="ln883">  module-&gt;default_enabled = 0;</a>
+<a name="ln884">  module-&gt;params_size = sizeof(dt_iop_colormapping_params_t);</a>
+<a name="ln885">  module-&gt;gui_data = NULL;</a>
+<a name="ln886">}</a>
+<a name="ln887"> </a>
+<a name="ln888">void init_global(dt_iop_module_so_t *module)</a>
+<a name="ln889">{</a>
+<a name="ln890">  const int program = 8; // extended.cl, from programs.conf</a>
+<a name="ln891">  dt_iop_colormapping_global_data_t *gd</a>
+<a name="ln892">      = (dt_iop_colormapping_global_data_t *)malloc(sizeof(dt_iop_colormapping_global_data_t));</a>
+<a name="ln893">  module-&gt;data = gd;</a>
+<a name="ln894">  gd-&gt;kernel_histogram = dt_opencl_create_kernel(program, &quot;colormapping_histogram&quot;);</a>
+<a name="ln895">  gd-&gt;kernel_mapping = dt_opencl_create_kernel(program, &quot;colormapping_mapping&quot;);</a>
+<a name="ln896">}</a>
+<a name="ln897"> </a>
+<a name="ln898">void cleanup(dt_iop_module_t *module)</a>
+<a name="ln899">{</a>
+<a name="ln900">  free(module-&gt;params);</a>
+<a name="ln901">  module-&gt;params = NULL;</a>
+<a name="ln902">}</a>
+<a name="ln903"> </a>
+<a name="ln904">void cleanup_global(dt_iop_module_so_t *module)</a>
+<a name="ln905">{</a>
+<a name="ln906">  dt_iop_colormapping_global_data_t *gd = (dt_iop_colormapping_global_data_t *)module-&gt;data;</a>
+<a name="ln907">  dt_opencl_free_kernel(gd-&gt;kernel_histogram);</a>
+<a name="ln908">  dt_opencl_free_kernel(gd-&gt;kernel_mapping);</a>
+<a name="ln909">  free(module-&gt;data);</a>
+<a name="ln910">  module-&gt;data = NULL;</a>
+<a name="ln911">}</a>
+<a name="ln912"> </a>
+<a name="ln913">void reload_defaults(dt_iop_module_t *module)</a>
+<a name="ln914">{</a>
+<a name="ln915">  dt_iop_colormapping_params_t *tmp = (dt_iop_colormapping_params_t *)malloc(sizeof(dt_iop_colormapping_params_t));</a>
+<a name="ln916"> </a>
+<a name="ln917">  tmp-&gt;flag = NEUTRAL;</a>
+<a name="ln918">  tmp-&gt;n = 3;</a>
+<a name="ln919">  tmp-&gt;dominance = 100.f;</a>
+<a name="ln920">  tmp-&gt;equalization = 50.0f;</a>
+<a name="ln921"> </a>
+<a name="ln922">  // we might be called from presets update infrastructure =&gt; there is no image</a>
+<a name="ln923">  if(!module-&gt;dev) goto end;</a>
+<a name="ln924"> </a>
+<a name="ln925">  dt_iop_colormapping_gui_data_t *g = (dt_iop_colormapping_gui_data_t *)module-&gt;gui_data;</a>
+<a name="ln926">  if(module-&gt;dev-&gt;gui_attached &amp;&amp; g &amp;&amp; g-&gt;flowback_set)</a>
+<a name="ln927">  {</a>
+<a name="ln928">    memcpy(tmp-&gt;source_ihist, g-&gt;flowback.hist, sizeof(float) * HISTN);</a>
+<a name="ln929">    memcpy(tmp-&gt;source_mean, g-&gt;flowback.mean, sizeof(float) * MAXN * 2);</a>
+<a name="ln930">    memcpy(tmp-&gt;source_var, g-&gt;flowback.var, sizeof(float) * MAXN * 2);</a>
+<a name="ln931">    memcpy(tmp-&gt;source_weight, g-&gt;flowback.weight, sizeof(float) * MAXN);</a>
+<a name="ln932">    tmp-&gt;n = g-&gt;flowback.n;</a>
+<a name="ln933">    tmp-&gt;flag = HAS_SOURCE;</a>
+<a name="ln934">  }</a>
+<a name="ln935">  module-&gt;default_enabled = 0;</a>
+<a name="ln936"> </a>
+<a name="ln937">end:</a>
+<a name="ln938">  memcpy(module-&gt;default_params, tmp, sizeof(dt_iop_colormapping_params_t));</a>
+<a name="ln939">  memcpy(module-&gt;params, tmp, sizeof(dt_iop_colormapping_params_t));</a>
+<a name="ln940">  free(tmp);</a>
+<a name="ln941">}</a>
+<a name="ln942"> </a>
+<a name="ln943"> </a>
+<a name="ln944">static gboolean cluster_preview_draw(GtkWidget *widget, cairo_t *crf, dt_iop_module_t *self)</a>
+<a name="ln945">{</a>
+<a name="ln946">  dt_iop_colormapping_params_t *p = (dt_iop_colormapping_params_t *)self-&gt;params;</a>
+<a name="ln947">  dt_iop_colormapping_gui_data_t *g = (dt_iop_colormapping_gui_data_t *)self-&gt;gui_data;</a>
+<a name="ln948"> </a>
+<a name="ln949">  float(*mean)[2];</a>
+<a name="ln950">  float(*var)[2];</a>
+<a name="ln951"> </a>
+<a name="ln952">  if(widget == g-&gt;source_area)</a>
+<a name="ln953">  {</a>
+<a name="ln954">    mean = p-&gt;source_mean;</a>
+<a name="ln955">    var = p-&gt;source_var;</a>
+<a name="ln956">  }</a>
+<a name="ln957">  else</a>
+<a name="ln958">  {</a>
+<a name="ln959">    mean = p-&gt;target_mean;</a>
+<a name="ln960">    var = p-&gt;target_var;</a>
+<a name="ln961">  }</a>
+<a name="ln962"> </a>
+<a name="ln963"> </a>
+<a name="ln964">  GtkAllocation allocation;</a>
+<a name="ln965">  gtk_widget_get_allocation(widget, &amp;allocation);</a>
+<a name="ln966">  const int inset = 5;</a>
+<a name="ln967">  int width = allocation.width, height = allocation.height;</a>
+<a name="ln968">  cairo_surface_t *cst = dt_cairo_image_surface_create(CAIRO_FORMAT_ARGB32, width, height);</a>
+<a name="ln969">  cairo_t *cr = cairo_create(cst);</a>
+<a name="ln970">  cairo_set_source_rgb(cr, .2, .2, .2);</a>
+<a name="ln971">  cairo_paint(cr);</a>
+<a name="ln972"> </a>
+<a name="ln973">  cairo_translate(cr, inset, inset);</a>
+<a name="ln974">  width -= 2 * inset;</a>
+<a name="ln975">  height -= 2 * inset;</a>
+<a name="ln976"> </a>
+<a name="ln977"> </a>
+<a name="ln978">  const float sep = DT_PIXEL_APPLY_DPI(2.0);</a>
+<a name="ln979">  const float qwd = (width - (p-&gt;n - 1) * sep) / (float)p-&gt;n;</a>
+<a name="ln980">  for(int cl = 0; cl &lt; p-&gt;n; cl++)</a>
+<a name="ln981">  {</a>
+<a name="ln982">    // draw cluster</a>
+<a name="ln983">    for(int j = -1; j &lt;= 1; j++)</a>
+<a name="ln984">      for(int i = -1; i &lt;= 1; i++)</a>
+<a name="ln985">      {</a>
+<a name="ln986">        // draw 9x9 grid showing mean and variance of this cluster.</a>
+<a name="ln987">        double rgb[3] = { 0.5, 0.5, 0.5 };</a>
+<a name="ln988">        cmsCIELab Lab;</a>
+<a name="ln989">        Lab.L = 53.390011;</a>
+<a name="ln990">        Lab.a = (mean[cl][0] + i * var[cl][0]);</a>
+<a name="ln991">        Lab.b = (mean[cl][1] + j * var[cl][1]);</a>
+<a name="ln992">        cmsDoTransform(g-&gt;xform, &amp;Lab, rgb, 1);</a>
+<a name="ln993">        cairo_set_source_rgb(cr, rgb[0], rgb[1], rgb[2]);</a>
+<a name="ln994">        cairo_rectangle(cr, qwd * (i + 1) / 3.0, height * (j + 1) / 3.0, qwd / 3.0 - DT_PIXEL_APPLY_DPI(.5),</a>
+<a name="ln995">                        height / 3.0 - DT_PIXEL_APPLY_DPI(.5));</a>
+<a name="ln996">        cairo_fill(cr);</a>
+<a name="ln997">      }</a>
+<a name="ln998">    cairo_translate(cr, qwd + sep, 0);</a>
+<a name="ln999">  }</a>
+<a name="ln1000"> </a>
+<a name="ln1001">  cairo_destroy(cr);</a>
+<a name="ln1002">  cairo_set_source_surface(crf, cst, 0, 0);</a>
+<a name="ln1003">  cairo_paint(crf);</a>
+<a name="ln1004">  cairo_surface_destroy(cst);</a>
+<a name="ln1005">  return TRUE;</a>
+<a name="ln1006">}</a>
+<a name="ln1007"> </a>
+<a name="ln1008"> </a>
+<a name="ln1009">static void process_clusters(gpointer instance, gpointer user_data)</a>
+<a name="ln1010">{</a>
+<a name="ln1011">  dt_iop_module_t *self = (dt_iop_module_t *)user_data;</a>
+<a name="ln1012">  dt_iop_colormapping_params_t *p = (dt_iop_colormapping_params_t *)self-&gt;params;</a>
+<a name="ln1013">  dt_iop_colormapping_gui_data_t *g = (dt_iop_colormapping_gui_data_t *)self-&gt;gui_data;</a>
+<a name="ln1014">  int new_source_clusters = 0;</a>
+<a name="ln1015"> </a>
+<a name="ln1016">  if(!g || !g-&gt;buffer) return;</a>
+<a name="ln1017">  if(!(p-&gt;flag &amp; ACQUIRE)) return;</a>
+<a name="ln1018"> </a>
+<a name="ln1019">  const int reset = darktable.gui-&gt;reset;</a>
+<a name="ln1020">  darktable.gui-&gt;reset = 1;</a>
+<a name="ln1021"> </a>
+<a name="ln1022">  dt_pthread_mutex_lock(&amp;g-&gt;lock);</a>
+<a name="ln1023">  const int width = g-&gt;width;</a>
+<a name="ln1024">  const int height = g-&gt;height;</a>
+<a name="ln1025">  const int ch = g-&gt;ch;</a>
+<a name="ln1026">  float *buffer = malloc(width * height * ch * sizeof(float));</a>
+<a name="ln1027">  if(!buffer)</a>
+<a name="ln1028">  {</a>
+<a name="ln1029">    dt_pthread_mutex_unlock(&amp;g-&gt;lock);</a>
+<a name="ln1030">    return;</a>
+<a name="ln1031">  }</a>
+<a name="ln1032">  memcpy(buffer, g-&gt;buffer, width * height * ch * sizeof(float));</a>
+<a name="ln1033">  dt_pthread_mutex_unlock(&amp;g-&gt;lock);</a>
+<a name="ln1034"> </a>
+<a name="ln1035">  if(p-&gt;flag &amp; GET_SOURCE)</a>
+<a name="ln1036">  {</a>
+<a name="ln1037">    int hist[HISTN];</a>
+<a name="ln1038"> </a>
+<a name="ln1039">    // get histogram of L</a>
+<a name="ln1040">    capture_histogram(buffer, width, height, hist);</a>
+<a name="ln1041"> </a>
+<a name="ln1042">    // invert histogram</a>
+<a name="ln1043">    invert_histogram(hist, p-&gt;source_ihist);</a>
+<a name="ln1044"> </a>
+<a name="ln1045">    // get n color clusters</a>
+<a name="ln1046">    kmeans(buffer, width, height, p-&gt;n, p-&gt;source_mean, p-&gt;source_var, p-&gt;source_weight);</a>
+<a name="ln1047"> </a>
+<a name="ln1048">    p-&gt;flag |= HAS_SOURCE;</a>
+<a name="ln1049">    new_source_clusters = 1;</a>
+<a name="ln1050"> </a>
+<a name="ln1051">    dt_control_queue_redraw_widget(g-&gt;source_area);</a>
+<a name="ln1052">  }</a>
+<a name="ln1053">  else if(p-&gt;flag &amp; GET_TARGET)</a>
+<a name="ln1054">  {</a>
+<a name="ln1055">    // get histogram of L</a>
+<a name="ln1056">    capture_histogram(buffer, width, height, p-&gt;target_hist);</a>
+<a name="ln1057"> </a>
+<a name="ln1058">    // get n color clusters</a>
+<a name="ln1059">    kmeans(buffer, width, height, p-&gt;n, p-&gt;target_mean, p-&gt;target_var, p-&gt;target_weight);</a>
+<a name="ln1060"> </a>
+<a name="ln1061">    p-&gt;flag |= HAS_TARGET;</a>
+<a name="ln1062"> </a>
+<a name="ln1063">    dt_control_queue_redraw_widget(g-&gt;target_area);</a>
+<a name="ln1064">  }</a>
+<a name="ln1065"> </a>
+<a name="ln1066">  free(buffer);</a>
+<a name="ln1067"> </a>
+<a name="ln1068">  if(new_source_clusters)</a>
+<a name="ln1069">  {</a>
+<a name="ln1070">    memcpy(g-&gt;flowback.hist, p-&gt;source_ihist, sizeof(float) * HISTN);</a>
+<a name="ln1071">    memcpy(g-&gt;flowback.mean, p-&gt;source_mean, sizeof(float) * MAXN * 2);</a>
+<a name="ln1072">    memcpy(g-&gt;flowback.var, p-&gt;source_var, sizeof(float) * MAXN * 2);</a>
+<a name="ln1073">    memcpy(g-&gt;flowback.weight, p-&gt;source_weight, sizeof(float) * MAXN);</a>
+<a name="ln1074">    g-&gt;flowback.n = p-&gt;n;</a>
+<a name="ln1075">    g-&gt;flowback_set = 1;</a>
+<a name="ln1076">    FILE *f = g_fopen(&quot;/tmp/dt_colormapping_loaded&quot;, &quot;wb&quot;);</a>
+<a name="ln1077">    if(f)</a>
+<a name="ln1078">    {</a>
+<a name="ln1079">      if(fwrite(&amp;g-&gt;flowback, sizeof(g-&gt;flowback), 1, f) &lt; 1)</a>
+<a name="ln1080">        fprintf(stderr, &quot;[colormapping] could not write flowback file /tmp/dt_colormapping_loaded\n&quot;);</a>
+<a name="ln1081">      fclose(f);</a>
+<a name="ln1082">    }</a>
+<a name="ln1083">  }</a>
+<a name="ln1084"> </a>
+<a name="ln1085">  p-&gt;flag &amp;= ~(GET_TARGET | GET_SOURCE | ACQUIRE);</a>
+<a name="ln1086">  darktable.gui-&gt;reset = reset;</a>
+<a name="ln1087"> </a>
+<a name="ln1088">  if(p-&gt;flag &amp; HAS_SOURCE) dt_dev_add_history_item(darktable.develop, self, TRUE);</a>
+<a name="ln1089"> </a>
+<a name="ln1090">  dt_control_queue_redraw();</a>
+<a name="ln1091">}</a>
+<a name="ln1092"> </a>
+<a name="ln1093"> </a>
+<a name="ln1094">void gui_init(struct dt_iop_module_t *self)</a>
+<a name="ln1095">{</a>
+<a name="ln1096">  self-&gt;gui_data = malloc(sizeof(dt_iop_colormapping_gui_data_t));</a>
+<a name="ln1097">  dt_iop_colormapping_gui_data_t *g = (dt_iop_colormapping_gui_data_t *)self-&gt;gui_data;</a>
+<a name="ln1098">  dt_iop_colormapping_params_t *p = (dt_iop_colormapping_params_t *)self-&gt;params;</a>
+<a name="ln1099"> </a>
+<a name="ln1100">  g-&gt;flag = NEUTRAL;</a>
+<a name="ln1101">  g-&gt;flowback_set = 0;</a>
+<a name="ln1102">  cmsHPROFILE hsRGB = dt_colorspaces_get_profile(DT_COLORSPACE_SRGB, &quot;&quot;, DT_PROFILE_DIRECTION_IN)-&gt;profile;</a>
+<a name="ln1103">  cmsHPROFILE hLab = dt_colorspaces_get_profile(DT_COLORSPACE_LAB, &quot;&quot;, DT_PROFILE_DIRECTION_ANY)-&gt;profile;</a>
+<a name="ln1104">  g-&gt;xform = cmsCreateTransform(hLab, TYPE_Lab_DBL, hsRGB, TYPE_RGB_DBL, INTENT_PERCEPTUAL, 0);</a>
+<a name="ln1105">  g-&gt;buffer = NULL;</a>
+<a name="ln1106"> </a>
+<a name="ln1107">  dt_pthread_mutex_init(&amp;g-&gt;lock, NULL);</a>
+<a name="ln1108"> </a>
+<a name="ln1109">  self-&gt;widget = GTK_WIDGET(gtk_box_new(GTK_ORIENTATION_VERTICAL, DT_BAUHAUS_SPACE));</a>
+<a name="ln1110">  dt_gui_add_help_link(self-&gt;widget, dt_get_help_url(self-&gt;op));</a>
+<a name="ln1111"> </a>
+<a name="ln1112">  GtkBox *hbox1 = GTK_BOX(gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0));</a>
+<a name="ln1113">  GtkWidget *source = gtk_label_new(_(&quot;source clusters:&quot;));</a>
+<a name="ln1114">  gtk_box_pack_start(GTK_BOX(hbox1), GTK_WIDGET(source), FALSE, FALSE, 0);</a>
+<a name="ln1115">  gtk_box_pack_start(GTK_BOX(self-&gt;widget), GTK_WIDGET(hbox1), TRUE, TRUE, 0);</a>
+<a name="ln1116"> </a>
+<a name="ln1117">  g-&gt;source_area = dtgtk_drawing_area_new_with_aspect_ratio(1.0 / 3.0);</a>
+<a name="ln1118">  gtk_box_pack_start(GTK_BOX(self-&gt;widget), g-&gt;source_area, TRUE, TRUE, 0);</a>
+<a name="ln1119">  g_signal_connect(G_OBJECT(g-&gt;source_area), &quot;draw&quot;, G_CALLBACK(cluster_preview_draw), self);</a>
+<a name="ln1120"> </a>
+<a name="ln1121">  GtkBox *hbox2 = GTK_BOX(gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0));</a>
+<a name="ln1122">  GtkWidget *target = gtk_label_new(_(&quot;target clusters:&quot;));</a>
+<a name="ln1123">  gtk_box_pack_start(GTK_BOX(hbox2), GTK_WIDGET(target), FALSE, FALSE, 0);</a>
+<a name="ln1124">  gtk_box_pack_start(GTK_BOX(self-&gt;widget), GTK_WIDGET(hbox2), TRUE, TRUE, 0);</a>
+<a name="ln1125"> </a>
+<a name="ln1126">  g-&gt;target_area = dtgtk_drawing_area_new_with_aspect_ratio(1.0 / 3.0);</a>
+<a name="ln1127">  gtk_box_pack_start(GTK_BOX(self-&gt;widget), g-&gt;target_area, TRUE, TRUE, 0);</a>
+<a name="ln1128">  g_signal_connect(G_OBJECT(g-&gt;target_area), &quot;draw&quot;, G_CALLBACK(cluster_preview_draw), self);</a>
+<a name="ln1129"> </a>
+<a name="ln1130"> </a>
+<a name="ln1131">  GtkBox *box = GTK_BOX(gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 5));</a>
+<a name="ln1132">  gtk_box_pack_start(GTK_BOX(self-&gt;widget), GTK_WIDGET(box), TRUE, TRUE, 0);</a>
+<a name="ln1133">  GtkWidget *button;</a>
+<a name="ln1134"> </a>
+<a name="ln1135">  button = gtk_button_new_with_label(_(&quot;acquire as source&quot;));</a>
+<a name="ln1136">  g-&gt;acquire_source_button = button;</a>
+<a name="ln1137">  gtk_widget_set_tooltip_text(button, _(&quot;analyze this image as a source image&quot;));</a>
+<a name="ln1138">  gtk_box_pack_start(box, button, TRUE, TRUE, 0);</a>
+<a name="ln1139">  g_signal_connect(G_OBJECT(button), &quot;clicked&quot;, G_CALLBACK(acquire_source_button_pressed), (gpointer)self);</a>
+<a name="ln1140"> </a>
+<a name="ln1141">  button = gtk_button_new_with_label(_(&quot;acquire as target&quot;));</a>
+<a name="ln1142">  g-&gt;acquire_target_button = button;</a>
+<a name="ln1143">  gtk_widget_set_tooltip_text(button, _(&quot;analyze this image as a target image&quot;));</a>
+<a name="ln1144">  gtk_box_pack_start(box, button, TRUE, TRUE, 0);</a>
+<a name="ln1145">  g_signal_connect(G_OBJECT(button), &quot;clicked&quot;, G_CALLBACK(acquire_target_button_pressed), (gpointer)self);</a>
+<a name="ln1146"> </a>
+<a name="ln1147">  g-&gt;clusters = dt_bauhaus_slider_new_with_range(self, 1.f, 5.f, 1.f, p-&gt;n, 0);</a>
+<a name="ln1148">  dt_bauhaus_widget_set_label(g-&gt;clusters, NULL, _(&quot;number of clusters&quot;));</a>
+<a name="ln1149">  dt_bauhaus_slider_set_format(g-&gt;clusters, &quot;%.0f&quot;);</a>
+<a name="ln1150">  gtk_widget_set_tooltip_text(g-&gt;clusters, _(&quot;number of clusters to find in image. value change resets all clusters&quot;));</a>
+<a name="ln1151">  gtk_box_pack_start(GTK_BOX(self-&gt;widget), GTK_WIDGET(g-&gt;clusters), TRUE, TRUE, 0);</a>
+<a name="ln1152">  g_signal_connect(G_OBJECT(g-&gt;clusters), &quot;value-changed&quot;, G_CALLBACK(clusters_changed), (gpointer)self);</a>
+<a name="ln1153"> </a>
+<a name="ln1154">  g-&gt;dominance = dt_bauhaus_slider_new_with_range(self, 0.f, 100.f, 2.f, p-&gt;dominance, 2);</a>
+<a name="ln1155">  dt_bauhaus_widget_set_label(g-&gt;dominance, NULL, _(&quot;color dominance&quot;));</a>
+<a name="ln1156">  gtk_widget_set_tooltip_text(g-&gt;dominance, _(&quot;how clusters are mapped. low values: based on color &quot;</a>
+<a name="ln1157">                                              &quot;proximity, high values: based on color dominance&quot;));</a>
+<a name="ln1158">  dt_bauhaus_slider_set_format(g-&gt;dominance, &quot;%.02f%%&quot;);</a>
+<a name="ln1159">  gtk_box_pack_start(GTK_BOX(self-&gt;widget), GTK_WIDGET(g-&gt;dominance), TRUE, TRUE, 0);</a>
+<a name="ln1160">  g_signal_connect(G_OBJECT(g-&gt;dominance), &quot;value-changed&quot;, G_CALLBACK(dominance_changed), self);</a>
+<a name="ln1161"> </a>
+<a name="ln1162">  g-&gt;equalization = dt_bauhaus_slider_new_with_range(self, 0.f, 100.f, 2.f, p-&gt;equalization, 2);</a>
+<a name="ln1163">  dt_bauhaus_widget_set_label(g-&gt;equalization, NULL, _(&quot;histogram equalization&quot;));</a>
+<a name="ln1164">  gtk_widget_set_tooltip_text(g-&gt;equalization, _(&quot;level of histogram equalization&quot;));</a>
+<a name="ln1165">  dt_bauhaus_slider_set_format(g-&gt;equalization, &quot;%.02f%%&quot;);</a>
+<a name="ln1166">  gtk_box_pack_start(GTK_BOX(self-&gt;widget), GTK_WIDGET(g-&gt;equalization), TRUE, TRUE, 0);</a>
+<a name="ln1167">  g_signal_connect(G_OBJECT(g-&gt;equalization), &quot;value-changed&quot;, G_CALLBACK(equalization_changed), self);</a>
+<a name="ln1168"> </a>
+<a name="ln1169">  /* add signal handler for preview pipe finished: process clusters if requested */</a>
+<a name="ln1170">  dt_control_signal_connect(darktable.signals, DT_SIGNAL_DEVELOP_PREVIEW_PIPE_FINISHED,</a>
+<a name="ln1171">                            G_CALLBACK(process_clusters), self);</a>
+<a name="ln1172"> </a>
+<a name="ln1173"> </a>
+<a name="ln1174">  FILE *f = g_fopen(&quot;/tmp/dt_colormapping_loaded&quot;, &quot;rb&quot;);</a>
+<a name="ln1175">  if(f)</a>
+<a name="ln1176">  {</a>
+<a name="ln1177">    if(fread(&amp;g-&gt;flowback, sizeof(g-&gt;flowback), 1, f) &gt; 0) g-&gt;flowback_set = 1;</a>
+<a name="ln1178">    fclose(f);</a>
+<a name="ln1179">  }</a>
+<a name="ln1180">}</a>
+<a name="ln1181"> </a>
+<a name="ln1182">void gui_cleanup(struct dt_iop_module_t *self)</a>
+<a name="ln1183">{</a>
+<a name="ln1184">  dt_iop_colormapping_gui_data_t *g = (dt_iop_colormapping_gui_data_t *)self-&gt;gui_data;</a>
+<a name="ln1185"> </a>
+<a name="ln1186">  dt_control_signal_disconnect(darktable.signals, G_CALLBACK(process_clusters), self);</a>
+<a name="ln1187"> </a>
+<a name="ln1188">  cmsDeleteTransform(g-&gt;xform);</a>
+<a name="ln1189">  dt_pthread_mutex_destroy(&amp;g-&gt;lock);</a>
+<a name="ln1190">  free(g-&gt;buffer);</a>
+<a name="ln1191">  free(self-&gt;gui_data);</a>
+<a name="ln1192">  self-&gt;gui_data = NULL;</a>
+<a name="ln1193">}</a>
+<a name="ln1194"> </a>
+<a name="ln1195">// modelines: These editor modelines have been set for all relevant files by tools/update_modelines.sh</a>
+<a name="ln1196">// vim: shiftwidth=2 expandtab tabstop=2 cindent</a>
+<a name="ln1197">// kate: tab-indents: off; indent-width 2; replace-tabs on; indent-mode cstyle; remove-trailing-spaces modified;</a>
+
+</code></pre>
+<div class="balloon" rel="333"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v522/" target="_blank">V522</a> There might be dereferencing of a potential null pointer 'mean'. Check lines: 333, 306.</p></div>
+<div class="balloon" rel="333"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v522/" target="_blank">V522</a> There might be dereferencing of a potential null pointer 'var'. Check lines: 333, 307.</p></div>
+<div class="balloon" rel="337"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v522/" target="_blank">V522</a> There might be dereferencing of a potential null pointer 'cnt'. Check lines: 337, 308.</p></div>
+<div class="balloon" rel="495"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v522/" target="_blank">V522</a> There might be dereferencing of a potential null pointer 'var_ratio'. Check lines: 495, 491.</p></div>
+<div class="balloon" rel="496"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v522/" target="_blank">V522</a> There might be dereferencing of a potential null pointer 'mapio'. Check lines: 496, 486.</p></div>
+<div class="balloon" rel="548"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v769/" target="_blank">V769</a> The 'weight_buf' pointer in the expression could be nullptr. In such case, resulting value of arithmetic operations on this pointer will be senseless and it should not be used. Check lines: 548, 538.</p></div>
+<div class="balloon" rel="894"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v522/" target="_blank">V522</a> There might be dereferencing of a potential null pointer 'gd'. Check lines: 894, 892.</p></div>
+<div class="balloon" rel="917"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v522/" target="_blank">V522</a> There might be dereferencing of a potential null pointer 'tmp'. Check lines: 917, 915.</p></div>
+<div class="balloon" rel="1100"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v522/" target="_blank">V522</a> There might be dereferencing of a potential null pointer 'g'. Check lines: 1100, 1096.</p></div>
+
+<link rel="stylesheet" href="highlight.css">
+<script src="highlight.pack.js"></script>
+<script src="highlightjs-line-numbers.js"></script>
+<script>hljs.initHighlightingOnLoad();</script>
+<script>hljs.initLineNumbersOnLoad();</script>
+<script>
+  $(document).ready(function() {
+      $('.balloon').each(function () {
+          var bl = $(this);
+          var line = bl.attr('rel');
+          var text = $('a[name="ln'+line+'"]').text();
+
+          var space_count = 0;
+          for(var i = 0; i<text.length; i++){
+              var char = text[i];
+              if((char !== ' ')&&(char !== '\t'))break;
+              if(char === '\t')space_count++;
+              space_count++;
+          }
+
+          bl.css('margin-left', space_count*8);
+          $('a[name="ln'+line+'"]').after(bl);
+      });
+
+      window.location = window.location;
+  });
+</script>
+</body>
+</html>

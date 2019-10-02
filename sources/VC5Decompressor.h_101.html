@@ -1,0 +1,283 @@
+
+<html>
+<head>
+  <link rel="stylesheet" href="../style.css"/>
+  <script src="../jquery-3.2.1.min.js"></script>
+</head>
+<body>
+<pre><code class = "cpp">
+<a name="ln1">/*</a>
+<a name="ln2">    RawSpeed - RAW file decoder.</a>
+<a name="ln3"> </a>
+<a name="ln4">    Copyright (C) 2018 Stefan Löffler</a>
+<a name="ln5">    Copyright (C) 2018 Roman Lebedev</a>
+<a name="ln6"> </a>
+<a name="ln7">    This library is free software; you can redistribute it and/or</a>
+<a name="ln8">    modify it under the terms of the GNU Lesser General Public</a>
+<a name="ln9">    License as published by the Free Software Foundation; either</a>
+<a name="ln10">    version 2 of the License, or (at your option) any later version.</a>
+<a name="ln11"> </a>
+<a name="ln12">    This library is distributed in the hope that it will be useful,</a>
+<a name="ln13">    but WITHOUT ANY WARRANTY; without even the implied warranty of</a>
+<a name="ln14">    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU</a>
+<a name="ln15">    Lesser General Public License for more details.</a>
+<a name="ln16"> </a>
+<a name="ln17">    You should have received a copy of the GNU Lesser General Public</a>
+<a name="ln18">    License along with this library; if not, write to the Free Software</a>
+<a name="ln19">    Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA</a>
+<a name="ln20">*/</a>
+<a name="ln21"> </a>
+<a name="ln22">#pragma once</a>
+<a name="ln23"> </a>
+<a name="ln24">#include &quot;common/Array2DRef.h&quot;                  // for Array2DRef</a>
+<a name="ln25">#include &quot;common/Common.h&quot;                      // for uint16_t, int16_t</a>
+<a name="ln26">#include &quot;common/DefaultInitAllocatorAdaptor.h&quot; // for DefaultInitAllocatorA...</a>
+<a name="ln27">#include &quot;common/Optional.h&quot;                    // for Optional</a>
+<a name="ln28">#include &quot;common/RawImage.h&quot;                    // for RawImage</a>
+<a name="ln29">#include &quot;common/SimpleLUT.h&quot;                   // for SimpleLUT, SimpleLUT...</a>
+<a name="ln30">#include &quot;decompressors/AbstractDecompressor.h&quot; // for AbstractDecompressor</a>
+<a name="ln31">#include &quot;io/BitPumpMSB.h&quot;                      // for BitPumpMSB</a>
+<a name="ln32">#include &quot;io/ByteStream.h&quot;                      // for ByteStream</a>
+<a name="ln33">#include &lt;array&gt;                                // for array</a>
+<a name="ln34">#include &lt;cstdint&gt;                              // for int16_t, uint16_t</a>
+<a name="ln35">#include &lt;memory&gt;                               // for unique_ptr</a>
+<a name="ln36">#include &lt;type_traits&gt;                          // for underlying_type, und...</a>
+<a name="ln37">#include &lt;utility&gt;                              // for move</a>
+<a name="ln38">#include &lt;vector&gt;                               // for vector</a>
+<a name="ln39"> </a>
+<a name="ln40">namespace rawspeed {</a>
+<a name="ln41"> </a>
+<a name="ln42">const int MAX_NUM_PRESCALE = 8;</a>
+<a name="ln43"> </a>
+<a name="ln44">// Decompresses VC-5 as used by GoPro</a>
+<a name="ln45"> </a>
+<a name="ln46">enum class VC5Tag : int16_t {</a>
+<a name="ln47">  NoTag = 0x0, // synthetic, not an actual tag</a>
+<a name="ln48"> </a>
+<a name="ln49">  ChannelCount = 0x000c,</a>
+<a name="ln50">  ImageWidth = 0x0014,</a>
+<a name="ln51">  ImageHeight = 0x0015,</a>
+<a name="ln52">  LowpassPrecision = 0x0023,</a>
+<a name="ln53">  SubbandCount = 0x000E,</a>
+<a name="ln54">  SubbandNumber = 0x0030,</a>
+<a name="ln55">  Quantization = 0x0035,</a>
+<a name="ln56">  ChannelNumber = 0x003e,</a>
+<a name="ln57">  ImageFormat = 0x0054,</a>
+<a name="ln58">  MaxBitsPerComponent = 0x0066,</a>
+<a name="ln59">  PatternWidth = 0x006a,</a>
+<a name="ln60">  PatternHeight = 0x006b,</a>
+<a name="ln61">  ComponentsPerSample = 0x006c,</a>
+<a name="ln62">  PrescaleShift = 0x006d,</a>
+<a name="ln63"> </a>
+<a name="ln64">  LARGE_CHUNK = 0x2000,</a>
+<a name="ln65">  SMALL_CHUNK = 0x4000,</a>
+<a name="ln66">  UniqueImageIdentifier = 0x4004,</a>
+<a name="ln67">  LargeCodeblock = 0x6000,</a>
+<a name="ln68"> </a>
+<a name="ln69">  Optional = int16_t(0x8000U), // only signbit set</a>
+<a name="ln70">};</a>
+<a name="ln71">inline VC5Tag operator&amp;(VC5Tag LHS, VC5Tag RHS) {</a>
+<a name="ln72">  using value_type = std::underlying_type&lt;VC5Tag&gt;::type;</a>
+<a name="ln73">  return static_cast&lt;VC5Tag&gt;(static_cast&lt;value_type&gt;(LHS) &amp;</a>
+<a name="ln74">                             static_cast&lt;value_type&gt;(RHS));</a>
+<a name="ln75">}</a>
+<a name="ln76">inline bool matches(VC5Tag LHS, VC5Tag RHS) {</a>
+<a name="ln77">  // Are there any common bit set?</a>
+<a name="ln78">  return (LHS &amp; RHS) != VC5Tag::NoTag;</a>
+<a name="ln79">}</a>
+<a name="ln80">inline bool is(VC5Tag LHS, VC5Tag RHS) {</a>
+<a name="ln81">  // Does LHS have all the RHS bits set?</a>
+<a name="ln82">  return (LHS &amp; RHS) == RHS;</a>
+<a name="ln83">}</a>
+<a name="ln84">inline VC5Tag operator-(VC5Tag tag) {</a>
+<a name="ln85">  using value_type = std::underlying_type&lt;VC5Tag&gt;::type;</a>
+<a name="ln86">  // Negate</a>
+<a name="ln87">  return static_cast&lt;VC5Tag&gt;(-static_cast&lt;value_type&gt;(tag));</a>
+<a name="ln88">}</a>
+<a name="ln89"> </a>
+<a name="ln90">class VC5Decompressor final : public AbstractDecompressor {</a>
+<a name="ln91">  RawImage mRaw;</a>
+<a name="ln92">  ByteStream mBs;</a>
+<a name="ln93"> </a>
+<a name="ln94">  static constexpr auto VC5_LOG_TABLE_BITWIDTH = 12;</a>
+<a name="ln95">  int outputBits;</a>
+<a name="ln96">  SimpleLUT&lt;unsigned, VC5_LOG_TABLE_BITWIDTH&gt; mVC5LogTable;</a>
+<a name="ln97"> </a>
+<a name="ln98">  void initVC5LogTable();</a>
+<a name="ln99"> </a>
+<a name="ln100">  static constexpr int numWaveletLevels = 3;</a>
+<a name="ln101">  static constexpr int numHighPassBands = 3;</a>
+<a name="ln102">  static constexpr int numLowPassBands = 1;</a>
+<a name="ln103">  static constexpr int numSubbands =</a>
+<a name="ln104">      numLowPassBands + numHighPassBands * numWaveletLevels;</a>
+<a name="ln105"> </a>
+<a name="ln106">  struct {</a>
+<a name="ln107">    uint16_t iChannel = 0; // 0'th channel is the default</a>
+<a name="ln108">    Optional&lt;uint16_t&gt; iSubband;</a>
+<a name="ln109">    Optional&lt;uint16_t&gt; lowpassPrecision;</a>
+<a name="ln110">    Optional&lt;int16_t&gt; quantization;</a>
+<a name="ln111"> </a>
+<a name="ln112">    const uint16_t imgFormat = 4;</a>
+<a name="ln113">    const uint16_t patternWidth = 2;</a>
+<a name="ln114">    const uint16_t patternHeight = 2;</a>
+<a name="ln115">    const uint16_t cps = 1;</a>
+<a name="ln116">  } mVC5;</a>
+<a name="ln117"> </a>
+<a name="ln118">  class Wavelet {</a>
+<a name="ln119">  public:</a>
+<a name="ln120">    int width, height;</a>
+<a name="ln121">    int16_t prescale;</a>
+<a name="ln122"> </a>
+<a name="ln123">    struct AbstractBand {</a>
+<a name="ln124">      std::vector&lt;int16_t, DefaultInitAllocatorAdaptor&lt;int16_t&gt;&gt; data;</a>
+<a name="ln125">      virtual ~AbstractBand() = default;</a>
+<a name="ln126">      virtual void decode(const Wavelet&amp; wavelet) = 0;</a>
+<a name="ln127">    };</a>
+<a name="ln128">    struct ReconstructableBand final : AbstractBand {</a>
+<a name="ln129">      bool clampUint;</a>
+<a name="ln130">      std::vector&lt;int16_t, DefaultInitAllocatorAdaptor&lt;int16_t&gt;&gt;</a>
+<a name="ln131">          lowpass_storage;</a>
+<a name="ln132">      std::vector&lt;int16_t, DefaultInitAllocatorAdaptor&lt;int16_t&gt;&gt;</a>
+<a name="ln133">          highpass_storage;</a>
+<a name="ln134">      explicit ReconstructableBand(bool clampUint_ = false)</a>
+<a name="ln135">          : clampUint(clampUint_) {}</a>
+<a name="ln136">      void processLow(const Wavelet&amp; wavelet) noexcept;</a>
+<a name="ln137">      void processHigh(const Wavelet&amp; wavelet) noexcept;</a>
+<a name="ln138">      void combine(const Wavelet&amp; wavelet) noexcept;</a>
+<a name="ln139">      void decode(const Wavelet&amp; wavelet) noexcept final;</a>
+<a name="ln140">    };</a>
+<a name="ln141">    struct AbstractDecodeableBand : AbstractBand {</a>
+<a name="ln142">      ByteStream bs;</a>
+<a name="ln143">      explicit AbstractDecodeableBand(ByteStream bs_) : bs(std::move(bs_)) {}</a>
+<a name="ln144">    };</a>
+<a name="ln145">    struct LowPassBand final : AbstractDecodeableBand {</a>
+<a name="ln146">      uint16_t lowpassPrecision;</a>
+<a name="ln147">      LowPassBand(const Wavelet&amp; wavelet, ByteStream bs_,</a>
+<a name="ln148">                  uint16_t lowpassPrecision_);</a>
+<a name="ln149">      void decode(const Wavelet&amp; wavelet) final;</a>
+<a name="ln150">    };</a>
+<a name="ln151">    struct HighPassBand final : AbstractDecodeableBand {</a>
+<a name="ln152">      int16_t quant;</a>
+<a name="ln153">      HighPassBand(ByteStream bs_, int16_t quant_)</a>
+<a name="ln154">          : AbstractDecodeableBand(std::move(bs_)), quant(quant_) {}</a>
+<a name="ln155">      void decode(const Wavelet&amp; wavelet) final;</a>
+<a name="ln156">    };</a>
+<a name="ln157"> </a>
+<a name="ln158">    static constexpr uint16_t numBands = 4;</a>
+<a name="ln159">    std::array&lt;std::unique_ptr&lt;AbstractBand&gt;, numBands&gt; bands;</a>
+<a name="ln160"> </a>
+<a name="ln161">    void clear() {</a>
+<a name="ln162">      for (auto&amp; band : bands)</a>
+<a name="ln163">        band.reset();</a>
+<a name="ln164">    }</a>
+<a name="ln165"> </a>
+<a name="ln166">    void setBandValid(int band);</a>
+<a name="ln167">    bool isBandValid(int band) const;</a>
+<a name="ln168">    uint32_t getValidBandMask() const { return mDecodedBandMask; }</a>
+<a name="ln169">    bool allBandsValid() const;</a>
+<a name="ln170"> </a>
+<a name="ln171">    void reconstructPass(Array2DRef&lt;int16_t&gt; dst,</a>
+<a name="ln172">                         Array2DRef&lt;const int16_t&gt; high,</a>
+<a name="ln173">                         Array2DRef&lt;const int16_t&gt; low) const noexcept;</a>
+<a name="ln174"> </a>
+<a name="ln175">    void combineLowHighPass(Array2DRef&lt;int16_t&gt; dst,</a>
+<a name="ln176">                            Array2DRef&lt;const int16_t&gt; low,</a>
+<a name="ln177">                            Array2DRef&lt;const int16_t&gt; high, int descaleShift,</a>
+<a name="ln178">                            bool clampUint /*= false*/) const noexcept;</a>
+<a name="ln179"> </a>
+<a name="ln180">    Array2DRef&lt;const int16_t&gt; bandAsArray2DRef(unsigned int iBand) const;</a>
+<a name="ln181"> </a>
+<a name="ln182">  protected:</a>
+<a name="ln183">    uint32_t mDecodedBandMask = 0;</a>
+<a name="ln184">  };</a>
+<a name="ln185"> </a>
+<a name="ln186">  struct Channel {</a>
+<a name="ln187">    std::array&lt;Wavelet, numWaveletLevels&gt; wavelets;</a>
+<a name="ln188"> </a>
+<a name="ln189">    Wavelet::ReconstructableBand band{/*clampUint*/ true};</a>
+<a name="ln190">    // the final lowband.</a>
+<a name="ln191">    int width, height;</a>
+<a name="ln192">  };</a>
+<a name="ln193"> </a>
+<a name="ln194">  static constexpr int numChannels = 4;</a>
+<a name="ln195">  static constexpr int numSubbandsTotal = numSubbands * numChannels;</a>
+<a name="ln196">  static constexpr int numLowPassBandsTotal = numWaveletLevels * numChannels;</a>
+<a name="ln197">  std::array&lt;Channel, numChannels&gt; channels;</a>
+<a name="ln198"> </a>
+<a name="ln199">  struct DecodeableBand {</a>
+<a name="ln200">    Wavelet::AbstractDecodeableBand* band;</a>
+<a name="ln201">    const Wavelet&amp; wavelet;</a>
+<a name="ln202">    DecodeableBand(Wavelet::AbstractDecodeableBand* band_,</a>
+<a name="ln203">                   const Wavelet&amp; wavelet_)</a>
+<a name="ln204">        : band(band_), wavelet(wavelet_) {}</a>
+<a name="ln205">  };</a>
+<a name="ln206">  std::vector&lt;DecodeableBand&gt; allDecodeableBands;</a>
+<a name="ln207"> </a>
+<a name="ln208">  struct ReconstructionStep {</a>
+<a name="ln209">    Wavelet&amp; wavelet;</a>
+<a name="ln210">    Wavelet::ReconstructableBand&amp; band;</a>
+<a name="ln211">    ReconstructionStep(Wavelet* wavelet_, Wavelet::ReconstructableBand* band_)</a>
+<a name="ln212">        : wavelet(*wavelet_), band(*band_) {}</a>
+<a name="ln213">  };</a>
+<a name="ln214">  std::vector&lt;ReconstructionStep&gt; reconstructionSteps;</a>
+<a name="ln215"> </a>
+<a name="ln216">  static inline void getRLV(BitPumpMSB* bits, int* value, unsigned int* count);</a>
+<a name="ln217"> </a>
+<a name="ln218">  void parseLargeCodeblock(const ByteStream&amp; bs);</a>
+<a name="ln219"> </a>
+<a name="ln220">  void prepareBandDecodingPlan();</a>
+<a name="ln221">  void prepareBandReconstruction();</a>
+<a name="ln222">  void prepareDecodingPlan();</a>
+<a name="ln223"> </a>
+<a name="ln224">  void decodeBands(bool* exceptionThrown) const noexcept;</a>
+<a name="ln225"> </a>
+<a name="ln226">  void reconstructLowpassBands() const noexcept;</a>
+<a name="ln227"> </a>
+<a name="ln228">  void combineFinalLowpassBands() const noexcept;</a>
+<a name="ln229"> </a>
+<a name="ln230">  void decodeThread(bool* exceptionThrown) const noexcept;</a>
+<a name="ln231"> </a>
+<a name="ln232">  void parseVC5();</a>
+<a name="ln233"> </a>
+<a name="ln234">public:</a>
+<a name="ln235">  VC5Decompressor(ByteStream bs, const RawImage&amp; img);</a>
+<a name="ln236"> </a>
+<a name="ln237">  void decode(unsigned int offsetX, unsigned int offsetY, unsigned int width,</a>
+<a name="ln238">              unsigned int height);</a>
+<a name="ln239">};</a>
+<a name="ln240"> </a>
+<a name="ln241">} // namespace rawspeed</a>
+
+</code></pre>
+<div class="balloon" rel="118"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v730/" target="_blank">V730</a> Not all members of a class are initialized inside the compiler generated constructor. Consider inspecting: width, height, prescale.</p></div>
+<div class="balloon" rel="186"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v730/" target="_blank">V730</a> Not all members of a class are initialized inside the compiler generated constructor. Consider inspecting: width, height.</p></div>
+
+<link rel="stylesheet" href="highlight.css">
+<script src="highlight.pack.js"></script>
+<script src="highlightjs-line-numbers.js"></script>
+<script>hljs.initHighlightingOnLoad();</script>
+<script>hljs.initLineNumbersOnLoad();</script>
+<script>
+  $(document).ready(function() {
+      $('.balloon').each(function () {
+          var bl = $(this);
+          var line = bl.attr('rel');
+          var text = $('a[name="ln'+line+'"]').text();
+
+          var space_count = 0;
+          for(var i = 0; i<text.length; i++){
+              var char = text[i];
+              if((char !== ' ')&&(char !== '\t'))break;
+              if(char === '\t')space_count++;
+              space_count++;
+          }
+
+          bl.css('margin-left', space_count*8);
+          $('a[name="ln'+line+'"]').after(bl);
+      });
+
+      window.location = window.location;
+  });
+</script>
+</body>
+</html>

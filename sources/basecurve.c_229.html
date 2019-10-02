@@ -1,0 +1,2260 @@
+
+<html>
+<head>
+  <link rel="stylesheet" href="../style.css"/>
+  <script src="../jquery-3.2.1.min.js"></script>
+</head>
+<body>
+<pre><code class = "cpp">
+<a name="ln1">/*</a>
+<a name="ln2">    This file is part of darktable,</a>
+<a name="ln3">    copyright (c) 2009--2011 johannes hanika.</a>
+<a name="ln4"> </a>
+<a name="ln5">    darktable is free software: you can redistribute it and/or modify</a>
+<a name="ln6">    it under the terms of the GNU General Public License as published by</a>
+<a name="ln7">    the Free Software Foundation, either version 3 of the License, or</a>
+<a name="ln8">    (at your option) any later version.</a>
+<a name="ln9"> </a>
+<a name="ln10">    darktable is distributed in the hope that it will be useful,</a>
+<a name="ln11">    but WITHOUT ANY WARRANTY; without even the implied warranty of</a>
+<a name="ln12">    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the</a>
+<a name="ln13">    GNU General Public License for more details.</a>
+<a name="ln14"> </a>
+<a name="ln15">    You should have received a copy of the GNU General Public License</a>
+<a name="ln16">    along with darktable.  If not, see &lt;http://www.gnu.org/licenses/&gt;.</a>
+<a name="ln17">*/</a>
+<a name="ln18">#ifdef HAVE_CONFIG_H</a>
+<a name="ln19">#include &quot;config.h&quot;</a>
+<a name="ln20">#endif</a>
+<a name="ln21">#include &quot;bauhaus/bauhaus.h&quot;</a>
+<a name="ln22">#include &quot;common/colorspaces_inline_conversions.h&quot;</a>
+<a name="ln23">#include &quot;common/debug.h&quot;</a>
+<a name="ln24">#include &quot;common/opencl.h&quot;</a>
+<a name="ln25">#include &quot;common/rgb_norms.h&quot;</a>
+<a name="ln26">#include &quot;control/control.h&quot;</a>
+<a name="ln27">#include &quot;develop/develop.h&quot;</a>
+<a name="ln28">#include &quot;develop/imageop.h&quot;</a>
+<a name="ln29">#include &quot;develop/imageop_math.h&quot;</a>
+<a name="ln30">#include &quot;develop/tiling.h&quot;</a>
+<a name="ln31">#include &quot;dtgtk/drawingarea.h&quot;</a>
+<a name="ln32">#include &quot;gui/draw.h&quot;</a>
+<a name="ln33">#include &quot;gui/gtk.h&quot;</a>
+<a name="ln34">#include &quot;gui/presets.h&quot;</a>
+<a name="ln35">#include &quot;iop/iop_api.h&quot;</a>
+<a name="ln36"> </a>
+<a name="ln37">#include &lt;assert.h&gt;</a>
+<a name="ln38">#include &lt;gtk/gtk.h&gt;</a>
+<a name="ln39">#include &lt;inttypes.h&gt;</a>
+<a name="ln40">#include &lt;math.h&gt;</a>
+<a name="ln41">#include &lt;stdlib.h&gt;</a>
+<a name="ln42">#include &lt;string.h&gt;</a>
+<a name="ln43"> </a>
+<a name="ln44">#define DT_GUI_CURVE_EDITOR_INSET DT_PIXEL_APPLY_DPI(5)</a>
+<a name="ln45">#define DT_GUI_CURVE_INFL .3f</a>
+<a name="ln46">#define DT_IOP_TONECURVE_RES 256</a>
+<a name="ln47">#define MAXNODES 20</a>
+<a name="ln48"> </a>
+<a name="ln49"> </a>
+<a name="ln50">DT_MODULE_INTROSPECTION(6, dt_iop_basecurve_params_t)</a>
+<a name="ln51"> </a>
+<a name="ln52">typedef struct dt_iop_basecurve_node_t</a>
+<a name="ln53">{</a>
+<a name="ln54">  float x;</a>
+<a name="ln55">  float y;</a>
+<a name="ln56">} dt_iop_basecurve_node_t;</a>
+<a name="ln57"> </a>
+<a name="ln58">typedef struct dt_iop_basecurve_params_t</a>
+<a name="ln59">{</a>
+<a name="ln60">  // three curves (c, ., .) with max number of nodes</a>
+<a name="ln61">  // the other two are reserved, maybe we'll have cam rgb at some point.</a>
+<a name="ln62">  dt_iop_basecurve_node_t basecurve[3][MAXNODES];</a>
+<a name="ln63">  int basecurve_nodes[3];</a>
+<a name="ln64">  int basecurve_type[3];</a>
+<a name="ln65">  int exposure_fusion;    // number of exposure fusion steps</a>
+<a name="ln66">  float exposure_stops;   // number of stops between fusion images</a>
+<a name="ln67">  float exposure_bias;    // whether to do exposure-fusion with over or under-exposure</a>
+<a name="ln68">  int preserve_colors;</a>
+<a name="ln69">} dt_iop_basecurve_params_t;</a>
+<a name="ln70"> </a>
+<a name="ln71">typedef struct dt_iop_basecurve_params5_t</a>
+<a name="ln72">{</a>
+<a name="ln73">  // three curves (c, ., .) with max number of nodes</a>
+<a name="ln74">  // the other two are reserved, maybe we'll have cam rgb at some point.</a>
+<a name="ln75">  dt_iop_basecurve_node_t basecurve[3][MAXNODES];</a>
+<a name="ln76">  int basecurve_nodes[3];</a>
+<a name="ln77">  int basecurve_type[3];</a>
+<a name="ln78">  int exposure_fusion;    // number of exposure fusion steps</a>
+<a name="ln79">  float exposure_stops;   // number of stops between fusion images</a>
+<a name="ln80">  float exposure_bias;    // whether to do exposure-fusion with over or under-exposure</a>
+<a name="ln81">} dt_iop_basecurve_params5_t;</a>
+<a name="ln82"> </a>
+<a name="ln83">typedef struct dt_iop_basecurve_params3_t</a>
+<a name="ln84">{</a>
+<a name="ln85">  // three curves (c, ., .) with max number of nodes</a>
+<a name="ln86">  // the other two are reserved, maybe we'll have cam rgb at some point.</a>
+<a name="ln87">  dt_iop_basecurve_node_t basecurve[3][MAXNODES];</a>
+<a name="ln88">  int basecurve_nodes[3];</a>
+<a name="ln89">  int basecurve_type[3];</a>
+<a name="ln90">  int exposure_fusion;  // number of exposure fusion steps</a>
+<a name="ln91">  float exposure_stops; // number of stops between fusion images</a>
+<a name="ln92">} dt_iop_basecurve_params3_t;</a>
+<a name="ln93"> </a>
+<a name="ln94">// same but semantics/defaults changed</a>
+<a name="ln95">typedef dt_iop_basecurve_params3_t dt_iop_basecurve_params4_t;</a>
+<a name="ln96"> </a>
+<a name="ln97">typedef struct dt_iop_basecurve_params2_t</a>
+<a name="ln98">{</a>
+<a name="ln99">  // three curves (c, ., .) with max number of nodes</a>
+<a name="ln100">  // the other two are reserved, maybe we'll have cam rgb at some point.</a>
+<a name="ln101">  dt_iop_basecurve_node_t basecurve[3][MAXNODES];</a>
+<a name="ln102">  int basecurve_nodes[3];</a>
+<a name="ln103">  int basecurve_type[3];</a>
+<a name="ln104">} dt_iop_basecurve_params2_t;</a>
+<a name="ln105"> </a>
+<a name="ln106">typedef struct dt_iop_basecurve_params1_t</a>
+<a name="ln107">{</a>
+<a name="ln108">  float tonecurve_x[6], tonecurve_y[6];</a>
+<a name="ln109">  int tonecurve_preset;</a>
+<a name="ln110">} dt_iop_basecurve_params1_t;</a>
+<a name="ln111"> </a>
+<a name="ln112">int legacy_params(dt_iop_module_t *self, const void *const old_params, const int old_version,</a>
+<a name="ln113">                  void *new_params, const int new_version)</a>
+<a name="ln114">{</a>
+<a name="ln115">  if(old_version == 1 &amp;&amp; new_version == 6)</a>
+<a name="ln116">  {</a>
+<a name="ln117">    dt_iop_basecurve_params1_t *o = (dt_iop_basecurve_params1_t *)old_params;</a>
+<a name="ln118">    dt_iop_basecurve_params_t *n = (dt_iop_basecurve_params_t *)new_params;</a>
+<a name="ln119"> </a>
+<a name="ln120">    // start with a fresh copy of default parameters</a>
+<a name="ln121">    // unfortunately default_params aren't inited at this stage.</a>
+<a name="ln122">    *n = (dt_iop_basecurve_params_t){ {</a>
+<a name="ln123">                                        { { 0.0, 0.0 }, { 1.0, 1.0 } },</a>
+<a name="ln124">                                      },</a>
+<a name="ln125">                                      { 2, 3, 3 },</a>
+<a name="ln126">                                      { MONOTONE_HERMITE, MONOTONE_HERMITE, MONOTONE_HERMITE } , 0, 1};</a>
+<a name="ln127">    for(int k = 0; k &lt; 6; k++) n-&gt;basecurve[0][k].x = o-&gt;tonecurve_x[k];</a>
+<a name="ln128">    for(int k = 0; k &lt; 6; k++) n-&gt;basecurve[0][k].y = o-&gt;tonecurve_y[k];</a>
+<a name="ln129">    n-&gt;basecurve_nodes[0] = 6;</a>
+<a name="ln130">    n-&gt;basecurve_type[0] = CUBIC_SPLINE;</a>
+<a name="ln131">    n-&gt;exposure_fusion = 0;</a>
+<a name="ln132">    n-&gt;exposure_stops = 1;</a>
+<a name="ln133">    n-&gt;exposure_bias = 1.0;</a>
+<a name="ln134">    n-&gt;preserve_colors = DT_RGB_NORM_NONE;</a>
+<a name="ln135">    return 0;</a>
+<a name="ln136">  }</a>
+<a name="ln137">  if(old_version == 2 &amp;&amp; new_version == 6)</a>
+<a name="ln138">  {</a>
+<a name="ln139">    dt_iop_basecurve_params2_t *o = (dt_iop_basecurve_params2_t *)old_params;</a>
+<a name="ln140">    dt_iop_basecurve_params_t *n = (dt_iop_basecurve_params_t *)new_params;</a>
+<a name="ln141">    memcpy(n, o, sizeof(dt_iop_basecurve_params2_t));</a>
+<a name="ln142">    n-&gt;exposure_fusion = 0;</a>
+<a name="ln143">    n-&gt;exposure_stops = 1;</a>
+<a name="ln144">    n-&gt;exposure_bias = 1.0;</a>
+<a name="ln145">    n-&gt;preserve_colors = DT_RGB_NORM_NONE;</a>
+<a name="ln146">    return 0;</a>
+<a name="ln147">  }</a>
+<a name="ln148">  if(old_version == 3 &amp;&amp; new_version == 6)</a>
+<a name="ln149">  {</a>
+<a name="ln150">    dt_iop_basecurve_params3_t *o = (dt_iop_basecurve_params3_t *)old_params;</a>
+<a name="ln151">    dt_iop_basecurve_params_t *n = (dt_iop_basecurve_params_t *)new_params;</a>
+<a name="ln152">    memcpy(n, o, sizeof(dt_iop_basecurve_params3_t));</a>
+<a name="ln153">    n-&gt;exposure_stops = (o-&gt;exposure_fusion == 0 &amp;&amp; o-&gt;exposure_stops == 0) ? 1.0f : o-&gt;exposure_stops;</a>
+<a name="ln154">    n-&gt;exposure_bias = 1.0;</a>
+<a name="ln155">    n-&gt;preserve_colors = DT_RGB_NORM_NONE;</a>
+<a name="ln156">    return 0;</a>
+<a name="ln157">  }</a>
+<a name="ln158">  if(old_version == 4 &amp;&amp; new_version == 6)</a>
+<a name="ln159">  {</a>
+<a name="ln160">    dt_iop_basecurve_params4_t *o = (dt_iop_basecurve_params4_t *)old_params;</a>
+<a name="ln161">    dt_iop_basecurve_params_t *n = (dt_iop_basecurve_params_t *)new_params;</a>
+<a name="ln162">    memcpy(n, o, sizeof(dt_iop_basecurve_params4_t));</a>
+<a name="ln163">    n-&gt;exposure_bias = 1.0;</a>
+<a name="ln164">    n-&gt;preserve_colors = DT_RGB_NORM_NONE;</a>
+<a name="ln165">    return 0;</a>
+<a name="ln166">  }</a>
+<a name="ln167">  if(old_version == 5 &amp;&amp; new_version == 6)</a>
+<a name="ln168">  {</a>
+<a name="ln169">    dt_iop_basecurve_params5_t *o = (dt_iop_basecurve_params5_t *)old_params;</a>
+<a name="ln170">    dt_iop_basecurve_params_t *n = (dt_iop_basecurve_params_t *)new_params;</a>
+<a name="ln171">    memcpy(n, o, sizeof(dt_iop_basecurve_params4_t));</a>
+<a name="ln172">    n-&gt;preserve_colors = DT_RGB_NORM_NONE;</a>
+<a name="ln173">    return 0;</a>
+<a name="ln174">  }</a>
+<a name="ln175">  return 1;</a>
+<a name="ln176">}</a>
+<a name="ln177"> </a>
+<a name="ln178">static const char neutral[] = N_(&quot;neutral&quot;);</a>
+<a name="ln179">static const char canon_eos[] = N_(&quot;canon eos like&quot;);</a>
+<a name="ln180">static const char canon_eos_alt[] = N_(&quot;canon eos like alternate&quot;);</a>
+<a name="ln181">static const char nikon[] = N_(&quot;nikon like&quot;);</a>
+<a name="ln182">static const char nikon_alt[] = N_(&quot;nikon like alternate&quot;);</a>
+<a name="ln183">static const char sony_alpha[] = N_(&quot;sony alpha like&quot;);</a>
+<a name="ln184">static const char pentax[] = N_(&quot;pentax like&quot;);</a>
+<a name="ln185">static const char ricoh[] = N_(&quot;ricoh like&quot;);</a>
+<a name="ln186">static const char olympus[] = N_(&quot;olympus like&quot;);</a>
+<a name="ln187">static const char olympus_alt[] = N_(&quot;olympus like alternate&quot;);</a>
+<a name="ln188">static const char panasonic[] = N_(&quot;panasonic like&quot;);</a>
+<a name="ln189">static const char leica[] = N_(&quot;leica like&quot;);</a>
+<a name="ln190">static const char kodak_easyshare[] = N_(&quot;kodak easyshare like&quot;);</a>
+<a name="ln191">static const char konica_minolta[] = N_(&quot;konica minolta like&quot;);</a>
+<a name="ln192">static const char samsung[] = N_(&quot;samsung like&quot;);</a>
+<a name="ln193">static const char fujifilm[] = N_(&quot;fujifilm like&quot;);</a>
+<a name="ln194">static const char nokia[] = N_(&quot;nokia like&quot;);</a>
+<a name="ln195"> </a>
+<a name="ln196">typedef struct basecurve_preset_t</a>
+<a name="ln197">{</a>
+<a name="ln198">  const char *name;</a>
+<a name="ln199">  const char *maker;</a>
+<a name="ln200">  const char *model;</a>
+<a name="ln201">  int iso_min;</a>
+<a name="ln202">  float iso_max;</a>
+<a name="ln203">  dt_iop_basecurve_params_t params;</a>
+<a name="ln204">  int autoapply;</a>
+<a name="ln205">  int filter;</a>
+<a name="ln206">} basecurve_preset_t;</a>
+<a name="ln207"> </a>
+<a name="ln208">#define m MONOTONE_HERMITE</a>
+<a name="ln209"> </a>
+<a name="ln210">static const basecurve_preset_t basecurve_camera_presets[] = {</a>
+<a name="ln211">  // copy paste your measured basecurve line at the top here, like so (note the exif data and the last 1):</a>
+<a name="ln212">  // clang-format off</a>
+<a name="ln213"> </a>
+<a name="ln214">  // nikon d750 by Edouard Gomez</a>
+<a name="ln215">  {&quot;Nikon D750&quot;, &quot;NIKON CORPORATION&quot;, &quot;NIKON D750&quot;, 0, FLT_MAX, {{{{0.000000, 0.000000}, {0.018124, 0.026126}, {0.143357, 0.370145}, {0.330116, 0.730507}, {0.457952, 0.853462}, {0.734950, 0.965061}, {0.904758, 0.985699}, {1.000000, 1.000000}}}, {8}, {m}, 0, 0, 0, DT_RGB_NORM_LUMINANCE}, 0, 1},</a>
+<a name="ln216">  // contributed by Stefan Kauerauf</a>
+<a name="ln217">  {&quot;Nikon D5100&quot;, &quot;NIKON CORPORATION&quot;, &quot;NIKON D5100&quot;, 0, FLT_MAX, {{{{0.000000, 0.000000}, {0.001113, 0.000506}, {0.002842, 0.001338}, {0.005461, 0.002470}, {0.011381, 0.006099}, {0.013303, 0.007758}, {0.034638, 0.041119}, {0.044441, 0.063882}, {0.070338, 0.139639}, {0.096068, 0.210915}, {0.137693, 0.310295}, {0.206041, 0.432674}, {0.255508, 0.504447}, {0.302770, 0.569576}, {0.425625, 0.726755}, {0.554526, 0.839541}, {0.621216, 0.882839}, {0.702662, 0.927072}, {0.897426, 0.990984}, {1.000000, 1.000000}}}, {20}, {m}, 0, 0, 0, DT_RGB_NORM_LUMINANCE}, 0, 1},</a>
+<a name="ln218">  // nikon d7000 by Edouard Gomez</a>
+<a name="ln219">  {&quot;Nikon D7000&quot;, &quot;NIKON CORPORATION&quot;, &quot;NIKON D7000&quot;, 0, FLT_MAX, {{{{0.000000, 0.000000}, {0.001943, 0.003040}, {0.019814, 0.028810}, {0.080784, 0.210476}, {0.145700, 0.383873}, {0.295961, 0.654041}, {0.651915, 0.952819}, {1.000000, 1.000000}}}, {8}, {m}, 0, 0, 0, DT_RGB_NORM_LUMINANCE}, 0, 1},</a>
+<a name="ln220">  // nikon d7200 standard by Ralf Brown (firmware 1.00)</a>
+<a name="ln221">  {&quot;Nikon D7200&quot;, &quot;NIKON CORPORATION&quot;, &quot;NIKON D7200&quot;, 0, FLT_MAX, {{{{0.000000, 0.000000}, {0.001604, 0.001334}, {0.007401, 0.005237}, {0.009474, 0.006890}, {0.017348, 0.017176}, {0.032782, 0.044336}, {0.048033, 0.086548}, {0.075803, 0.168331}, {0.109539, 0.273539}, {0.137373, 0.364645}, {0.231651, 0.597511}, {0.323797, 0.736475}, {0.383796, 0.805797}, {0.462284, 0.872247}, {0.549844, 0.918328}, {0.678855, 0.962361}, {0.817445, 0.990406}, {1.000000, 1.000000}}}, {18}, {m}, 0, 0, 0, DT_RGB_NORM_LUMINANCE}, 0, 1},</a>
+<a name="ln222">  // nikon d7500 by Anders Bennehag (firmware C 1.00, LD 2.016)</a>
+<a name="ln223">  {&quot;NIKON D7500&quot;, &quot;NIKON CORPORATION&quot;, &quot;NIKON D7500&quot;, 0, FLT_MAX, {{{{0.000000, 0.000000}, {0.000892, 0.001062}, {0.002280, 0.001768}, {0.013983, 0.011368}, {0.032597, 0.044700}, {0.050065, 0.097131}, {0.084129, 0.219954}, {0.120975, 0.336806}, {0.170730, 0.473752}, {0.258677, 0.647113}, {0.409997, 0.827417}, {0.499979, 0.889468}, {0.615564, 0.941960}, {0.665272, 0.957736}, {0.832126, 0.991968}, {1.000000, 1.000000}}}, {16}, {m}, 0, 0, 0, DT_RGB_NORM_LUMINANCE}, 0, 1},</a>
+<a name="ln224">  // sony rx100m2 by Günther R.</a>
+<a name="ln225">  { &quot;Sony DSC-RX100M2&quot;, &quot;SONY&quot;, &quot;DSC-RX100M2&quot;, 0, FLT_MAX, { { { { 0.000000, 0.000000 }, { 0.015106, 0.008116 }, { 0.070077, 0.093725 }, { 0.107484, 0.170723 }, { 0.191528, 0.341093 }, { 0.257996, 0.458453 }, { 0.305381, 0.537267 }, { 0.326367, 0.569257 }, { 0.448067, 0.723742 }, { 0.509627, 0.777966 }, { 0.676751, 0.898797 }, { 1.000000, 1.000000 } } }, { 12 }, { m } , 0, 0, 0, DT_RGB_NORM_LUMINANCE}, 0, 1 },</a>
+<a name="ln226">  // contributed by matthias bodenbinder</a>
+<a name="ln227">  { &quot;Canon EOS 6D&quot;, &quot;Canon&quot;, &quot;Canon EOS 6D&quot;, 0, FLT_MAX, { { { { 0.000000, 0.002917 }, { 0.000751, 0.001716 }, { 0.006011, 0.004438 }, { 0.020286, 0.021725 }, { 0.048084, 0.085918 }, { 0.093914, 0.233804 }, { 0.162284, 0.431375 }, { 0.257701, 0.629218 }, { 0.384673, 0.800332 }, { 0.547709, 0.917761 }, { 0.751315, 0.988132 }, { 1.000000, 0.999943 } } }, { 12 }, { m } , 0, 0, 0, DT_RGB_NORM_LUMINANCE}, 0, 1 },</a>
+<a name="ln228">  // contributed by Dan Torop</a>
+<a name="ln229">  { &quot;Fujifilm X100S&quot;, &quot;Fujifilm&quot;, &quot;X100S&quot;, 0, FLT_MAX, { { { { 0.000000, 0.000000 }, { 0.009145, 0.007905 }, { 0.026570, 0.032201 }, { 0.131526, 0.289717 }, { 0.175858, 0.395263 }, { 0.350981, 0.696899 }, { 0.614997, 0.959451 }, { 1.000000, 1.000000 } } }, { 8 }, { m } , 0, 0, 0, DT_RGB_NORM_LUMINANCE}, 0, 1 },</a>
+<a name="ln230">  { &quot;Fujifilm X100T&quot;, &quot;Fujifilm&quot;, &quot;X100T&quot;, 0, FLT_MAX, { { { { 0.000000, 0.000000 }, { 0.009145, 0.007905 }, { 0.026570, 0.032201 }, { 0.131526, 0.289717 }, { 0.175858, 0.395263 }, { 0.350981, 0.696899 }, { 0.614997, 0.959451 }, { 1.000000, 1.000000 } } }, { 8 }, { m } , 0, 0, 0, DT_RGB_NORM_LUMINANCE}, 0, 1 },</a>
+<a name="ln231">  // contributed by Johannes Hanika</a>
+<a name="ln232">  { &quot;Canon EOS 5D Mark II&quot;, &quot;Canon&quot;, &quot;Canon EOS 5D Mark II&quot;, 0, FLT_MAX, { { { { 0.000000, 0.000366 }, { 0.006560, 0.003504 }, { 0.027310, 0.029834 }, { 0.045915, 0.070230 }, { 0.206554, 0.539895 }, { 0.442337, 0.872409 }, { 0.673263, 0.971703 }, { 1.000000, 0.999832 } } }, { 8 }, { m } , 0, 0, 0, DT_RGB_NORM_LUMINANCE}, 0, 1 },</a>
+<a name="ln233">  // contributed by chrik5</a>
+<a name="ln234">  { &quot;Pentax K-5&quot;, &quot;Pentax&quot;, &quot;Pentax K-5&quot;, 0, FLT_MAX, { { { { 0.000000, 0.000000 }, { 0.004754, 0.002208 }, { 0.009529, 0.004214 }, { 0.023713, 0.013508 }, { 0.031866, 0.020352 }, { 0.046734, 0.034063 }, { 0.059989, 0.052413 }, { 0.088415, 0.096030 }, { 0.136610, 0.190629 }, { 0.174480, 0.256484 }, { 0.205192, 0.307430 }, { 0.228896, 0.348447 }, { 0.286411, 0.428680 }, { 0.355314, 0.513527 }, { 0.440014, 0.607651 }, { 0.567096, 0.732791 }, { 0.620597, 0.775968 }, { 0.760355, 0.881828 }, { 0.875139, 0.960682 }, { 1.000000, 1.000000 } } }, { 20 }, { m } , 0, 0, 0, DT_RGB_NORM_LUMINANCE}, 0, 1 },</a>
+<a name="ln235">  // contributed by Togan Muftuoglu - ed: slope is too aggressive on shadows</a>
+<a name="ln236">  //{ &quot;Nikon D90&quot;, &quot;NIKON&quot;, &quot;D90&quot;, 0, FLT_MAX, { { { { 0.000000, 0.000000 }, { 0.015520, 0.012248 }, { 0.097950, 0.251013 }, { 0.301515, 0.621951 }, { 0.415513, 0.771384 }, { 0.547326, 0.843079 }, { 0.819769, 0.956678 }, { 1.000000, 1.000000 } } }, { 8 }, { m } }, 0, 1 },</a>
+<a name="ln237">  // contributed by Edouard Gomez</a>
+<a name="ln238">  {&quot;Nikon D90&quot;, &quot;NIKON CORPORATION&quot;, &quot;NIKON D90&quot;, 0, FLT_MAX, {{{{0.000000, 0.000000}, {0.011702, 0.012659}, {0.122918, 0.289973}, {0.153642, 0.342731}, {0.246855, 0.510114}, {0.448958, 0.733820}, {0.666759, 0.894290}, {1.000000, 1.000000}}}, {8}, {m}, 0, 0, 0, DT_RGB_NORM_LUMINANCE}, 0, 1},</a>
+<a name="ln239">  // contributed by Pascal Obry</a>
+<a name="ln240">  { &quot;Nikon D800&quot;, &quot;NIKON&quot;, &quot;D800&quot;, 0, FLT_MAX, { { { { 0.000000, 0.000000 }, { 0.001773, 0.001936 }, { 0.009671, 0.009693 }, { 0.016754, 0.020617 }, { 0.024884, 0.037309 }, { 0.048174, 0.107768 }, { 0.056932, 0.139532 }, { 0.085504, 0.233303 }, { 0.130378, 0.349747 }, { 0.155476, 0.405445 }, { 0.175245, 0.445918 }, { 0.217657, 0.516873 }, { 0.308475, 0.668608 }, { 0.375381, 0.754058 }, { 0.459858, 0.839909 }, { 0.509567, 0.881543 }, { 0.654394, 0.960877 }, { 0.783380, 0.999161 }, { 0.859310, 1.000000 }, { 1.000000, 1.000000 } } }, { 20 }, { m } , 0, 0, 0, DT_RGB_NORM_LUMINANCE}, 0, 1 },</a>
+<a name="ln241">  // contributed by Lukas Schrangl</a>
+<a name="ln242">  {&quot;Olympus OM-D E-M10 II&quot;, &quot;OLYMPUS CORPORATION    &quot;, &quot;E-M10MarkII     &quot;, 0, FLT_MAX, {{{{0.000000, 0.000000}, {0.005707, 0.004764}, {0.018944, 0.024456}, {0.054501, 0.129992}, {0.075665, 0.211873}, {0.119641, 0.365771}, {0.173148, 0.532024}, {0.247979, 0.668989}, {0.357597, 0.780138}, {0.459003, 0.839829}, {0.626844, 0.904426}, {0.769425, 0.948541}, {0.820429, 0.964715}, {1.000000, 1.000000}}}, {14}, {m}, 0, 0, 0, DT_RGB_NORM_LUMINANCE}, 0, 1},</a>
+<a name="ln243">  // clang-format on</a>
+<a name="ln244">};</a>
+<a name="ln245">static const int basecurve_camera_presets_cnt = sizeof(basecurve_camera_presets) / sizeof(basecurve_preset_t);</a>
+<a name="ln246"> </a>
+<a name="ln247">static const basecurve_preset_t basecurve_presets[] = {</a>
+<a name="ln248">  // clang-format off</a>
+<a name="ln249">  // smoother cubic spline curve</a>
+<a name="ln250">  { N_(&quot;cubic spline&quot;), &quot;&quot;, &quot;&quot;, 0, FLT_MAX, { { { { 0.0, 0.0}, { 1.0, 1.0 }, { 0., 0.}, { 0., 0.}, { 0., 0.}, { 0., 0.}, { 0., 0.}, { 0., 0.} } }, { 2 }, { CUBIC_SPLINE }, 0, 0, 0, DT_RGB_NORM_LUMINANCE }, 0, 0 },</a>
+<a name="ln251">  { neutral,         &quot;&quot;, &quot;&quot;,                      0, FLT_MAX, { { { { 0.000000, 0.000000 }, { 0.005000, 0.002500 }, { 0.150000, 0.300000 }, { 0.400000, 0.700000 }, { 0.750000, 0.950000 }, { 1.000000, 1.000000 } } }, { 6 }, { m } , 0, 0, 0, DT_RGB_NORM_LUMINANCE}, 0, 1 },</a>
+<a name="ln252">  { canon_eos,       &quot;Canon&quot;, &quot;&quot;,                 0, FLT_MAX, { { { { 0.000000, 0.000000 }, { 0.028226, 0.029677 }, { 0.120968, 0.232258 }, { 0.459677, 0.747581 }, { 0.858871, 0.967742 }, { 1.000000, 1.000000 } } }, { 6 }, { m }, 0, 0, 0, DT_RGB_NORM_LUMINANCE }, 0, 0 },</a>
+<a name="ln253">  { canon_eos_alt,   &quot;Canon&quot;, &quot;EOS 5D Mark&quot;,      0, FLT_MAX, { { { { 0.000000, 0.000000 }, { 0.026210, 0.029677 }, { 0.108871, 0.232258 }, { 0.350806, 0.747581 }, { 0.669355, 0.967742 }, { 1.000000, 1.000000 } } }, { 6 }, { m }, 0, 0, 0, DT_RGB_NORM_LUMINANCE }, 0, 0 },</a>
+<a name="ln254">  { nikon,           &quot;NIKON&quot;, &quot;&quot;,                 0, FLT_MAX, { { { { 0.000000, 0.000000 }, { 0.036290, 0.036532 }, { 0.120968, 0.228226 }, { 0.459677, 0.759678 }, { 0.858871, 0.983468 }, { 1.000000, 1.000000 } } }, { 6 }, { m }, 0, 0, 0, DT_RGB_NORM_LUMINANCE }, 0, 0 },</a>
+<a name="ln255">  { nikon_alt,       &quot;NIKON&quot;, &quot;D____&quot;,            0, FLT_MAX, { { { { 0.000000, 0.000000 }, { 0.012097, 0.007322 }, { 0.072581, 0.130742 }, { 0.310484, 0.729291 }, { 0.611321, 0.951613 }, { 1.000000, 1.000000 } } }, { 6 }, { m }, 0, 0, 0, DT_RGB_NORM_LUMINANCE }, 0, 0 },</a>
+<a name="ln256">  { sony_alpha,      &quot;SONY&quot;, &quot;&quot;,                  0, FLT_MAX, { { { { 0.000000, 0.000000 }, { 0.031949, 0.036532 }, { 0.105431, 0.228226 }, { 0.434505, 0.759678 }, { 0.855738, 0.983468 }, { 1.000000, 1.000000 } } }, { 6 }, { m }, 0, 0, 0, DT_RGB_NORM_LUMINANCE }, 0, 0 },</a>
+<a name="ln257">  { pentax,          &quot;PENTAX&quot;, &quot;&quot;,                0, FLT_MAX, { { { { 0.000000, 0.000000 }, { 0.032258, 0.024596 }, { 0.120968, 0.166419 }, { 0.205645, 0.328527 }, { 0.604839, 0.790171 }, { 1.000000, 1.000000 } } }, { 6 }, { m }, 0, 0, 0, DT_RGB_NORM_LUMINANCE }, 0, 0 },</a>
+<a name="ln258">  { ricoh,           &quot;RICOH&quot;, &quot;&quot;,                 0, FLT_MAX, { { { { 0.000000, 0.000000 }, { 0.032259, 0.024596 }, { 0.120968, 0.166419 }, { 0.205645, 0.328527 }, { 0.604839, 0.790171 }, { 1.000000, 1.000000 } } }, { 6 }, { m }, 0, 0, 0, DT_RGB_NORM_LUMINANCE }, 0, 0 },</a>
+<a name="ln259">  { olympus,         &quot;OLYMPUS&quot;, &quot;&quot;,               0, FLT_MAX, { { { { 0.000000, 0.000000 }, { 0.033962, 0.028226 }, { 0.249057, 0.439516 }, { 0.501887, 0.798387 }, { 0.750943, 0.955645 }, { 1.000000, 1.000000 } } }, { 6 }, { m }, 0, 0, 0, DT_RGB_NORM_LUMINANCE }, 0, 0 },</a>
+<a name="ln260">  { olympus_alt,     &quot;OLYMPUS&quot;, &quot;E-M&quot;,            0, FLT_MAX, { { { { 0.000000, 0.000000 }, { 0.012097, 0.010322 }, { 0.072581, 0.167742 }, { 0.310484, 0.711291 }, { 0.645161, 0.956855 }, { 1.000000, 1.000000 } } }, { 6 }, { m }, 0, 0, 0, DT_RGB_NORM_LUMINANCE }, 0, 0 },</a>
+<a name="ln261">  { panasonic,       &quot;Panasonic&quot;, &quot;&quot;,             0, FLT_MAX, { { { { 0.000000, 0.000000 }, { 0.036290, 0.024596 }, { 0.120968, 0.166419 }, { 0.205645, 0.328527 }, { 0.604839, 0.790171 }, { 1.000000, 1.000000 } } }, { 6 }, { m }, 0, 0, 0, DT_RGB_NORM_LUMINANCE }, 0, 0 },</a>
+<a name="ln262">  { leica,           &quot;Leica&quot;, &quot;&quot;,                 0, FLT_MAX, { { { { 0.000000, 0.000000 }, { 0.036291, 0.024596 }, { 0.120968, 0.166419 }, { 0.205645, 0.328527 }, { 0.604839, 0.790171 }, { 1.000000, 1.000000 } } }, { 6 }, { m }, 0, 0, 0, DT_RGB_NORM_LUMINANCE }, 0, 0 },</a>
+<a name="ln263">  { kodak_easyshare, &quot;EASTMAN KODAK COMPANY&quot;, &quot;&quot;, 0, FLT_MAX, { { { { 0.000000, 0.000000 }, { 0.044355, 0.020967 }, { 0.133065, 0.154322 }, { 0.209677, 0.300301 }, { 0.572581, 0.753477 }, { 1.000000, 1.000000 } } }, { 6 }, { m }, 0, 0, 0, DT_RGB_NORM_LUMINANCE }, 0, 0 },</a>
+<a name="ln264">  { konica_minolta,  &quot;MINOLTA&quot;, &quot;&quot;,               0, FLT_MAX, { { { { 0.000000, 0.000000 }, { 0.020161, 0.010322 }, { 0.112903, 0.167742 }, { 0.500000, 0.711291 }, { 0.899194, 0.956855 }, { 1.000000, 1.000000 } } }, { 6 }, { m }, 0, 0, 0, DT_RGB_NORM_LUMINANCE }, 0, 0 },</a>
+<a name="ln265">  { samsung,         &quot;SAMSUNG&quot;, &quot;&quot;,               0, FLT_MAX, { { { { 0.000000, 0.000000 }, { 0.040323, 0.029677 }, { 0.133065, 0.232258 }, { 0.447581, 0.747581 }, { 0.842742, 0.967742 }, { 1.000000, 1.000000 } } }, { 6 }, { m }, 0, 0, 0, DT_RGB_NORM_LUMINANCE }, 0, 0 },</a>
+<a name="ln266">  { fujifilm,        &quot;FUJIFILM&quot;, &quot;&quot;,              0, FLT_MAX, { { { { 0.000000, 0.000000 }, { 0.028226, 0.029677 }, { 0.104839, 0.232258 }, { 0.387097, 0.747581 }, { 0.754032, 0.967742 }, { 1.000000, 1.000000 } } }, { 6 }, { m }, 0, 0, 0, DT_RGB_NORM_LUMINANCE }, 0, 0 },</a>
+<a name="ln267">  { nokia,           &quot;Nokia&quot;, &quot;&quot;,                 0, FLT_MAX, { { { { 0.000000, 0.000000 }, { 0.041825, 0.020161 }, { 0.117871, 0.153226 }, { 0.319392, 0.500000 }, { 0.638783, 0.842742 }, { 1.000000, 1.000000 } } }, { 6 }, { m }, 0, 0, 0, DT_RGB_NORM_LUMINANCE }, 0, 0 },</a>
+<a name="ln268">  // clang-format on</a>
+<a name="ln269">};</a>
+<a name="ln270">#undef m</a>
+<a name="ln271">static const int basecurve_presets_cnt = sizeof(basecurve_presets) / sizeof(basecurve_preset_t);</a>
+<a name="ln272"> </a>
+<a name="ln273">typedef struct dt_iop_basecurve_gui_data_t</a>
+<a name="ln274">{</a>
+<a name="ln275">  dt_draw_curve_t *minmax_curve; // curve for gui to draw</a>
+<a name="ln276">  int minmax_curve_type, minmax_curve_nodes;</a>
+<a name="ln277">  GtkBox *hbox;</a>
+<a name="ln278">  GtkDrawingArea *area;</a>
+<a name="ln279">  GtkWidget *scale, *fusion, *exposure_step, *exposure_bias;</a>
+<a name="ln280">  GtkWidget *cmb_preserve_colors;</a>
+<a name="ln281">  double mouse_x, mouse_y;</a>
+<a name="ln282">  int selected;</a>
+<a name="ln283">  double selected_offset, selected_y, selected_min, selected_max;</a>
+<a name="ln284">  float draw_xs[DT_IOP_TONECURVE_RES], draw_ys[DT_IOP_TONECURVE_RES];</a>
+<a name="ln285">  float draw_min_xs[DT_IOP_TONECURVE_RES], draw_min_ys[DT_IOP_TONECURVE_RES];</a>
+<a name="ln286">  float draw_max_xs[DT_IOP_TONECURVE_RES], draw_max_ys[DT_IOP_TONECURVE_RES];</a>
+<a name="ln287">  int loglogscale;</a>
+<a name="ln288">} dt_iop_basecurve_gui_data_t;</a>
+<a name="ln289"> </a>
+<a name="ln290">typedef struct dt_iop_basecurve_data_t</a>
+<a name="ln291">{</a>
+<a name="ln292">  dt_draw_curve_t *curve; // curve for pixelpipe piece and pixel processing</a>
+<a name="ln293">  int basecurve_type;</a>
+<a name="ln294">  int basecurve_nodes;</a>
+<a name="ln295">  float table[0x10000];      // precomputed look-up table for tone curve</a>
+<a name="ln296">  float unbounded_coeffs[3]; // approximation for extrapolation</a>
+<a name="ln297">  int exposure_fusion;</a>
+<a name="ln298">  float exposure_stops;</a>
+<a name="ln299">  float exposure_bias;</a>
+<a name="ln300">  int preserve_colors;</a>
+<a name="ln301">} dt_iop_basecurve_data_t;</a>
+<a name="ln302"> </a>
+<a name="ln303">typedef struct dt_iop_basecurve_global_data_t</a>
+<a name="ln304">{</a>
+<a name="ln305">  int kernel_basecurve_lut;</a>
+<a name="ln306">  int kernel_basecurve_zero;</a>
+<a name="ln307">  int kernel_basecurve_legacy_lut;</a>
+<a name="ln308">  int kernel_basecurve_compute_features;</a>
+<a name="ln309">  int kernel_basecurve_blur_h;</a>
+<a name="ln310">  int kernel_basecurve_blur_v;</a>
+<a name="ln311">  int kernel_basecurve_expand;</a>
+<a name="ln312">  int kernel_basecurve_reduce;</a>
+<a name="ln313">  int kernel_basecurve_detail;</a>
+<a name="ln314">  int kernel_basecurve_adjust_features;</a>
+<a name="ln315">  int kernel_basecurve_blend_gaussian;</a>
+<a name="ln316">  int kernel_basecurve_blend_laplacian;</a>
+<a name="ln317">  int kernel_basecurve_normalize;</a>
+<a name="ln318">  int kernel_basecurve_reconstruct;</a>
+<a name="ln319">  int kernel_basecurve_finalize;</a>
+<a name="ln320">} dt_iop_basecurve_global_data_t;</a>
+<a name="ln321"> </a>
+<a name="ln322"> </a>
+<a name="ln323"> </a>
+<a name="ln324">const char *name()</a>
+<a name="ln325">{</a>
+<a name="ln326">  return _(&quot;base curve&quot;);</a>
+<a name="ln327">}</a>
+<a name="ln328"> </a>
+<a name="ln329">int default_group()</a>
+<a name="ln330">{</a>
+<a name="ln331">  return IOP_GROUP_BASIC;</a>
+<a name="ln332">}</a>
+<a name="ln333"> </a>
+<a name="ln334">int flags()</a>
+<a name="ln335">{</a>
+<a name="ln336">  return IOP_FLAGS_SUPPORTS_BLENDING | IOP_FLAGS_ALLOW_TILING;</a>
+<a name="ln337">}</a>
+<a name="ln338"> </a>
+<a name="ln339">int default_colorspace(dt_iop_module_t *self, dt_dev_pixelpipe_t *pipe, dt_dev_pixelpipe_iop_t *piece)</a>
+<a name="ln340">{</a>
+<a name="ln341">  return iop_cs_rgb;</a>
+<a name="ln342">}</a>
+<a name="ln343"> </a>
+<a name="ln344">static void set_presets(dt_iop_module_so_t *self, const basecurve_preset_t *presets, int count, gboolean camera)</a>
+<a name="ln345">{</a>
+<a name="ln346">  const gboolean autoapply = dt_conf_get_bool(&quot;plugins/darkroom/basecurve/auto_apply&quot;);</a>
+<a name="ln347">  const gboolean autoapply_percamera = dt_conf_get_bool(&quot;plugins/darkroom/basecurve/auto_apply_percamera_presets&quot;);</a>
+<a name="ln348"> </a>
+<a name="ln349">  const gboolean force_autoapply = autoapply &amp;&amp; (autoapply_percamera || !camera);</a>
+<a name="ln350"> </a>
+<a name="ln351">  // transform presets above to db entries.</a>
+<a name="ln352">  for(int k = 0; k &lt; count; k++)</a>
+<a name="ln353">  {</a>
+<a name="ln354">    // disable exposure fusion if not explicitly inited in params struct definition above:</a>
+<a name="ln355">    dt_iop_basecurve_params_t tmp = presets[k].params;</a>
+<a name="ln356">    if(tmp.exposure_fusion == 0 &amp;&amp; tmp.exposure_stops == 0.0f)</a>
+<a name="ln357">    {</a>
+<a name="ln358">      tmp.exposure_fusion = 0;</a>
+<a name="ln359">      tmp.exposure_stops = 1.0f;</a>
+<a name="ln360">      tmp.exposure_bias = 1.0f;</a>
+<a name="ln361">    }</a>
+<a name="ln362">    // add the preset.</a>
+<a name="ln363">    dt_gui_presets_add_generic(_(presets[k].name), self-&gt;op, self-&gt;version(),</a>
+<a name="ln364">                               &amp;tmp, sizeof(dt_iop_basecurve_params_t), 1);</a>
+<a name="ln365">    // and restrict it to model, maker, iso, and raw images</a>
+<a name="ln366">    dt_gui_presets_update_mml(_(presets[k].name), self-&gt;op, self-&gt;version(),</a>
+<a name="ln367">                              presets[k].maker, presets[k].model, &quot;&quot;);</a>
+<a name="ln368">    dt_gui_presets_update_iso(_(presets[k].name), self-&gt;op, self-&gt;version(),</a>
+<a name="ln369">                              presets[k].iso_min, presets[k].iso_max);</a>
+<a name="ln370">    dt_gui_presets_update_ldr(_(presets[k].name), self-&gt;op, self-&gt;version(), FOR_RAW);</a>
+<a name="ln371">    // make it auto-apply for matching images:</a>
+<a name="ln372">    dt_gui_presets_update_autoapply(_(presets[k].name), self-&gt;op, self-&gt;version(),</a>
+<a name="ln373">                                    force_autoapply ? 1 : presets[k].autoapply);</a>
+<a name="ln374">    // hide all non-matching presets in case the model string is set.</a>
+<a name="ln375">    // When force_autoapply was given always filter (as these are per-camera presets)</a>
+<a name="ln376">    dt_gui_presets_update_filter(_(presets[k].name), self-&gt;op, self-&gt;version(), camera || presets[k].filter);</a>
+<a name="ln377">  }</a>
+<a name="ln378">}</a>
+<a name="ln379"> </a>
+<a name="ln380">void init_presets(dt_iop_module_so_t *self)</a>
+<a name="ln381">{</a>
+<a name="ln382">  // sql begin</a>
+<a name="ln383">  DT_DEBUG_SQLITE3_EXEC(dt_database_get(darktable.db), &quot;BEGIN&quot;, NULL, NULL, NULL);</a>
+<a name="ln384"> </a>
+<a name="ln385">  set_presets(self, basecurve_presets, basecurve_presets_cnt, FALSE);</a>
+<a name="ln386">  set_presets(self, basecurve_camera_presets, basecurve_camera_presets_cnt, TRUE);</a>
+<a name="ln387"> </a>
+<a name="ln388">  // sql commit</a>
+<a name="ln389">  DT_DEBUG_SQLITE3_EXEC(dt_database_get(darktable.db), &quot;COMMIT&quot;, NULL, NULL, NULL);</a>
+<a name="ln390">}</a>
+<a name="ln391"> </a>
+<a name="ln392">static float exposure_increment(float stops, int e, float fusion, float bias)</a>
+<a name="ln393">{</a>
+<a name="ln394">  float offset = stops * fusion * (bias - 1.0f) / 2.0f;</a>
+<a name="ln395">  return powf(2.0f, stops * e + offset);</a>
+<a name="ln396">}</a>
+<a name="ln397"> </a>
+<a name="ln398">#ifdef HAVE_OPENCL</a>
+<a name="ln399">static</a>
+<a name="ln400">int gauss_blur_cl(struct dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece,</a>
+<a name="ln401">                  cl_mem dev_in, cl_mem dev_out, cl_mem dev_tmp,</a>
+<a name="ln402">                  const int width, const int height)</a>
+<a name="ln403">{</a>
+<a name="ln404">  dt_iop_basecurve_global_data_t *gd = (dt_iop_basecurve_global_data_t *)self-&gt;global_data;</a>
+<a name="ln405"> </a>
+<a name="ln406">  cl_int err = -999;</a>
+<a name="ln407">  const int devid = piece-&gt;pipe-&gt;devid;</a>
+<a name="ln408"> </a>
+<a name="ln409">  /* horizontal blur */</a>
+<a name="ln410">  size_t sizes[] = { ROUNDUPWD(width), ROUNDUPHT(height), 1 };</a>
+<a name="ln411">  dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_basecurve_blur_h, 0, sizeof(cl_mem), (void *)&amp;dev_in);</a>
+<a name="ln412">  dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_basecurve_blur_h, 1, sizeof(cl_mem), (void *)&amp;dev_tmp);</a>
+<a name="ln413">  dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_basecurve_blur_h, 2, sizeof(int), (void *)&amp;width);</a>
+<a name="ln414">  dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_basecurve_blur_h, 3, sizeof(int), (void *)&amp;height);</a>
+<a name="ln415">  err = dt_opencl_enqueue_kernel_2d(devid, gd-&gt;kernel_basecurve_blur_h, sizes);</a>
+<a name="ln416">  if(err != CL_SUCCESS) return FALSE;</a>
+<a name="ln417"> </a>
+<a name="ln418">  /* vertical blur */</a>
+<a name="ln419">  dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_basecurve_blur_v, 0, sizeof(cl_mem), (void *)&amp;dev_tmp);</a>
+<a name="ln420">  dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_basecurve_blur_v, 1, sizeof(cl_mem), (void *)&amp;dev_out);</a>
+<a name="ln421">  dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_basecurve_blur_v, 2, sizeof(int), (void *)&amp;width);</a>
+<a name="ln422">  dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_basecurve_blur_v, 3, sizeof(int), (void *)&amp;height);</a>
+<a name="ln423">  err = dt_opencl_enqueue_kernel_2d(devid, gd-&gt;kernel_basecurve_blur_v, sizes);</a>
+<a name="ln424">  if(err != CL_SUCCESS) return FALSE;</a>
+<a name="ln425"> </a>
+<a name="ln426">  return TRUE;</a>
+<a name="ln427">}</a>
+<a name="ln428"> </a>
+<a name="ln429">static</a>
+<a name="ln430">int gauss_expand_cl(struct dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece,</a>
+<a name="ln431">                    cl_mem dev_in, cl_mem dev_out, cl_mem dev_tmp,</a>
+<a name="ln432">                    const int width, const int height)</a>
+<a name="ln433">{</a>
+<a name="ln434">  dt_iop_basecurve_global_data_t *gd = (dt_iop_basecurve_global_data_t *)self-&gt;global_data;</a>
+<a name="ln435"> </a>
+<a name="ln436">  cl_int err = -999;</a>
+<a name="ln437">  const int devid = piece-&gt;pipe-&gt;devid;</a>
+<a name="ln438"> </a>
+<a name="ln439">  size_t sizes[] = { ROUNDUPWD(width), ROUNDUPHT(height), 1 };</a>
+<a name="ln440">  dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_basecurve_expand, 0, sizeof(cl_mem), (void *)&amp;dev_in);</a>
+<a name="ln441">  dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_basecurve_expand, 1, sizeof(cl_mem), (void *)&amp;dev_out);</a>
+<a name="ln442">  dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_basecurve_expand, 2, sizeof(int), (void *)&amp;width);</a>
+<a name="ln443">  dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_basecurve_expand, 3, sizeof(int), (void *)&amp;height);</a>
+<a name="ln444">  err = dt_opencl_enqueue_kernel_2d(devid, gd-&gt;kernel_basecurve_expand, sizes);</a>
+<a name="ln445">  if(err != CL_SUCCESS) return FALSE;</a>
+<a name="ln446"> </a>
+<a name="ln447">  return gauss_blur_cl(self, piece, dev_out, dev_out, dev_tmp, width, height);</a>
+<a name="ln448">}</a>
+<a name="ln449"> </a>
+<a name="ln450"> </a>
+<a name="ln451">static</a>
+<a name="ln452">int gauss_reduce_cl(struct dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece,</a>
+<a name="ln453">                    cl_mem dev_in, cl_mem dev_coarse, cl_mem dev_detail,</a>
+<a name="ln454">                    cl_mem dev_tmp1, cl_mem dev_tmp2,</a>
+<a name="ln455">                    const int width, const int height)</a>
+<a name="ln456">{</a>
+<a name="ln457">  dt_iop_basecurve_global_data_t *gd = (dt_iop_basecurve_global_data_t *)self-&gt;global_data;</a>
+<a name="ln458"> </a>
+<a name="ln459">  cl_int err = -999;</a>
+<a name="ln460">  const int devid = piece-&gt;pipe-&gt;devid;</a>
+<a name="ln461"> </a>
+<a name="ln462">  {</a>
+<a name="ln463">    if(!gauss_blur_cl(self, piece, dev_in, dev_tmp1, dev_tmp2, width, height))</a>
+<a name="ln464">      return FALSE;</a>
+<a name="ln465"> </a>
+<a name="ln466">    const int cw = (width - 1) / 2 + 1;</a>
+<a name="ln467">    const int ch = (height - 1) / 2 + 1;</a>
+<a name="ln468"> </a>
+<a name="ln469">    size_t sizes[] = { ROUNDUPWD(cw), ROUNDUPHT(ch), 1 };</a>
+<a name="ln470">    dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_basecurve_reduce, 0, sizeof(cl_mem), (void *)&amp;dev_tmp1);</a>
+<a name="ln471">    dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_basecurve_reduce, 1, sizeof(cl_mem), (void *)&amp;dev_coarse);</a>
+<a name="ln472">    dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_basecurve_reduce, 2, sizeof(int), (void *)&amp;cw);</a>
+<a name="ln473">    dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_basecurve_reduce, 3, sizeof(int), (void *)&amp;ch);</a>
+<a name="ln474">    err = dt_opencl_enqueue_kernel_2d(devid, gd-&gt;kernel_basecurve_reduce, sizes);</a>
+<a name="ln475">    if(err != CL_SUCCESS) return FALSE;</a>
+<a name="ln476">  }</a>
+<a name="ln477"> </a>
+<a name="ln478">  if(dev_detail != NULL)</a>
+<a name="ln479">  {</a>
+<a name="ln480">    if(!gauss_expand_cl(self, piece, dev_coarse, dev_tmp1, dev_tmp2, width, height))</a>
+<a name="ln481">      return FALSE;</a>
+<a name="ln482"> </a>
+<a name="ln483">    size_t sizes[] = { ROUNDUPWD(width), ROUNDUPHT(height), 1 };</a>
+<a name="ln484">    dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_basecurve_detail, 0, sizeof(cl_mem), (void *)&amp;dev_in);</a>
+<a name="ln485">    dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_basecurve_detail, 1, sizeof(cl_mem), (void *)&amp;dev_tmp1);</a>
+<a name="ln486">    dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_basecurve_detail, 2, sizeof(cl_mem), (void *)&amp;dev_detail);</a>
+<a name="ln487">    dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_basecurve_detail, 3, sizeof(int), (void *)&amp;width);</a>
+<a name="ln488">    dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_basecurve_detail, 4, sizeof(int), (void *)&amp;height);</a>
+<a name="ln489">    err = dt_opencl_enqueue_kernel_2d(devid, gd-&gt;kernel_basecurve_detail, sizes);</a>
+<a name="ln490">    if(err != CL_SUCCESS) return FALSE;</a>
+<a name="ln491">  }</a>
+<a name="ln492"> </a>
+<a name="ln493">  return TRUE;</a>
+<a name="ln494">}</a>
+<a name="ln495"> </a>
+<a name="ln496">static</a>
+<a name="ln497">int process_cl_fusion(struct dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, cl_mem dev_in, cl_mem dev_out,</a>
+<a name="ln498">                      const dt_iop_roi_t *const roi_in, const dt_iop_roi_t *const roi_out)</a>
+<a name="ln499">{</a>
+<a name="ln500">  dt_iop_basecurve_data_t *d = (dt_iop_basecurve_data_t *)piece-&gt;data;</a>
+<a name="ln501">  dt_iop_basecurve_global_data_t *gd = (dt_iop_basecurve_global_data_t *)self-&gt;global_data;</a>
+<a name="ln502">  const dt_iop_order_iccprofile_info_t *const work_profile = dt_ioppr_get_pipe_work_profile_info(piece-&gt;pipe);</a>
+<a name="ln503"> </a>
+<a name="ln504">  cl_int err = -999;</a>
+<a name="ln505"> </a>
+<a name="ln506">  const int num_levels_max = 8;</a>
+<a name="ln507">  const int devid = piece-&gt;pipe-&gt;devid;</a>
+<a name="ln508">  const int width = roi_in-&gt;width;</a>
+<a name="ln509">  const int height = roi_in-&gt;height;</a>
+<a name="ln510">  const int rad = MIN(width, (int)ceilf(256 * roi_in-&gt;scale / piece-&gt;iscale));</a>
+<a name="ln511"> </a>
+<a name="ln512">  cl_mem dev_profile_info = NULL;</a>
+<a name="ln513">  cl_mem dev_profile_lut = NULL;</a>
+<a name="ln514">  dt_colorspaces_iccprofile_info_cl_t *profile_info_cl;</a>
+<a name="ln515">  cl_float *profile_lut_cl = NULL;</a>
+<a name="ln516"> </a>
+<a name="ln517">  cl_mem *dev_col = calloc(num_levels_max, sizeof(cl_mem));</a>
+<a name="ln518">  cl_mem *dev_comb = calloc(num_levels_max, sizeof(cl_mem));</a>
+<a name="ln519"> </a>
+<a name="ln520">  cl_mem dev_tmp1 = NULL;</a>
+<a name="ln521">  cl_mem dev_tmp2 = NULL;</a>
+<a name="ln522">  cl_mem dev_m = NULL;</a>
+<a name="ln523">  cl_mem dev_coeffs = NULL;</a>
+<a name="ln524"> </a>
+<a name="ln525">  const int use_work_profile = (work_profile == NULL) ? 0 : 1;</a>
+<a name="ln526">  const int preserve_colors = d-&gt;preserve_colors;</a>
+<a name="ln527"> </a>
+<a name="ln528">  err = dt_ioppr_build_iccprofile_params_cl(work_profile, devid, &amp;profile_info_cl, &amp;profile_lut_cl,</a>
+<a name="ln529">                                            &amp;dev_profile_info, &amp;dev_profile_lut);</a>
+<a name="ln530">  if(err != CL_SUCCESS) goto error;</a>
+<a name="ln531"> </a>
+<a name="ln532">  int num_levels = num_levels_max;</a>
+<a name="ln533"> </a>
+<a name="ln534">  dev_tmp1 = dt_opencl_alloc_device(devid, width, height, 4 * sizeof(float));</a>
+<a name="ln535">  if(dev_tmp1 == NULL) goto error;</a>
+<a name="ln536"> </a>
+<a name="ln537">  dev_tmp2 = dt_opencl_alloc_device(devid, width, height, 4 * sizeof(float));</a>
+<a name="ln538">  if(dev_tmp2 == NULL) goto error;</a>
+<a name="ln539"> </a>
+<a name="ln540">  // allocate buffers for wavelet transform and blending</a>
+<a name="ln541">  for(int k = 0, step = 1, w = width, h = height; k &lt; num_levels; k++)</a>
+<a name="ln542">  {</a>
+<a name="ln543">    // coarsest step is some % of image width.</a>
+<a name="ln544">    dev_col[k] = dt_opencl_alloc_device(devid, w, h, 4 * sizeof(float));</a>
+<a name="ln545">    if(dev_col[k] == NULL) goto error;</a>
+<a name="ln546"> </a>
+<a name="ln547">    dev_comb[k] = dt_opencl_alloc_device(devid, w, h, 4 * sizeof(float));</a>
+<a name="ln548">    if(dev_comb[k] == NULL) goto error;</a>
+<a name="ln549"> </a>
+<a name="ln550">    size_t sizes[] = { ROUNDUPWD(w), ROUNDUPHT(h), 1 };</a>
+<a name="ln551">    dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_basecurve_zero, 0, sizeof(cl_mem), (void *)&amp;dev_comb[k]);</a>
+<a name="ln552">    dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_basecurve_zero, 1, sizeof(int), (void *)&amp;w);</a>
+<a name="ln553">    dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_basecurve_zero, 2, sizeof(int), (void *)&amp;h);</a>
+<a name="ln554">    err = dt_opencl_enqueue_kernel_2d(devid, gd-&gt;kernel_basecurve_zero, sizes);</a>
+<a name="ln555">    if(err != CL_SUCCESS) goto error;</a>
+<a name="ln556"> </a>
+<a name="ln557">    w = (w - 1) / 2 + 1;</a>
+<a name="ln558">    h = (h - 1) / 2 + 1;</a>
+<a name="ln559">    step *= 2;</a>
+<a name="ln560"> </a>
+<a name="ln561">    if(step &gt; rad || w &lt; 4 || h &lt; 4)</a>
+<a name="ln562">    {</a>
+<a name="ln563">      num_levels = k + 1;</a>
+<a name="ln564">      break;</a>
+<a name="ln565">    }</a>
+<a name="ln566">  }</a>
+<a name="ln567"> </a>
+<a name="ln568">  dev_m = dt_opencl_copy_host_to_device(devid, d-&gt;table, 256, 256, sizeof(float));</a>
+<a name="ln569">  if(dev_m == NULL) goto error;</a>
+<a name="ln570"> </a>
+<a name="ln571">  dev_coeffs = dt_opencl_copy_host_to_device_constant(devid, sizeof(float) * 3, d-&gt;unbounded_coeffs);</a>
+<a name="ln572">  if(dev_coeffs == NULL) goto error;</a>
+<a name="ln573"> </a>
+<a name="ln574"> </a>
+<a name="ln575">  for(int e = 0; e &lt; d-&gt;exposure_fusion + 1; e++)</a>
+<a name="ln576">  {</a>
+<a name="ln577">    // for every exposure fusion image: push by some ev, apply base curve and compute features</a>
+<a name="ln578">    {</a>
+<a name="ln579">      const float mul = exposure_increment(d-&gt;exposure_stops, e, d-&gt;exposure_fusion, d-&gt;exposure_bias);</a>
+<a name="ln580"> </a>
+<a name="ln581">      size_t sizes[] = { ROUNDUPWD(width), ROUNDUPHT(height), 1 };</a>
+<a name="ln582">      if(d-&gt;preserve_colors == DT_RGB_NORM_NONE)</a>
+<a name="ln583">      {</a>
+<a name="ln584">        dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_basecurve_legacy_lut, 0, sizeof(cl_mem), (void *)&amp;dev_in);</a>
+<a name="ln585">        dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_basecurve_legacy_lut, 1, sizeof(cl_mem), (void *)&amp;dev_tmp1);</a>
+<a name="ln586">        dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_basecurve_legacy_lut, 2, sizeof(int), (void *)&amp;width);</a>
+<a name="ln587">        dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_basecurve_legacy_lut, 3, sizeof(int), (void *)&amp;height);</a>
+<a name="ln588">        dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_basecurve_legacy_lut, 4, sizeof(float), (void *)&amp;mul);</a>
+<a name="ln589">        dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_basecurve_legacy_lut, 5, sizeof(cl_mem), (void *)&amp;dev_m);</a>
+<a name="ln590">        dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_basecurve_legacy_lut, 6, sizeof(cl_mem), (void *)&amp;dev_coeffs);</a>
+<a name="ln591">        err = dt_opencl_enqueue_kernel_2d(devid, gd-&gt;kernel_basecurve_legacy_lut, sizes);</a>
+<a name="ln592">        if(err != CL_SUCCESS) goto error;</a>
+<a name="ln593">      }</a>
+<a name="ln594">      else</a>
+<a name="ln595">      {</a>
+<a name="ln596">        dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_basecurve_lut, 0, sizeof(cl_mem), (void *)&amp;dev_in);</a>
+<a name="ln597">        dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_basecurve_lut, 1, sizeof(cl_mem), (void *)&amp;dev_tmp1);</a>
+<a name="ln598">        dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_basecurve_lut, 2, sizeof(int), (void *)&amp;width);</a>
+<a name="ln599">        dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_basecurve_lut, 3, sizeof(int), (void *)&amp;height);</a>
+<a name="ln600">        dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_basecurve_lut, 4, sizeof(float), (void *)&amp;mul);       </a>
+<a name="ln601">        dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_basecurve_lut, 5, sizeof(cl_mem), (void *)&amp;dev_m);</a>
+<a name="ln602">        dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_basecurve_lut, 6, sizeof(cl_mem), (void *)&amp;dev_coeffs);</a>
+<a name="ln603">        dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_basecurve_lut, 7, sizeof(int), (void *)&amp;preserve_colors);</a>
+<a name="ln604">        dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_basecurve_lut, 8, sizeof(cl_mem), (void *)&amp;dev_profile_info);</a>
+<a name="ln605">        dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_basecurve_lut, 9, sizeof(cl_mem), (void *)&amp;dev_profile_lut);</a>
+<a name="ln606">        dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_basecurve_lut, 10, sizeof(int), (void *)&amp;use_work_profile);</a>
+<a name="ln607">        err = dt_opencl_enqueue_kernel_2d(devid, gd-&gt;kernel_basecurve_lut, sizes);</a>
+<a name="ln608">      }</a>
+<a name="ln609"> </a>
+<a name="ln610">      dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_basecurve_compute_features, 0, sizeof(cl_mem), (void *)&amp;dev_tmp1);</a>
+<a name="ln611">      dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_basecurve_compute_features, 1, sizeof(cl_mem), (void *)&amp;dev_col[0]);</a>
+<a name="ln612">      dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_basecurve_compute_features, 2, sizeof(int), (void *)&amp;width);</a>
+<a name="ln613">      dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_basecurve_compute_features, 3, sizeof(int), (void *)&amp;height);</a>
+<a name="ln614">      err = dt_opencl_enqueue_kernel_2d(devid, gd-&gt;kernel_basecurve_compute_features, sizes);</a>
+<a name="ln615">      if(err != CL_SUCCESS) goto error;</a>
+<a name="ln616">    }</a>
+<a name="ln617"> </a>
+<a name="ln618">    // create gaussian pyramid of color buffer</a>
+<a name="ln619">    if(!gauss_reduce_cl(self, piece, dev_col[0], dev_col[1], dev_out, dev_tmp1, dev_tmp2, width, height))</a>
+<a name="ln620">      goto error;</a>
+<a name="ln621"> </a>
+<a name="ln622">    // adjust features</a>
+<a name="ln623">    {</a>
+<a name="ln624">      size_t sizes[] = { ROUNDUPWD(width), ROUNDUPHT(height), 1 };</a>
+<a name="ln625">      dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_basecurve_adjust_features, 0, sizeof(cl_mem), (void *)&amp;dev_col[0]);</a>
+<a name="ln626">      dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_basecurve_adjust_features, 1, sizeof(cl_mem), (void *)&amp;dev_out);</a>
+<a name="ln627">      dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_basecurve_adjust_features, 2, sizeof(cl_mem), (void *)&amp;dev_tmp1);</a>
+<a name="ln628">      dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_basecurve_adjust_features, 3, sizeof(int), (void *)&amp;width);</a>
+<a name="ln629">      dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_basecurve_adjust_features, 4, sizeof(int), (void *)&amp;height);</a>
+<a name="ln630">      err = dt_opencl_enqueue_kernel_2d(devid, gd-&gt;kernel_basecurve_adjust_features, sizes);</a>
+<a name="ln631">      if(err != CL_SUCCESS) goto error;</a>
+<a name="ln632"> </a>
+<a name="ln633">      size_t origin[] = { 0, 0, 0 };</a>
+<a name="ln634">      size_t region[] = { width, height, 1 };</a>
+<a name="ln635">      err = dt_opencl_enqueue_copy_image(devid, dev_tmp1, dev_col[0], origin, origin, region);</a>
+<a name="ln636">      if(err != CL_SUCCESS) goto error;</a>
+<a name="ln637">    }</a>
+<a name="ln638"> </a>
+<a name="ln639">    for(int k = 1, w = width, h = height; k &lt; num_levels; k++)</a>
+<a name="ln640">    {</a>
+<a name="ln641">      if(!gauss_reduce_cl(self, piece, dev_col[k-1], dev_col[k], NULL, dev_tmp1, dev_tmp2, w, h))</a>
+<a name="ln642">        goto error;</a>
+<a name="ln643"> </a>
+<a name="ln644">      w = (w - 1) / 2 + 1;</a>
+<a name="ln645">      h = (h - 1) / 2 + 1;</a>
+<a name="ln646">    }</a>
+<a name="ln647"> </a>
+<a name="ln648">    // update pyramid coarse to fine</a>
+<a name="ln649">    for(int k = num_levels - 1; k &gt;= 0; k--)</a>
+<a name="ln650">    {</a>
+<a name="ln651">      int w = width;</a>
+<a name="ln652">      int h = height;</a>
+<a name="ln653"> </a>
+<a name="ln654">      for(int i = 0; i &lt; k; i++)</a>
+<a name="ln655">      {</a>
+<a name="ln656">        w = (w - 1) / 2 + 1;</a>
+<a name="ln657">        h = (h - 1) / 2 + 1;</a>
+<a name="ln658">      }</a>
+<a name="ln659"> </a>
+<a name="ln660">      // dev_col[k+1] -&gt; dev_tmp2[k]</a>
+<a name="ln661">      if(k != num_levels - 1)</a>
+<a name="ln662">        if(!gauss_expand_cl(self, piece, dev_col[k+1], dev_tmp2, dev_tmp1, w, h))</a>
+<a name="ln663">          goto error;</a>
+<a name="ln664"> </a>
+<a name="ln665">      // blend images into output pyramid</a>
+<a name="ln666">      if(k == num_levels - 1)</a>
+<a name="ln667">      {</a>
+<a name="ln668">        // blend gaussian base</a>
+<a name="ln669">        size_t sizes[] = { ROUNDUPWD(w), ROUNDUPHT(h), 1 };</a>
+<a name="ln670">        dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_basecurve_blend_gaussian, 0, sizeof(cl_mem), (void *)&amp;dev_comb[k]);</a>
+<a name="ln671">        dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_basecurve_blend_gaussian, 1, sizeof(cl_mem), (void *)&amp;dev_col[k]);</a>
+<a name="ln672">        dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_basecurve_blend_gaussian, 2, sizeof(cl_mem), (void *)&amp;dev_tmp1);</a>
+<a name="ln673">        dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_basecurve_blend_gaussian, 3, sizeof(int), (void *)&amp;w);</a>
+<a name="ln674">        dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_basecurve_blend_gaussian, 4, sizeof(int), (void *)&amp;h);</a>
+<a name="ln675">        err = dt_opencl_enqueue_kernel_2d(devid, gd-&gt;kernel_basecurve_blend_gaussian, sizes);</a>
+<a name="ln676">        if(err != CL_SUCCESS) goto error;</a>
+<a name="ln677"> </a>
+<a name="ln678">        size_t origin[] = { 0, 0, 0 };</a>
+<a name="ln679">        size_t region[] = { w, h, 1 };</a>
+<a name="ln680">        err = dt_opencl_enqueue_copy_image(devid, dev_tmp1, dev_comb[k], origin, origin, region);</a>
+<a name="ln681">        if(err != CL_SUCCESS) goto error;</a>
+<a name="ln682">      }</a>
+<a name="ln683">      else</a>
+<a name="ln684">      {</a>
+<a name="ln685">        // blend laplacian</a>
+<a name="ln686">        size_t sizes[] = { ROUNDUPWD(w), ROUNDUPHT(h), 1 };</a>
+<a name="ln687">        dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_basecurve_blend_laplacian, 0, sizeof(cl_mem), (void *)&amp;dev_comb[k]);</a>
+<a name="ln688">        dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_basecurve_blend_laplacian, 1, sizeof(cl_mem), (void *)&amp;dev_col[k]);</a>
+<a name="ln689">        dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_basecurve_blend_laplacian, 2, sizeof(cl_mem), (void *)&amp;dev_tmp2);</a>
+<a name="ln690">        dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_basecurve_blend_laplacian, 3, sizeof(cl_mem), (void *)&amp;dev_tmp1);</a>
+<a name="ln691">        dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_basecurve_blend_laplacian, 4, sizeof(int), (void *)&amp;w);</a>
+<a name="ln692">        dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_basecurve_blend_laplacian, 5, sizeof(int), (void *)&amp;h);</a>
+<a name="ln693">        err = dt_opencl_enqueue_kernel_2d(devid, gd-&gt;kernel_basecurve_blend_laplacian, sizes);</a>
+<a name="ln694">        if(err != CL_SUCCESS) goto error;</a>
+<a name="ln695"> </a>
+<a name="ln696">        size_t origin[] = { 0, 0, 0 };</a>
+<a name="ln697">        size_t region[] = { w, h, 1 };</a>
+<a name="ln698">        err = dt_opencl_enqueue_copy_image(devid, dev_tmp1, dev_comb[k], origin, origin, region);</a>
+<a name="ln699">        if(err != CL_SUCCESS) goto error;</a>
+<a name="ln700">      }</a>
+<a name="ln701">    }</a>
+<a name="ln702">  }</a>
+<a name="ln703"> </a>
+<a name="ln704">  // normalize and reconstruct output pyramid buffer coarse to fine</a>
+<a name="ln705">  for(int k = num_levels - 1; k &gt;= 0; k--)</a>
+<a name="ln706">  {</a>
+<a name="ln707">    int w = width;</a>
+<a name="ln708">    int h = height;</a>
+<a name="ln709"> </a>
+<a name="ln710">    for(int i = 0; i &lt; k; i++)</a>
+<a name="ln711">    {</a>
+<a name="ln712">      w = (w - 1) / 2 + 1;</a>
+<a name="ln713">      h = (h - 1) / 2 + 1;</a>
+<a name="ln714">    }</a>
+<a name="ln715"> </a>
+<a name="ln716">    {</a>
+<a name="ln717">      // normalize both gaussian base and laplacian</a>
+<a name="ln718">      size_t sizes[] = { ROUNDUPWD(w), ROUNDUPHT(h), 1 };</a>
+<a name="ln719">      dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_basecurve_normalize, 0, sizeof(cl_mem), (void *)&amp;dev_comb[k]);</a>
+<a name="ln720">      dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_basecurve_normalize, 1, sizeof(cl_mem), (void *)&amp;dev_tmp1);</a>
+<a name="ln721">      dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_basecurve_normalize, 2, sizeof(int), (void *)&amp;w);</a>
+<a name="ln722">      dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_basecurve_normalize, 3, sizeof(int), (void *)&amp;h);</a>
+<a name="ln723">      err = dt_opencl_enqueue_kernel_2d(devid, gd-&gt;kernel_basecurve_normalize, sizes);</a>
+<a name="ln724">      if(err != CL_SUCCESS) goto error;</a>
+<a name="ln725"> </a>
+<a name="ln726">      // dev_tmp1[k] -&gt; dev_comb[k]</a>
+<a name="ln727">      size_t origin[] = { 0, 0, 0 };</a>
+<a name="ln728">      size_t region[] = { w, h, 1 };</a>
+<a name="ln729">      err = dt_opencl_enqueue_copy_image(devid, dev_tmp1, dev_comb[k], origin, origin, region);</a>
+<a name="ln730">      if(err != CL_SUCCESS) goto error;</a>
+<a name="ln731">    }</a>
+<a name="ln732"> </a>
+<a name="ln733">    if(k &lt; num_levels - 1)</a>
+<a name="ln734">    {</a>
+<a name="ln735">      // reconstruct output image</a>
+<a name="ln736"> </a>
+<a name="ln737">      // dev_comb[k+1] -&gt; dev_tmp1</a>
+<a name="ln738">      if(!gauss_expand_cl(self, piece, dev_comb[k+1], dev_tmp1, dev_tmp2, w, h))</a>
+<a name="ln739">        goto error;</a>
+<a name="ln740"> </a>
+<a name="ln741">      // dev_comb[k] + dev_tmp1 -&gt; dev_tmp2</a>
+<a name="ln742">      size_t sizes[] = { ROUNDUPWD(w), ROUNDUPHT(h), 1 };</a>
+<a name="ln743">      dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_basecurve_reconstruct, 0, sizeof(cl_mem), (void *)&amp;dev_comb[k]);</a>
+<a name="ln744">      dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_basecurve_reconstruct, 1, sizeof(cl_mem), (void *)&amp;dev_tmp1);</a>
+<a name="ln745">      dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_basecurve_reconstruct, 2, sizeof(cl_mem), (void *)&amp;dev_tmp2);</a>
+<a name="ln746">      dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_basecurve_reconstruct, 3, sizeof(int), (void *)&amp;w);</a>
+<a name="ln747">      dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_basecurve_reconstruct, 4, sizeof(int), (void *)&amp;h);</a>
+<a name="ln748">      err = dt_opencl_enqueue_kernel_2d(devid, gd-&gt;kernel_basecurve_reconstruct, sizes);</a>
+<a name="ln749">      if(err != CL_SUCCESS) goto error;</a>
+<a name="ln750"> </a>
+<a name="ln751">      // dev_tmp2 -&gt; dev_comb[k]</a>
+<a name="ln752">      size_t origin[] = { 0, 0, 0 };</a>
+<a name="ln753">      size_t region[] = { w, h, 1 };</a>
+<a name="ln754">      err = dt_opencl_enqueue_copy_image(devid, dev_tmp2, dev_comb[k], origin, origin, region);</a>
+<a name="ln755">      if(err != CL_SUCCESS) goto error;</a>
+<a name="ln756">    }</a>
+<a name="ln757">  }</a>
+<a name="ln758"> </a>
+<a name="ln759">  // copy output buffer</a>
+<a name="ln760">  {</a>
+<a name="ln761">    size_t sizes[] = { ROUNDUPWD(width), ROUNDUPHT(height), 1 };</a>
+<a name="ln762">    dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_basecurve_finalize, 0, sizeof(cl_mem), (void *)&amp;dev_in);</a>
+<a name="ln763">    dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_basecurve_finalize, 1, sizeof(cl_mem), (void *)&amp;dev_comb[0]);</a>
+<a name="ln764">    dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_basecurve_finalize, 2, sizeof(cl_mem), (void *)&amp;dev_out);</a>
+<a name="ln765">    dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_basecurve_finalize, 3, sizeof(int), (void *)&amp;width);</a>
+<a name="ln766">    dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_basecurve_finalize, 4, sizeof(int), (void *)&amp;height);</a>
+<a name="ln767">    err = dt_opencl_enqueue_kernel_2d(devid, gd-&gt;kernel_basecurve_finalize, sizes);</a>
+<a name="ln768">    if(err != CL_SUCCESS) goto error;</a>
+<a name="ln769">  }</a>
+<a name="ln770"> </a>
+<a name="ln771">  for(int k = 0; k &lt; num_levels_max; k++)</a>
+<a name="ln772">  {</a>
+<a name="ln773">    dt_opencl_release_mem_object(dev_col[k]);</a>
+<a name="ln774">    dt_opencl_release_mem_object(dev_comb[k]);</a>
+<a name="ln775">  }</a>
+<a name="ln776">  dt_ioppr_free_iccprofile_params_cl(&amp;profile_info_cl, &amp;profile_lut_cl, &amp;dev_profile_info, &amp;dev_profile_lut);</a>
+<a name="ln777">  dt_opencl_release_mem_object(dev_m);</a>
+<a name="ln778">  dt_opencl_release_mem_object(dev_coeffs);</a>
+<a name="ln779">  dt_opencl_release_mem_object(dev_tmp1);</a>
+<a name="ln780">  dt_opencl_release_mem_object(dev_tmp2);</a>
+<a name="ln781">  free(dev_comb);</a>
+<a name="ln782">  free(dev_col);</a>
+<a name="ln783">  return TRUE;</a>
+<a name="ln784"> </a>
+<a name="ln785">error:</a>
+<a name="ln786">  for(int k = 0; k &lt; num_levels_max; k++)</a>
+<a name="ln787">  {</a>
+<a name="ln788">    dt_opencl_release_mem_object(dev_col[k]);</a>
+<a name="ln789">    dt_opencl_release_mem_object(dev_comb[k]);</a>
+<a name="ln790">  }</a>
+<a name="ln791">  dt_ioppr_free_iccprofile_params_cl(&amp;profile_info_cl, &amp;profile_lut_cl, &amp;dev_profile_info, &amp;dev_profile_lut);</a>
+<a name="ln792">  dt_opencl_release_mem_object(dev_m);</a>
+<a name="ln793">  dt_opencl_release_mem_object(dev_coeffs);</a>
+<a name="ln794">  dt_opencl_release_mem_object(dev_tmp1);</a>
+<a name="ln795">  dt_opencl_release_mem_object(dev_tmp2);</a>
+<a name="ln796">  free(dev_comb);</a>
+<a name="ln797">  free(dev_col);</a>
+<a name="ln798">  dt_print(DT_DEBUG_OPENCL, &quot;[opencl_basecurve_fusion] couldn't enqueue kernel! %d\n&quot;, err);</a>
+<a name="ln799">  return FALSE;</a>
+<a name="ln800">}</a>
+<a name="ln801"> </a>
+<a name="ln802">static</a>
+<a name="ln803">int process_cl_lut(struct dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, cl_mem dev_in, cl_mem dev_out,</a>
+<a name="ln804">                   const dt_iop_roi_t *const roi_in, const dt_iop_roi_t *const roi_out)</a>
+<a name="ln805">{</a>
+<a name="ln806">  dt_iop_basecurve_data_t *d = (dt_iop_basecurve_data_t *)piece-&gt;data;</a>
+<a name="ln807">  dt_iop_basecurve_global_data_t *gd = (dt_iop_basecurve_global_data_t *)self-&gt;global_data;</a>
+<a name="ln808">  const dt_iop_order_iccprofile_info_t *const work_profile = dt_ioppr_get_pipe_work_profile_info(piece-&gt;pipe);</a>
+<a name="ln809"> </a>
+<a name="ln810">  cl_mem dev_m = NULL;</a>
+<a name="ln811">  cl_mem dev_coeffs = NULL;</a>
+<a name="ln812">  cl_int err = -999;</a>
+<a name="ln813"> </a>
+<a name="ln814">  cl_mem dev_profile_info = NULL;</a>
+<a name="ln815">  cl_mem dev_profile_lut = NULL;</a>
+<a name="ln816">  dt_colorspaces_iccprofile_info_cl_t *profile_info_cl;</a>
+<a name="ln817">  cl_float *profile_lut_cl = NULL;</a>
+<a name="ln818"> </a>
+<a name="ln819">  const int use_work_profile = (work_profile == NULL) ? 0 : 1;</a>
+<a name="ln820">  const int devid = piece-&gt;pipe-&gt;devid;</a>
+<a name="ln821">  const int width = roi_in-&gt;width;</a>
+<a name="ln822">  const int height = roi_in-&gt;height;</a>
+<a name="ln823">  const int preserve_colors = d-&gt;preserve_colors;</a>
+<a name="ln824"> </a>
+<a name="ln825">  const float mul = 1.0f;</a>
+<a name="ln826"> </a>
+<a name="ln827">  size_t sizes[] = { ROUNDUPWD(width), ROUNDUPHT(height), 1 };</a>
+<a name="ln828">  dev_m = dt_opencl_copy_host_to_device(devid, d-&gt;table, 256, 256, sizeof(float));</a>
+<a name="ln829">  if(dev_m == NULL) goto error;</a>
+<a name="ln830"> </a>
+<a name="ln831">  err = dt_ioppr_build_iccprofile_params_cl(work_profile, devid, &amp;profile_info_cl, &amp;profile_lut_cl,</a>
+<a name="ln832">                                            &amp;dev_profile_info, &amp;dev_profile_lut);</a>
+<a name="ln833">  if(err != CL_SUCCESS) goto error;</a>
+<a name="ln834"> </a>
+<a name="ln835">  dev_coeffs = dt_opencl_copy_host_to_device_constant(devid, sizeof(float) * 3, d-&gt;unbounded_coeffs);</a>
+<a name="ln836"> </a>
+<a name="ln837">  if(dev_coeffs == NULL) goto error;</a>
+<a name="ln838"> </a>
+<a name="ln839">  // read data/kernels/basecurve.cl for a description of &quot;legacy&quot; vs current</a>
+<a name="ln840">  // Conditional is moved outside of the OpenCL operations for performance.</a>
+<a name="ln841">  if(d-&gt;preserve_colors == DT_RGB_NORM_NONE)</a>
+<a name="ln842">  {</a>
+<a name="ln843">    dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_basecurve_legacy_lut, 0, sizeof(cl_mem), (void *)&amp;dev_in);</a>
+<a name="ln844">    dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_basecurve_legacy_lut, 1, sizeof(cl_mem), (void *)&amp;dev_out);</a>
+<a name="ln845">    dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_basecurve_legacy_lut, 2, sizeof(int), (void *)&amp;width);</a>
+<a name="ln846">    dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_basecurve_legacy_lut, 3, sizeof(int), (void *)&amp;height);</a>
+<a name="ln847">    dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_basecurve_legacy_lut, 4, sizeof(float), (void *)&amp;mul);</a>
+<a name="ln848">    dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_basecurve_legacy_lut, 5, sizeof(cl_mem), (void *)&amp;dev_m);</a>
+<a name="ln849">    dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_basecurve_legacy_lut, 6, sizeof(cl_mem), (void *)&amp;dev_coeffs);</a>
+<a name="ln850">    err = dt_opencl_enqueue_kernel_2d(devid, gd-&gt;kernel_basecurve_legacy_lut, sizes);</a>
+<a name="ln851">    if(err != CL_SUCCESS) goto error;</a>
+<a name="ln852">  }</a>
+<a name="ln853">  else</a>
+<a name="ln854">  {</a>
+<a name="ln855">    //FIXME:  There are still conditionals on d-&gt;preserve_colors within this flow that could impact performance</a>
+<a name="ln856">    dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_basecurve_lut, 0, sizeof(cl_mem), (void *)&amp;dev_in);</a>
+<a name="ln857">    dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_basecurve_lut, 1, sizeof(cl_mem), (void *)&amp;dev_out);</a>
+<a name="ln858">    dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_basecurve_lut, 2, sizeof(int), (void *)&amp;width);</a>
+<a name="ln859">    dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_basecurve_lut, 3, sizeof(int), (void *)&amp;height);</a>
+<a name="ln860">    dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_basecurve_lut, 4, sizeof(float), (void *)&amp;mul); </a>
+<a name="ln861">    dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_basecurve_lut, 5, sizeof(cl_mem), (void *)&amp;dev_m);</a>
+<a name="ln862">    dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_basecurve_lut, 6, sizeof(cl_mem), (void *)&amp;dev_coeffs);</a>
+<a name="ln863">    dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_basecurve_lut, 7, sizeof(int), (void *)&amp;preserve_colors);</a>
+<a name="ln864">    dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_basecurve_lut, 8, sizeof(cl_mem), (void *)&amp;dev_profile_info);</a>
+<a name="ln865">    dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_basecurve_lut, 9, sizeof(cl_mem), (void *)&amp;dev_profile_lut);</a>
+<a name="ln866">    dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_basecurve_lut, 10, sizeof(int), (void *)&amp;use_work_profile);</a>
+<a name="ln867">    err = dt_opencl_enqueue_kernel_2d(devid, gd-&gt;kernel_basecurve_lut, sizes);</a>
+<a name="ln868">    if(err != CL_SUCCESS) goto error;</a>
+<a name="ln869">  }</a>
+<a name="ln870"> </a>
+<a name="ln871">  dt_opencl_release_mem_object(dev_m);</a>
+<a name="ln872">  dt_opencl_release_mem_object(dev_coeffs);</a>
+<a name="ln873">  dt_ioppr_free_iccprofile_params_cl(&amp;profile_info_cl, &amp;profile_lut_cl, &amp;dev_profile_info, &amp;dev_profile_lut);</a>
+<a name="ln874">  return TRUE;</a>
+<a name="ln875"> </a>
+<a name="ln876">error:</a>
+<a name="ln877">  dt_opencl_release_mem_object(dev_m);</a>
+<a name="ln878">  dt_opencl_release_mem_object(dev_coeffs);</a>
+<a name="ln879">  dt_ioppr_free_iccprofile_params_cl(&amp;profile_info_cl, &amp;profile_lut_cl, &amp;dev_profile_info, &amp;dev_profile_lut);</a>
+<a name="ln880">  dt_print(DT_DEBUG_OPENCL, &quot;[opencl_basecurve_lut] couldn't enqueue kernel! %d\n&quot;, err);</a>
+<a name="ln881">  return FALSE;</a>
+<a name="ln882">}</a>
+<a name="ln883"> </a>
+<a name="ln884">int process_cl(struct dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, cl_mem dev_in, cl_mem dev_out,</a>
+<a name="ln885">               const dt_iop_roi_t *const roi_in, const dt_iop_roi_t *const roi_out)</a>
+<a name="ln886">{</a>
+<a name="ln887">  dt_iop_basecurve_data_t *d = (dt_iop_basecurve_data_t *)piece-&gt;data;</a>
+<a name="ln888"> </a>
+<a name="ln889">  if(d-&gt;exposure_fusion)</a>
+<a name="ln890">    return process_cl_fusion(self, piece, dev_in, dev_out, roi_in, roi_out);</a>
+<a name="ln891">  else</a>
+<a name="ln892">    return process_cl_lut(self, piece, dev_in, dev_out, roi_in, roi_out);</a>
+<a name="ln893">}</a>
+<a name="ln894"> </a>
+<a name="ln895">#endif</a>
+<a name="ln896"> </a>
+<a name="ln897">void tiling_callback(struct dt_iop_module_t *self, struct dt_dev_pixelpipe_iop_t *piece,</a>
+<a name="ln898">                     const dt_iop_roi_t *roi_in, const dt_iop_roi_t *roi_out,</a>
+<a name="ln899">                     struct dt_develop_tiling_t *tiling)</a>
+<a name="ln900">{</a>
+<a name="ln901">  dt_iop_basecurve_data_t *const d = (dt_iop_basecurve_data_t *)piece-&gt;data;</a>
+<a name="ln902"> </a>
+<a name="ln903">  if(d-&gt;exposure_fusion)</a>
+<a name="ln904">  {</a>
+<a name="ln905">    const int rad = MIN(roi_in-&gt;width, (int)ceilf(256 * roi_in-&gt;scale / piece-&gt;iscale));</a>
+<a name="ln906"> </a>
+<a name="ln907">    tiling-&gt;factor = 6.666f;                 // in + out + col[] + comb[] + 2*tmp</a>
+<a name="ln908">    tiling-&gt;maxbuf = 1.0f;</a>
+<a name="ln909">    tiling-&gt;overhead = 0;</a>
+<a name="ln910">    tiling-&gt;xalign = 1;</a>
+<a name="ln911">    tiling-&gt;yalign = 1;</a>
+<a name="ln912">    tiling-&gt;overlap = rad;</a>
+<a name="ln913">  }</a>
+<a name="ln914">  else</a>
+<a name="ln915">  {</a>
+<a name="ln916">    tiling-&gt;factor = 2.0f;                   // in + out</a>
+<a name="ln917">    tiling-&gt;maxbuf = 1.0f;</a>
+<a name="ln918">    tiling-&gt;overhead = 0;</a>
+<a name="ln919">    tiling-&gt;xalign = 1;</a>
+<a name="ln920">    tiling-&gt;yalign = 1;</a>
+<a name="ln921">    tiling-&gt;overlap = 0;</a>
+<a name="ln922">  }</a>
+<a name="ln923">}</a>
+<a name="ln924"> </a>
+<a name="ln925"> </a>
+<a name="ln926">// See comments of opencl version in data/kernels/basecurve.cl for description of the meaning of &quot;legacy&quot;</a>
+<a name="ln927">static inline void apply_legacy_curve(</a>
+<a name="ln928">    const float *const in,</a>
+<a name="ln929">    float *const out,</a>
+<a name="ln930">    const int width,</a>
+<a name="ln931">    const int height,</a>
+<a name="ln932">    const float mul,</a>
+<a name="ln933">    const float *const table,</a>
+<a name="ln934">    const float *const unbounded_coeffs)</a>
+<a name="ln935">{</a>
+<a name="ln936">#ifdef _OPENMP</a>
+<a name="ln937">#pragma omp parallel for default(none) \</a>
+<a name="ln938">  dt_omp_firstprivate(height, width, in, out, mul, table, unbounded_coeffs) \</a>
+<a name="ln939">  schedule(static)</a>
+<a name="ln940">#endif</a>
+<a name="ln941">  for(size_t k = 0; k &lt; (size_t)width * height; k++)</a>
+<a name="ln942">  {</a>
+<a name="ln943">    const float *inp = in + 4 * k;</a>
+<a name="ln944">    float *outp = out + 4 * k;</a>
+<a name="ln945">    for(int i = 0; i &lt; 3; i++)</a>
+<a name="ln946">    {</a>
+<a name="ln947">      const float f = inp[i] * mul;</a>
+<a name="ln948">      // use base curve for values &lt; 1, else use extrapolation.</a>
+<a name="ln949">      if(f &lt; 1.0f)</a>
+<a name="ln950">        outp[i] = table[CLAMP((int)(f * 0x10000ul), 0, 0xffff)];</a>
+<a name="ln951">      else</a>
+<a name="ln952">        outp[i] = dt_iop_eval_exp(unbounded_coeffs, f);</a>
+<a name="ln953">    }</a>
+<a name="ln954">    outp[3] = inp[3];</a>
+<a name="ln955">  }</a>
+<a name="ln956">}</a>
+<a name="ln957"> </a>
+<a name="ln958">// See description of the equivalent OpenCL function in data/kernels/basecurve.cl</a>
+<a name="ln959">static inline void apply_curve(</a>
+<a name="ln960">    const float *const in,</a>
+<a name="ln961">    float *const out,</a>
+<a name="ln962">    const int width,</a>
+<a name="ln963">    const int height,</a>
+<a name="ln964">    const int preserve_colors,</a>
+<a name="ln965">    const float mul,</a>
+<a name="ln966">    const float *const table,</a>
+<a name="ln967">    const float *const unbounded_coeffs,</a>
+<a name="ln968">    const dt_iop_order_iccprofile_info_t *const work_profile)</a>
+<a name="ln969">{</a>
+<a name="ln970">#ifdef _OPENMP</a>
+<a name="ln971">#pragma omp parallel for default(none)                            \</a>
+<a name="ln972">  dt_omp_firstprivate(in, out, width, height, mul, table, unbounded_coeffs, preserve_colors, work_profile) \</a>
+<a name="ln973">  schedule(static)</a>
+<a name="ln974">#endif</a>
+<a name="ln975">  for(size_t k = 0; k &lt; (size_t)width * height; k++)</a>
+<a name="ln976">  {</a>
+<a name="ln977">    const float *inp = in + 4 * k;</a>
+<a name="ln978">    float *outp = out + 4 * k;</a>
+<a name="ln979">    float ratio = 1.f;</a>
+<a name="ln980">    // FIXME: Determine if we can get rid of the conditionals within this function in some way to improve performance.</a>
+<a name="ln981">    // However, solving this one is much harder than the conditional for legacy vs. current</a>
+<a name="ln982">    const float lum = mul * dt_rgb_norm(inp, preserve_colors, work_profile);</a>
+<a name="ln983">    if(lum &gt; 0.f)</a>
+<a name="ln984">    {</a>
+<a name="ln985">      const float curve_lum = (lum &lt; 1.0f)</a>
+<a name="ln986">        ? table[CLAMP((int)(lum * 0x10000ul), 0, 0xffff)]</a>
+<a name="ln987">        : dt_iop_eval_exp(unbounded_coeffs, lum);</a>
+<a name="ln988">      ratio = mul * curve_lum / lum;</a>
+<a name="ln989">    }</a>
+<a name="ln990">    for(size_t c = 0; c &lt; 3; c++)</a>
+<a name="ln991">    {</a>
+<a name="ln992">      outp[c] = (ratio * inp[c]);</a>
+<a name="ln993">    }</a>
+<a name="ln994">    outp[3] = inp[3];</a>
+<a name="ln995">  }</a>
+<a name="ln996">}</a>
+<a name="ln997"> </a>
+<a name="ln998">static inline void compute_features(</a>
+<a name="ln999">    float *const col,</a>
+<a name="ln1000">    const int wd,</a>
+<a name="ln1001">    const int ht)</a>
+<a name="ln1002">{</a>
+<a name="ln1003">  // features are product of</a>
+<a name="ln1004">  // 1) well exposedness</a>
+<a name="ln1005">  // 2) saturation</a>
+<a name="ln1006">  // 3) local contrast (handled in laplacian form later)</a>
+<a name="ln1007">#ifdef _OPENMP</a>
+<a name="ln1008">#pragma omp parallel for default(none) \</a>
+<a name="ln1009">  dt_omp_firstprivate(col, ht, wd) \</a>
+<a name="ln1010">  schedule(static) \</a>
+<a name="ln1011">  collapse(2)</a>
+<a name="ln1012">#endif</a>
+<a name="ln1013">  for(int j=0;j&lt;ht;j++) for(int i=0;i&lt;wd;i++)</a>
+<a name="ln1014">  {</a>
+<a name="ln1015">    const size_t x = 4*((size_t)wd*j+i);</a>
+<a name="ln1016">    const float max = MAX(col[x], MAX(col[x+1], col[x+2]));</a>
+<a name="ln1017">    const float min = MIN(col[x], MIN(col[x+1], col[x+2]));</a>
+<a name="ln1018">    const float sat = .1f + .1f*(max-min)/MAX(1e-4f, max);</a>
+<a name="ln1019">    col[x+3] = sat;</a>
+<a name="ln1020"> </a>
+<a name="ln1021">    const float c = 0.54f;</a>
+<a name="ln1022">    float v = fabsf(col[x]-c);</a>
+<a name="ln1023">    v = MAX(fabsf(col[x+1]-c), v);</a>
+<a name="ln1024">    v = MAX(fabsf(col[x+2]-c), v);</a>
+<a name="ln1025">    const float var = 0.5;</a>
+<a name="ln1026">    const float exp = .2f + dt_fast_expf(-v*v/(var*var));</a>
+<a name="ln1027">    col[x+3] *= exp;</a>
+<a name="ln1028">  }</a>
+<a name="ln1029">}</a>
+<a name="ln1030"> </a>
+<a name="ln1031">static inline void gauss_blur(</a>
+<a name="ln1032">    const float *const input,</a>
+<a name="ln1033">    float *const output,</a>
+<a name="ln1034">    const size_t wd,</a>
+<a name="ln1035">    const size_t ht)</a>
+<a name="ln1036">{</a>
+<a name="ln1037">  const float w[5] = { 1.f / 16.f, 4.f / 16.f, 6.f / 16.f, 4.f / 16.f, 1.f / 16.f };</a>
+<a name="ln1038">  float *tmp = dt_alloc_align(64, (size_t)wd*ht*4*sizeof(float));</a>
+<a name="ln1039">  memset(tmp, 0, 4*wd*ht*sizeof(float));</a>
+<a name="ln1040">#ifdef _OPENMP</a>
+<a name="ln1041">#pragma omp parallel for default(none) \</a>
+<a name="ln1042">  dt_omp_firstprivate(ht, input, w, wd) \</a>
+<a name="ln1043">  shared(tmp) \</a>
+<a name="ln1044">  schedule(static)</a>
+<a name="ln1045">#endif</a>
+<a name="ln1046">  for(int j=0;j&lt;ht;j++)</a>
+<a name="ln1047">  { // horizontal pass</a>
+<a name="ln1048">    // left borders</a>
+<a name="ln1049">    for(int i=0;i&lt;2;i++) for(int c=0;c&lt;4;c++)</a>
+<a name="ln1050">      for(int ii=-2;ii&lt;=2;ii++)</a>
+<a name="ln1051">        tmp[4*(j*wd+i)+c] += input[4*(j*wd+MAX(-i-ii,i+ii))+c] * w[ii+2];</a>
+<a name="ln1052">    // most pixels</a>
+<a name="ln1053">    for(int i=2;i&lt;wd-2;i++) for(int c=0;c&lt;4;c++)</a>
+<a name="ln1054">      for(int ii=-2;ii&lt;=2;ii++)</a>
+<a name="ln1055">        tmp[4*(j*wd+i)+c] += input[4*(j*wd+i+ii)+c] * w[ii+2];</a>
+<a name="ln1056">    // right borders</a>
+<a name="ln1057">    for(int i=wd-2;i&lt;wd;i++) for(int c=0;c&lt;4;c++)</a>
+<a name="ln1058">      for(int ii=-2;ii&lt;=2;ii++)</a>
+<a name="ln1059">        tmp[4*(j*wd+i)+c] += input[4*(j*wd+MIN(i+ii, wd-(i+ii-wd+1) ))+c] * w[ii+2];</a>
+<a name="ln1060">  }</a>
+<a name="ln1061">  memset(output, 0, 4*wd*ht*sizeof(float));</a>
+<a name="ln1062">#ifdef _OPENMP</a>
+<a name="ln1063">#pragma omp parallel for default(none) \</a>
+<a name="ln1064">  dt_omp_firstprivate(ht, output, w, wd) \</a>
+<a name="ln1065">  shared(tmp) \</a>
+<a name="ln1066">  schedule(static)</a>
+<a name="ln1067">#endif</a>
+<a name="ln1068">  for(int i=0;i&lt;wd;i++)</a>
+<a name="ln1069">  { // vertical pass</a>
+<a name="ln1070">    for(int j=0;j&lt;2;j++) for(int c=0;c&lt;4;c++)</a>
+<a name="ln1071">      for(int jj=-2;jj&lt;=2;jj++)</a>
+<a name="ln1072">        output[4*(j*wd+i)+c] += tmp[4*(MAX(-j-jj,j+jj)*wd+i)+c] * w[jj+2];</a>
+<a name="ln1073">    for(int j=2;j&lt;ht-2;j++) for(int c=0;c&lt;4;c++)</a>
+<a name="ln1074">      for(int jj=-2;jj&lt;=2;jj++)</a>
+<a name="ln1075">        output[4*(j*wd+i)+c] += tmp[4*((j+jj)*wd+i)+c] * w[jj+2];</a>
+<a name="ln1076">    for(int j=ht-2;j&lt;ht;j++) for(int c=0;c&lt;4;c++)</a>
+<a name="ln1077">      for(int jj=-2;jj&lt;=2;jj++)</a>
+<a name="ln1078">        output[4*(j*wd+i)+c] += tmp[4*(MIN(j+jj, ht-(j+jj-ht+1))*wd+i)+c] * w[jj+2];</a>
+<a name="ln1079">  }</a>
+<a name="ln1080">  dt_free_align(tmp);</a>
+<a name="ln1081">}</a>
+<a name="ln1082"> </a>
+<a name="ln1083">static inline void gauss_expand(</a>
+<a name="ln1084">    const float *const input, // coarse input</a>
+<a name="ln1085">    float *const fine,        // upsampled, blurry output</a>
+<a name="ln1086">    const size_t wd,          // fine res</a>
+<a name="ln1087">    const size_t ht)</a>
+<a name="ln1088">{</a>
+<a name="ln1089">  const size_t cw = (wd-1)/2+1;</a>
+<a name="ln1090">  // fill numbers in even pixels, zero odd ones</a>
+<a name="ln1091">  memset(fine, 0, 4*wd*ht*sizeof(float));</a>
+<a name="ln1092">#ifdef _OPENMP</a>
+<a name="ln1093">#pragma omp parallel for default(none) \</a>
+<a name="ln1094">  dt_omp_firstprivate(cw, fine, ht, input, wd) \</a>
+<a name="ln1095">  schedule(static) \</a>
+<a name="ln1096">  collapse(2)</a>
+<a name="ln1097">#endif</a>
+<a name="ln1098">  for(int j=0;j&lt;ht;j+=2)</a>
+<a name="ln1099">    for(int i=0;i&lt;wd;i+=2)</a>
+<a name="ln1100">      for(int c=0;c&lt;4;c++)</a>
+<a name="ln1101">        fine[4*(j*wd+i)+c] = 4.0f * input[4*(j/2*cw + i/2)+c];</a>
+<a name="ln1102"> </a>
+<a name="ln1103">  // convolve with same kernel weights mul by 4:</a>
+<a name="ln1104">  gauss_blur(fine, fine, wd, ht);</a>
+<a name="ln1105">}</a>
+<a name="ln1106"> </a>
+<a name="ln1107">// XXX FIXME: we'll need to pad up the image to get a good boundary condition!</a>
+<a name="ln1108">// XXX FIXME: downsampling will not result in an energy conserving pattern (every 4 pixels one sample)</a>
+<a name="ln1109">// XXX FIXME: neither will a mirror boundary condition (mirrors in subsampled values at random density)</a>
+<a name="ln1110">// TODO: copy laplacian code from local laplacian filters, it's faster.</a>
+<a name="ln1111">static inline void gauss_reduce(</a>
+<a name="ln1112">    const float *const input, // fine input buffer</a>
+<a name="ln1113">    float *const coarse,      // coarse scale, blurred input buf</a>
+<a name="ln1114">    float *const detail,      // detail/laplacian, fine scale, or 0</a>
+<a name="ln1115">    const size_t wd,</a>
+<a name="ln1116">    const size_t ht)</a>
+<a name="ln1117">{</a>
+<a name="ln1118">  // blur, store only coarse res</a>
+<a name="ln1119">  const size_t cw = (wd-1)/2+1, ch = (ht-1)/2+1;</a>
+<a name="ln1120"> </a>
+<a name="ln1121">  float *blurred = dt_alloc_align(64, (size_t)wd*ht*4*sizeof(float));</a>
+<a name="ln1122">  gauss_blur(input, blurred, wd, ht);</a>
+<a name="ln1123">  for(size_t j=0;j&lt;ch;j++) for(size_t i=0;i&lt;cw;i++)</a>
+<a name="ln1124">    for(int c=0;c&lt;4;c++) coarse[4*(j*cw+i)+c] = blurred[4*(2*j*wd+2*i)+c];</a>
+<a name="ln1125">  dt_free_align(blurred);</a>
+<a name="ln1126"> </a>
+<a name="ln1127">  if(detail)</a>
+<a name="ln1128">  {</a>
+<a name="ln1129">    // compute laplacian/details: expand coarse buffer into detail</a>
+<a name="ln1130">    // buffer subtract expanded buffer from input in place</a>
+<a name="ln1131">    gauss_expand(coarse, detail, wd, ht);</a>
+<a name="ln1132">    for(size_t k=0;k&lt;wd*ht*4;k++)</a>
+<a name="ln1133">      detail[k] = input[k] - detail[k];</a>
+<a name="ln1134">  }</a>
+<a name="ln1135">}</a>
+<a name="ln1136"> </a>
+<a name="ln1137">void process_fusion(struct dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, const void *const ivoid,</a>
+<a name="ln1138">                    void *const ovoid, const dt_iop_roi_t *const roi_in, const dt_iop_roi_t *const roi_out)</a>
+<a name="ln1139">{</a>
+<a name="ln1140">  const float *const in = (const float *)ivoid;</a>
+<a name="ln1141">  float *const out = (float *)ovoid;</a>
+<a name="ln1142">  dt_iop_basecurve_data_t *const d = (dt_iop_basecurve_data_t *)(piece-&gt;data);</a>
+<a name="ln1143">  const dt_iop_order_iccprofile_info_t *const work_profile = dt_ioppr_get_pipe_work_profile_info(piece-&gt;pipe);</a>
+<a name="ln1144"> </a>
+<a name="ln1145">  // allocate temporary buffer for wavelet transform + blending</a>
+<a name="ln1146">  const int wd = roi_in-&gt;width, ht = roi_in-&gt;height;</a>
+<a name="ln1147">  int num_levels = 8;</a>
+<a name="ln1148">  float **col = malloc(num_levels * sizeof(float *));</a>
+<a name="ln1149">  float **comb = malloc(num_levels * sizeof(float *));</a>
+<a name="ln1150">  int w = wd, h = ht;</a>
+<a name="ln1151">  const int rad = MIN(wd, (int)ceilf(256 * roi_in-&gt;scale / piece-&gt;iscale));</a>
+<a name="ln1152">  int step = 1;</a>
+<a name="ln1153">  for(int k = 0; k &lt; num_levels; k++)</a>
+<a name="ln1154">  {</a>
+<a name="ln1155">    // coarsest step is some % of image width.</a>
+<a name="ln1156">    col[k] = dt_alloc_align(64, sizeof(float) * 4 * w * h);</a>
+<a name="ln1157">    comb[k] = dt_alloc_align(64, sizeof(float) * 4 * w * h);</a>
+<a name="ln1158">    memset(comb[k], 0, sizeof(float) * 4 * w * h);</a>
+<a name="ln1159">    w = (w - 1) / 2 + 1;</a>
+<a name="ln1160">    h = (h - 1) / 2 + 1;</a>
+<a name="ln1161">    step *= 2;</a>
+<a name="ln1162">    if(step &gt; rad || w &lt; 4 || h &lt; 4)</a>
+<a name="ln1163">    {</a>
+<a name="ln1164">      num_levels = k + 1;</a>
+<a name="ln1165">      break;</a>
+<a name="ln1166">    }</a>
+<a name="ln1167">  }</a>
+<a name="ln1168"> </a>
+<a name="ln1169">  for(int e = 0; e &lt; d-&gt;exposure_fusion + 1; e++)</a>
+<a name="ln1170">  {</a>
+<a name="ln1171">    // for every exposure fusion image:</a>
+<a name="ln1172">    // push by some ev, apply base curve:</a>
+<a name="ln1173">    if(d-&gt;preserve_colors == DT_RGB_NORM_NONE)</a>
+<a name="ln1174">      apply_legacy_curve(in, col[0], wd, ht, exposure_increment(d-&gt;exposure_stops, e, d-&gt;exposure_fusion, d-&gt;exposure_bias),</a>
+<a name="ln1175">                         d-&gt;table, d-&gt;unbounded_coeffs);</a>
+<a name="ln1176">    else</a>
+<a name="ln1177">      apply_curve(in, col[0], wd, ht, d-&gt;preserve_colors, exposure_increment(d-&gt;exposure_stops, e, d-&gt;exposure_fusion, d-&gt;exposure_bias),</a>
+<a name="ln1178">                  d-&gt;table, d-&gt;unbounded_coeffs, work_profile);</a>
+<a name="ln1179"> </a>
+<a name="ln1180">    // compute features</a>
+<a name="ln1181">    compute_features(col[0], wd, ht);</a>
+<a name="ln1182"> </a>
+<a name="ln1183">    // create gaussian pyramid of colour buffer</a>
+<a name="ln1184">    w = wd;</a>
+<a name="ln1185">    h = ht;</a>
+<a name="ln1186">    gauss_reduce(col[0], col[1], out, w, h);</a>
+<a name="ln1187">#ifdef _OPENMP</a>
+<a name="ln1188">#pragma omp parallel for default(none) \</a>
+<a name="ln1189">    dt_omp_firstprivate(ht, out, wd) \</a>
+<a name="ln1190">    shared(col) \</a>
+<a name="ln1191">    schedule(static)</a>
+<a name="ln1192">#endif</a>
+<a name="ln1193">    for(size_t k = 0; k &lt; 4ul * wd * ht; k += 4)</a>
+<a name="ln1194">      col[0][k + 3] *= .1f + sqrtf(out[k] * out[k] + out[k + 1] * out[k + 1] + out[k + 2] * out[k + 2]);</a>
+<a name="ln1195"> </a>
+<a name="ln1196">// #define DEBUG_VIS2</a>
+<a name="ln1197">#ifdef DEBUG_VIS2 // transform weights in channels</a>
+<a name="ln1198">    for(size_t k = 0; k &lt; 4ul * w * h; k += 4) col[0][k + e] = col[0][k + 3];</a>
+<a name="ln1199">#endif</a>
+<a name="ln1200"> </a>
+<a name="ln1201">// #define DEBUG_VIS</a>
+<a name="ln1202">#ifdef DEBUG_VIS // DEBUG visualise weight buffer</a>
+<a name="ln1203">    for(size_t k = 0; k &lt; 4ul * w * h; k += 4) comb[0][k + e] = col[0][k + 3];</a>
+<a name="ln1204">    continue;</a>
+<a name="ln1205">#endif</a>
+<a name="ln1206"> </a>
+<a name="ln1207">    for(int k = 1; k &lt; num_levels; k++)</a>
+<a name="ln1208">    {</a>
+<a name="ln1209">      gauss_reduce(col[k - 1], col[k], 0, w, h);</a>
+<a name="ln1210">      w = (w - 1) / 2 + 1;</a>
+<a name="ln1211">      h = (h - 1) / 2 + 1;</a>
+<a name="ln1212">    }</a>
+<a name="ln1213"> </a>
+<a name="ln1214">    // update pyramid coarse to fine</a>
+<a name="ln1215">    for(int k = num_levels - 1; k &gt;= 0; k--)</a>
+<a name="ln1216">    {</a>
+<a name="ln1217">      w = wd;</a>
+<a name="ln1218">      h = ht;</a>
+<a name="ln1219">      for(int i = 0; i &lt; k; i++)</a>
+<a name="ln1220">      {</a>
+<a name="ln1221">        w = (w - 1) / 2 + 1;</a>
+<a name="ln1222">        h = (h - 1) / 2 + 1;</a>
+<a name="ln1223">      }</a>
+<a name="ln1224">      // abuse output buffer as temporary memory:</a>
+<a name="ln1225">      if(k != num_levels - 1) gauss_expand(col[k + 1], out, w, h);</a>
+<a name="ln1226">#ifdef _OPENMP</a>
+<a name="ln1227">#pragma omp parallel for default(none) \</a>
+<a name="ln1228">      dt_omp_firstprivate(out) \</a>
+<a name="ln1229">      shared(col, comb, w, h, num_levels, k) \</a>
+<a name="ln1230">      schedule(static)</a>
+<a name="ln1231">#endif</a>
+<a name="ln1232">      for(int j = 0; j &lt; h; j++)</a>
+<a name="ln1233">        for(int i = 0; i &lt; w; i++)</a>
+<a name="ln1234">        {</a>
+<a name="ln1235">          const size_t x = 4 * ((size_t)w * j + i);</a>
+<a name="ln1236">          // blend images into output pyramid</a>
+<a name="ln1237">          if(k == num_levels - 1) // blend gaussian base</a>
+<a name="ln1238">#ifdef DEBUG_VIS2</a>
+<a name="ln1239">            ;</a>
+<a name="ln1240">#else</a>
+<a name="ln1241">            for(int c = 0; c &lt; 3; c++) comb[k][x + c] += col[k][x + 3] * col[k][x + c];</a>
+<a name="ln1242">#endif</a>
+<a name="ln1243">          else // laplacian</a>
+<a name="ln1244">            for(int c = 0; c &lt; 3; c++) comb[k][x + c] += col[k][x + 3] * (col[k][x + c] - out[x + c]);</a>
+<a name="ln1245">          comb[k][x + 3] += col[k][x + 3];</a>
+<a name="ln1246">        }</a>
+<a name="ln1247">    }</a>
+<a name="ln1248">  }</a>
+<a name="ln1249"> </a>
+<a name="ln1250">#ifndef DEBUG_VIS // DEBUG: switch off when visualising weight buf</a>
+<a name="ln1251">  // normalise and reconstruct output pyramid buffer coarse to fine</a>
+<a name="ln1252">  for(int k = num_levels - 1; k &gt;= 0; k--)</a>
+<a name="ln1253">  {</a>
+<a name="ln1254">    w = wd;</a>
+<a name="ln1255">    h = ht;</a>
+<a name="ln1256">    for(int i = 0; i &lt; k; i++)</a>
+<a name="ln1257">    {</a>
+<a name="ln1258">      w = (w - 1) / 2 + 1;</a>
+<a name="ln1259">      h = (h - 1) / 2 + 1;</a>
+<a name="ln1260">    }</a>
+<a name="ln1261"> </a>
+<a name="ln1262">    // normalise both gaussian base and laplacians:</a>
+<a name="ln1263">#ifdef _OPENMP</a>
+<a name="ln1264">#pragma omp parallel for default(none) shared(comb, w, h, k) schedule(static)</a>
+<a name="ln1265">#endif</a>
+<a name="ln1266">    for(size_t i = 0; i &lt; (size_t)4 * w * h; i += 4)</a>
+<a name="ln1267">      if(comb[k][i + 3] &gt; 1e-8f)</a>
+<a name="ln1268">        for(int c = 0; c &lt; 3; c++) comb[k][i + c] /= comb[k][i + 3];</a>
+<a name="ln1269"> </a>
+<a name="ln1270">    if(k &lt; num_levels - 1)</a>
+<a name="ln1271">    { // reconstruct output image</a>
+<a name="ln1272">      gauss_expand(comb[k + 1], out, w, h);</a>
+<a name="ln1273">#ifdef _OPENMP</a>
+<a name="ln1274">#pragma omp parallel for default(none) \</a>
+<a name="ln1275">      dt_omp_firstprivate(out) \</a>
+<a name="ln1276">      shared(comb, w, h, k) \</a>
+<a name="ln1277">      schedule(static)</a>
+<a name="ln1278">#endif</a>
+<a name="ln1279">      for(int j = 0; j &lt; h; j++)</a>
+<a name="ln1280">        for(int i = 0; i &lt; w; i++)</a>
+<a name="ln1281">        {</a>
+<a name="ln1282">          const size_t x = 4ul * (w * j + i);</a>
+<a name="ln1283">          for(int c = 0; c &lt; 3; c++) comb[k][x + c] += out[x + c];</a>
+<a name="ln1284">        }</a>
+<a name="ln1285">    }</a>
+<a name="ln1286">  }</a>
+<a name="ln1287">#endif</a>
+<a name="ln1288">  // copy output buffer</a>
+<a name="ln1289">#ifdef _OPENMP</a>
+<a name="ln1290">#pragma omp parallel for default(none) \</a>
+<a name="ln1291">  dt_omp_firstprivate(col, in, ht, out, wd) \</a>
+<a name="ln1292">  shared(comb) \</a>
+<a name="ln1293">  schedule(static)</a>
+<a name="ln1294">#endif</a>
+<a name="ln1295">  for(size_t k = 0; k &lt; (size_t)4 * wd * ht; k += 4)</a>
+<a name="ln1296">  {</a>
+<a name="ln1297">    out[k + 0] = comb[0][k + 0];</a>
+<a name="ln1298">    out[k + 1] = comb[0][k + 1];</a>
+<a name="ln1299">    out[k + 2] = comb[0][k + 2];</a>
+<a name="ln1300">    out[k + 3] = in[k + 3]; // pass on 4th channel</a>
+<a name="ln1301">  }</a>
+<a name="ln1302"> </a>
+<a name="ln1303">  // free temp buffers</a>
+<a name="ln1304">  for(int k = 0; k &lt; num_levels; k++)</a>
+<a name="ln1305">  {</a>
+<a name="ln1306">    dt_free_align(col[k]);</a>
+<a name="ln1307">    dt_free_align(comb[k]);</a>
+<a name="ln1308">  }</a>
+<a name="ln1309">  free(col);</a>
+<a name="ln1310">  free(comb);</a>
+<a name="ln1311">}</a>
+<a name="ln1312"> </a>
+<a name="ln1313">void process_lut(struct dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, const void *const ivoid,</a>
+<a name="ln1314">                 void *const ovoid, const dt_iop_roi_t *const roi_in, const dt_iop_roi_t *const roi_out)</a>
+<a name="ln1315">{</a>
+<a name="ln1316">  const float *const in = (const float *)ivoid;</a>
+<a name="ln1317">  float *const out = (float *)ovoid;</a>
+<a name="ln1318">  //const int ch = piece-&gt;colors; &lt;-- it appears someone was trying to make this handle monochrome data,</a>
+<a name="ln1319">  //however the for loops only handled RGBA - FIXME, determine what possible data formats and channel</a>
+<a name="ln1320">  //configurations we might encounter here and handle those too</a>
+<a name="ln1321">  dt_iop_basecurve_data_t *const d = (dt_iop_basecurve_data_t *)(piece-&gt;data);</a>
+<a name="ln1322">  const dt_iop_order_iccprofile_info_t *const work_profile = dt_ioppr_get_pipe_work_profile_info(piece-&gt;pipe);</a>
+<a name="ln1323"> </a>
+<a name="ln1324">  const int wd = roi_in-&gt;width, ht = roi_in-&gt;height;</a>
+<a name="ln1325"> </a>
+<a name="ln1326">  // Compared to previous implementation, we've at least moved this conditional outside of the image processing loops</a>
+<a name="ln1327">  // so that it is evaluated only once.  See FIXME comments in apply_curve for more potential performance improvements</a>
+<a name="ln1328">  if(d-&gt;preserve_colors == DT_RGB_NORM_NONE)</a>
+<a name="ln1329">    apply_legacy_curve(in, out, wd, ht, 1.0, d-&gt;table, d-&gt;unbounded_coeffs);</a>
+<a name="ln1330">  else</a>
+<a name="ln1331">    apply_curve(in, out, wd, ht, d-&gt;preserve_colors, 1.0, d-&gt;table, d-&gt;unbounded_coeffs, work_profile);</a>
+<a name="ln1332">}</a>
+<a name="ln1333"> </a>
+<a name="ln1334"> </a>
+<a name="ln1335">void process(struct dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, const void *const ivoid,</a>
+<a name="ln1336">             void *const ovoid, const dt_iop_roi_t *const roi_in, const dt_iop_roi_t *const roi_out)</a>
+<a name="ln1337">{</a>
+<a name="ln1338">  dt_iop_basecurve_data_t *const d = (dt_iop_basecurve_data_t *)(piece-&gt;data);</a>
+<a name="ln1339"> </a>
+<a name="ln1340">  // are we doing exposure fusion?</a>
+<a name="ln1341">  if(d-&gt;exposure_fusion)</a>
+<a name="ln1342">    process_fusion(self, piece, ivoid, ovoid, roi_in, roi_out);</a>
+<a name="ln1343">  else</a>
+<a name="ln1344">    process_lut(self, piece, ivoid, ovoid, roi_in, roi_out);</a>
+<a name="ln1345">}</a>
+<a name="ln1346"> </a>
+<a name="ln1347">void commit_params(struct dt_iop_module_t *self, dt_iop_params_t *p1, dt_dev_pixelpipe_t *pipe,</a>
+<a name="ln1348">                   dt_dev_pixelpipe_iop_t *piece)</a>
+<a name="ln1349">{</a>
+<a name="ln1350">  dt_iop_basecurve_data_t *d = (dt_iop_basecurve_data_t *)(piece-&gt;data);</a>
+<a name="ln1351">  dt_iop_basecurve_params_t *p = (dt_iop_basecurve_params_t *)p1;</a>
+<a name="ln1352"> </a>
+<a name="ln1353">  d-&gt;exposure_fusion = p-&gt;exposure_fusion;</a>
+<a name="ln1354">  d-&gt;exposure_stops = p-&gt;exposure_stops;</a>
+<a name="ln1355">  d-&gt;exposure_bias = p-&gt;exposure_bias;</a>
+<a name="ln1356">  d-&gt;preserve_colors = p-&gt;preserve_colors;</a>
+<a name="ln1357"> </a>
+<a name="ln1358">  const int ch = 0;</a>
+<a name="ln1359">  // take care of possible change of curve type or number of nodes (not yet implemented in UI)</a>
+<a name="ln1360">  if(d-&gt;basecurve_type != p-&gt;basecurve_type[ch] || d-&gt;basecurve_nodes != p-&gt;basecurve_nodes[ch])</a>
+<a name="ln1361">  {</a>
+<a name="ln1362">    if(d-&gt;curve) // catch initial init_pipe case</a>
+<a name="ln1363">      dt_draw_curve_destroy(d-&gt;curve);</a>
+<a name="ln1364">    d-&gt;curve = dt_draw_curve_new(0.0, 1.0, p-&gt;basecurve_type[ch]);</a>
+<a name="ln1365">    d-&gt;basecurve_nodes = p-&gt;basecurve_nodes[ch];</a>
+<a name="ln1366">    d-&gt;basecurve_type = p-&gt;basecurve_type[ch];</a>
+<a name="ln1367">    for(int k = 0; k &lt; p-&gt;basecurve_nodes[ch]; k++)</a>
+<a name="ln1368">    {</a>
+<a name="ln1369">      // printf(&quot;p-&gt;basecurve[%i][%i].x = %f;\n&quot;, ch, k, p-&gt;basecurve[ch][k].x);</a>
+<a name="ln1370">      // printf(&quot;p-&gt;basecurve[%i][%i].y = %f;\n&quot;, ch, k, p-&gt;basecurve[ch][k].y);</a>
+<a name="ln1371">      (void)dt_draw_curve_add_point(d-&gt;curve, p-&gt;basecurve[ch][k].x, p-&gt;basecurve[ch][k].y);</a>
+<a name="ln1372">    }</a>
+<a name="ln1373">  }</a>
+<a name="ln1374">  else</a>
+<a name="ln1375">  {</a>
+<a name="ln1376">    for(int k = 0; k &lt; p-&gt;basecurve_nodes[ch]; k++)</a>
+<a name="ln1377">      dt_draw_curve_set_point(d-&gt;curve, k, p-&gt;basecurve[ch][k].x, p-&gt;basecurve[ch][k].y);</a>
+<a name="ln1378">  }</a>
+<a name="ln1379">  dt_draw_curve_calc_values(d-&gt;curve, 0.0f, 1.0f, 0x10000, NULL, d-&gt;table);</a>
+<a name="ln1380"> </a>
+<a name="ln1381">  // now the extrapolation stuff:</a>
+<a name="ln1382">  const float xm = p-&gt;basecurve[0][p-&gt;basecurve_nodes[0] - 1].x;</a>
+<a name="ln1383">  const float x[4] = { 0.7f * xm, 0.8f * xm, 0.9f * xm, 1.0f * xm };</a>
+<a name="ln1384">  const float y[4] = { d-&gt;table[CLAMP((int)(x[0] * 0x10000ul), 0, 0xffff)],</a>
+<a name="ln1385">                       d-&gt;table[CLAMP((int)(x[1] * 0x10000ul), 0, 0xffff)],</a>
+<a name="ln1386">                       d-&gt;table[CLAMP((int)(x[2] * 0x10000ul), 0, 0xffff)],</a>
+<a name="ln1387">                       d-&gt;table[CLAMP((int)(x[3] * 0x10000ul), 0, 0xffff)] };</a>
+<a name="ln1388">  dt_iop_estimate_exp(x, y, 4, d-&gt;unbounded_coeffs);</a>
+<a name="ln1389">}</a>
+<a name="ln1390"> </a>
+<a name="ln1391">void init_pipe(struct dt_iop_module_t *self, dt_dev_pixelpipe_t *pipe, dt_dev_pixelpipe_iop_t *piece)</a>
+<a name="ln1392">{</a>
+<a name="ln1393">  // create part of the pixelpipe</a>
+<a name="ln1394">  piece-&gt;data = calloc(1, sizeof(dt_iop_basecurve_data_t));</a>
+<a name="ln1395">  self-&gt;commit_params(self, self-&gt;default_params, pipe, piece);</a>
+<a name="ln1396">}</a>
+<a name="ln1397"> </a>
+<a name="ln1398">void cleanup_pipe(struct dt_iop_module_t *self, dt_dev_pixelpipe_t *pipe, dt_dev_pixelpipe_iop_t *piece)</a>
+<a name="ln1399">{</a>
+<a name="ln1400">  // clean up everything again.</a>
+<a name="ln1401">  dt_iop_basecurve_data_t *d = (dt_iop_basecurve_data_t *)(piece-&gt;data);</a>
+<a name="ln1402">  dt_draw_curve_destroy(d-&gt;curve);</a>
+<a name="ln1403">  free(piece-&gt;data);</a>
+<a name="ln1404">  piece-&gt;data = NULL;</a>
+<a name="ln1405">}</a>
+<a name="ln1406"> </a>
+<a name="ln1407">void gui_update(struct dt_iop_module_t *self)</a>
+<a name="ln1408">{</a>
+<a name="ln1409">  dt_iop_basecurve_params_t *p = (dt_iop_basecurve_params_t *)self-&gt;params;</a>
+<a name="ln1410">  dt_iop_basecurve_gui_data_t *g = (dt_iop_basecurve_gui_data_t *)self-&gt;gui_data;</a>
+<a name="ln1411">  dt_bauhaus_combobox_set(g-&gt;cmb_preserve_colors, p-&gt;preserve_colors);</a>
+<a name="ln1412">  dt_bauhaus_combobox_set(g-&gt;fusion, p-&gt;exposure_fusion);</a>
+<a name="ln1413">  if(p-&gt;exposure_fusion != 0)</a>
+<a name="ln1414">  {</a>
+<a name="ln1415">    gtk_widget_set_visible(g-&gt;exposure_step, TRUE);</a>
+<a name="ln1416">    gtk_widget_set_visible(g-&gt;exposure_bias, TRUE);</a>
+<a name="ln1417">  }</a>
+<a name="ln1418">  if(p-&gt;exposure_fusion == 0)</a>
+<a name="ln1419">  {</a>
+<a name="ln1420">    gtk_widget_set_visible(g-&gt;exposure_step, FALSE);</a>
+<a name="ln1421">    gtk_widget_set_visible(g-&gt;exposure_bias, FALSE);</a>
+<a name="ln1422">  }</a>
+<a name="ln1423"> </a>
+<a name="ln1424">  dt_bauhaus_slider_set(g-&gt;exposure_step, p-&gt;exposure_stops);</a>
+<a name="ln1425">  dt_bauhaus_slider_set(g-&gt;exposure_bias, p-&gt;exposure_bias);</a>
+<a name="ln1426">  // gui curve is read directly from params during expose event.</a>
+<a name="ln1427">  gtk_widget_queue_draw(self-&gt;widget);</a>
+<a name="ln1428">}</a>
+<a name="ln1429"> </a>
+<a name="ln1430">void init(dt_iop_module_t *module)</a>
+<a name="ln1431">{</a>
+<a name="ln1432">  module-&gt;params = calloc(1, sizeof(dt_iop_basecurve_params_t));</a>
+<a name="ln1433">  module-&gt;default_params = calloc(1, sizeof(dt_iop_basecurve_params_t));</a>
+<a name="ln1434">  module-&gt;default_enabled = 0;</a>
+<a name="ln1435">  module-&gt;params_size = sizeof(dt_iop_basecurve_params_t);</a>
+<a name="ln1436">  module-&gt;gui_data = NULL;</a>
+<a name="ln1437">  dt_iop_basecurve_params_t tmp = (dt_iop_basecurve_params_t){</a>
+<a name="ln1438">    {</a>
+<a name="ln1439">      { // three curves (L, a, b) with a number of nodes</a>
+<a name="ln1440">        { 0.0, 0.0 },</a>
+<a name="ln1441">        { 1.0, 1.0 }</a>
+<a name="ln1442">      },</a>
+<a name="ln1443">    },</a>
+<a name="ln1444">    { 2, 0, 0 }, // number of nodes per curve</a>
+<a name="ln1445">    { MONOTONE_HERMITE, MONOTONE_HERMITE, MONOTONE_HERMITE },</a>
+<a name="ln1446">    0, 1.0f, 1.0f, // no exposure fusion, but if we would, add one stop</a>
+<a name="ln1447">    DT_RGB_NORM_LUMINANCE</a>
+<a name="ln1448">  };</a>
+<a name="ln1449">  memcpy(module-&gt;params, &amp;tmp, sizeof(dt_iop_basecurve_params_t));</a>
+<a name="ln1450">  memcpy(module-&gt;default_params, &amp;tmp, sizeof(dt_iop_basecurve_params_t));</a>
+<a name="ln1451">}</a>
+<a name="ln1452"> </a>
+<a name="ln1453">void cleanup(dt_iop_module_t *module)</a>
+<a name="ln1454">{</a>
+<a name="ln1455">  free(module-&gt;params);</a>
+<a name="ln1456">  module-&gt;params = NULL;</a>
+<a name="ln1457">}</a>
+<a name="ln1458"> </a>
+<a name="ln1459">void init_global(dt_iop_module_so_t *module)</a>
+<a name="ln1460">{</a>
+<a name="ln1461">  const int program = 18; // basecurve.cl, from programs.conf</a>
+<a name="ln1462">  dt_iop_basecurve_global_data_t *gd</a>
+<a name="ln1463">      = (dt_iop_basecurve_global_data_t *)malloc(sizeof(dt_iop_basecurve_global_data_t));</a>
+<a name="ln1464">  module-&gt;data = gd;</a>
+<a name="ln1465">  gd-&gt;kernel_basecurve_lut = dt_opencl_create_kernel(program, &quot;basecurve_lut&quot;);</a>
+<a name="ln1466">  gd-&gt;kernel_basecurve_zero = dt_opencl_create_kernel(program, &quot;basecurve_zero&quot;);</a>
+<a name="ln1467">  gd-&gt;kernel_basecurve_legacy_lut = dt_opencl_create_kernel(program, &quot;basecurve_legacy_lut&quot;);</a>
+<a name="ln1468">  gd-&gt;kernel_basecurve_compute_features = dt_opencl_create_kernel(program, &quot;basecurve_compute_features&quot;);</a>
+<a name="ln1469">  gd-&gt;kernel_basecurve_blur_h = dt_opencl_create_kernel(program, &quot;basecurve_blur_h&quot;);</a>
+<a name="ln1470">  gd-&gt;kernel_basecurve_blur_v = dt_opencl_create_kernel(program, &quot;basecurve_blur_v&quot;);</a>
+<a name="ln1471">  gd-&gt;kernel_basecurve_expand = dt_opencl_create_kernel(program, &quot;basecurve_expand&quot;);</a>
+<a name="ln1472">  gd-&gt;kernel_basecurve_reduce = dt_opencl_create_kernel(program, &quot;basecurve_reduce&quot;);</a>
+<a name="ln1473">  gd-&gt;kernel_basecurve_detail = dt_opencl_create_kernel(program, &quot;basecurve_detail&quot;);</a>
+<a name="ln1474">  gd-&gt;kernel_basecurve_adjust_features = dt_opencl_create_kernel(program, &quot;basecurve_adjust_features&quot;);</a>
+<a name="ln1475">  gd-&gt;kernel_basecurve_blend_gaussian = dt_opencl_create_kernel(program, &quot;basecurve_blend_gaussian&quot;);</a>
+<a name="ln1476">  gd-&gt;kernel_basecurve_blend_laplacian = dt_opencl_create_kernel(program, &quot;basecurve_blend_laplacian&quot;);</a>
+<a name="ln1477">  gd-&gt;kernel_basecurve_normalize = dt_opencl_create_kernel(program, &quot;basecurve_normalize&quot;);</a>
+<a name="ln1478">  gd-&gt;kernel_basecurve_reconstruct = dt_opencl_create_kernel(program, &quot;basecurve_reconstruct&quot;);</a>
+<a name="ln1479">  gd-&gt;kernel_basecurve_finalize = dt_opencl_create_kernel(program, &quot;basecurve_finalize&quot;);</a>
+<a name="ln1480">}</a>
+<a name="ln1481"> </a>
+<a name="ln1482">void cleanup_global(dt_iop_module_so_t *module)</a>
+<a name="ln1483">{</a>
+<a name="ln1484">  dt_iop_basecurve_global_data_t *gd = (dt_iop_basecurve_global_data_t *)module-&gt;data;</a>
+<a name="ln1485">  dt_opencl_free_kernel(gd-&gt;kernel_basecurve_lut);</a>
+<a name="ln1486">  dt_opencl_free_kernel(gd-&gt;kernel_basecurve_zero);</a>
+<a name="ln1487">  dt_opencl_free_kernel(gd-&gt;kernel_basecurve_legacy_lut);</a>
+<a name="ln1488">  dt_opencl_free_kernel(gd-&gt;kernel_basecurve_compute_features);</a>
+<a name="ln1489">  dt_opencl_free_kernel(gd-&gt;kernel_basecurve_blur_h);</a>
+<a name="ln1490">  dt_opencl_free_kernel(gd-&gt;kernel_basecurve_blur_v);</a>
+<a name="ln1491">  dt_opencl_free_kernel(gd-&gt;kernel_basecurve_expand);</a>
+<a name="ln1492">  dt_opencl_free_kernel(gd-&gt;kernel_basecurve_reduce);</a>
+<a name="ln1493">  dt_opencl_free_kernel(gd-&gt;kernel_basecurve_detail);</a>
+<a name="ln1494">  dt_opencl_free_kernel(gd-&gt;kernel_basecurve_adjust_features);</a>
+<a name="ln1495">  dt_opencl_free_kernel(gd-&gt;kernel_basecurve_blend_gaussian);</a>
+<a name="ln1496">  dt_opencl_free_kernel(gd-&gt;kernel_basecurve_blend_laplacian);</a>
+<a name="ln1497">  dt_opencl_free_kernel(gd-&gt;kernel_basecurve_normalize);</a>
+<a name="ln1498">  dt_opencl_free_kernel(gd-&gt;kernel_basecurve_reconstruct);</a>
+<a name="ln1499">  dt_opencl_free_kernel(gd-&gt;kernel_basecurve_finalize);</a>
+<a name="ln1500">  free(module-&gt;data);</a>
+<a name="ln1501">  module-&gt;data = NULL;</a>
+<a name="ln1502">}</a>
+<a name="ln1503"> </a>
+<a name="ln1504">static gboolean dt_iop_basecurve_enter_notify(GtkWidget *widget, GdkEventCrossing *event, gpointer user_data)</a>
+<a name="ln1505">{</a>
+<a name="ln1506">  gtk_widget_queue_draw(widget);</a>
+<a name="ln1507">  return TRUE;</a>
+<a name="ln1508">}</a>
+<a name="ln1509"> </a>
+<a name="ln1510">static gboolean dt_iop_basecurve_leave_notify(GtkWidget *widget, GdkEventCrossing *event, gpointer user_data)</a>
+<a name="ln1511">{</a>
+<a name="ln1512">  gtk_widget_queue_draw(widget);</a>
+<a name="ln1513">  return TRUE;</a>
+<a name="ln1514">}</a>
+<a name="ln1515"> </a>
+<a name="ln1516">static float to_log(const float x, const float base)</a>
+<a name="ln1517">{</a>
+<a name="ln1518">  if(base &gt; 0.0f &amp;&amp; base != 1.0f)</a>
+<a name="ln1519">    return logf(x * (base - 1.0f) + 1.0f) / logf(base);</a>
+<a name="ln1520">  else</a>
+<a name="ln1521">    return x;</a>
+<a name="ln1522">}</a>
+<a name="ln1523"> </a>
+<a name="ln1524">static float to_lin(const float x, const float base)</a>
+<a name="ln1525">{</a>
+<a name="ln1526">  if(base &gt; 0.0f &amp;&amp; base != 1.0f)</a>
+<a name="ln1527">    return (powf(base, x) - 1.0f) / (base - 1.0f);</a>
+<a name="ln1528">  else</a>
+<a name="ln1529">    return x;</a>
+<a name="ln1530">}</a>
+<a name="ln1531"> </a>
+<a name="ln1532">static gboolean dt_iop_basecurve_draw(GtkWidget *widget, cairo_t *crf, gpointer user_data)</a>
+<a name="ln1533">{</a>
+<a name="ln1534">  dt_iop_module_t *self = (dt_iop_module_t *)user_data;</a>
+<a name="ln1535">  dt_iop_basecurve_gui_data_t *c = (dt_iop_basecurve_gui_data_t *)self-&gt;gui_data;</a>
+<a name="ln1536">  dt_iop_basecurve_params_t *p = (dt_iop_basecurve_params_t *)self-&gt;params;</a>
+<a name="ln1537"> </a>
+<a name="ln1538">  int nodes = p-&gt;basecurve_nodes[0];</a>
+<a name="ln1539">  dt_iop_basecurve_node_t *basecurve = p-&gt;basecurve[0];</a>
+<a name="ln1540">  if(c-&gt;minmax_curve_type != p-&gt;basecurve_type[0] || c-&gt;minmax_curve_nodes != p-&gt;basecurve_nodes[0])</a>
+<a name="ln1541">  {</a>
+<a name="ln1542">    dt_draw_curve_destroy(c-&gt;minmax_curve);</a>
+<a name="ln1543">    c-&gt;minmax_curve = dt_draw_curve_new(0.0, 1.0, p-&gt;basecurve_type[0]);</a>
+<a name="ln1544">    c-&gt;minmax_curve_nodes = p-&gt;basecurve_nodes[0];</a>
+<a name="ln1545">    c-&gt;minmax_curve_type = p-&gt;basecurve_type[0];</a>
+<a name="ln1546">    for(int k = 0; k &lt; p-&gt;basecurve_nodes[0]; k++)</a>
+<a name="ln1547">      (void)dt_draw_curve_add_point(c-&gt;minmax_curve, p-&gt;basecurve[0][k].x, p-&gt;basecurve[0][k].y);</a>
+<a name="ln1548">  }</a>
+<a name="ln1549">  else</a>
+<a name="ln1550">  {</a>
+<a name="ln1551">    for(int k = 0; k &lt; p-&gt;basecurve_nodes[0]; k++)</a>
+<a name="ln1552">      dt_draw_curve_set_point(c-&gt;minmax_curve, k, p-&gt;basecurve[0][k].x, p-&gt;basecurve[0][k].y);</a>
+<a name="ln1553">  }</a>
+<a name="ln1554">  dt_draw_curve_t *minmax_curve = c-&gt;minmax_curve;</a>
+<a name="ln1555">  dt_draw_curve_calc_values(minmax_curve, 0.0, 1.0, DT_IOP_TONECURVE_RES, c-&gt;draw_xs, c-&gt;draw_ys);</a>
+<a name="ln1556"> </a>
+<a name="ln1557">  float unbounded_coeffs[3];</a>
+<a name="ln1558">  const float xm = basecurve[nodes - 1].x;</a>
+<a name="ln1559">  {</a>
+<a name="ln1560">    const float x[4] = { 0.7f * xm, 0.8f * xm, 0.9f * xm, 1.0f * xm };</a>
+<a name="ln1561">    const float y[4] = { c-&gt;draw_ys[CLAMP((int)(x[0] * DT_IOP_TONECURVE_RES), 0, DT_IOP_TONECURVE_RES - 1)],</a>
+<a name="ln1562">                         c-&gt;draw_ys[CLAMP((int)(x[1] * DT_IOP_TONECURVE_RES), 0, DT_IOP_TONECURVE_RES - 1)],</a>
+<a name="ln1563">                         c-&gt;draw_ys[CLAMP((int)(x[2] * DT_IOP_TONECURVE_RES), 0, DT_IOP_TONECURVE_RES - 1)],</a>
+<a name="ln1564">                         c-&gt;draw_ys[CLAMP((int)(x[3] * DT_IOP_TONECURVE_RES), 0, DT_IOP_TONECURVE_RES - 1)] };</a>
+<a name="ln1565">    dt_iop_estimate_exp(x, y, 4, unbounded_coeffs);</a>
+<a name="ln1566">  }</a>
+<a name="ln1567"> </a>
+<a name="ln1568">  const int inset = DT_GUI_CURVE_EDITOR_INSET;</a>
+<a name="ln1569">  GtkAllocation allocation;</a>
+<a name="ln1570">  gtk_widget_get_allocation(widget, &amp;allocation);</a>
+<a name="ln1571">  int width = allocation.width, height = allocation.height;</a>
+<a name="ln1572">  cairo_surface_t *cst = dt_cairo_image_surface_create(CAIRO_FORMAT_ARGB32, width, height);</a>
+<a name="ln1573">  cairo_t *cr = cairo_create(cst);</a>
+<a name="ln1574">  // clear bg</a>
+<a name="ln1575">  cairo_set_source_rgb(cr, .2, .2, .2);</a>
+<a name="ln1576">  cairo_paint(cr);</a>
+<a name="ln1577"> </a>
+<a name="ln1578">  cairo_translate(cr, inset, inset);</a>
+<a name="ln1579">  width -= 2 * inset;</a>
+<a name="ln1580">  height -= 2 * inset;</a>
+<a name="ln1581"> </a>
+<a name="ln1582">#if 0</a>
+<a name="ln1583">  // draw shadow around</a>
+<a name="ln1584">  float alpha = 1.0f;</a>
+<a name="ln1585">  for(int k=0; k&lt;inset; k++)</a>
+<a name="ln1586">  {</a>
+<a name="ln1587">    cairo_rectangle(cr, -k, -k, width + 2*k, height + 2*k);</a>
+<a name="ln1588">    cairo_set_source_rgba(cr, 0, 0, 0, alpha);</a>
+<a name="ln1589">    alpha *= 0.6f;</a>
+<a name="ln1590">    cairo_fill(cr);</a>
+<a name="ln1591">  }</a>
+<a name="ln1592">#else</a>
+<a name="ln1593">  cairo_set_line_width(cr, DT_PIXEL_APPLY_DPI(1.0));</a>
+<a name="ln1594">  cairo_set_source_rgb(cr, .1, .1, .1);</a>
+<a name="ln1595">  cairo_rectangle(cr, 0, 0, width, height);</a>
+<a name="ln1596">  cairo_stroke(cr);</a>
+<a name="ln1597">#endif</a>
+<a name="ln1598"> </a>
+<a name="ln1599">  cairo_set_source_rgb(cr, .3, .3, .3);</a>
+<a name="ln1600">  cairo_rectangle(cr, 0, 0, width, height);</a>
+<a name="ln1601">  cairo_fill(cr);</a>
+<a name="ln1602"> </a>
+<a name="ln1603">  cairo_translate(cr, 0, height);</a>
+<a name="ln1604">  if(c-&gt;selected &gt;= 0)</a>
+<a name="ln1605">  {</a>
+<a name="ln1606">    char text[30];</a>
+<a name="ln1607">    // draw information about current selected node</a>
+<a name="ln1608">    PangoLayout *layout;</a>
+<a name="ln1609">    PangoRectangle ink;</a>
+<a name="ln1610">    PangoFontDescription *desc = pango_font_description_copy_static(darktable.bauhaus-&gt;pango_font_desc);</a>
+<a name="ln1611">    pango_font_description_set_weight(desc, PANGO_WEIGHT_BOLD);</a>
+<a name="ln1612">    pango_font_description_set_absolute_size(desc, PANGO_SCALE);</a>
+<a name="ln1613">    layout = pango_cairo_create_layout(cr);</a>
+<a name="ln1614">    pango_layout_set_font_description(layout, desc);</a>
+<a name="ln1615"> </a>
+<a name="ln1616">    const float x_node_value = basecurve[c-&gt;selected].x * 100;</a>
+<a name="ln1617">    const float y_node_value = basecurve[c-&gt;selected].y * 100;</a>
+<a name="ln1618">    const float d_node_value = y_node_value - x_node_value;</a>
+<a name="ln1619">    // scale conservatively to 100% of width:</a>
+<a name="ln1620">    snprintf(text, sizeof(text), &quot;100.00 / 100.00 ( +100.00)&quot;);</a>
+<a name="ln1621">    pango_layout_set_text(layout, text, -1);</a>
+<a name="ln1622">    pango_layout_get_pixel_extents(layout, &amp;ink, NULL);</a>
+<a name="ln1623">    pango_font_description_set_absolute_size(desc, (double)width / ink.width * PANGO_SCALE);</a>
+<a name="ln1624">    pango_layout_set_font_description(layout, desc);</a>
+<a name="ln1625"> </a>
+<a name="ln1626">    snprintf(text, sizeof(text), &quot;%.2f / %.2f ( %+.2f)&quot;, x_node_value, y_node_value, d_node_value);</a>
+<a name="ln1627"> </a>
+<a name="ln1628">    cairo_set_source_rgb(cr, 0.1, 0.1, 0.1);</a>
+<a name="ln1629">    pango_layout_set_text(layout, text, -1);</a>
+<a name="ln1630">    pango_layout_get_pixel_extents(layout, &amp;ink, NULL);</a>
+<a name="ln1631">    cairo_move_to(cr, 0.98f * width - ink.width - ink.x, -0.02 * height - ink.height - ink.y);</a>
+<a name="ln1632">    pango_cairo_show_layout(cr, layout);</a>
+<a name="ln1633">    cairo_stroke(cr);</a>
+<a name="ln1634">    pango_font_description_free(desc);</a>
+<a name="ln1635">    g_object_unref(layout);</a>
+<a name="ln1636">  }</a>
+<a name="ln1637">  cairo_scale(cr, 1.0f, -1.0f);</a>
+<a name="ln1638"> </a>
+<a name="ln1639">  // draw grid</a>
+<a name="ln1640">  cairo_set_line_width(cr, DT_PIXEL_APPLY_DPI(.4));</a>
+<a name="ln1641">  cairo_set_source_rgb(cr, .1, .1, .1);</a>
+<a name="ln1642">  if(c-&gt;loglogscale)</a>
+<a name="ln1643">    dt_draw_loglog_grid(cr, 4, 0, 0, width, height, c-&gt;loglogscale);</a>
+<a name="ln1644">  else</a>
+<a name="ln1645">    dt_draw_grid(cr, 4, 0, 0, width, height);</a>
+<a name="ln1646"> </a>
+<a name="ln1647">  // draw nodes positions</a>
+<a name="ln1648">  cairo_set_line_width(cr, DT_PIXEL_APPLY_DPI(1.));</a>
+<a name="ln1649">  cairo_set_source_rgb(cr, 0.6, 0.6, 0.6);</a>
+<a name="ln1650">  for(int k = 0; k &lt; nodes; k++)</a>
+<a name="ln1651">  {</a>
+<a name="ln1652">    const float x = to_log(basecurve[k].x, c-&gt;loglogscale), y = to_log(basecurve[k].y, c-&gt;loglogscale);</a>
+<a name="ln1653">    cairo_arc(cr, x * width, y * height, DT_PIXEL_APPLY_DPI(3), 0, 2. * M_PI);</a>
+<a name="ln1654">    cairo_stroke(cr);</a>
+<a name="ln1655">  }</a>
+<a name="ln1656"> </a>
+<a name="ln1657">  // draw selected cursor</a>
+<a name="ln1658">  cairo_set_line_width(cr, DT_PIXEL_APPLY_DPI(1.));</a>
+<a name="ln1659"> </a>
+<a name="ln1660">  if(c-&gt;selected &gt;= 0)</a>
+<a name="ln1661">  {</a>
+<a name="ln1662">    cairo_set_source_rgb(cr, .9, .9, .9);</a>
+<a name="ln1663">    const float x = to_log(basecurve[c-&gt;selected].x, c-&gt;loglogscale),</a>
+<a name="ln1664">                y = to_log(basecurve[c-&gt;selected].y, c-&gt;loglogscale);</a>
+<a name="ln1665">    cairo_arc(cr, x * width, y * height, DT_PIXEL_APPLY_DPI(4), 0, 2. * M_PI);</a>
+<a name="ln1666">    cairo_stroke(cr);</a>
+<a name="ln1667">  }</a>
+<a name="ln1668"> </a>
+<a name="ln1669">  // draw curve</a>
+<a name="ln1670">  cairo_set_line_width(cr, DT_PIXEL_APPLY_DPI(2.));</a>
+<a name="ln1671">  cairo_set_source_rgb(cr, .9, .9, .9);</a>
+<a name="ln1672">  // cairo_set_line_cap  (cr, CAIRO_LINE_CAP_SQUARE);</a>
+<a name="ln1673">  cairo_move_to(cr, 0, height * to_log(c-&gt;draw_ys[0], c-&gt;loglogscale));</a>
+<a name="ln1674">  for(int k = 1; k &lt; DT_IOP_TONECURVE_RES; k++)</a>
+<a name="ln1675">  {</a>
+<a name="ln1676">    const float xx = k / (DT_IOP_TONECURVE_RES - 1.0f);</a>
+<a name="ln1677">    if(xx &gt; xm)</a>
+<a name="ln1678">    {</a>
+<a name="ln1679">      const float yy = dt_iop_eval_exp(unbounded_coeffs, xx);</a>
+<a name="ln1680">      const float x = to_log(xx, c-&gt;loglogscale), y = to_log(yy, c-&gt;loglogscale);</a>
+<a name="ln1681">      cairo_line_to(cr, x * width, height * y);</a>
+<a name="ln1682">    }</a>
+<a name="ln1683">    else</a>
+<a name="ln1684">    {</a>
+<a name="ln1685">      const float yy = c-&gt;draw_ys[k];</a>
+<a name="ln1686">      const float x = to_log(xx, c-&gt;loglogscale), y = to_log(yy, c-&gt;loglogscale);</a>
+<a name="ln1687">      cairo_line_to(cr, x * width, height * y);</a>
+<a name="ln1688">    }</a>
+<a name="ln1689">  }</a>
+<a name="ln1690">  cairo_stroke(cr);</a>
+<a name="ln1691"> </a>
+<a name="ln1692">  cairo_destroy(cr);</a>
+<a name="ln1693">  cairo_set_source_surface(crf, cst, 0, 0);</a>
+<a name="ln1694">  cairo_paint(crf);</a>
+<a name="ln1695">  cairo_surface_destroy(cst);</a>
+<a name="ln1696">  return TRUE;</a>
+<a name="ln1697">}</a>
+<a name="ln1698"> </a>
+<a name="ln1699">static inline int _add_node(dt_iop_basecurve_node_t *basecurve, int *nodes, float x, float y)</a>
+<a name="ln1700">{</a>
+<a name="ln1701">  int selected = -1;</a>
+<a name="ln1702">  if(basecurve[0].x &gt; x)</a>
+<a name="ln1703">    selected = 0;</a>
+<a name="ln1704">  else</a>
+<a name="ln1705">  {</a>
+<a name="ln1706">    for(int k = 1; k &lt; *nodes; k++)</a>
+<a name="ln1707">    {</a>
+<a name="ln1708">      if(basecurve[k].x &gt; x)</a>
+<a name="ln1709">      {</a>
+<a name="ln1710">        selected = k;</a>
+<a name="ln1711">        break;</a>
+<a name="ln1712">      }</a>
+<a name="ln1713">    }</a>
+<a name="ln1714">  }</a>
+<a name="ln1715">  if(selected == -1) selected = *nodes;</a>
+<a name="ln1716">  for(int i = *nodes; i &gt; selected; i--)</a>
+<a name="ln1717">  {</a>
+<a name="ln1718">    basecurve[i].x = basecurve[i - 1].x;</a>
+<a name="ln1719">    basecurve[i].y = basecurve[i - 1].y;</a>
+<a name="ln1720">  }</a>
+<a name="ln1721">  // found a new point</a>
+<a name="ln1722">  basecurve[selected].x = x;</a>
+<a name="ln1723">  basecurve[selected].y = y;</a>
+<a name="ln1724">  (*nodes)++;</a>
+<a name="ln1725">  return selected;</a>
+<a name="ln1726">}</a>
+<a name="ln1727"> </a>
+<a name="ln1728">static void dt_iop_basecurve_sanity_check(dt_iop_module_t *self, GtkWidget *widget)</a>
+<a name="ln1729">{</a>
+<a name="ln1730">  dt_iop_basecurve_gui_data_t *c = (dt_iop_basecurve_gui_data_t *)self-&gt;gui_data;</a>
+<a name="ln1731">  dt_iop_basecurve_params_t *p = (dt_iop_basecurve_params_t *)self-&gt;params;</a>
+<a name="ln1732"> </a>
+<a name="ln1733">  int ch = 0;</a>
+<a name="ln1734">  int nodes = p-&gt;basecurve_nodes[ch];</a>
+<a name="ln1735">  dt_iop_basecurve_node_t *basecurve = p-&gt;basecurve[ch];</a>
+<a name="ln1736"> </a>
+<a name="ln1737">  if(nodes &lt;= 2) return;</a>
+<a name="ln1738"> </a>
+<a name="ln1739">  const float mx = basecurve[c-&gt;selected].x;</a>
+<a name="ln1740"> </a>
+<a name="ln1741">  // delete vertex if order has changed</a>
+<a name="ln1742">  // for all points, x coordinate of point must be strictly larger than</a>
+<a name="ln1743">  // the x coordinate of the previous point</a>
+<a name="ln1744">  if((c-&gt;selected &gt; 0 &amp;&amp; (basecurve[c-&gt;selected - 1].x &gt;= mx))</a>
+<a name="ln1745">     || (c-&gt;selected &lt; nodes - 1 &amp;&amp; (basecurve[c-&gt;selected + 1].x &lt;= mx)))</a>
+<a name="ln1746">  {</a>
+<a name="ln1747">    for(int k = c-&gt;selected; k &lt; nodes - 1; k++)</a>
+<a name="ln1748">    {</a>
+<a name="ln1749">      basecurve[k].x = basecurve[k + 1].x;</a>
+<a name="ln1750">      basecurve[k].y = basecurve[k + 1].y;</a>
+<a name="ln1751">    }</a>
+<a name="ln1752">    c-&gt;selected = -2; // avoid re-insertion of that point immediately after this</a>
+<a name="ln1753">    p-&gt;basecurve_nodes[ch]--;</a>
+<a name="ln1754">  }</a>
+<a name="ln1755">}</a>
+<a name="ln1756"> </a>
+<a name="ln1757">static gboolean _move_point_internal(dt_iop_module_t *self, GtkWidget *widget, float dx, float dy, guint state);</a>
+<a name="ln1758"> </a>
+<a name="ln1759">static gboolean dt_iop_basecurve_motion_notify(GtkWidget *widget, GdkEventMotion *event, gpointer user_data)</a>
+<a name="ln1760">{</a>
+<a name="ln1761">  dt_iop_module_t *self = (dt_iop_module_t *)user_data;</a>
+<a name="ln1762">  dt_iop_basecurve_gui_data_t *c = (dt_iop_basecurve_gui_data_t *)self-&gt;gui_data;</a>
+<a name="ln1763">  dt_iop_basecurve_params_t *p = (dt_iop_basecurve_params_t *)self-&gt;params;</a>
+<a name="ln1764">  int ch = 0;</a>
+<a name="ln1765">  int nodes = p-&gt;basecurve_nodes[ch];</a>
+<a name="ln1766">  dt_iop_basecurve_node_t *basecurve = p-&gt;basecurve[ch];</a>
+<a name="ln1767"> </a>
+<a name="ln1768">  GtkAllocation allocation;</a>
+<a name="ln1769">  gtk_widget_get_allocation(widget, &amp;allocation);</a>
+<a name="ln1770">  const int inset = DT_GUI_CURVE_EDITOR_INSET;</a>
+<a name="ln1771">  int height = allocation.height - 2 * inset, width = allocation.width - 2 * inset;</a>
+<a name="ln1772">  const double old_m_x = c-&gt;mouse_x;</a>
+<a name="ln1773">  const double old_m_y = c-&gt;mouse_y;</a>
+<a name="ln1774">  c-&gt;mouse_x = event-&gt;x - inset;</a>
+<a name="ln1775">  c-&gt;mouse_y = event-&gt;y - inset;</a>
+<a name="ln1776"> </a>
+<a name="ln1777">  const float mx = CLAMP(c-&gt;mouse_x, 0, width) / (float)width;</a>
+<a name="ln1778">  const float my = 1.0f - CLAMP(c-&gt;mouse_y, 0, height) / (float)height;</a>
+<a name="ln1779">  const float linx = to_lin(mx, c-&gt;loglogscale), liny = to_lin(my, c-&gt;loglogscale);</a>
+<a name="ln1780"> </a>
+<a name="ln1781">  if(event-&gt;state &amp; GDK_BUTTON1_MASK)</a>
+<a name="ln1782">  {</a>
+<a name="ln1783">    // got a vertex selected:</a>
+<a name="ln1784">    if(c-&gt;selected &gt;= 0)</a>
+<a name="ln1785">    {</a>
+<a name="ln1786">      // this is used to translate mause position in loglogscale to make this behavior unified with linear scale.</a>
+<a name="ln1787">      const float translate_mouse_x = old_m_x / width - to_log(basecurve[c-&gt;selected].x, c-&gt;loglogscale);</a>
+<a name="ln1788">      const float translate_mouse_y = 1 - old_m_y / height - to_log(basecurve[c-&gt;selected].y, c-&gt;loglogscale);</a>
+<a name="ln1789">      // dx &amp; dy are in linear coordinates</a>
+<a name="ln1790">      const float dx = to_lin(c-&gt;mouse_x / width - translate_mouse_x, c-&gt;loglogscale)</a>
+<a name="ln1791">                       - to_lin(old_m_x / width - translate_mouse_x, c-&gt;loglogscale);</a>
+<a name="ln1792">      const float dy = to_lin(1 - c-&gt;mouse_y / height - translate_mouse_y, c-&gt;loglogscale)</a>
+<a name="ln1793">                       - to_lin(1 - old_m_y / height - translate_mouse_y, c-&gt;loglogscale);</a>
+<a name="ln1794"> </a>
+<a name="ln1795">      return _move_point_internal(self, widget, dx, dy, event-&gt;state);</a>
+<a name="ln1796">    }</a>
+<a name="ln1797">    else if(nodes &lt; MAXNODES &amp;&amp; c-&gt;selected &gt;= -1)</a>
+<a name="ln1798">    {</a>
+<a name="ln1799">      // no vertex was close, create a new one!</a>
+<a name="ln1800">      c-&gt;selected = _add_node(basecurve, &amp;p-&gt;basecurve_nodes[ch], linx, liny);</a>
+<a name="ln1801">      dt_dev_add_history_item(darktable.develop, self, TRUE);</a>
+<a name="ln1802">    }</a>
+<a name="ln1803">  }</a>
+<a name="ln1804">  else</a>
+<a name="ln1805">  {</a>
+<a name="ln1806">    // minimum area around the node to select it:</a>
+<a name="ln1807">    float min = .04f;</a>
+<a name="ln1808">    min *= min; // comparing against square</a>
+<a name="ln1809">    int nearest = -1;</a>
+<a name="ln1810">    for(int k = 0; k &lt; nodes; k++)</a>
+<a name="ln1811">    {</a>
+<a name="ln1812">      float dist</a>
+<a name="ln1813">          = (my - to_log(basecurve[k].y, c-&gt;loglogscale)) * (my - to_log(basecurve[k].y, c-&gt;loglogscale))</a>
+<a name="ln1814">            + (mx - to_log(basecurve[k].x, c-&gt;loglogscale)) * (mx - to_log(basecurve[k].x, c-&gt;loglogscale));</a>
+<a name="ln1815">      if(dist &lt; min)</a>
+<a name="ln1816">      {</a>
+<a name="ln1817">        min = dist;</a>
+<a name="ln1818">        nearest = k;</a>
+<a name="ln1819">      }</a>
+<a name="ln1820">    }</a>
+<a name="ln1821">    c-&gt;selected = nearest;</a>
+<a name="ln1822">  }</a>
+<a name="ln1823">  if(c-&gt;selected &gt;= 0) gtk_widget_grab_focus(widget);</a>
+<a name="ln1824">  gtk_widget_queue_draw(widget);</a>
+<a name="ln1825">  return TRUE;</a>
+<a name="ln1826">}</a>
+<a name="ln1827"> </a>
+<a name="ln1828">static gboolean dt_iop_basecurve_button_press(GtkWidget *widget, GdkEventButton *event, gpointer user_data)</a>
+<a name="ln1829">{</a>
+<a name="ln1830">  dt_iop_module_t *self = (dt_iop_module_t *)user_data;</a>
+<a name="ln1831">  dt_iop_basecurve_params_t *p = (dt_iop_basecurve_params_t *)self-&gt;params;</a>
+<a name="ln1832">  dt_iop_basecurve_params_t *d = (dt_iop_basecurve_params_t *)self-&gt;default_params;</a>
+<a name="ln1833">  dt_iop_basecurve_gui_data_t *c = (dt_iop_basecurve_gui_data_t *)self-&gt;gui_data;</a>
+<a name="ln1834"> </a>
+<a name="ln1835">  int ch = 0;</a>
+<a name="ln1836">  int nodes = p-&gt;basecurve_nodes[ch];</a>
+<a name="ln1837">  dt_iop_basecurve_node_t *basecurve = p-&gt;basecurve[ch];</a>
+<a name="ln1838"> </a>
+<a name="ln1839">  if(event-&gt;button == 1)</a>
+<a name="ln1840">  {</a>
+<a name="ln1841">    if(event-&gt;type == GDK_BUTTON_PRESS &amp;&amp; (event-&gt;state &amp; GDK_CONTROL_MASK) == GDK_CONTROL_MASK</a>
+<a name="ln1842">      &amp;&amp; nodes &lt; MAXNODES &amp;&amp; c-&gt;selected == -1)</a>
+<a name="ln1843">    {</a>
+<a name="ln1844">      // if we are not on a node -&gt; add a new node at the current x of the pointer and y of the curve at that x</a>
+<a name="ln1845">      const int inset = DT_GUI_CURVE_EDITOR_INSET;</a>
+<a name="ln1846">      GtkAllocation allocation;</a>
+<a name="ln1847">      gtk_widget_get_allocation(widget, &amp;allocation);</a>
+<a name="ln1848">      int width = allocation.width - 2 * inset;</a>
+<a name="ln1849">      c-&gt;mouse_x = event-&gt;x - inset;</a>
+<a name="ln1850">      c-&gt;mouse_y = event-&gt;y - inset;</a>
+<a name="ln1851"> </a>
+<a name="ln1852">      const float mx = CLAMP(c-&gt;mouse_x, 0, width) / (float)width;</a>
+<a name="ln1853">      const float linx = to_lin(mx, c-&gt;loglogscale);</a>
+<a name="ln1854"> </a>
+<a name="ln1855">      // don't add a node too close to others in x direction, it can crash dt</a>
+<a name="ln1856">      int selected = -1;</a>
+<a name="ln1857">      if(basecurve[0].x &gt; linx)</a>
+<a name="ln1858">        selected = 0;</a>
+<a name="ln1859">      else</a>
+<a name="ln1860">      {</a>
+<a name="ln1861">        for(int k = 1; k &lt; nodes; k++)</a>
+<a name="ln1862">        {</a>
+<a name="ln1863">          if(basecurve[k].x &gt; linx)</a>
+<a name="ln1864">          {</a>
+<a name="ln1865">            selected = k;</a>
+<a name="ln1866">            break;</a>
+<a name="ln1867">          }</a>
+<a name="ln1868">        }</a>
+<a name="ln1869">      }</a>
+<a name="ln1870">      if(selected == -1) selected = nodes;</a>
+<a name="ln1871">      // &gt; 0 -&gt; check distance to left neighbour</a>
+<a name="ln1872">      // &lt; nodes -&gt; check distance to right neighbour</a>
+<a name="ln1873">      if(!((selected &gt; 0 &amp;&amp; linx - basecurve[selected - 1].x &lt;= 0.025) ||</a>
+<a name="ln1874">           (selected &lt; nodes &amp;&amp; basecurve[selected].x - linx &lt;= 0.025)))</a>
+<a name="ln1875">      {</a>
+<a name="ln1876">        // evaluate the curve at the current x position</a>
+<a name="ln1877">        const float y = dt_draw_curve_calc_value(c-&gt;minmax_curve, linx);</a>
+<a name="ln1878"> </a>
+<a name="ln1879">        if(y &gt;= 0.0 &amp;&amp; y &lt;= 1.0) // never add something outside the viewport, you couldn't change it afterwards</a>
+<a name="ln1880">        {</a>
+<a name="ln1881">          // create a new node</a>
+<a name="ln1882">          selected = _add_node(basecurve, &amp;p-&gt;basecurve_nodes[ch], linx, y);</a>
+<a name="ln1883"> </a>
+<a name="ln1884">          // maybe set the new one as being selected</a>
+<a name="ln1885">          float min = .04f;</a>
+<a name="ln1886">          min *= min; // comparing against square</a>
+<a name="ln1887">          for(int k = 0; k &lt; nodes; k++)</a>
+<a name="ln1888">          {</a>
+<a name="ln1889">            float other_y = to_log(basecurve[k].y, c-&gt;loglogscale);</a>
+<a name="ln1890">            float dist = (y - other_y) * (y - other_y);</a>
+<a name="ln1891">            if(dist &lt; min) c-&gt;selected = selected;</a>
+<a name="ln1892">          }</a>
+<a name="ln1893"> </a>
+<a name="ln1894">          dt_dev_add_history_item(darktable.develop, self, TRUE);</a>
+<a name="ln1895">          gtk_widget_queue_draw(self-&gt;widget);</a>
+<a name="ln1896">        }</a>
+<a name="ln1897">      }</a>
+<a name="ln1898">      return TRUE;</a>
+<a name="ln1899">    }</a>
+<a name="ln1900">    else if(event-&gt;type == GDK_2BUTTON_PRESS)</a>
+<a name="ln1901">    {</a>
+<a name="ln1902">      // reset current curve</a>
+<a name="ln1903">      p-&gt;basecurve_nodes[ch] = d-&gt;basecurve_nodes[ch];</a>
+<a name="ln1904">      p-&gt;basecurve_type[ch] = d-&gt;basecurve_type[ch];</a>
+<a name="ln1905">      for(int k = 0; k &lt; d-&gt;basecurve_nodes[ch]; k++)</a>
+<a name="ln1906">      {</a>
+<a name="ln1907">        p-&gt;basecurve[ch][k].x = d-&gt;basecurve[ch][k].x;</a>
+<a name="ln1908">        p-&gt;basecurve[ch][k].y = d-&gt;basecurve[ch][k].y;</a>
+<a name="ln1909">      }</a>
+<a name="ln1910">      c-&gt;selected = -2; // avoid motion notify re-inserting immediately.</a>
+<a name="ln1911">      dt_dev_add_history_item(darktable.develop, self, TRUE);</a>
+<a name="ln1912">      gtk_widget_queue_draw(self-&gt;widget);</a>
+<a name="ln1913">      return TRUE;</a>
+<a name="ln1914">    }</a>
+<a name="ln1915">  }</a>
+<a name="ln1916">  else if(event-&gt;button == 3 &amp;&amp; c-&gt;selected &gt;= 0)</a>
+<a name="ln1917">  {</a>
+<a name="ln1918">    if(c-&gt;selected == 0 || c-&gt;selected == nodes - 1)</a>
+<a name="ln1919">    {</a>
+<a name="ln1920">      float reset_value = c-&gt;selected == 0 ? 0 : 1;</a>
+<a name="ln1921">      basecurve[c-&gt;selected].y = basecurve[c-&gt;selected].x = reset_value;</a>
+<a name="ln1922">      gtk_widget_queue_draw(self-&gt;widget);</a>
+<a name="ln1923">      dt_dev_add_history_item(darktable.develop, self, TRUE);</a>
+<a name="ln1924">      return TRUE;</a>
+<a name="ln1925">    }</a>
+<a name="ln1926"> </a>
+<a name="ln1927">    for(int k = c-&gt;selected; k &lt; nodes - 1; k++)</a>
+<a name="ln1928">    {</a>
+<a name="ln1929">      basecurve[k].x = basecurve[k + 1].x;</a>
+<a name="ln1930">      basecurve[k].y = basecurve[k + 1].y;</a>
+<a name="ln1931">    }</a>
+<a name="ln1932">    c-&gt;selected = -2; // avoid re-insertion of that point immediately after this</a>
+<a name="ln1933">    p-&gt;basecurve_nodes[ch]--;</a>
+<a name="ln1934">    gtk_widget_queue_draw(self-&gt;widget);</a>
+<a name="ln1935">    dt_dev_add_history_item(darktable.develop, self, TRUE);</a>
+<a name="ln1936">    return TRUE;</a>
+<a name="ln1937">  }</a>
+<a name="ln1938">  return FALSE;</a>
+<a name="ln1939">}</a>
+<a name="ln1940"> </a>
+<a name="ln1941">static gboolean area_resized(GtkWidget *widget, GdkEvent *event, gpointer user_data)</a>
+<a name="ln1942">{</a>
+<a name="ln1943">  GtkAllocation allocation;</a>
+<a name="ln1944">  gtk_widget_get_allocation(widget, &amp;allocation);</a>
+<a name="ln1945">  GtkRequisition r;</a>
+<a name="ln1946">  r.width = allocation.width;</a>
+<a name="ln1947">  r.height = allocation.width;</a>
+<a name="ln1948">  gtk_widget_get_preferred_size(widget, &amp;r, NULL);</a>
+<a name="ln1949">  return TRUE;</a>
+<a name="ln1950">}</a>
+<a name="ln1951"> </a>
+<a name="ln1952">static gboolean _move_point_internal(dt_iop_module_t *self, GtkWidget *widget, float dx, float dy, guint state)</a>
+<a name="ln1953">{</a>
+<a name="ln1954">  dt_iop_basecurve_params_t *p = (dt_iop_basecurve_params_t *)self-&gt;params;</a>
+<a name="ln1955">  dt_iop_basecurve_gui_data_t *c = (dt_iop_basecurve_gui_data_t *)self-&gt;gui_data;</a>
+<a name="ln1956"> </a>
+<a name="ln1957">  int ch = 0;</a>
+<a name="ln1958">  dt_iop_basecurve_node_t *basecurve = p-&gt;basecurve[ch];</a>
+<a name="ln1959"> </a>
+<a name="ln1960">  float multiplier;</a>
+<a name="ln1961"> </a>
+<a name="ln1962">  GdkModifierType modifiers = gtk_accelerator_get_default_mod_mask();</a>
+<a name="ln1963">  if((state &amp; modifiers) == GDK_SHIFT_MASK)</a>
+<a name="ln1964">  {</a>
+<a name="ln1965">    multiplier = dt_conf_get_float(&quot;darkroom/ui/scale_rough_step_multiplier&quot;);</a>
+<a name="ln1966">  }</a>
+<a name="ln1967">  else if((state &amp; modifiers) == GDK_CONTROL_MASK)</a>
+<a name="ln1968">  {</a>
+<a name="ln1969">    multiplier = dt_conf_get_float(&quot;darkroom/ui/scale_precise_step_multiplier&quot;);</a>
+<a name="ln1970">  }</a>
+<a name="ln1971">  else</a>
+<a name="ln1972">  {</a>
+<a name="ln1973">    multiplier = dt_conf_get_float(&quot;darkroom/ui/scale_step_multiplier&quot;);</a>
+<a name="ln1974">  }</a>
+<a name="ln1975"> </a>
+<a name="ln1976">  dx *= multiplier;</a>
+<a name="ln1977">  dy *= multiplier;</a>
+<a name="ln1978"> </a>
+<a name="ln1979">  basecurve[c-&gt;selected].x = CLAMP(basecurve[c-&gt;selected].x + dx, 0.0f, 1.0f);</a>
+<a name="ln1980">  basecurve[c-&gt;selected].y = CLAMP(basecurve[c-&gt;selected].y + dy, 0.0f, 1.0f);</a>
+<a name="ln1981"> </a>
+<a name="ln1982">  dt_iop_basecurve_sanity_check(self, widget);</a>
+<a name="ln1983"> </a>
+<a name="ln1984">  dt_dev_add_history_item(darktable.develop, self, TRUE);</a>
+<a name="ln1985">  gtk_widget_queue_draw(widget);</a>
+<a name="ln1986"> </a>
+<a name="ln1987">  return TRUE;</a>
+<a name="ln1988">}</a>
+<a name="ln1989"> </a>
+<a name="ln1990">#define BASECURVE_DEFAULT_STEP (0.001f)</a>
+<a name="ln1991"> </a>
+<a name="ln1992">static gboolean _scrolled(GtkWidget *widget, GdkEventScroll *event, gpointer user_data)</a>
+<a name="ln1993">{</a>
+<a name="ln1994">  dt_iop_module_t *self = (dt_iop_module_t *)user_data;</a>
+<a name="ln1995">  dt_iop_basecurve_gui_data_t *c = (dt_iop_basecurve_gui_data_t *)self-&gt;gui_data;</a>
+<a name="ln1996"> </a>
+<a name="ln1997">  if(((event-&gt;state &amp; gtk_accelerator_get_default_mod_mask()) == darktable.gui-&gt;sidebar_scroll_mask) != dt_conf_get_bool(&quot;darkroom/ui/sidebar_scroll_default&quot;)) return FALSE;</a>
+<a name="ln1998">  if(c-&gt;selected &lt; 0) return TRUE;</a>
+<a name="ln1999"> </a>
+<a name="ln2000">  gdouble delta_y;</a>
+<a name="ln2001">  if(dt_gui_get_scroll_deltas(event, NULL, &amp;delta_y))</a>
+<a name="ln2002">  {</a>
+<a name="ln2003">    delta_y *= -BASECURVE_DEFAULT_STEP;</a>
+<a name="ln2004">    return _move_point_internal(self, widget, 0.0, delta_y, event-&gt;state);</a>
+<a name="ln2005">  }</a>
+<a name="ln2006"> </a>
+<a name="ln2007">  return TRUE;</a>
+<a name="ln2008">}</a>
+<a name="ln2009"> </a>
+<a name="ln2010">static gboolean dt_iop_basecurve_key_press(GtkWidget *widget, GdkEventKey *event, gpointer user_data)</a>
+<a name="ln2011">{</a>
+<a name="ln2012">  dt_iop_module_t *self = (dt_iop_module_t *)user_data;</a>
+<a name="ln2013">  dt_iop_basecurve_gui_data_t *c = (dt_iop_basecurve_gui_data_t *)self-&gt;gui_data;</a>
+<a name="ln2014"> </a>
+<a name="ln2015">  if(c-&gt;selected &lt; 0) return TRUE;</a>
+<a name="ln2016"> </a>
+<a name="ln2017">  int handled = 0;</a>
+<a name="ln2018">  float dx = 0.0f, dy = 0.0f;</a>
+<a name="ln2019">  if(event-&gt;keyval == GDK_KEY_Up || event-&gt;keyval == GDK_KEY_KP_Up)</a>
+<a name="ln2020">  {</a>
+<a name="ln2021">    handled = 1;</a>
+<a name="ln2022">    dy = BASECURVE_DEFAULT_STEP;</a>
+<a name="ln2023">  }</a>
+<a name="ln2024">  else if(event-&gt;keyval == GDK_KEY_Down || event-&gt;keyval == GDK_KEY_KP_Down)</a>
+<a name="ln2025">  {</a>
+<a name="ln2026">    handled = 1;</a>
+<a name="ln2027">    dy = -BASECURVE_DEFAULT_STEP;</a>
+<a name="ln2028">  }</a>
+<a name="ln2029">  else if(event-&gt;keyval == GDK_KEY_Right || event-&gt;keyval == GDK_KEY_KP_Right)</a>
+<a name="ln2030">  {</a>
+<a name="ln2031">    handled = 1;</a>
+<a name="ln2032">    dx = BASECURVE_DEFAULT_STEP;</a>
+<a name="ln2033">  }</a>
+<a name="ln2034">  else if(event-&gt;keyval == GDK_KEY_Left || event-&gt;keyval == GDK_KEY_KP_Left)</a>
+<a name="ln2035">  {</a>
+<a name="ln2036">    handled = 1;</a>
+<a name="ln2037">    dx = -BASECURVE_DEFAULT_STEP;</a>
+<a name="ln2038">  }</a>
+<a name="ln2039"> </a>
+<a name="ln2040">  if(!handled) return TRUE;</a>
+<a name="ln2041"> </a>
+<a name="ln2042">  return _move_point_internal(self, widget, dx, dy, event-&gt;state);</a>
+<a name="ln2043">}</a>
+<a name="ln2044"> </a>
+<a name="ln2045">#undef BASECURVE_DEFAULT_STEP</a>
+<a name="ln2046"> </a>
+<a name="ln2047">static void fusion_callback(GtkWidget *widget, gpointer user_data)</a>
+<a name="ln2048">{</a>
+<a name="ln2049">  if(darktable.gui-&gt;reset) return;</a>
+<a name="ln2050">  dt_iop_module_t *self = (dt_iop_module_t *)user_data;</a>
+<a name="ln2051">  dt_iop_basecurve_params_t *p = (dt_iop_basecurve_params_t *)self-&gt;params;</a>
+<a name="ln2052">  int fuse = dt_bauhaus_combobox_get(widget);</a>
+<a name="ln2053">  dt_iop_basecurve_gui_data_t *g = (dt_iop_basecurve_gui_data_t *)self-&gt;gui_data;</a>
+<a name="ln2054">  if(p-&gt;exposure_fusion == 0 &amp;&amp; fuse != 0)</a>
+<a name="ln2055">  {</a>
+<a name="ln2056">    gtk_widget_set_visible(g-&gt;exposure_step, TRUE);</a>
+<a name="ln2057">    gtk_widget_set_visible(g-&gt;exposure_bias, TRUE);</a>
+<a name="ln2058">  }</a>
+<a name="ln2059">  if(p-&gt;exposure_fusion != 0 &amp;&amp; fuse == 0)</a>
+<a name="ln2060">  {</a>
+<a name="ln2061">    gtk_widget_set_visible(g-&gt;exposure_step, FALSE);</a>
+<a name="ln2062">    gtk_widget_set_visible(g-&gt;exposure_bias, FALSE);</a>
+<a name="ln2063">  }</a>
+<a name="ln2064">  p-&gt;exposure_fusion = fuse;</a>
+<a name="ln2065">  dt_dev_add_history_item(darktable.develop, self, TRUE);</a>
+<a name="ln2066">}</a>
+<a name="ln2067"> </a>
+<a name="ln2068">static void exposure_step_callback(GtkWidget *widget, gpointer user_data)</a>
+<a name="ln2069">{</a>
+<a name="ln2070">  dt_iop_module_t *self = (dt_iop_module_t *)user_data;</a>
+<a name="ln2071">  dt_iop_basecurve_params_t *p = (dt_iop_basecurve_params_t *)self-&gt;params;</a>
+<a name="ln2072">  float stops = dt_bauhaus_slider_get(widget);</a>
+<a name="ln2073">  p-&gt;exposure_stops = stops;</a>
+<a name="ln2074">  dt_dev_add_history_item(darktable.develop, self, TRUE);</a>
+<a name="ln2075">}</a>
+<a name="ln2076"> </a>
+<a name="ln2077">static void exposure_bias_callback(GtkWidget *widget, gpointer user_data)</a>
+<a name="ln2078">{</a>
+<a name="ln2079">  dt_iop_module_t *self = (dt_iop_module_t *)user_data;</a>
+<a name="ln2080">  dt_iop_basecurve_params_t *p = (dt_iop_basecurve_params_t *)self-&gt;params;</a>
+<a name="ln2081">  float bias = dt_bauhaus_slider_get(widget);</a>
+<a name="ln2082">  p-&gt;exposure_bias = bias;</a>
+<a name="ln2083">  dt_dev_add_history_item(darktable.develop, self, TRUE);</a>
+<a name="ln2084">}</a>
+<a name="ln2085"> </a>
+<a name="ln2086">static void scale_callback(GtkWidget *widget, gpointer user_data)</a>
+<a name="ln2087">{</a>
+<a name="ln2088">  dt_iop_module_t *self = (dt_iop_module_t *)user_data;</a>
+<a name="ln2089">  dt_iop_basecurve_gui_data_t *g = (dt_iop_basecurve_gui_data_t *)self-&gt;gui_data;</a>
+<a name="ln2090">  if(dt_bauhaus_combobox_get(widget))</a>
+<a name="ln2091">    g-&gt;loglogscale = 64;</a>
+<a name="ln2092">  else</a>
+<a name="ln2093">    g-&gt;loglogscale = 0;</a>
+<a name="ln2094">  gtk_widget_queue_draw(GTK_WIDGET(g-&gt;area));</a>
+<a name="ln2095">}</a>
+<a name="ln2096"> </a>
+<a name="ln2097">static void preserve_colors_callback(GtkWidget *widget, dt_iop_module_t *self)</a>
+<a name="ln2098">{</a>
+<a name="ln2099">  if(darktable.gui-&gt;reset) return;</a>
+<a name="ln2100">  dt_iop_basecurve_params_t *p = (dt_iop_basecurve_params_t *)self-&gt;params;</a>
+<a name="ln2101"> </a>
+<a name="ln2102">  p-&gt;preserve_colors = dt_bauhaus_combobox_get(widget);</a>
+<a name="ln2103"> </a>
+<a name="ln2104">  dt_dev_add_history_item(darktable.develop, self, TRUE);</a>
+<a name="ln2105">}</a>
+<a name="ln2106"> </a>
+<a name="ln2107">void gui_init(struct dt_iop_module_t *self)</a>
+<a name="ln2108">{</a>
+<a name="ln2109">  self-&gt;gui_data = malloc(sizeof(dt_iop_basecurve_gui_data_t));</a>
+<a name="ln2110">  dt_iop_basecurve_gui_data_t *c = (dt_iop_basecurve_gui_data_t *)self-&gt;gui_data;</a>
+<a name="ln2111">  dt_iop_basecurve_params_t *p = (dt_iop_basecurve_params_t *)self-&gt;params;</a>
+<a name="ln2112"> </a>
+<a name="ln2113">  c-&gt;minmax_curve = dt_draw_curve_new(0.0, 1.0, p-&gt;basecurve_type[0]);</a>
+<a name="ln2114">  c-&gt;minmax_curve_type = p-&gt;basecurve_type[0];</a>
+<a name="ln2115">  c-&gt;minmax_curve_nodes = p-&gt;basecurve_nodes[0];</a>
+<a name="ln2116">  for(int k = 0; k &lt; p-&gt;basecurve_nodes[0]; k++)</a>
+<a name="ln2117">    (void)dt_draw_curve_add_point(c-&gt;minmax_curve, p-&gt;basecurve[0][k].x, p-&gt;basecurve[0][k].y);</a>
+<a name="ln2118">  c-&gt;mouse_x = c-&gt;mouse_y = -1.0;</a>
+<a name="ln2119">  c-&gt;selected = -1;</a>
+<a name="ln2120">  c-&gt;loglogscale = 0;</a>
+<a name="ln2121"> </a>
+<a name="ln2122">  self-&gt;widget = gtk_box_new(GTK_ORIENTATION_VERTICAL, DT_BAUHAUS_SPACE);</a>
+<a name="ln2123">  dt_gui_add_help_link(self-&gt;widget, dt_get_help_url(self-&gt;op));</a>
+<a name="ln2124">  c-&gt;area = GTK_DRAWING_AREA(dtgtk_drawing_area_new_with_aspect_ratio(1.0));</a>
+<a name="ln2125">  gtk_widget_set_tooltip_text(GTK_WIDGET(c-&gt;area), _(&quot;abscissa: input, ordinate: output. works on RGB channels&quot;));</a>
+<a name="ln2126"> </a>
+<a name="ln2127">  gtk_box_pack_start(GTK_BOX(self-&gt;widget), GTK_WIDGET(c-&gt;area), TRUE, TRUE, 0);</a>
+<a name="ln2128"> </a>
+<a name="ln2129">  c-&gt;scale = dt_bauhaus_combobox_new(self);</a>
+<a name="ln2130">  dt_bauhaus_widget_set_label(c-&gt;scale, NULL, _(&quot;scale&quot;));</a>
+<a name="ln2131">  dt_bauhaus_combobox_add(c-&gt;scale, _(&quot;linear&quot;));</a>
+<a name="ln2132">  dt_bauhaus_combobox_add(c-&gt;scale, _(&quot;logarithmic&quot;));</a>
+<a name="ln2133">  gtk_widget_set_tooltip_text(c-&gt;scale, _(&quot;scale to use in the graph. use logarithmic scale for &quot;</a>
+<a name="ln2134">                                          &quot;more precise control near the blacks&quot;));</a>
+<a name="ln2135">  gtk_box_pack_start(GTK_BOX(self-&gt;widget), c-&gt;scale, TRUE, TRUE, 0);</a>
+<a name="ln2136">  g_signal_connect(G_OBJECT(c-&gt;scale), &quot;value-changed&quot;, G_CALLBACK(scale_callback), self);</a>
+<a name="ln2137"> </a>
+<a name="ln2138">  c-&gt;cmb_preserve_colors = dt_bauhaus_combobox_new(self);</a>
+<a name="ln2139">  dt_bauhaus_widget_set_label(c-&gt;cmb_preserve_colors, NULL, _(&quot;preserve colors&quot;));</a>
+<a name="ln2140">  dt_bauhaus_combobox_add(c-&gt;cmb_preserve_colors, _(&quot;none&quot;));</a>
+<a name="ln2141">  dt_bauhaus_combobox_add(c-&gt;cmb_preserve_colors, _(&quot;luminance&quot;));</a>
+<a name="ln2142">  dt_bauhaus_combobox_add(c-&gt;cmb_preserve_colors, _(&quot;max rgb&quot;));</a>
+<a name="ln2143">  dt_bauhaus_combobox_add(c-&gt;cmb_preserve_colors, _(&quot;average rgb&quot;));</a>
+<a name="ln2144">  dt_bauhaus_combobox_add(c-&gt;cmb_preserve_colors, _(&quot;sum rgb&quot;));</a>
+<a name="ln2145">  dt_bauhaus_combobox_add(c-&gt;cmb_preserve_colors, _(&quot;norm rgb&quot;));</a>
+<a name="ln2146">  dt_bauhaus_combobox_add(c-&gt;cmb_preserve_colors, _(&quot;basic power&quot;));</a>
+<a name="ln2147">  gtk_box_pack_start(GTK_BOX(self-&gt;widget), c-&gt;cmb_preserve_colors, TRUE, TRUE, 0);</a>
+<a name="ln2148">  gtk_widget_set_tooltip_text(c-&gt;cmb_preserve_colors, _(&quot;method to preserve colors when applying contrast&quot;));</a>
+<a name="ln2149">  g_signal_connect(G_OBJECT(c-&gt;cmb_preserve_colors), &quot;value-changed&quot;, G_CALLBACK(preserve_colors_callback), self);</a>
+<a name="ln2150"> </a>
+<a name="ln2151">  c-&gt;fusion = dt_bauhaus_combobox_new(self);</a>
+<a name="ln2152">  dt_bauhaus_widget_set_label(c-&gt;fusion, NULL, _(&quot;fusion&quot;));</a>
+<a name="ln2153">  dt_bauhaus_combobox_add(c-&gt;fusion, _(&quot;none&quot;));</a>
+<a name="ln2154">  dt_bauhaus_combobox_add(c-&gt;fusion, _(&quot;two exposures&quot;));</a>
+<a name="ln2155">  dt_bauhaus_combobox_add(c-&gt;fusion, _(&quot;three exposures&quot;));</a>
+<a name="ln2156">  gtk_widget_set_tooltip_text(c-&gt;fusion, _(&quot;fuse this image stopped up/down a couple of times with itself, to &quot;</a>
+<a name="ln2157">                                           &quot;compress high dynamic range. expose for the highlights before use.&quot;));</a>
+<a name="ln2158">  gtk_box_pack_start(GTK_BOX(self-&gt;widget), c-&gt;fusion, TRUE, TRUE, 0);</a>
+<a name="ln2159">  g_signal_connect(G_OBJECT(c-&gt;fusion), &quot;value-changed&quot;, G_CALLBACK(fusion_callback), self);</a>
+<a name="ln2160"> </a>
+<a name="ln2161">  c-&gt;exposure_step = dt_bauhaus_slider_new_with_range(self, 0.01f, 4.0f, 0.100f, 1.0f, 3);</a>
+<a name="ln2162">  gtk_widget_set_tooltip_text(c-&gt;exposure_step, _(&quot;how many stops to shift the individual exposures apart&quot;));</a>
+<a name="ln2163">  dt_bauhaus_widget_set_label(c-&gt;exposure_step, NULL, _(&quot;exposure shift&quot;));</a>
+<a name="ln2164">  gtk_box_pack_start(GTK_BOX(self-&gt;widget), c-&gt;exposure_step, TRUE, TRUE, 0);</a>
+<a name="ln2165">  g_signal_connect(G_OBJECT(c-&gt;exposure_step), &quot;value-changed&quot;, G_CALLBACK(exposure_step_callback), self);</a>
+<a name="ln2166">  gtk_widget_show_all(c-&gt;exposure_step);</a>
+<a name="ln2167">  gtk_widget_set_no_show_all(c-&gt;exposure_step, TRUE);</a>
+<a name="ln2168">  gtk_widget_set_visible(c-&gt;exposure_step, p-&gt;exposure_fusion != 0 ? TRUE : FALSE);</a>
+<a name="ln2169"> </a>
+<a name="ln2170">  // initially set to 1 (consistency with previous versions), but double-click resets to 0</a>
+<a name="ln2171">  // to get a quick way to reach 0 with the mouse.</a>
+<a name="ln2172">  c-&gt;exposure_bias = dt_bauhaus_slider_new_with_range(self, -1.0f, 1.0f, 0.100f, 0.0f, 3);</a>
+<a name="ln2173">  gtk_widget_set_tooltip_text(c-&gt;exposure_bias, _(&quot;whether to shift exposure up or down &quot;</a>
+<a name="ln2174">                                                  &quot;(-1: reduce highlight, +1: reduce shadows)&quot;));</a>
+<a name="ln2175">  dt_bauhaus_widget_set_label(c-&gt;exposure_bias, NULL, _(&quot;exposure bias&quot;));</a>
+<a name="ln2176">  gtk_box_pack_start(GTK_BOX(self-&gt;widget), c-&gt;exposure_bias, TRUE, TRUE, 0);</a>
+<a name="ln2177">  g_signal_connect(G_OBJECT(c-&gt;exposure_bias), &quot;value-changed&quot;, G_CALLBACK(exposure_bias_callback), self);</a>
+<a name="ln2178">  gtk_widget_show_all(c-&gt;exposure_bias);</a>
+<a name="ln2179">  gtk_widget_set_no_show_all(c-&gt;exposure_bias, TRUE);</a>
+<a name="ln2180">  gtk_widget_set_visible(c-&gt;exposure_bias, p-&gt;exposure_fusion != 0 ? TRUE : FALSE);</a>
+<a name="ln2181"> </a>
+<a name="ln2182">  gtk_widget_add_events(GTK_WIDGET(c-&gt;area), GDK_POINTER_MOTION_MASK | GDK_POINTER_MOTION_HINT_MASK</a>
+<a name="ln2183">                                                 | GDK_BUTTON_PRESS_MASK | GDK_BUTTON_RELEASE_MASK</a>
+<a name="ln2184">                                                 | GDK_LEAVE_NOTIFY_MASK | GDK_SCROLL_MASK</a>
+<a name="ln2185">                                                 | darktable.gui-&gt;scroll_mask);</a>
+<a name="ln2186">  gtk_widget_set_can_focus(GTK_WIDGET(c-&gt;area), TRUE);</a>
+<a name="ln2187">  g_signal_connect(G_OBJECT(c-&gt;area), &quot;draw&quot;, G_CALLBACK(dt_iop_basecurve_draw), self);</a>
+<a name="ln2188">  g_signal_connect(G_OBJECT(c-&gt;area), &quot;button-press-event&quot;, G_CALLBACK(dt_iop_basecurve_button_press), self);</a>
+<a name="ln2189">  g_signal_connect(G_OBJECT(c-&gt;area), &quot;motion-notify-event&quot;, G_CALLBACK(dt_iop_basecurve_motion_notify), self);</a>
+<a name="ln2190">  g_signal_connect(G_OBJECT(c-&gt;area), &quot;leave-notify-event&quot;, G_CALLBACK(dt_iop_basecurve_leave_notify), self);</a>
+<a name="ln2191">  g_signal_connect(G_OBJECT(c-&gt;area), &quot;enter-notify-event&quot;, G_CALLBACK(dt_iop_basecurve_enter_notify), self);</a>
+<a name="ln2192">  g_signal_connect(G_OBJECT(c-&gt;area), &quot;configure-event&quot;, G_CALLBACK(area_resized), self);</a>
+<a name="ln2193">  g_signal_connect(G_OBJECT(c-&gt;area), &quot;scroll-event&quot;, G_CALLBACK(_scrolled), self);</a>
+<a name="ln2194">  g_signal_connect(G_OBJECT(c-&gt;area), &quot;key-press-event&quot;, G_CALLBACK(dt_iop_basecurve_key_press), self);</a>
+<a name="ln2195">}</a>
+<a name="ln2196"> </a>
+<a name="ln2197">void gui_cleanup(struct dt_iop_module_t *self)</a>
+<a name="ln2198">{</a>
+<a name="ln2199">  dt_iop_basecurve_gui_data_t *c = (dt_iop_basecurve_gui_data_t *)self-&gt;gui_data;</a>
+<a name="ln2200">  dt_draw_curve_destroy(c-&gt;minmax_curve);</a>
+<a name="ln2201">  free(self-&gt;gui_data);</a>
+<a name="ln2202">  self-&gt;gui_data = NULL;</a>
+<a name="ln2203">}</a>
+<a name="ln2204"> </a>
+<a name="ln2205">// modelines: These editor modelines have been set for all relevant files by tools/update_modelines.sh</a>
+<a name="ln2206">// vim: shiftwidth=2 expandtab tabstop=2 cindent</a>
+<a name="ln2207">// kate: tab-indents: off; indent-width 2; replace-tabs on; indent-mode cstyle; remove-trailing-spaces modified;</a>
+
+</code></pre>
+<div class="balloon" rel="141"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v512/" target="_blank">V512</a> A call of the 'memcpy' function will lead to underflow of the buffer 'n'.</p></div>
+<div class="balloon" rel="152"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v512/" target="_blank">V512</a> A call of the 'memcpy' function will lead to underflow of the buffer 'n'.</p></div>
+<div class="balloon" rel="162"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v512/" target="_blank">V512</a> A call of the 'memcpy' function will lead to underflow of the buffer 'n'.</p></div>
+<div class="balloon" rel="171"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v512/" target="_blank">V512</a> A call of the 'memcpy' function will lead to underflow of the buffer 'n'.</p></div>
+<div class="balloon" rel="171"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v512/" target="_blank">V512</a> A call of the 'memcpy' function will lead to underflow of the buffer 'o'.</p></div>
+<div class="balloon" rel="544"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v522/" target="_blank">V522</a> There might be dereferencing of a potential null pointer 'dev_col'. Check lines: 544, 517.</p></div>
+<div class="balloon" rel="547"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v522/" target="_blank">V522</a> There might be dereferencing of a potential null pointer 'dev_comb'. Check lines: 547, 518.</p></div>
+<div class="balloon" rel="1156"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v522/" target="_blank">V522</a> There might be dereferencing of a potential null pointer 'col'. Check lines: 1156, 1148.</p></div>
+<div class="balloon" rel="1157"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v522/" target="_blank">V522</a> There might be dereferencing of a potential null pointer 'comb'. Check lines: 1157, 1149.</p></div>
+<div class="balloon" rel="1449"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v575/" target="_blank">V575</a> The potential null pointer is passed into 'memcpy' function. Inspect the first argument. Check lines: 1449, 1432.</p></div>
+<div class="balloon" rel="1450"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v575/" target="_blank">V575</a> The potential null pointer is passed into 'memcpy' function. Inspect the first argument. Check lines: 1450, 1433.</p></div>
+<div class="balloon" rel="1465"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v522/" target="_blank">V522</a> There might be dereferencing of a potential null pointer 'gd'. Check lines: 1465, 1463.</p></div>
+<div class="balloon" rel="2113"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v522/" target="_blank">V522</a> There might be dereferencing of a potential null pointer 'c'. Check lines: 2113, 2109.</p></div>
+
+<link rel="stylesheet" href="highlight.css">
+<script src="highlight.pack.js"></script>
+<script src="highlightjs-line-numbers.js"></script>
+<script>hljs.initHighlightingOnLoad();</script>
+<script>hljs.initLineNumbersOnLoad();</script>
+<script>
+  $(document).ready(function() {
+      $('.balloon').each(function () {
+          var bl = $(this);
+          var line = bl.attr('rel');
+          var text = $('a[name="ln'+line+'"]').text();
+
+          var space_count = 0;
+          for(var i = 0; i<text.length; i++){
+              var char = text[i];
+              if((char !== ' ')&&(char !== '\t'))break;
+              if(char === '\t')space_count++;
+              space_count++;
+          }
+
+          bl.css('margin-left', space_count*8);
+          $('a[name="ln'+line+'"]').after(bl);
+      });
+
+      window.location = window.location;
+  });
+</script>
+</body>
+</html>

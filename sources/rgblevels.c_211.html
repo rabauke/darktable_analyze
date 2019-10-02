@@ -1,0 +1,1605 @@
+
+<html>
+<head>
+  <link rel="stylesheet" href="../style.css"/>
+  <script src="../jquery-3.2.1.min.js"></script>
+</head>
+<body>
+<pre><code class = "cpp">
+<a name="ln1">/*</a>
+<a name="ln2">    This file is part of darktable,</a>
+<a name="ln3">    copyright (c) 2019 edgardo hoszowski.</a>
+<a name="ln4"> </a>
+<a name="ln5">    darktable is free software: you can redistribute it and/or modify</a>
+<a name="ln6">    it under the terms of the GNU General Public License as published by</a>
+<a name="ln7">    the Free Software Foundation, either version 3 of the License, or</a>
+<a name="ln8">    (at your option) any later version.</a>
+<a name="ln9"> </a>
+<a name="ln10">    darktable is distributed in the hope that it will be useful,</a>
+<a name="ln11">    but WITHOUT ANY WARRANTY; without even the implied warranty of</a>
+<a name="ln12">    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the</a>
+<a name="ln13">    GNU General Public License for more details.</a>
+<a name="ln14"> </a>
+<a name="ln15">    You should have received a copy of the GNU General Public License</a>
+<a name="ln16">    along with darktable.  If not, see &lt;http://www.gnu.org/licenses/&gt;.</a>
+<a name="ln17">*/</a>
+<a name="ln18">#ifdef HAVE_CONFIG_H</a>
+<a name="ln19">#include &quot;config.h&quot;</a>
+<a name="ln20">#endif</a>
+<a name="ln21"> </a>
+<a name="ln22">#include &quot;bauhaus/bauhaus.h&quot;</a>
+<a name="ln23">#include &quot;common/colorspaces_inline_conversions.h&quot;</a>
+<a name="ln24">#include &quot;common/rgb_norms.h&quot;</a>
+<a name="ln25">#include &quot;develop/imageop.h&quot;</a>
+<a name="ln26">#include &quot;dtgtk/drawingarea.h&quot;</a>
+<a name="ln27">#include &quot;gui/color_picker_proxy.h&quot;</a>
+<a name="ln28"> </a>
+<a name="ln29">#define DT_GUI_CURVE_EDITOR_INSET DT_PIXEL_APPLY_DPI(5)</a>
+<a name="ln30"> </a>
+<a name="ln31">DT_MODULE_INTROSPECTION(1, dt_iop_rgblevels_params_t)</a>
+<a name="ln32"> </a>
+<a name="ln33">#define RGBLEVELS_MIN 0.f</a>
+<a name="ln34">#define RGBLEVELS_MID 0.5f</a>
+<a name="ln35">#define RGBLEVELS_MAX 1.f</a>
+<a name="ln36"> </a>
+<a name="ln37">typedef enum dt_iop_rgblevels_channel_t</a>
+<a name="ln38">{</a>
+<a name="ln39">  DT_IOP_RGBLEVELS_R = 0,</a>
+<a name="ln40">  DT_IOP_RGBLEVELS_G = 1,</a>
+<a name="ln41">  DT_IOP_RGBLEVELS_B = 2,</a>
+<a name="ln42">  DT_IOP_RGBLEVELS_MAX_CHANNELS = 3</a>
+<a name="ln43">} dt_iop_rgblevels_channel_t;</a>
+<a name="ln44"> </a>
+<a name="ln45">typedef enum dt_iop_rgblevels_autoscale_t</a>
+<a name="ln46">{</a>
+<a name="ln47">  DT_IOP_RGBLEVELS_LINKED_CHANNELS = 0,</a>
+<a name="ln48">  DT_IOP_RGBLEVELS_INDEPENDENT_CHANNELS = 1</a>
+<a name="ln49">} dt_iop_rgblevels_autoscale_t;</a>
+<a name="ln50"> </a>
+<a name="ln51">typedef struct dt_iop_rgblevels_params_t</a>
+<a name="ln52">{</a>
+<a name="ln53">  int autoscale; // (DT_IOP_RGBLEVELS_INDEPENDENT_CHANNELS, DT_IOP_RGBLEVELS_LINKED_CHANNELS)</a>
+<a name="ln54">  int preserve_colors;</a>
+<a name="ln55">  float levels[DT_IOP_RGBLEVELS_MAX_CHANNELS][3];</a>
+<a name="ln56">} dt_iop_rgblevels_params_t;</a>
+<a name="ln57"> </a>
+<a name="ln58">typedef enum dt_iop_rgblevels_pick_t</a>
+<a name="ln59">{</a>
+<a name="ln60">  DT_IOP_RGBLEVELS_PICK_NONE,</a>
+<a name="ln61">  DT_IOP_RGBLEVELS_PICK_BLACK,</a>
+<a name="ln62">  DT_IOP_RGBLEVELS_PICK_GREY,</a>
+<a name="ln63">  DT_IOP_RGBLEVELS_PICK_WHITE</a>
+<a name="ln64">} dt_iop_rgblevels_pick_t;</a>
+<a name="ln65"> </a>
+<a name="ln66">typedef struct dt_iop_rgblevels_gui_data_t</a>
+<a name="ln67">{</a>
+<a name="ln68">  dt_pthread_mutex_t lock;</a>
+<a name="ln69">  dt_iop_rgblevels_params_t params;</a>
+<a name="ln70"> </a>
+<a name="ln71">  GtkWidget *cmb_autoscale; // (DT_IOP_RGBLEVELS_INDEPENDENT_CHANNELS, DT_IOP_RGBLEVELS_LINKED_CHANNELS)</a>
+<a name="ln72">  GtkDrawingArea *area;</a>
+<a name="ln73">  GtkWidget *cmb_preserve_colors;</a>
+<a name="ln74">  GtkNotebook *channel_tabs;</a>
+<a name="ln75">  GtkWidget *bt_auto_levels;</a>
+<a name="ln76">  GtkWidget *bt_select_region;</a>
+<a name="ln77"> </a>
+<a name="ln78">  int call_auto_levels;                         // should we calculate levels automatically?</a>
+<a name="ln79">  int draw_selected_region;                     // are we drawing the selected region?</a>
+<a name="ln80">  float posx_from, posx_to, posy_from, posy_to; // coordinates of the area</a>
+<a name="ln81">  float box_cood[4];                            // normalized coordinates</a>
+<a name="ln82">  int button_down;                              // user pressed the mouse button?</a>
+<a name="ln83"> </a>
+<a name="ln84">  double mouse_x, mouse_y;</a>
+<a name="ln85">  int dragging, handle_move;</a>
+<a name="ln86">  float drag_start_percentage;</a>
+<a name="ln87">  dt_iop_rgblevels_channel_t channel;</a>
+<a name="ln88">  dt_iop_color_picker_t color_picker;</a>
+<a name="ln89">  float last_picked_color;</a>
+<a name="ln90">  GtkWidget *blackpick, *greypick, *whitepick;</a>
+<a name="ln91">} dt_iop_rgblevels_gui_data_t;</a>
+<a name="ln92"> </a>
+<a name="ln93">typedef struct dt_iop_rgblevels_data_t</a>
+<a name="ln94">{</a>
+<a name="ln95">  dt_iop_rgblevels_params_t params;</a>
+<a name="ln96">  float inv_gamma[DT_IOP_RGBLEVELS_MAX_CHANNELS];</a>
+<a name="ln97">  float lut[DT_IOP_RGBLEVELS_MAX_CHANNELS][0x10000];</a>
+<a name="ln98">} dt_iop_rgblevels_data_t;</a>
+<a name="ln99"> </a>
+<a name="ln100">typedef struct dt_iop_rgblevels_global_data_t</a>
+<a name="ln101">{</a>
+<a name="ln102">  int kernel_levels;</a>
+<a name="ln103">} dt_iop_rgblevels_global_data_t;</a>
+<a name="ln104"> </a>
+<a name="ln105"> </a>
+<a name="ln106">const char *name()</a>
+<a name="ln107">{</a>
+<a name="ln108">  return _(&quot;rgb levels&quot;);</a>
+<a name="ln109">}</a>
+<a name="ln110"> </a>
+<a name="ln111">int default_group()</a>
+<a name="ln112">{</a>
+<a name="ln113">  return IOP_GROUP_TONE;</a>
+<a name="ln114">}</a>
+<a name="ln115"> </a>
+<a name="ln116">int flags()</a>
+<a name="ln117">{</a>
+<a name="ln118">  return IOP_FLAGS_SUPPORTS_BLENDING;</a>
+<a name="ln119">}</a>
+<a name="ln120"> </a>
+<a name="ln121">int default_colorspace(dt_iop_module_t *self, dt_dev_pixelpipe_t *pipe, dt_dev_pixelpipe_iop_t *piece)</a>
+<a name="ln122">{</a>
+<a name="ln123">  return iop_cs_rgb;</a>
+<a name="ln124">}</a>
+<a name="ln125"> </a>
+<a name="ln126">static void _turn_select_region_off(struct dt_iop_module_t *self)</a>
+<a name="ln127">{</a>
+<a name="ln128">  dt_iop_rgblevels_gui_data_t *g = (dt_iop_rgblevels_gui_data_t *)self-&gt;gui_data;</a>
+<a name="ln129">  if(g)</a>
+<a name="ln130">  {</a>
+<a name="ln131">    g-&gt;button_down = g-&gt;draw_selected_region = 0;</a>
+<a name="ln132">    gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(g-&gt;bt_select_region), g-&gt;draw_selected_region);</a>
+<a name="ln133">  }</a>
+<a name="ln134">}</a>
+<a name="ln135"> </a>
+<a name="ln136">static void _turn_selregion_picker_off(struct dt_iop_module_t *self)</a>
+<a name="ln137">{</a>
+<a name="ln138">  _turn_select_region_off(self);</a>
+<a name="ln139">  dt_iop_color_picker_reset(self, TRUE);</a>
+<a name="ln140">}</a>
+<a name="ln141"> </a>
+<a name="ln142">static void _develop_ui_pipe_finished_callback(gpointer instance, dt_iop_module_t *self)</a>
+<a name="ln143">{</a>
+<a name="ln144">  dt_iop_rgblevels_params_t *p = (dt_iop_rgblevels_params_t *)self-&gt;params;</a>
+<a name="ln145">  dt_iop_rgblevels_gui_data_t *g = (dt_iop_rgblevels_gui_data_t *)self-&gt;gui_data;</a>
+<a name="ln146"> </a>
+<a name="ln147">  if(g == NULL) return;</a>
+<a name="ln148"> </a>
+<a name="ln149">  // FIXME: this doesn't seems the right place to update params and GUI ...</a>
+<a name="ln150">  // update auto levels</a>
+<a name="ln151">  dt_pthread_mutex_lock(&amp;g-&gt;lock);</a>
+<a name="ln152">  if(g-&gt;call_auto_levels == 2)</a>
+<a name="ln153">  {</a>
+<a name="ln154">    g-&gt;call_auto_levels = -1;</a>
+<a name="ln155"> </a>
+<a name="ln156">    dt_pthread_mutex_unlock(&amp;g-&gt;lock);</a>
+<a name="ln157"> </a>
+<a name="ln158">    memcpy(p, &amp;g-&gt;params, sizeof(dt_iop_rgblevels_params_t));</a>
+<a name="ln159"> </a>
+<a name="ln160">    dt_dev_add_history_item(darktable.develop, self, TRUE);</a>
+<a name="ln161"> </a>
+<a name="ln162">    dt_pthread_mutex_lock(&amp;g-&gt;lock);</a>
+<a name="ln163"> </a>
+<a name="ln164">    g-&gt;call_auto_levels = 0;</a>
+<a name="ln165"> </a>
+<a name="ln166">    dt_pthread_mutex_unlock(&amp;g-&gt;lock);</a>
+<a name="ln167"> </a>
+<a name="ln168">    const int reset = darktable.gui-&gt;reset;</a>
+<a name="ln169">    darktable.gui-&gt;reset = 1;</a>
+<a name="ln170"> </a>
+<a name="ln171">    gui_update(self);</a>
+<a name="ln172"> </a>
+<a name="ln173">    darktable.gui-&gt;reset = reset;</a>
+<a name="ln174">  }</a>
+<a name="ln175">  else</a>
+<a name="ln176">  {</a>
+<a name="ln177">    dt_pthread_mutex_unlock(&amp;g-&gt;lock);</a>
+<a name="ln178">  }</a>
+<a name="ln179">}</a>
+<a name="ln180"> </a>
+<a name="ln181">static void _compute_lut(dt_dev_pixelpipe_iop_t *piece)</a>
+<a name="ln182">{</a>
+<a name="ln183">  dt_iop_rgblevels_data_t *d = (dt_iop_rgblevels_data_t *)piece-&gt;data;</a>
+<a name="ln184"> </a>
+<a name="ln185">  // Building the lut for values in the [0,1] range</a>
+<a name="ln186">  if(d-&gt;params.autoscale == DT_IOP_RGBLEVELS_LINKED_CHANNELS)</a>
+<a name="ln187">  {</a>
+<a name="ln188">    const int c = 0;</a>
+<a name="ln189">    const float delta = (d-&gt;params.levels[c][2] - d-&gt;params.levels[c][0]) / 2.0f;</a>
+<a name="ln190">    const float mid = d-&gt;params.levels[c][0] + delta;</a>
+<a name="ln191">    const float tmp = (d-&gt;params.levels[c][1] - mid) / delta;</a>
+<a name="ln192">    d-&gt;inv_gamma[0] = d-&gt;inv_gamma[1] = d-&gt;inv_gamma[2] = pow(10, tmp);</a>
+<a name="ln193"> </a>
+<a name="ln194">    for(unsigned int i = 0; i &lt; 0x10000; i++)</a>
+<a name="ln195">    {</a>
+<a name="ln196">      float percentage = (float)i / (float)0x10000ul;</a>
+<a name="ln197">      d-&gt;lut[0][i] = d-&gt;lut[1][i] = d-&gt;lut[2][i] = pow(percentage, d-&gt;inv_gamma[c]);</a>
+<a name="ln198">    }</a>
+<a name="ln199">  }</a>
+<a name="ln200">  else</a>
+<a name="ln201">  {</a>
+<a name="ln202">    for(int c = 0; c &lt; 3; c++)</a>
+<a name="ln203">    {</a>
+<a name="ln204">      const float delta = (d-&gt;params.levels[c][2] - d-&gt;params.levels[c][0]) / 2.0f;</a>
+<a name="ln205">      const float mid = d-&gt;params.levels[c][0] + delta;</a>
+<a name="ln206">      const float tmp = (d-&gt;params.levels[c][1] - mid) / delta;</a>
+<a name="ln207">      d-&gt;inv_gamma[c] = pow(10, tmp);</a>
+<a name="ln208"> </a>
+<a name="ln209">      for(unsigned int i = 0; i &lt; 0x10000; i++)</a>
+<a name="ln210">      {</a>
+<a name="ln211">        float percentage = (float)i / (float)0x10000ul;</a>
+<a name="ln212">        d-&gt;lut[c][i] = pow(percentage, d-&gt;inv_gamma[c]);</a>
+<a name="ln213">      }</a>
+<a name="ln214">    }</a>
+<a name="ln215">  }</a>
+<a name="ln216">}</a>
+<a name="ln217"> </a>
+<a name="ln218">static void _rgblevels_show_hide_controls(dt_iop_rgblevels_params_t *p, dt_iop_rgblevels_gui_data_t *g)</a>
+<a name="ln219">{</a>
+<a name="ln220">  switch(p-&gt;autoscale)</a>
+<a name="ln221">  {</a>
+<a name="ln222">    case DT_IOP_RGBLEVELS_INDEPENDENT_CHANNELS:</a>
+<a name="ln223">      gtk_notebook_set_show_tabs(g-&gt;channel_tabs, TRUE);</a>
+<a name="ln224">      break;</a>
+<a name="ln225">    case DT_IOP_RGBLEVELS_LINKED_CHANNELS:</a>
+<a name="ln226">      gtk_notebook_set_show_tabs(g-&gt;channel_tabs, FALSE);</a>
+<a name="ln227">      break;</a>
+<a name="ln228">  }</a>
+<a name="ln229"> </a>
+<a name="ln230">  if(p-&gt;autoscale == DT_IOP_RGBLEVELS_LINKED_CHANNELS)</a>
+<a name="ln231">    gtk_widget_set_visible(g-&gt;cmb_preserve_colors, TRUE);</a>
+<a name="ln232">  else</a>
+<a name="ln233">    gtk_widget_set_visible(g-&gt;cmb_preserve_colors, FALSE);</a>
+<a name="ln234">}</a>
+<a name="ln235"> </a>
+<a name="ln236">int mouse_moved(struct dt_iop_module_t *self, double x, double y, double pressure, int which)</a>
+<a name="ln237">{</a>
+<a name="ln238">  int handled = 0;</a>
+<a name="ln239">  dt_iop_rgblevels_gui_data_t *g = (dt_iop_rgblevels_gui_data_t *)self-&gt;gui_data;</a>
+<a name="ln240">  if(g &amp;&amp; g-&gt;draw_selected_region &amp;&amp; g-&gt;button_down &amp;&amp; self-&gt;enabled)</a>
+<a name="ln241">  {</a>
+<a name="ln242">    float pzx, pzy;</a>
+<a name="ln243">    dt_dev_get_pointer_zoom_pos(darktable.develop, x, y, &amp;pzx, &amp;pzy);</a>
+<a name="ln244">    pzx += 0.5f;</a>
+<a name="ln245">    pzy += 0.5f;</a>
+<a name="ln246"> </a>
+<a name="ln247">    g-&gt;posx_to = pzx * darktable.develop-&gt;preview_pipe-&gt;backbuf_width;</a>
+<a name="ln248">    g-&gt;posy_to = pzy * darktable.develop-&gt;preview_pipe-&gt;backbuf_height;</a>
+<a name="ln249"> </a>
+<a name="ln250">    dt_control_queue_redraw_center();</a>
+<a name="ln251"> </a>
+<a name="ln252">    handled = 1;</a>
+<a name="ln253">  }</a>
+<a name="ln254"> </a>
+<a name="ln255">  return handled;</a>
+<a name="ln256">}</a>
+<a name="ln257"> </a>
+<a name="ln258">int button_released(struct dt_iop_module_t *self, double x, double y, int which, uint32_t state)</a>
+<a name="ln259">{</a>
+<a name="ln260">  int handled = 0;</a>
+<a name="ln261">  dt_iop_rgblevels_gui_data_t *g = (dt_iop_rgblevels_gui_data_t *)self-&gt;gui_data;</a>
+<a name="ln262">  if(g &amp;&amp; g-&gt;draw_selected_region &amp;&amp; self-&gt;enabled)</a>
+<a name="ln263">  {</a>
+<a name="ln264">    if(fabsf(g-&gt;posx_from - g-&gt;posx_to) &gt; 1 &amp;&amp; fabsf(g-&gt;posy_from - g-&gt;posy_to) &gt; 1)</a>
+<a name="ln265">    {</a>
+<a name="ln266">      g-&gt;box_cood[0] = g-&gt;posx_from;</a>
+<a name="ln267">      g-&gt;box_cood[1] = g-&gt;posy_from;</a>
+<a name="ln268">      g-&gt;box_cood[2] = g-&gt;posx_to;</a>
+<a name="ln269">      g-&gt;box_cood[3] = g-&gt;posy_to;</a>
+<a name="ln270">      dt_dev_distort_backtransform(darktable.develop, g-&gt;box_cood, 2);</a>
+<a name="ln271">      g-&gt;box_cood[0] /= darktable.develop-&gt;preview_pipe-&gt;iwidth;</a>
+<a name="ln272">      g-&gt;box_cood[1] /= darktable.develop-&gt;preview_pipe-&gt;iheight;</a>
+<a name="ln273">      g-&gt;box_cood[2] /= darktable.develop-&gt;preview_pipe-&gt;iwidth;</a>
+<a name="ln274">      g-&gt;box_cood[3] /= darktable.develop-&gt;preview_pipe-&gt;iheight;</a>
+<a name="ln275"> </a>
+<a name="ln276">      g-&gt;button_down = 0;</a>
+<a name="ln277">      g-&gt;call_auto_levels = 1;</a>
+<a name="ln278"> </a>
+<a name="ln279">      dt_dev_reprocess_all(self-&gt;dev);</a>
+<a name="ln280">    }</a>
+<a name="ln281">    else</a>
+<a name="ln282">      g-&gt;button_down = 0;</a>
+<a name="ln283"> </a>
+<a name="ln284">    handled = 1;</a>
+<a name="ln285">  }</a>
+<a name="ln286"> </a>
+<a name="ln287">  return handled;</a>
+<a name="ln288">}</a>
+<a name="ln289"> </a>
+<a name="ln290">int button_pressed(struct dt_iop_module_t *self, double x, double y, double pressure, int which, int type,</a>
+<a name="ln291">                   uint32_t state)</a>
+<a name="ln292">{</a>
+<a name="ln293">  int handled = 0;</a>
+<a name="ln294">  dt_iop_rgblevels_gui_data_t *g = (dt_iop_rgblevels_gui_data_t *)self-&gt;gui_data;</a>
+<a name="ln295">  if(g &amp;&amp; g-&gt;draw_selected_region &amp;&amp; self-&gt;enabled)</a>
+<a name="ln296">  {</a>
+<a name="ln297">    if((which == 3) || (which == 1 &amp;&amp; type == GDK_2BUTTON_PRESS))</a>
+<a name="ln298">    {</a>
+<a name="ln299">      _turn_selregion_picker_off(self);</a>
+<a name="ln300"> </a>
+<a name="ln301">      handled = 1;</a>
+<a name="ln302">    }</a>
+<a name="ln303">    else if(which == 1)</a>
+<a name="ln304">    {</a>
+<a name="ln305">      float pzx, pzy;</a>
+<a name="ln306">      dt_dev_get_pointer_zoom_pos(darktable.develop, x, y, &amp;pzx, &amp;pzy);</a>
+<a name="ln307">      pzx += 0.5f;</a>
+<a name="ln308">      pzy += 0.5f;</a>
+<a name="ln309"> </a>
+<a name="ln310">      g-&gt;posx_from = g-&gt;posx_to = pzx * darktable.develop-&gt;preview_pipe-&gt;backbuf_width;</a>
+<a name="ln311">      g-&gt;posy_from = g-&gt;posy_to = pzy * darktable.develop-&gt;preview_pipe-&gt;backbuf_height;</a>
+<a name="ln312"> </a>
+<a name="ln313">      g-&gt;button_down = 1;</a>
+<a name="ln314"> </a>
+<a name="ln315">      handled = 1;</a>
+<a name="ln316">    }</a>
+<a name="ln317">  }</a>
+<a name="ln318"> </a>
+<a name="ln319">  return handled;</a>
+<a name="ln320">}</a>
+<a name="ln321"> </a>
+<a name="ln322">void gui_post_expose(struct dt_iop_module_t *self, cairo_t *cr, int32_t width, int32_t height, int32_t pointerx,</a>
+<a name="ln323">                     int32_t pointery)</a>
+<a name="ln324">{</a>
+<a name="ln325">  dt_iop_rgblevels_gui_data_t *g = (dt_iop_rgblevels_gui_data_t *)self-&gt;gui_data;</a>
+<a name="ln326">  if(g == NULL || !self-&gt;enabled) return;</a>
+<a name="ln327">  if(!g-&gt;draw_selected_region || !g-&gt;button_down) return;</a>
+<a name="ln328">  if(g-&gt;posx_from == g-&gt;posx_to &amp;&amp; g-&gt;posy_from == g-&gt;posy_to) return;</a>
+<a name="ln329"> </a>
+<a name="ln330">  dt_develop_t *dev = darktable.develop;</a>
+<a name="ln331">  const float wd = dev-&gt;preview_pipe-&gt;backbuf_width;</a>
+<a name="ln332">  const float ht = dev-&gt;preview_pipe-&gt;backbuf_height;</a>
+<a name="ln333">  const float zoom_y = dt_control_get_dev_zoom_y();</a>
+<a name="ln334">  const float zoom_x = dt_control_get_dev_zoom_x();</a>
+<a name="ln335">  const dt_dev_zoom_t zoom = dt_control_get_dev_zoom();</a>
+<a name="ln336">  const int closeup = dt_control_get_dev_closeup();</a>
+<a name="ln337">  const float zoom_scale = dt_dev_get_zoom_scale(dev, zoom, 1 &lt;&lt; closeup, 1);</a>
+<a name="ln338"> </a>
+<a name="ln339">  const float posx_from = fmin(g-&gt;posx_from, g-&gt;posx_to);</a>
+<a name="ln340">  const float posx_to = fmax(g-&gt;posx_from, g-&gt;posx_to);</a>
+<a name="ln341">  const float posy_from = fmin(g-&gt;posy_from, g-&gt;posy_to);</a>
+<a name="ln342">  const float posy_to = fmax(g-&gt;posy_from, g-&gt;posy_to);</a>
+<a name="ln343"> </a>
+<a name="ln344">  cairo_save(cr);</a>
+<a name="ln345">  cairo_set_line_width(cr, 1.0 / zoom_scale);</a>
+<a name="ln346">  cairo_set_source_rgb(cr, .2, .2, .2);</a>
+<a name="ln347"> </a>
+<a name="ln348">  cairo_translate(cr, width / 2.0, height / 2.0f);</a>
+<a name="ln349">  cairo_scale(cr, zoom_scale, zoom_scale);</a>
+<a name="ln350">  cairo_translate(cr, -.5f * wd - zoom_x * wd, -.5f * ht - zoom_y * ht);</a>
+<a name="ln351"> </a>
+<a name="ln352">  cairo_set_line_cap(cr, CAIRO_LINE_CAP_ROUND);</a>
+<a name="ln353"> </a>
+<a name="ln354">  cairo_rectangle(cr, posx_from, posy_from, (posx_to - posx_from), (posy_to - posy_from));</a>
+<a name="ln355">  cairo_stroke(cr);</a>
+<a name="ln356">  cairo_translate(cr, 1.0 / zoom_scale, 1.0 / zoom_scale);</a>
+<a name="ln357">  cairo_set_source_rgb(cr, .8, .8, .8);</a>
+<a name="ln358">  cairo_rectangle(cr, posx_from + 1.0 / zoom_scale, posy_from, (posx_to - posx_from) - 3. / zoom_scale,</a>
+<a name="ln359">                  (posy_to - posy_from) - 2. / zoom_scale);</a>
+<a name="ln360">  cairo_stroke(cr);</a>
+<a name="ln361"> </a>
+<a name="ln362">  cairo_restore(cr);</a>
+<a name="ln363">}</a>
+<a name="ln364"> </a>
+<a name="ln365">static gboolean _area_leave_notify_callback(GtkWidget *widget, GdkEventCrossing *event, dt_iop_module_t *self)</a>
+<a name="ln366">{</a>
+<a name="ln367">  dt_iop_rgblevels_gui_data_t *c = (dt_iop_rgblevels_gui_data_t *)self-&gt;gui_data;</a>
+<a name="ln368">  c-&gt;mouse_x = c-&gt;mouse_y = -1.0;</a>
+<a name="ln369">  gtk_widget_queue_draw(widget);</a>
+<a name="ln370">  return TRUE;</a>
+<a name="ln371">}</a>
+<a name="ln372"> </a>
+<a name="ln373">static gboolean _area_draw_callback(GtkWidget *widget, cairo_t *crf, dt_iop_module_t *self)</a>
+<a name="ln374">{</a>
+<a name="ln375">  dt_iop_rgblevels_gui_data_t *c = (dt_iop_rgblevels_gui_data_t *)self-&gt;gui_data;</a>
+<a name="ln376">  dt_iop_rgblevels_params_t *p = (dt_iop_rgblevels_params_t *)self-&gt;params;</a>
+<a name="ln377"> </a>
+<a name="ln378">  dt_develop_t *dev = darktable.develop;</a>
+<a name="ln379">  const int inset = DT_GUI_CURVE_EDITOR_INSET;</a>
+<a name="ln380">  GtkAllocation allocation;</a>
+<a name="ln381">  gtk_widget_get_allocation(GTK_WIDGET(c-&gt;area), &amp;allocation);</a>
+<a name="ln382">  int width = allocation.width, height = allocation.height;</a>
+<a name="ln383">  cairo_surface_t *cst = dt_cairo_image_surface_create(CAIRO_FORMAT_ARGB32, width, height);</a>
+<a name="ln384">  cairo_t *cr = cairo_create(cst);</a>
+<a name="ln385"> </a>
+<a name="ln386">  // clear bg</a>
+<a name="ln387">  cairo_set_source_rgb(cr, .2, .2, .2);</a>
+<a name="ln388">  cairo_paint(cr);</a>
+<a name="ln389"> </a>
+<a name="ln390">  cairo_translate(cr, inset, inset);</a>
+<a name="ln391">  width -= 2 * inset;</a>
+<a name="ln392">  height -= 2 * inset;</a>
+<a name="ln393"> </a>
+<a name="ln394">  cairo_set_line_width(cr, DT_PIXEL_APPLY_DPI(1.0));</a>
+<a name="ln395">  cairo_set_source_rgb(cr, .1, .1, .1);</a>
+<a name="ln396">  cairo_rectangle(cr, 0, 0, width, height);</a>
+<a name="ln397">  cairo_stroke(cr);</a>
+<a name="ln398"> </a>
+<a name="ln399">  cairo_set_source_rgb(cr, .3, .3, .3);</a>
+<a name="ln400">  cairo_rectangle(cr, 0, 0, width, height);</a>
+<a name="ln401">  cairo_fill(cr);</a>
+<a name="ln402"> </a>
+<a name="ln403">  // draw grid</a>
+<a name="ln404">  cairo_set_line_width(cr, DT_PIXEL_APPLY_DPI(.4));</a>
+<a name="ln405">  cairo_set_source_rgb(cr, .1, .1, .1);</a>
+<a name="ln406">  dt_draw_vertical_lines(cr, 4, 0, 0, width, height);</a>
+<a name="ln407"> </a>
+<a name="ln408">  // Drawing the vertical line indicators</a>
+<a name="ln409">  cairo_set_line_width(cr, DT_PIXEL_APPLY_DPI(2.));</a>
+<a name="ln410"> </a>
+<a name="ln411">  for(int k = 0; k &lt; 3; k++)</a>
+<a name="ln412">  {</a>
+<a name="ln413">    if(k == c-&gt;handle_move &amp;&amp; c-&gt;mouse_x &gt; 0)</a>
+<a name="ln414">      cairo_set_source_rgb(cr, 1, 1, 1);</a>
+<a name="ln415">    else</a>
+<a name="ln416">      cairo_set_source_rgb(cr, .7, .7, .7);</a>
+<a name="ln417"> </a>
+<a name="ln418">    cairo_move_to(cr, width * p-&gt;levels[c-&gt;channel][k], height);</a>
+<a name="ln419">    cairo_rel_line_to(cr, 0, -height);</a>
+<a name="ln420">    cairo_stroke(cr);</a>
+<a name="ln421">  }</a>
+<a name="ln422"> </a>
+<a name="ln423">  // draw x positions</a>
+<a name="ln424">  cairo_set_line_width(cr, DT_PIXEL_APPLY_DPI(1.));</a>
+<a name="ln425">  const float arrw = DT_PIXEL_APPLY_DPI(7.0f);</a>
+<a name="ln426">  for(int k = 0; k &lt; 3; k++)</a>
+<a name="ln427">  {</a>
+<a name="ln428">    switch(k)</a>
+<a name="ln429">    {</a>
+<a name="ln430">      case 0:</a>
+<a name="ln431">        cairo_set_source_rgb(cr, 0, 0, 0);</a>
+<a name="ln432">        break;</a>
+<a name="ln433"> </a>
+<a name="ln434">      case 1:</a>
+<a name="ln435">        cairo_set_source_rgb(cr, 0.5, 0.5, 0.5);</a>
+<a name="ln436">        break;</a>
+<a name="ln437"> </a>
+<a name="ln438">      default:</a>
+<a name="ln439">        cairo_set_source_rgb(cr, 1, 1, 1);</a>
+<a name="ln440">        break;</a>
+<a name="ln441">    }</a>
+<a name="ln442"> </a>
+<a name="ln443">    cairo_move_to(cr, width * p-&gt;levels[c-&gt;channel][k], height + inset - 1);</a>
+<a name="ln444">    cairo_rel_line_to(cr, -arrw * .5f, 0);</a>
+<a name="ln445">    cairo_rel_line_to(cr, arrw * .5f, -arrw);</a>
+<a name="ln446">    cairo_rel_line_to(cr, arrw * .5f, arrw);</a>
+<a name="ln447">    cairo_close_path(cr);</a>
+<a name="ln448">    if(c-&gt;handle_move == k &amp;&amp; c-&gt;mouse_x &gt; 0)</a>
+<a name="ln449">      cairo_fill(cr);</a>
+<a name="ln450">    else</a>
+<a name="ln451">      cairo_stroke(cr);</a>
+<a name="ln452">  }</a>
+<a name="ln453"> </a>
+<a name="ln454">  cairo_translate(cr, 0, height);</a>
+<a name="ln455"> </a>
+<a name="ln456">  // draw histogram in background</a>
+<a name="ln457">  // only if the module is enabled</a>
+<a name="ln458">  if(self-&gt;enabled)</a>
+<a name="ln459">  {</a>
+<a name="ln460">    const int ch = c-&gt;channel;</a>
+<a name="ln461">    const uint32_t *hist = self-&gt;histogram;</a>
+<a name="ln462">    const float hist_max = dev-&gt;histogram_type == DT_DEV_HISTOGRAM_LINEAR ? self-&gt;histogram_max[ch]</a>
+<a name="ln463">                                                                          : logf(1.0 + self-&gt;histogram_max[ch]);</a>
+<a name="ln464">    if(hist &amp;&amp; hist_max &gt; 0.0f)</a>
+<a name="ln465">    {</a>
+<a name="ln466">      cairo_save(cr);</a>
+<a name="ln467">      cairo_scale(cr, width / 255.0, -(height - DT_PIXEL_APPLY_DPI(5)) / hist_max);</a>
+<a name="ln468"> </a>
+<a name="ln469">      if(p-&gt;autoscale == DT_IOP_RGBLEVELS_LINKED_CHANNELS)</a>
+<a name="ln470">      {</a>
+<a name="ln471">        cairo_set_operator(cr, CAIRO_OPERATOR_ADD);</a>
+<a name="ln472"> </a>
+<a name="ln473">        cairo_set_source_rgba(cr, 1., 0., 0., 0.2);</a>
+<a name="ln474">        dt_draw_histogram_8(cr, hist, 4, 0, dev-&gt;histogram_type == DT_DEV_HISTOGRAM_LINEAR);</a>
+<a name="ln475"> </a>
+<a name="ln476">        cairo_set_source_rgba(cr, 0., 1., 0., 0.2);</a>
+<a name="ln477">        dt_draw_histogram_8(cr, hist, 4, 1, dev-&gt;histogram_type == DT_DEV_HISTOGRAM_LINEAR);</a>
+<a name="ln478"> </a>
+<a name="ln479">        cairo_set_source_rgba(cr, 0., 0., 1., 0.2);</a>
+<a name="ln480">        dt_draw_histogram_8(cr, hist, 4, 2, dev-&gt;histogram_type == DT_DEV_HISTOGRAM_LINEAR);</a>
+<a name="ln481">      }</a>
+<a name="ln482">      else if(p-&gt;autoscale == DT_IOP_RGBLEVELS_INDEPENDENT_CHANNELS)</a>
+<a name="ln483">      {</a>
+<a name="ln484">        if(ch == DT_IOP_RGBLEVELS_R)</a>
+<a name="ln485">          cairo_set_source_rgba(cr, 1., 0., 0., 0.2);</a>
+<a name="ln486">        else if(ch == DT_IOP_RGBLEVELS_G)</a>
+<a name="ln487">          cairo_set_source_rgba(cr, 0., 1., 0., 0.2);</a>
+<a name="ln488">        else</a>
+<a name="ln489">          cairo_set_source_rgba(cr, 0., 0., 1., 0.2);</a>
+<a name="ln490">        dt_draw_histogram_8(cr, hist, 4, ch, dev-&gt;histogram_type == DT_DEV_HISTOGRAM_LINEAR);</a>
+<a name="ln491">      }</a>
+<a name="ln492"> </a>
+<a name="ln493">      cairo_restore(cr);</a>
+<a name="ln494">    }</a>
+<a name="ln495">  }</a>
+<a name="ln496"> </a>
+<a name="ln497">  // Cleaning up</a>
+<a name="ln498">  cairo_destroy(cr);</a>
+<a name="ln499">  cairo_set_source_surface(crf, cst, 0, 0);</a>
+<a name="ln500">  cairo_paint(crf);</a>
+<a name="ln501">  cairo_surface_destroy(cst);</a>
+<a name="ln502">  return TRUE;</a>
+<a name="ln503">}</a>
+<a name="ln504"> </a>
+<a name="ln505">static void _rgblevels_move_handle(dt_iop_module_t *self, const int handle_move, const float new_pos, float *levels,</a>
+<a name="ln506">                                      const float drag_start_percentage)</a>
+<a name="ln507">{</a>
+<a name="ln508">  dt_iop_rgblevels_gui_data_t *c = (dt_iop_rgblevels_gui_data_t *)self-&gt;gui_data;</a>
+<a name="ln509">  float min_x = 0.f;</a>
+<a name="ln510">  float max_x = 1.f;</a>
+<a name="ln511"> </a>
+<a name="ln512">  if((handle_move &lt; 0) || handle_move &gt; 2) return;</a>
+<a name="ln513"> </a>
+<a name="ln514">  if(levels == NULL) return;</a>
+<a name="ln515"> </a>
+<a name="ln516">  // Determining the minimum and maximum bounds for the drag handles</a>
+<a name="ln517">  switch(handle_move)</a>
+<a name="ln518">  {</a>
+<a name="ln519">    case 0:</a>
+<a name="ln520">      max_x = fminf(levels[2] - (0.05 / drag_start_percentage), 1);</a>
+<a name="ln521">      max_x = fminf((levels[2] * (1 - drag_start_percentage) - 0.05) / (1 - drag_start_percentage), max_x);</a>
+<a name="ln522">      break;</a>
+<a name="ln523"> </a>
+<a name="ln524">    case 1:</a>
+<a name="ln525">      min_x = levels[0] + 0.05;</a>
+<a name="ln526">      max_x = levels[2] - 0.05;</a>
+<a name="ln527">      break;</a>
+<a name="ln528"> </a>
+<a name="ln529">    case 2:</a>
+<a name="ln530">      min_x = fmaxf((0.05 / drag_start_percentage) + levels[0], 0);</a>
+<a name="ln531">      min_x = fmaxf((levels[0] * (1 - drag_start_percentage) + 0.05) / (1 - drag_start_percentage), min_x);</a>
+<a name="ln532">      break;</a>
+<a name="ln533">  }</a>
+<a name="ln534"> </a>
+<a name="ln535">  levels[handle_move] = fminf(max_x, fmaxf(min_x, new_pos));</a>
+<a name="ln536"> </a>
+<a name="ln537">  if(handle_move != 1) levels[1] = levels[0] + (drag_start_percentage * (levels[2] - levels[0]));</a>
+<a name="ln538"> </a>
+<a name="ln539">  c-&gt;last_picked_color = -1;</a>
+<a name="ln540">}</a>
+<a name="ln541"> </a>
+<a name="ln542">static gboolean _area_motion_notify_callback(GtkWidget *widget, GdkEventMotion *event, dt_iop_module_t *self)</a>
+<a name="ln543">{</a>
+<a name="ln544">  dt_iop_rgblevels_gui_data_t *c = (dt_iop_rgblevels_gui_data_t *)self-&gt;gui_data;</a>
+<a name="ln545">  dt_iop_rgblevels_params_t *p = (dt_iop_rgblevels_params_t *)self-&gt;params;</a>
+<a name="ln546">  const int inset = DT_GUI_CURVE_EDITOR_INSET;</a>
+<a name="ln547">  GtkAllocation allocation;</a>
+<a name="ln548">  gtk_widget_get_allocation(widget, &amp;allocation);</a>
+<a name="ln549">  int height = allocation.height - 2 * inset, width = allocation.width - 2 * inset;</a>
+<a name="ln550">  if(!c-&gt;dragging)</a>
+<a name="ln551">  {</a>
+<a name="ln552">    c-&gt;mouse_x = CLAMP(event-&gt;x - inset, 0, width);</a>
+<a name="ln553">    c-&gt;drag_start_percentage = (p-&gt;levels[c-&gt;channel][1] - p-&gt;levels[c-&gt;channel][0]) / (p-&gt;levels[c-&gt;channel][2] - p-&gt;levels[c-&gt;channel][0]);</a>
+<a name="ln554">  }</a>
+<a name="ln555">  c-&gt;mouse_y = CLAMP(event-&gt;y - inset, 0, height);</a>
+<a name="ln556"> </a>
+<a name="ln557">  if(c-&gt;dragging)</a>
+<a name="ln558">  {</a>
+<a name="ln559">    if(c-&gt;handle_move &gt;= 0 &amp;&amp; c-&gt;handle_move &lt; 3)</a>
+<a name="ln560">    {</a>
+<a name="ln561">      const float mx = (CLAMP(event-&gt;x - inset, 0, width)) / (float)width;</a>
+<a name="ln562"> </a>
+<a name="ln563">      _rgblevels_move_handle(self, c-&gt;handle_move, mx, p-&gt;levels[c-&gt;channel], c-&gt;drag_start_percentage);</a>
+<a name="ln564">    }</a>
+<a name="ln565">    dt_dev_add_history_item(darktable.develop, self, TRUE);</a>
+<a name="ln566">  }</a>
+<a name="ln567">  else</a>
+<a name="ln568">  {</a>
+<a name="ln569">    c-&gt;handle_move = 0;</a>
+<a name="ln570">    const float mx = CLAMP(event-&gt;x - inset, 0, width) / (float)width;</a>
+<a name="ln571">    float dist = fabsf(p-&gt;levels[c-&gt;channel][0] - mx);</a>
+<a name="ln572">    for(int k = 1; k &lt; 3; k++)</a>
+<a name="ln573">    {</a>
+<a name="ln574">      float d2 = fabsf(p-&gt;levels[c-&gt;channel][k] - mx);</a>
+<a name="ln575">      if(d2 &lt; dist)</a>
+<a name="ln576">      {</a>
+<a name="ln577">        c-&gt;handle_move = k;</a>
+<a name="ln578">        dist = d2;</a>
+<a name="ln579">      }</a>
+<a name="ln580">    }</a>
+<a name="ln581">  }</a>
+<a name="ln582">  gtk_widget_queue_draw(widget);</a>
+<a name="ln583"> </a>
+<a name="ln584">  return TRUE;</a>
+<a name="ln585">}</a>
+<a name="ln586"> </a>
+<a name="ln587">static gboolean _area_button_press_callback(GtkWidget *widget, GdkEventButton *event, dt_iop_module_t *self)</a>
+<a name="ln588">{</a>
+<a name="ln589">  // set active point</a>
+<a name="ln590">  if(event-&gt;button == 1)</a>
+<a name="ln591">  {</a>
+<a name="ln592">    if(darktable.develop-&gt;gui_module != self) dt_iop_request_focus(self);</a>
+<a name="ln593"> </a>
+<a name="ln594">    if(event-&gt;type == GDK_2BUTTON_PRESS)</a>
+<a name="ln595">    {</a>
+<a name="ln596">      _turn_selregion_picker_off(self);</a>
+<a name="ln597"> </a>
+<a name="ln598">      // Reset</a>
+<a name="ln599">      dt_iop_rgblevels_gui_data_t *c = (dt_iop_rgblevels_gui_data_t *)self-&gt;gui_data;</a>
+<a name="ln600">      dt_iop_rgblevels_params_t *p = (dt_iop_rgblevels_params_t *)self-&gt;params;</a>
+<a name="ln601">      dt_iop_rgblevels_params_t *default_params = (dt_iop_rgblevels_params_t *)self-&gt;default_params;</a>
+<a name="ln602"> </a>
+<a name="ln603">      for(int i = 0; i &lt; 3; i++)</a>
+<a name="ln604">        p-&gt;levels[c-&gt;channel][i] = default_params-&gt;levels[c-&gt;channel][i];</a>
+<a name="ln605"> </a>
+<a name="ln606">      // Needed in case the user scrolls or drags immediately after a reset,</a>
+<a name="ln607">      // as drag_start_percentage is only updated when the mouse is moved.</a>
+<a name="ln608">      c-&gt;drag_start_percentage = 0.5;</a>
+<a name="ln609">      dt_dev_add_history_item(darktable.develop, self, TRUE);</a>
+<a name="ln610">      gtk_widget_queue_draw(self-&gt;widget);</a>
+<a name="ln611">    }</a>
+<a name="ln612">    else</a>
+<a name="ln613">    {</a>
+<a name="ln614">      _turn_selregion_picker_off(self);</a>
+<a name="ln615"> </a>
+<a name="ln616">      dt_iop_rgblevels_gui_data_t *c = (dt_iop_rgblevels_gui_data_t *)self-&gt;gui_data;</a>
+<a name="ln617">      c-&gt;dragging = 1;</a>
+<a name="ln618">    }</a>
+<a name="ln619">    return TRUE;</a>
+<a name="ln620">  }</a>
+<a name="ln621">  return FALSE;</a>
+<a name="ln622">}</a>
+<a name="ln623"> </a>
+<a name="ln624">static gboolean _area_button_release_callback(GtkWidget *widget, GdkEventButton *event, dt_iop_module_t *self)</a>
+<a name="ln625">{</a>
+<a name="ln626">  if(event-&gt;button == 1)</a>
+<a name="ln627">  {</a>
+<a name="ln628">    dt_iop_rgblevels_gui_data_t *c = (dt_iop_rgblevels_gui_data_t *)self-&gt;gui_data;</a>
+<a name="ln629">    c-&gt;dragging = 0;</a>
+<a name="ln630">    return TRUE;</a>
+<a name="ln631">  }</a>
+<a name="ln632">  return FALSE;</a>
+<a name="ln633">}</a>
+<a name="ln634"> </a>
+<a name="ln635">static gboolean _area_scroll_callback(GtkWidget *widget, GdkEventScroll *event, dt_iop_module_t *self)</a>
+<a name="ln636">{</a>
+<a name="ln637">  dt_iop_rgblevels_gui_data_t *c = (dt_iop_rgblevels_gui_data_t *)self-&gt;gui_data;</a>
+<a name="ln638">  dt_iop_rgblevels_params_t *p = (dt_iop_rgblevels_params_t *)self-&gt;params;</a>
+<a name="ln639"> </a>
+<a name="ln640">  if(((event-&gt;state &amp; gtk_accelerator_get_default_mod_mask()) == darktable.gui-&gt;sidebar_scroll_mask) != dt_conf_get_bool(&quot;darkroom/ui/sidebar_scroll_default&quot;)) return FALSE;</a>
+<a name="ln641">  _turn_selregion_picker_off(self);</a>
+<a name="ln642"> </a>
+<a name="ln643">  if(c-&gt;dragging)</a>
+<a name="ln644">  {</a>
+<a name="ln645">    return FALSE;</a>
+<a name="ln646">  }</a>
+<a name="ln647"> </a>
+<a name="ln648">  if(darktable.develop-&gt;gui_module != self) dt_iop_request_focus(self);</a>
+<a name="ln649"> </a>
+<a name="ln650">  const float interval = 0.002; // Distance moved for each scroll event</a>
+<a name="ln651">  gdouble delta_y;</a>
+<a name="ln652">  if(dt_gui_get_scroll_deltas(event, NULL, &amp;delta_y))</a>
+<a name="ln653">  {</a>
+<a name="ln654">    const float new_position = p-&gt;levels[c-&gt;channel][c-&gt;handle_move] - interval * delta_y;</a>
+<a name="ln655">    _rgblevels_move_handle(self, c-&gt;handle_move, new_position, p-&gt;levels[c-&gt;channel], c-&gt;drag_start_percentage);</a>
+<a name="ln656">    dt_dev_add_history_item(darktable.develop, self, TRUE);</a>
+<a name="ln657">    return TRUE;</a>
+<a name="ln658">  }</a>
+<a name="ln659"> </a>
+<a name="ln660">  return FALSE;</a>
+<a name="ln661">}</a>
+<a name="ln662"> </a>
+<a name="ln663">static void _auto_levels_callback(GtkButton *button, dt_iop_module_t *self)</a>
+<a name="ln664">{</a>
+<a name="ln665">  if(darktable.gui-&gt;reset) return;</a>
+<a name="ln666"> </a>
+<a name="ln667">  dt_iop_rgblevels_gui_data_t *g = (dt_iop_rgblevels_gui_data_t *)self-&gt;gui_data;</a>
+<a name="ln668"> </a>
+<a name="ln669">  dt_iop_request_focus(self);</a>
+<a name="ln670">  if(self-&gt;off)</a>
+<a name="ln671">  {</a>
+<a name="ln672">    gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(self-&gt;off), 1);</a>
+<a name="ln673">    dt_dev_add_history_item(darktable.develop, self, TRUE);</a>
+<a name="ln674">  }</a>
+<a name="ln675"> </a>
+<a name="ln676">  _turn_selregion_picker_off(self);</a>
+<a name="ln677"> </a>
+<a name="ln678">  dt_pthread_mutex_lock(&amp;g-&gt;lock);</a>
+<a name="ln679">  if(g-&gt;call_auto_levels == 0)</a>
+<a name="ln680">  {</a>
+<a name="ln681">    g-&gt;box_cood[0] = g-&gt;box_cood[1] = g-&gt;box_cood[2] = g-&gt;box_cood[3] = 0.f;</a>
+<a name="ln682">    g-&gt;call_auto_levels = 1;</a>
+<a name="ln683">  }</a>
+<a name="ln684">  dt_pthread_mutex_unlock(&amp;g-&gt;lock);</a>
+<a name="ln685"> </a>
+<a name="ln686">  dt_dev_reprocess_all(self-&gt;dev);</a>
+<a name="ln687">}</a>
+<a name="ln688"> </a>
+<a name="ln689">static void _select_region_toggled_callback(GtkToggleButton *togglebutton, dt_iop_module_t *self)</a>
+<a name="ln690">{</a>
+<a name="ln691">  if(darktable.gui-&gt;reset) return;</a>
+<a name="ln692"> </a>
+<a name="ln693">  dt_iop_rgblevels_gui_data_t *g = (dt_iop_rgblevels_gui_data_t *)self-&gt;gui_data;</a>
+<a name="ln694"> </a>
+<a name="ln695">  dt_iop_request_focus(self);</a>
+<a name="ln696">  if(self-&gt;off)</a>
+<a name="ln697">  {</a>
+<a name="ln698">    gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(self-&gt;off), 1);</a>
+<a name="ln699">    dt_dev_add_history_item(darktable.develop, self, TRUE);</a>
+<a name="ln700">  }</a>
+<a name="ln701"> </a>
+<a name="ln702">  dt_iop_color_picker_reset(self, TRUE);</a>
+<a name="ln703"> </a>
+<a name="ln704">  dt_pthread_mutex_lock(&amp;g-&gt;lock);</a>
+<a name="ln705"> </a>
+<a name="ln706">  if(gtk_toggle_button_get_active(togglebutton))</a>
+<a name="ln707">  {</a>
+<a name="ln708">    g-&gt;draw_selected_region = 1;</a>
+<a name="ln709">  }</a>
+<a name="ln710">  else</a>
+<a name="ln711">    g-&gt;draw_selected_region = 0;</a>
+<a name="ln712"> </a>
+<a name="ln713">  g-&gt;posx_from = g-&gt;posx_to = g-&gt;posy_from = g-&gt;posy_to = 0;</a>
+<a name="ln714"> </a>
+<a name="ln715">  dt_pthread_mutex_unlock(&amp;g-&gt;lock);</a>
+<a name="ln716">}</a>
+<a name="ln717"> </a>
+<a name="ln718">static void _autoscale_callback(GtkWidget *widget, dt_iop_module_t *self)</a>
+<a name="ln719">{</a>
+<a name="ln720">  if(darktable.gui-&gt;reset) return;</a>
+<a name="ln721">  dt_iop_rgblevels_gui_data_t *g = (dt_iop_rgblevels_gui_data_t *)self-&gt;gui_data;</a>
+<a name="ln722">  dt_iop_rgblevels_params_t *p = (dt_iop_rgblevels_params_t *)self-&gt;params;</a>
+<a name="ln723"> </a>
+<a name="ln724">  _turn_selregion_picker_off(self);</a>
+<a name="ln725"> </a>
+<a name="ln726">  g-&gt;channel = DT_IOP_RGBLEVELS_R;</a>
+<a name="ln727">  gtk_notebook_set_current_page(GTK_NOTEBOOK(g-&gt;channel_tabs), DT_IOP_RGBLEVELS_R);</a>
+<a name="ln728">  p-&gt;autoscale = dt_bauhaus_combobox_get(widget);</a>
+<a name="ln729"> </a>
+<a name="ln730">  _rgblevels_show_hide_controls(p, g);</a>
+<a name="ln731"> </a>
+<a name="ln732">  dt_dev_add_history_item(darktable.develop, self, TRUE);</a>
+<a name="ln733">  gtk_widget_queue_draw(self-&gt;widget);</a>
+<a name="ln734">}</a>
+<a name="ln735"> </a>
+<a name="ln736">static void _preserve_colors_callback(GtkWidget *widget, dt_iop_module_t *self)</a>
+<a name="ln737">{</a>
+<a name="ln738">  if(darktable.gui-&gt;reset) return;</a>
+<a name="ln739">  dt_iop_rgblevels_params_t *p = (dt_iop_rgblevels_params_t *)self-&gt;params;</a>
+<a name="ln740"> </a>
+<a name="ln741">  _turn_selregion_picker_off(self);</a>
+<a name="ln742"> </a>
+<a name="ln743">  p-&gt;preserve_colors = dt_bauhaus_combobox_get(widget);</a>
+<a name="ln744"> </a>
+<a name="ln745">  dt_dev_add_history_item(darktable.develop, self, TRUE);</a>
+<a name="ln746">}</a>
+<a name="ln747"> </a>
+<a name="ln748">static void _tab_switch_callback(GtkNotebook *notebook, GtkWidget *page, guint page_num, dt_iop_module_t *self)</a>
+<a name="ln749">{</a>
+<a name="ln750">  if(darktable.gui-&gt;reset) return;</a>
+<a name="ln751">  dt_iop_rgblevels_gui_data_t *g = (dt_iop_rgblevels_gui_data_t *)self-&gt;gui_data;</a>
+<a name="ln752"> </a>
+<a name="ln753">  g-&gt;channel = (dt_iop_rgblevels_channel_t)page_num;</a>
+<a name="ln754"> </a>
+<a name="ln755">  gtk_widget_queue_draw(self-&gt;widget);</a>
+<a name="ln756">}</a>
+<a name="ln757"> </a>
+<a name="ln758">static void _color_picker_callback(GtkWidget *button, dt_iop_color_picker_t *self)</a>
+<a name="ln759">{</a>
+<a name="ln760">  _turn_select_region_off(self-&gt;module);</a>
+<a name="ln761">  dt_iop_color_picker_callback(button, self);</a>
+<a name="ln762">}</a>
+<a name="ln763"> </a>
+<a name="ln764">static int _iop_color_picker_get_set(dt_iop_module_t *self, GtkWidget *button)</a>
+<a name="ln765">{</a>
+<a name="ln766">  dt_iop_rgblevels_gui_data_t *g = (dt_iop_rgblevels_gui_data_t *)self-&gt;gui_data;</a>
+<a name="ln767"> </a>
+<a name="ln768">  const dt_iop_rgblevels_pick_t current_picker = g-&gt;color_picker.current_picker;</a>
+<a name="ln769"> </a>
+<a name="ln770">  g-&gt;color_picker.current_picker = DT_IOP_RGBLEVELS_PICK_NONE;</a>
+<a name="ln771"> </a>
+<a name="ln772">  if(button == GTK_WIDGET(g-&gt;blackpick))</a>
+<a name="ln773">    g-&gt;color_picker.current_picker = DT_IOP_RGBLEVELS_PICK_BLACK;</a>
+<a name="ln774">  else if(button == GTK_WIDGET(g-&gt;greypick))</a>
+<a name="ln775">    g-&gt;color_picker.current_picker = DT_IOP_RGBLEVELS_PICK_GREY;</a>
+<a name="ln776">  else if(button == GTK_WIDGET(g-&gt;whitepick))</a>
+<a name="ln777">    g-&gt;color_picker.current_picker = DT_IOP_RGBLEVELS_PICK_WHITE;</a>
+<a name="ln778"> </a>
+<a name="ln779">  if (current_picker == g-&gt;color_picker.current_picker)</a>
+<a name="ln780">    return DT_COLOR_PICKER_ALREADY_SELECTED;</a>
+<a name="ln781">  else</a>
+<a name="ln782">    return g-&gt;color_picker.current_picker;</a>
+<a name="ln783">}</a>
+<a name="ln784"> </a>
+<a name="ln785">static void _iop_color_picker_apply(struct dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece)</a>
+<a name="ln786">{</a>
+<a name="ln787">  dt_iop_rgblevels_gui_data_t *c = (dt_iop_rgblevels_gui_data_t *)self-&gt;gui_data;</a>
+<a name="ln788">  dt_iop_rgblevels_params_t *p = (dt_iop_rgblevels_params_t *)self-&gt;params;</a>
+<a name="ln789"> </a>
+<a name="ln790">  const dt_iop_rgblevels_channel_t channel = c-&gt;channel;</a>
+<a name="ln791"> </a>
+<a name="ln792">  /* we need to save the last picked color to prevent flickering when</a>
+<a name="ln793">   * changing from one picker to another, as the picked_color value does not</a>
+<a name="ln794">   * update as rapidly */</a>
+<a name="ln795">  const float mean_picked_color = *self-&gt;picked_color;</a>
+<a name="ln796"> </a>
+<a name="ln797">  if(self-&gt;color_picker_point[0] &gt;= 0.0f</a>
+<a name="ln798">     &amp;&amp; self-&gt;color_picker_point[1] &gt;= 0.0f</a>
+<a name="ln799">     &amp;&amp; self-&gt;picked_color_max[0] &gt;= 0.0f</a>
+<a name="ln800">     &amp;&amp; mean_picked_color != c-&gt;last_picked_color)</a>
+<a name="ln801">  {</a>
+<a name="ln802">    float previous_color[3];</a>
+<a name="ln803">    previous_color[0] = p-&gt;levels[channel][0];</a>
+<a name="ln804">    previous_color[1] = p-&gt;levels[channel][1];</a>
+<a name="ln805">    previous_color[2] = p-&gt;levels[channel][2];</a>
+<a name="ln806"> </a>
+<a name="ln807">    c-&gt;last_picked_color = mean_picked_color;</a>
+<a name="ln808"> </a>
+<a name="ln809">    if(DT_IOP_RGBLEVELS_PICK_BLACK == c-&gt;color_picker.current_picker)</a>
+<a name="ln810">    {</a>
+<a name="ln811">      if(mean_picked_color &gt; p-&gt;levels[channel][1])</a>
+<a name="ln812">      {</a>
+<a name="ln813">        p-&gt;levels[channel][0] = p-&gt;levels[channel][1] - FLT_EPSILON;</a>
+<a name="ln814">      }</a>
+<a name="ln815">      else</a>
+<a name="ln816">      {</a>
+<a name="ln817">        p-&gt;levels[channel][0] = mean_picked_color;</a>
+<a name="ln818">      }</a>
+<a name="ln819">    }</a>
+<a name="ln820">    else if(DT_IOP_RGBLEVELS_PICK_GREY == c-&gt;color_picker.current_picker)</a>
+<a name="ln821">    {</a>
+<a name="ln822">      if(mean_picked_color &lt; p-&gt;levels[channel][0] || mean_picked_color &gt; p-&gt;levels[channel][2])</a>
+<a name="ln823">      {</a>
+<a name="ln824">        p-&gt;levels[channel][1] = p-&gt;levels[channel][1];</a>
+<a name="ln825">      }</a>
+<a name="ln826">      else</a>
+<a name="ln827">      {</a>
+<a name="ln828">        p-&gt;levels[channel][1] = mean_picked_color;</a>
+<a name="ln829">      }</a>
+<a name="ln830">    }</a>
+<a name="ln831">    else if(DT_IOP_RGBLEVELS_PICK_WHITE == c-&gt;color_picker.current_picker)</a>
+<a name="ln832">    {</a>
+<a name="ln833">      if(mean_picked_color &lt; p-&gt;levels[channel][1])</a>
+<a name="ln834">      {</a>
+<a name="ln835">        p-&gt;levels[channel][2] = p-&gt;levels[channel][1] + FLT_EPSILON;</a>
+<a name="ln836">      }</a>
+<a name="ln837">      else</a>
+<a name="ln838">      {</a>
+<a name="ln839">        p-&gt;levels[channel][2] = mean_picked_color;</a>
+<a name="ln840">      }</a>
+<a name="ln841">    }</a>
+<a name="ln842"> </a>
+<a name="ln843">    if(previous_color[0] != p-&gt;levels[channel][0]</a>
+<a name="ln844">       || previous_color[1] != p-&gt;levels[channel][1]</a>
+<a name="ln845">       || previous_color[2] != p-&gt;levels[channel][2])</a>
+<a name="ln846">    {</a>
+<a name="ln847">      dt_dev_add_history_item(darktable.develop, self, TRUE);</a>
+<a name="ln848">    }</a>
+<a name="ln849">  }</a>
+<a name="ln850"> </a>
+<a name="ln851">}</a>
+<a name="ln852"> </a>
+<a name="ln853">static void _iop_color_picker_update(dt_iop_module_t *self)</a>
+<a name="ln854">{</a>
+<a name="ln855">  dt_iop_rgblevels_gui_data_t *g = (dt_iop_rgblevels_gui_data_t *)self-&gt;gui_data;</a>
+<a name="ln856">  const dt_iop_rgblevels_pick_t which_colorpicker = g-&gt;color_picker.current_picker;</a>
+<a name="ln857">  const int reset = darktable.gui-&gt;reset;</a>
+<a name="ln858">  darktable.gui-&gt;reset = 1;</a>
+<a name="ln859">  gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(g-&gt;blackpick), which_colorpicker == DT_IOP_RGBLEVELS_PICK_BLACK);</a>
+<a name="ln860">  gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(g-&gt;greypick), which_colorpicker == DT_IOP_RGBLEVELS_PICK_GREY);</a>
+<a name="ln861">  gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(g-&gt;whitepick), which_colorpicker == DT_IOP_RGBLEVELS_PICK_WHITE);</a>
+<a name="ln862">  darktable.gui-&gt;reset = reset;</a>
+<a name="ln863">}</a>
+<a name="ln864"> </a>
+<a name="ln865">void commit_params(dt_iop_module_t *self, dt_iop_params_t *p1, dt_dev_pixelpipe_t *pipe,</a>
+<a name="ln866">                   dt_dev_pixelpipe_iop_t *piece)</a>
+<a name="ln867">{</a>
+<a name="ln868">  dt_iop_rgblevels_data_t *d = (dt_iop_rgblevels_data_t *)piece-&gt;data;</a>
+<a name="ln869">  dt_iop_rgblevels_params_t *p = (dt_iop_rgblevels_params_t *)p1;</a>
+<a name="ln870"> </a>
+<a name="ln871">  if(pipe-&gt;type == DT_DEV_PIXELPIPE_PREVIEW)</a>
+<a name="ln872">    piece-&gt;request_histogram |= (DT_REQUEST_ON);</a>
+<a name="ln873">  else</a>
+<a name="ln874">    piece-&gt;request_histogram &amp;= ~(DT_REQUEST_ON);</a>
+<a name="ln875"> </a>
+<a name="ln876">  memcpy(&amp;(d-&gt;params), p, sizeof(dt_iop_rgblevels_params_t));</a>
+<a name="ln877"> </a>
+<a name="ln878">  for(int i = 0; i &lt; DT_IOP_RGBLEVELS_MAX_CHANNELS; i++)</a>
+<a name="ln879">  {</a>
+<a name="ln880">    for(int c = 0; c &lt; 3; c++)</a>
+<a name="ln881">    {</a>
+<a name="ln882">      if(d-&gt;params.autoscale == DT_IOP_RGBLEVELS_LINKED_CHANNELS)</a>
+<a name="ln883">        d-&gt;params.levels[i][c] = p-&gt;levels[0][c];</a>
+<a name="ln884">      else</a>
+<a name="ln885">        d-&gt;params.levels[i][c] = p-&gt;levels[i][c];</a>
+<a name="ln886">    }</a>
+<a name="ln887">  }</a>
+<a name="ln888"> </a>
+<a name="ln889">  _compute_lut(piece);</a>
+<a name="ln890">}</a>
+<a name="ln891"> </a>
+<a name="ln892">void init_pipe(dt_iop_module_t *self, dt_dev_pixelpipe_t *pipe, dt_dev_pixelpipe_iop_t *piece)</a>
+<a name="ln893">{</a>
+<a name="ln894">  piece-&gt;data = malloc(sizeof(dt_iop_rgblevels_data_t));</a>
+<a name="ln895">}</a>
+<a name="ln896"> </a>
+<a name="ln897">void cleanup_pipe(dt_iop_module_t *self, dt_dev_pixelpipe_t *pipe, dt_dev_pixelpipe_iop_t *piece)</a>
+<a name="ln898">{</a>
+<a name="ln899">  // clean up everything again.</a>
+<a name="ln900">  free(piece-&gt;data);</a>
+<a name="ln901">  piece-&gt;data = NULL;</a>
+<a name="ln902">}</a>
+<a name="ln903"> </a>
+<a name="ln904">void gui_update(dt_iop_module_t *self)</a>
+<a name="ln905">{</a>
+<a name="ln906">  dt_iop_rgblevels_params_t *p = (dt_iop_rgblevels_params_t *)self-&gt;params;</a>
+<a name="ln907">  dt_iop_rgblevels_gui_data_t *g = (dt_iop_rgblevels_gui_data_t *)self-&gt;gui_data;</a>
+<a name="ln908"> </a>
+<a name="ln909">  dt_bauhaus_combobox_set(g-&gt;cmb_autoscale, p-&gt;autoscale);</a>
+<a name="ln910">  dt_bauhaus_combobox_set(g-&gt;cmb_preserve_colors, p-&gt;preserve_colors);</a>
+<a name="ln911">  gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(g-&gt;bt_select_region), g-&gt;draw_selected_region);</a>
+<a name="ln912">  _rgblevels_show_hide_controls(p, g);</a>
+<a name="ln913"> </a>
+<a name="ln914">  gtk_widget_queue_draw(self-&gt;widget);</a>
+<a name="ln915">}</a>
+<a name="ln916"> </a>
+<a name="ln917">void gui_focus(struct dt_iop_module_t *self, gboolean in)</a>
+<a name="ln918">{</a>
+<a name="ln919">  if(!in) _turn_selregion_picker_off(self);</a>
+<a name="ln920">}</a>
+<a name="ln921"> </a>
+<a name="ln922">void gui_reset(struct dt_iop_module_t *self)</a>
+<a name="ln923">{</a>
+<a name="ln924">  dt_iop_rgblevels_gui_data_t *g = (dt_iop_rgblevels_gui_data_t *)self-&gt;gui_data;</a>
+<a name="ln925"> </a>
+<a name="ln926">  _turn_selregion_picker_off(self);</a>
+<a name="ln927"> </a>
+<a name="ln928">  g-&gt;channel = DT_IOP_RGBLEVELS_R;</a>
+<a name="ln929"> </a>
+<a name="ln930">  gtk_widget_queue_draw(self-&gt;widget);</a>
+<a name="ln931">}</a>
+<a name="ln932"> </a>
+<a name="ln933">void reload_defaults(dt_iop_module_t *self)</a>
+<a name="ln934">{</a>
+<a name="ln935">  dt_iop_rgblevels_params_t tmp = {0};</a>
+<a name="ln936">  tmp.autoscale = DT_IOP_RGBLEVELS_LINKED_CHANNELS;</a>
+<a name="ln937">  tmp.preserve_colors = DT_RGB_NORM_LUMINANCE;</a>
+<a name="ln938">  for(int c = 0; c &lt; DT_IOP_RGBLEVELS_MAX_CHANNELS; c++)</a>
+<a name="ln939">  {</a>
+<a name="ln940">    tmp.levels[c][0] = RGBLEVELS_MIN;</a>
+<a name="ln941">    tmp.levels[c][1] = RGBLEVELS_MID;</a>
+<a name="ln942">    tmp.levels[c][2] = RGBLEVELS_MAX;</a>
+<a name="ln943">  }</a>
+<a name="ln944"> </a>
+<a name="ln945">  memcpy(self-&gt;params, &amp;tmp, sizeof(dt_iop_rgblevels_params_t));</a>
+<a name="ln946">  memcpy(self-&gt;default_params, &amp;tmp, sizeof(dt_iop_rgblevels_params_t));</a>
+<a name="ln947">}</a>
+<a name="ln948"> </a>
+<a name="ln949">void init(dt_iop_module_t *self)</a>
+<a name="ln950">{</a>
+<a name="ln951">  self-&gt;params = calloc(1, sizeof(dt_iop_rgblevels_params_t));</a>
+<a name="ln952">  self-&gt;default_params = calloc(1, sizeof(dt_iop_rgblevels_params_t));</a>
+<a name="ln953">  self-&gt;default_enabled = 0;</a>
+<a name="ln954">  self-&gt;request_histogram |= (DT_REQUEST_ON);</a>
+<a name="ln955">  self-&gt;params_size = sizeof(dt_iop_rgblevels_params_t);</a>
+<a name="ln956">  self-&gt;gui_data = NULL;</a>
+<a name="ln957">}</a>
+<a name="ln958"> </a>
+<a name="ln959">void init_global(dt_iop_module_so_t *self)</a>
+<a name="ln960">{</a>
+<a name="ln961">  const int program = 29; // rgblevels.cl, from programs.conf</a>
+<a name="ln962">  dt_iop_rgblevels_global_data_t *gd</a>
+<a name="ln963">      = (dt_iop_rgblevels_global_data_t *)malloc(sizeof(dt_iop_rgblevels_global_data_t));</a>
+<a name="ln964">  self-&gt;data = gd;</a>
+<a name="ln965">  gd-&gt;kernel_levels = dt_opencl_create_kernel(program, &quot;rgblevels&quot;);</a>
+<a name="ln966">}</a>
+<a name="ln967"> </a>
+<a name="ln968">void cleanup_global(dt_iop_module_so_t *self)</a>
+<a name="ln969">{</a>
+<a name="ln970">  dt_iop_rgblevels_global_data_t *gd = (dt_iop_rgblevels_global_data_t *)self-&gt;data;</a>
+<a name="ln971">  dt_opencl_free_kernel(gd-&gt;kernel_levels);</a>
+<a name="ln972">  free(self-&gt;data);</a>
+<a name="ln973">  self-&gt;data = NULL;</a>
+<a name="ln974">}</a>
+<a name="ln975"> </a>
+<a name="ln976">void cleanup(dt_iop_module_t *self)</a>
+<a name="ln977">{</a>
+<a name="ln978">  free(self-&gt;params);</a>
+<a name="ln979">  self-&gt;params = NULL;</a>
+<a name="ln980">}</a>
+<a name="ln981"> </a>
+<a name="ln982">void change_image(struct dt_iop_module_t *self)</a>
+<a name="ln983">{</a>
+<a name="ln984">  dt_iop_rgblevels_gui_data_t *g = (dt_iop_rgblevels_gui_data_t *)self-&gt;gui_data;</a>
+<a name="ln985"> </a>
+<a name="ln986">  g-&gt;channel = DT_IOP_RGBLEVELS_R;</a>
+<a name="ln987">  g-&gt;call_auto_levels = 0;</a>
+<a name="ln988">  g-&gt;draw_selected_region = 0;</a>
+<a name="ln989">  g-&gt;posx_from = g-&gt;posx_to = g-&gt;posy_from = g-&gt;posy_to = 0.f;</a>
+<a name="ln990">  g-&gt;box_cood[0] = g-&gt;box_cood[1] = g-&gt;box_cood[2] = g-&gt;box_cood[3] = 0.f;</a>
+<a name="ln991">  g-&gt;button_down = 0;</a>
+<a name="ln992">}</a>
+<a name="ln993"> </a>
+<a name="ln994">void gui_init(dt_iop_module_t *self)</a>
+<a name="ln995">{</a>
+<a name="ln996">  self-&gt;gui_data = malloc(sizeof(dt_iop_rgblevels_gui_data_t));</a>
+<a name="ln997">  dt_iop_rgblevels_gui_data_t *c = (dt_iop_rgblevels_gui_data_t *)self-&gt;gui_data;</a>
+<a name="ln998"> </a>
+<a name="ln999">  dt_pthread_mutex_init(&amp;c-&gt;lock, NULL);</a>
+<a name="ln1000">  change_image(self);</a>
+<a name="ln1001"> </a>
+<a name="ln1002">  c-&gt;mouse_x = c-&gt;mouse_y = -1.0;</a>
+<a name="ln1003">  c-&gt;dragging = 0;</a>
+<a name="ln1004">  c-&gt;last_picked_color = -1;</a>
+<a name="ln1005"> </a>
+<a name="ln1006">  self-&gt;widget = GTK_WIDGET(gtk_box_new(GTK_ORIENTATION_VERTICAL, 5));</a>
+<a name="ln1007">  dt_gui_add_help_link(self-&gt;widget, dt_get_help_url(self-&gt;op));</a>
+<a name="ln1008"> </a>
+<a name="ln1009">  c-&gt;cmb_autoscale = dt_bauhaus_combobox_new(self);</a>
+<a name="ln1010">  dt_bauhaus_widget_set_label(c-&gt;cmb_autoscale, NULL, _(&quot;mode&quot;));</a>
+<a name="ln1011">  dt_bauhaus_combobox_add(c-&gt;cmb_autoscale, _(&quot;RGB, linked channels&quot;));</a>
+<a name="ln1012">  dt_bauhaus_combobox_add(c-&gt;cmb_autoscale, _(&quot;RGB, independent channels&quot;));</a>
+<a name="ln1013">  gtk_box_pack_start(GTK_BOX(self-&gt;widget), c-&gt;cmb_autoscale, TRUE, TRUE, 0);</a>
+<a name="ln1014">  gtk_widget_set_tooltip_text(c-&gt;cmb_autoscale, _(&quot;choose between linked and independent channels.&quot;));</a>
+<a name="ln1015">  g_signal_connect(G_OBJECT(c-&gt;cmb_autoscale), &quot;value-changed&quot;, G_CALLBACK(_autoscale_callback), self);</a>
+<a name="ln1016"> </a>
+<a name="ln1017">  // tabs</a>
+<a name="ln1018">  c-&gt;channel_tabs = GTK_NOTEBOOK(gtk_notebook_new());</a>
+<a name="ln1019"> </a>
+<a name="ln1020">  gtk_notebook_append_page(GTK_NOTEBOOK(c-&gt;channel_tabs), GTK_WIDGET(gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0)),</a>
+<a name="ln1021">                           gtk_label_new(_(&quot;  R  &quot;)));</a>
+<a name="ln1022">  gtk_widget_set_tooltip_text(</a>
+<a name="ln1023">      gtk_notebook_get_tab_label(c-&gt;channel_tabs, gtk_notebook_get_nth_page(c-&gt;channel_tabs, -1)),</a>
+<a name="ln1024">      _(&quot;curve nodes for r channel&quot;));</a>
+<a name="ln1025">  gtk_notebook_append_page(GTK_NOTEBOOK(c-&gt;channel_tabs), GTK_WIDGET(gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0)),</a>
+<a name="ln1026">                           gtk_label_new(_(&quot;  G  &quot;)));</a>
+<a name="ln1027">  gtk_widget_set_tooltip_text(</a>
+<a name="ln1028">      gtk_notebook_get_tab_label(c-&gt;channel_tabs, gtk_notebook_get_nth_page(c-&gt;channel_tabs, -1)),</a>
+<a name="ln1029">      _(&quot;curve nodes for g channel&quot;));</a>
+<a name="ln1030">  gtk_notebook_append_page(GTK_NOTEBOOK(c-&gt;channel_tabs), GTK_WIDGET(gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0)),</a>
+<a name="ln1031">                           gtk_label_new(_(&quot;  B  &quot;)));</a>
+<a name="ln1032">  gtk_widget_set_tooltip_text(</a>
+<a name="ln1033">      gtk_notebook_get_tab_label(c-&gt;channel_tabs, gtk_notebook_get_nth_page(c-&gt;channel_tabs, -1)),</a>
+<a name="ln1034">      _(&quot;curve nodes for b channel&quot;));</a>
+<a name="ln1035"> </a>
+<a name="ln1036">  gtk_widget_show_all(GTK_WIDGET(gtk_notebook_get_nth_page(c-&gt;channel_tabs, c-&gt;channel)));</a>
+<a name="ln1037">  gtk_notebook_set_current_page(GTK_NOTEBOOK(c-&gt;channel_tabs), c-&gt;channel);</a>
+<a name="ln1038"> </a>
+<a name="ln1039">  GtkWidget *notebook = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);</a>
+<a name="ln1040">  gtk_box_pack_start(GTK_BOX(notebook), GTK_WIDGET(c-&gt;channel_tabs), FALSE, FALSE, 0);</a>
+<a name="ln1041"> </a>
+<a name="ln1042">  GtkWidget *vbox = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);</a>
+<a name="ln1043">  gtk_box_pack_start(GTK_BOX(self-&gt;widget), vbox, FALSE, FALSE, 0);</a>
+<a name="ln1044">  gtk_box_pack_start(GTK_BOX(vbox), GTK_WIDGET(notebook), TRUE, TRUE, 0);</a>
+<a name="ln1045"> </a>
+<a name="ln1046">  g_signal_connect(G_OBJECT(c-&gt;channel_tabs), &quot;switch_page&quot;, G_CALLBACK(_tab_switch_callback), self);</a>
+<a name="ln1047"> </a>
+<a name="ln1048">  c-&gt;area = GTK_DRAWING_AREA(dtgtk_drawing_area_new_with_aspect_ratio(9.0 / 16.0));</a>
+<a name="ln1049">  GtkWidget *vbox_manual = GTK_WIDGET(gtk_box_new(GTK_ORIENTATION_VERTICAL, 0));</a>
+<a name="ln1050">  gtk_box_pack_start(GTK_BOX(vbox_manual), GTK_WIDGET(c-&gt;area), TRUE, TRUE, 0);</a>
+<a name="ln1051"> </a>
+<a name="ln1052">  gtk_widget_set_tooltip_text(GTK_WIDGET(c-&gt;area),_(&quot;drag handles to set black, gray, and white points. &quot;</a>
+<a name="ln1053">                                                    &quot;operates on L channel.&quot;));</a>
+<a name="ln1054"> </a>
+<a name="ln1055">  gtk_widget_add_events(GTK_WIDGET(c-&gt;area), GDK_POINTER_MOTION_MASK | GDK_POINTER_MOTION_HINT_MASK</a>
+<a name="ln1056">                                             | GDK_BUTTON_PRESS_MASK | GDK_BUTTON_RELEASE_MASK</a>
+<a name="ln1057">                                             | GDK_LEAVE_NOTIFY_MASK | darktable.gui-&gt;scroll_mask);</a>
+<a name="ln1058">  g_signal_connect(G_OBJECT(c-&gt;area), &quot;draw&quot;, G_CALLBACK(_area_draw_callback), self);</a>
+<a name="ln1059">  g_signal_connect(G_OBJECT(c-&gt;area), &quot;button-press-event&quot;, G_CALLBACK(_area_button_press_callback), self);</a>
+<a name="ln1060">  g_signal_connect(G_OBJECT(c-&gt;area), &quot;button-release-event&quot;, G_CALLBACK(_area_button_release_callback), self);</a>
+<a name="ln1061">  g_signal_connect(G_OBJECT(c-&gt;area), &quot;motion-notify-event&quot;, G_CALLBACK(_area_motion_notify_callback), self);</a>
+<a name="ln1062">  g_signal_connect(G_OBJECT(c-&gt;area), &quot;leave-notify-event&quot;, G_CALLBACK(_area_leave_notify_callback), self);</a>
+<a name="ln1063">  g_signal_connect(G_OBJECT(c-&gt;area), &quot;scroll-event&quot;, G_CALLBACK(_area_scroll_callback), self);</a>
+<a name="ln1064"> </a>
+<a name="ln1065">  c-&gt;blackpick = dtgtk_togglebutton_new(dtgtk_cairo_paint_colorpicker, CPF_STYLE_FLAT, NULL);</a>
+<a name="ln1066">  gtk_widget_set_tooltip_text(c-&gt;blackpick, _(&quot;pick black point from image&quot;));</a>
+<a name="ln1067"> </a>
+<a name="ln1068">  c-&gt;greypick = dtgtk_togglebutton_new(dtgtk_cairo_paint_colorpicker, CPF_STYLE_FLAT, NULL);</a>
+<a name="ln1069">  gtk_widget_set_tooltip_text(c-&gt;greypick, _(&quot;pick medium gray point from image&quot;));</a>
+<a name="ln1070"> </a>
+<a name="ln1071">  c-&gt;whitepick = dtgtk_togglebutton_new(dtgtk_cairo_paint_colorpicker, CPF_STYLE_FLAT, NULL);</a>
+<a name="ln1072">  gtk_widget_set_tooltip_text(c-&gt;whitepick, _(&quot;pick white point from image&quot;));</a>
+<a name="ln1073"> </a>
+<a name="ln1074">  GdkRGBA color = { 0 };</a>
+<a name="ln1075">  color.alpha = 1.0;</a>
+<a name="ln1076">  dtgtk_togglebutton_override_color(DTGTK_TOGGLEBUTTON(c-&gt;blackpick), &amp;color);</a>
+<a name="ln1077">  color.red = color.green = color.blue = 0.5;</a>
+<a name="ln1078">  dtgtk_togglebutton_override_color(DTGTK_TOGGLEBUTTON(c-&gt;greypick), &amp;color);</a>
+<a name="ln1079">  color.red = color.green = color.blue = 1.0;</a>
+<a name="ln1080">  dtgtk_togglebutton_override_color(DTGTK_TOGGLEBUTTON(c-&gt;whitepick), &amp;color);</a>
+<a name="ln1081"> </a>
+<a name="ln1082">  GtkWidget *pick_hbox = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);</a>
+<a name="ln1083">  gtk_box_pack_start(GTK_BOX(pick_hbox), GTK_WIDGET(c-&gt;blackpick), TRUE, TRUE, 0);</a>
+<a name="ln1084">  gtk_box_pack_start(GTK_BOX(pick_hbox), GTK_WIDGET(c-&gt;greypick), TRUE, TRUE, 0);</a>
+<a name="ln1085">  gtk_box_pack_end(GTK_BOX(pick_hbox), GTK_WIDGET(c-&gt;whitepick), TRUE, TRUE, 0);</a>
+<a name="ln1086"> </a>
+<a name="ln1087">  gtk_box_pack_start(GTK_BOX(vbox_manual), pick_hbox, TRUE, TRUE, 0);</a>
+<a name="ln1088"> </a>
+<a name="ln1089">  c-&gt;bt_auto_levels = gtk_button_new_with_label(_(&quot;auto&quot;));</a>
+<a name="ln1090">  gtk_widget_set_tooltip_text(c-&gt;bt_auto_levels, _(&quot;apply auto levels&quot;));</a>
+<a name="ln1091"> </a>
+<a name="ln1092">  c-&gt;bt_select_region = dtgtk_togglebutton_new(dtgtk_cairo_paint_colorpicker, CPF_STYLE_FLAT, NULL);</a>
+<a name="ln1093">  g_object_set(G_OBJECT(c-&gt;bt_select_region), &quot;tooltip-text&quot;,</a>
+<a name="ln1094">               _(&quot;apply auto levels based on a region defined by the user\n&quot;</a>
+<a name="ln1095">                 &quot;click and drag to draw the area\n&quot;</a>
+<a name="ln1096">                 &quot;right click to cancel&quot;),</a>
+<a name="ln1097">               (char *)NULL);</a>
+<a name="ln1098"> </a>
+<a name="ln1099">  GtkWidget *autolevels_box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, DT_PIXEL_APPLY_DPI(10));</a>
+<a name="ln1100">  gtk_box_pack_start(GTK_BOX(autolevels_box), c-&gt;bt_auto_levels, TRUE, TRUE, 0);</a>
+<a name="ln1101">  gtk_box_pack_start(GTK_BOX(autolevels_box), c-&gt;bt_select_region, TRUE, TRUE, 0);</a>
+<a name="ln1102"> </a>
+<a name="ln1103">  gtk_box_pack_start(GTK_BOX(vbox_manual), autolevels_box, TRUE, TRUE, 0);</a>
+<a name="ln1104"> </a>
+<a name="ln1105">  gtk_box_pack_start(GTK_BOX(self-&gt;widget), vbox_manual, TRUE, TRUE, 0);</a>
+<a name="ln1106"> </a>
+<a name="ln1107">  gtk_widget_show_all(vbox_manual);</a>
+<a name="ln1108"> </a>
+<a name="ln1109">  g_signal_connect(G_OBJECT(c-&gt;bt_auto_levels), &quot;clicked&quot;, G_CALLBACK(_auto_levels_callback), self);</a>
+<a name="ln1110">  g_signal_connect(G_OBJECT(c-&gt;bt_select_region), &quot;toggled&quot;, G_CALLBACK(_select_region_toggled_callback), self);</a>
+<a name="ln1111">  g_signal_connect(G_OBJECT(c-&gt;blackpick), &quot;toggled&quot;, G_CALLBACK(_color_picker_callback), &amp;c-&gt;color_picker);</a>
+<a name="ln1112">  g_signal_connect(G_OBJECT(c-&gt;greypick), &quot;toggled&quot;, G_CALLBACK(_color_picker_callback), &amp;c-&gt;color_picker);</a>
+<a name="ln1113">  g_signal_connect(G_OBJECT(c-&gt;whitepick), &quot;toggled&quot;, G_CALLBACK(_color_picker_callback), &amp;c-&gt;color_picker);</a>
+<a name="ln1114"> </a>
+<a name="ln1115">  c-&gt;cmb_preserve_colors = dt_bauhaus_combobox_new(self);</a>
+<a name="ln1116">  dt_bauhaus_widget_set_label(c-&gt;cmb_preserve_colors, NULL, _(&quot;preserve colors&quot;));</a>
+<a name="ln1117">  dt_bauhaus_combobox_add(c-&gt;cmb_preserve_colors, _(&quot;none&quot;));</a>
+<a name="ln1118">  dt_bauhaus_combobox_add(c-&gt;cmb_preserve_colors, _(&quot;luminance&quot;));</a>
+<a name="ln1119">  dt_bauhaus_combobox_add(c-&gt;cmb_preserve_colors, _(&quot;max rgb&quot;));</a>
+<a name="ln1120">  dt_bauhaus_combobox_add(c-&gt;cmb_preserve_colors, _(&quot;average rgb&quot;));</a>
+<a name="ln1121">  dt_bauhaus_combobox_add(c-&gt;cmb_preserve_colors, _(&quot;sum rgb&quot;));</a>
+<a name="ln1122">  dt_bauhaus_combobox_add(c-&gt;cmb_preserve_colors, _(&quot;norm rgb&quot;));</a>
+<a name="ln1123">  dt_bauhaus_combobox_add(c-&gt;cmb_preserve_colors, _(&quot;basic power&quot;));</a>
+<a name="ln1124">  gtk_box_pack_start(GTK_BOX(self-&gt;widget), c-&gt;cmb_preserve_colors, TRUE, TRUE, 0);</a>
+<a name="ln1125">  gtk_widget_set_tooltip_text(c-&gt;cmb_preserve_colors, _(&quot;method to preserve colors when applying contrast&quot;));</a>
+<a name="ln1126">  g_signal_connect(G_OBJECT(c-&gt;cmb_preserve_colors), &quot;value-changed&quot;, G_CALLBACK(_preserve_colors_callback), self);</a>
+<a name="ln1127"> </a>
+<a name="ln1128">  dt_iop_init_picker(&amp;c-&gt;color_picker,</a>
+<a name="ln1129">              self,</a>
+<a name="ln1130">              DT_COLOR_PICKER_POINT,</a>
+<a name="ln1131">              _iop_color_picker_get_set,</a>
+<a name="ln1132">              _iop_color_picker_apply,</a>
+<a name="ln1133">              _iop_color_picker_update);</a>
+<a name="ln1134"> </a>
+<a name="ln1135">  // add signal handler for preview pipe finish</a>
+<a name="ln1136">  dt_control_signal_connect(darktable.signals, DT_SIGNAL_DEVELOP_PREVIEW_PIPE_FINISHED,</a>
+<a name="ln1137">                            G_CALLBACK(_develop_ui_pipe_finished_callback), self);</a>
+<a name="ln1138">}</a>
+<a name="ln1139"> </a>
+<a name="ln1140">void gui_cleanup(dt_iop_module_t *self)</a>
+<a name="ln1141">{</a>
+<a name="ln1142">  dt_control_signal_disconnect(darktable.signals, G_CALLBACK(_develop_ui_pipe_finished_callback), self);</a>
+<a name="ln1143"> </a>
+<a name="ln1144">  dt_iop_rgblevels_gui_data_t *g = (dt_iop_rgblevels_gui_data_t *)self-&gt;gui_data;</a>
+<a name="ln1145">  if(g)</a>
+<a name="ln1146">  {</a>
+<a name="ln1147">    dt_pthread_mutex_destroy(&amp;g-&gt;lock);</a>
+<a name="ln1148">  }</a>
+<a name="ln1149">  free(self-&gt;gui_data);</a>
+<a name="ln1150">  self-&gt;gui_data = NULL;</a>
+<a name="ln1151">}</a>
+<a name="ln1152"> </a>
+<a name="ln1153">static void _get_selected_area(struct dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece,</a>
+<a name="ln1154">                               dt_iop_rgblevels_gui_data_t *g, const dt_iop_roi_t *const roi_in, int *box_out)</a>
+<a name="ln1155">{</a>
+<a name="ln1156">  box_out[0] = box_out[1] = box_out[2] = box_out[3] = 0;</a>
+<a name="ln1157"> </a>
+<a name="ln1158">  if(g)</a>
+<a name="ln1159">  {</a>
+<a name="ln1160">    const int width = roi_in-&gt;width;</a>
+<a name="ln1161">    const int height = roi_in-&gt;height;</a>
+<a name="ln1162">    float box_cood[4] = { g-&gt;box_cood[0], g-&gt;box_cood[1], g-&gt;box_cood[2], g-&gt;box_cood[3] };</a>
+<a name="ln1163"> </a>
+<a name="ln1164">    box_cood[0] *= piece-&gt;pipe-&gt;iwidth;</a>
+<a name="ln1165">    box_cood[1] *= piece-&gt;pipe-&gt;iheight;</a>
+<a name="ln1166">    box_cood[2] *= piece-&gt;pipe-&gt;iwidth;</a>
+<a name="ln1167">    box_cood[3] *= piece-&gt;pipe-&gt;iheight;</a>
+<a name="ln1168"> </a>
+<a name="ln1169">    dt_dev_distort_transform_plus(self-&gt;dev, piece-&gt;pipe, self-&gt;iop_order, DT_DEV_TRANSFORM_DIR_BACK_INCL,</a>
+<a name="ln1170">                                  box_cood, 2);</a>
+<a name="ln1171"> </a>
+<a name="ln1172">    box_cood[0] *= roi_in-&gt;scale;</a>
+<a name="ln1173">    box_cood[1] *= roi_in-&gt;scale;</a>
+<a name="ln1174">    box_cood[2] *= roi_in-&gt;scale;</a>
+<a name="ln1175">    box_cood[3] *= roi_in-&gt;scale;</a>
+<a name="ln1176"> </a>
+<a name="ln1177">    box_cood[0] -= roi_in-&gt;x;</a>
+<a name="ln1178">    box_cood[1] -= roi_in-&gt;y;</a>
+<a name="ln1179">    box_cood[2] -= roi_in-&gt;x;</a>
+<a name="ln1180">    box_cood[3] -= roi_in-&gt;y;</a>
+<a name="ln1181"> </a>
+<a name="ln1182">    int box[4];</a>
+<a name="ln1183"> </a>
+<a name="ln1184">    // re-order edges of bounding box</a>
+<a name="ln1185">    box[0] = fminf(box_cood[0], box_cood[2]);</a>
+<a name="ln1186">    box[1] = fminf(box_cood[1], box_cood[3]);</a>
+<a name="ln1187">    box[2] = fmaxf(box_cood[0], box_cood[2]);</a>
+<a name="ln1188">    box[3] = fmaxf(box_cood[1], box_cood[3]);</a>
+<a name="ln1189"> </a>
+<a name="ln1190">    // do not continue if box is completely outside of roi</a>
+<a name="ln1191">    if(!(box[0] &gt;= width || box[1] &gt;= height || box[2] &lt; 0 || box[3] &lt; 0))</a>
+<a name="ln1192">    {</a>
+<a name="ln1193">      // clamp bounding box to roi</a>
+<a name="ln1194">      for(int k = 0; k &lt; 4; k += 2) box[k] = MIN(width - 1, MAX(0, box[k]));</a>
+<a name="ln1195">      for(int k = 1; k &lt; 4; k += 2) box[k] = MIN(height - 1, MAX(0, box[k]));</a>
+<a name="ln1196"> </a>
+<a name="ln1197">      // safety check: area needs to have minimum 1 pixel width and height</a>
+<a name="ln1198">      if(!(box[2] - box[0] &lt; 1 || box[3] - box[1] &lt; 1))</a>
+<a name="ln1199">      {</a>
+<a name="ln1200">        box_out[0] = box[0];</a>
+<a name="ln1201">        box_out[1] = box[1];</a>
+<a name="ln1202">        box_out[2] = box[2];</a>
+<a name="ln1203">        box_out[3] = box[3];</a>
+<a name="ln1204">      }</a>
+<a name="ln1205">    }</a>
+<a name="ln1206">  }</a>
+<a name="ln1207">}</a>
+<a name="ln1208"> </a>
+<a name="ln1209">static void _auto_levels(const float *const img, const int width, const int height, int *box_area,</a>
+<a name="ln1210">                           dt_iop_rgblevels_params_t *p, const int _channel, const dt_iop_order_iccprofile_info_t *const work_profile)</a>
+<a name="ln1211">{</a>
+<a name="ln1212">  int y_from, y_to, x_from, x_to;</a>
+<a name="ln1213">  const int ch = 4;</a>
+<a name="ln1214">  const int channel = (p-&gt;autoscale == DT_IOP_RGBLEVELS_INDEPENDENT_CHANNELS) ? _channel : 0;</a>
+<a name="ln1215">  if(box_area[2] &gt; box_area[0] &amp;&amp; box_area[3] &gt; box_area[1])</a>
+<a name="ln1216">  {</a>
+<a name="ln1217">    y_from = box_area[1];</a>
+<a name="ln1218">    y_to = box_area[3];</a>
+<a name="ln1219">    x_from = box_area[0];</a>
+<a name="ln1220">    x_to = box_area[2];</a>
+<a name="ln1221">  }</a>
+<a name="ln1222">  else</a>
+<a name="ln1223">  {</a>
+<a name="ln1224">    y_from = 0;</a>
+<a name="ln1225">    y_to = height - 1;</a>
+<a name="ln1226">    x_from = 0;</a>
+<a name="ln1227">    x_to = width - 1;</a>
+<a name="ln1228">  }</a>
+<a name="ln1229"> </a>
+<a name="ln1230">  float max = -INFINITY;</a>
+<a name="ln1231">  float min = INFINITY;</a>
+<a name="ln1232"> </a>
+<a name="ln1233">  for(int y = y_from; y &lt;= y_to; y++)</a>
+<a name="ln1234">  {</a>
+<a name="ln1235">    const float *const in = img + ch * width * y;</a>
+<a name="ln1236">    for(int x = x_from; x &lt;= x_to; x++)</a>
+<a name="ln1237">    {</a>
+<a name="ln1238">      const float *const pixel = in + x * ch;</a>
+<a name="ln1239"> </a>
+<a name="ln1240">      if(p-&gt;autoscale == DT_IOP_RGBLEVELS_INDEPENDENT_CHANNELS || p-&gt;preserve_colors == DT_RGB_NORM_NONE)</a>
+<a name="ln1241">      {</a>
+<a name="ln1242">        if(p-&gt;autoscale == DT_IOP_RGBLEVELS_INDEPENDENT_CHANNELS)</a>
+<a name="ln1243">        {</a>
+<a name="ln1244">          if(pixel[channel] &gt;= 0.f)</a>
+<a name="ln1245">          {</a>
+<a name="ln1246">            max = fmaxf(max, pixel[channel]);</a>
+<a name="ln1247">            min = fminf(min, pixel[channel]);</a>
+<a name="ln1248">          }</a>
+<a name="ln1249">        }</a>
+<a name="ln1250">        else</a>
+<a name="ln1251">        {</a>
+<a name="ln1252">          for(int c = 0; c &lt; 3; c++)</a>
+<a name="ln1253">          {</a>
+<a name="ln1254">            if(pixel[c] &gt;= 0.f)</a>
+<a name="ln1255">            {</a>
+<a name="ln1256">              max = fmaxf(max, pixel[c]);</a>
+<a name="ln1257">              min = fminf(min, pixel[c]);</a>
+<a name="ln1258">            }</a>
+<a name="ln1259">          }</a>
+<a name="ln1260">        }</a>
+<a name="ln1261">      }</a>
+<a name="ln1262">      else</a>
+<a name="ln1263">      {</a>
+<a name="ln1264">        const float lum = dt_rgb_norm(pixel, p-&gt;preserve_colors, work_profile);</a>
+<a name="ln1265">        if(lum &gt;= 0.f)</a>
+<a name="ln1266">        {</a>
+<a name="ln1267">          max = fmaxf(max, lum);</a>
+<a name="ln1268">          min = fminf(min, lum);</a>
+<a name="ln1269">        }</a>
+<a name="ln1270">      }</a>
+<a name="ln1271">    }</a>
+<a name="ln1272">  }</a>
+<a name="ln1273"> </a>
+<a name="ln1274">  p-&gt;levels[channel][0] = CLAMP(min, 0.f, 1.f);</a>
+<a name="ln1275">  p-&gt;levels[channel][2] = CLAMP(max, 0.f, 1.f);</a>
+<a name="ln1276">  p-&gt;levels[channel][1] = (p-&gt;levels[channel][2] + p-&gt;levels[channel][0]) / 2.f;</a>
+<a name="ln1277">}</a>
+<a name="ln1278"> </a>
+<a name="ln1279">void process(dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, const void *const ivoid, void *const ovoid,</a>
+<a name="ln1280">             const dt_iop_roi_t *const roi_in, const dt_iop_roi_t *const roi_out)</a>
+<a name="ln1281">{</a>
+<a name="ln1282">  const int ch = piece-&gt;colors;</a>
+<a name="ln1283">  const dt_iop_rgblevels_data_t *const d = (dt_iop_rgblevels_data_t *)piece-&gt;data;</a>
+<a name="ln1284">  dt_iop_rgblevels_params_t *p = (dt_iop_rgblevels_params_t *)&amp;d-&gt;params;</a>
+<a name="ln1285">  dt_iop_rgblevels_gui_data_t *g = (dt_iop_rgblevels_gui_data_t *)self-&gt;gui_data;</a>
+<a name="ln1286">  const dt_iop_order_iccprofile_info_t *const work_profile = dt_ioppr_get_pipe_work_profile_info(piece-&gt;pipe);</a>
+<a name="ln1287"> </a>
+<a name="ln1288">  // process auto levels</a>
+<a name="ln1289">  if(g &amp;&amp; piece-&gt;pipe-&gt;type == DT_DEV_PIXELPIPE_PREVIEW)</a>
+<a name="ln1290">  {</a>
+<a name="ln1291">    dt_pthread_mutex_lock(&amp;g-&gt;lock);</a>
+<a name="ln1292">    if(g-&gt;call_auto_levels == 1 &amp;&amp; !darktable.gui-&gt;reset)</a>
+<a name="ln1293">    {</a>
+<a name="ln1294">      g-&gt;call_auto_levels = -1;</a>
+<a name="ln1295"> </a>
+<a name="ln1296">      dt_pthread_mutex_unlock(&amp;g-&gt;lock);</a>
+<a name="ln1297"> </a>
+<a name="ln1298">      memcpy(&amp;g-&gt;params, p, sizeof(dt_iop_rgblevels_params_t));</a>
+<a name="ln1299"> </a>
+<a name="ln1300">      int box[4] = { 0 };</a>
+<a name="ln1301">      _get_selected_area(self, piece, g, roi_in, box);</a>
+<a name="ln1302">      _auto_levels((const float *const)ivoid, roi_in-&gt;width, roi_in-&gt;height, box, &amp;(g-&gt;params), g-&gt;channel, work_profile);</a>
+<a name="ln1303"> </a>
+<a name="ln1304">      dt_pthread_mutex_lock(&amp;g-&gt;lock);</a>
+<a name="ln1305"> </a>
+<a name="ln1306">      g-&gt;call_auto_levels = 2;</a>
+<a name="ln1307"> </a>
+<a name="ln1308">      dt_pthread_mutex_unlock(&amp;g-&gt;lock);</a>
+<a name="ln1309">    }</a>
+<a name="ln1310">    else</a>
+<a name="ln1311">    {</a>
+<a name="ln1312">      dt_pthread_mutex_unlock(&amp;g-&gt;lock);</a>
+<a name="ln1313">    }</a>
+<a name="ln1314">  }</a>
+<a name="ln1315"> </a>
+<a name="ln1316">  const float mult[3] = { 1.f / (d-&gt;params.levels[0][2] - d-&gt;params.levels[0][0]),</a>
+<a name="ln1317">                          1.f / (d-&gt;params.levels[1][2] - d-&gt;params.levels[1][0]),</a>
+<a name="ln1318">                          1.f / (d-&gt;params.levels[2][2] - d-&gt;params.levels[2][0]) };</a>
+<a name="ln1319"> </a>
+<a name="ln1320">#ifdef _OPENMP</a>
+<a name="ln1321">#pragma omp parallel for default(none) \</a>
+<a name="ln1322">  dt_omp_firstprivate(work_profile, d, ch, ivoid, ovoid, roi_out, mult) \</a>
+<a name="ln1323">  schedule(static)</a>
+<a name="ln1324">#endif</a>
+<a name="ln1325">  for(int k = 0; k &lt; roi_out-&gt;height; k++)</a>
+<a name="ln1326">  {</a>
+<a name="ln1327">    float *in = (float *)ivoid + (size_t)k * ch * roi_out-&gt;width;</a>
+<a name="ln1328">    float *out = (float *)ovoid + (size_t)k * ch * roi_out-&gt;width;</a>
+<a name="ln1329"> </a>
+<a name="ln1330">    for(int j = 0; j &lt; roi_out-&gt;width; j++, in += ch, out += ch)</a>
+<a name="ln1331">    {</a>
+<a name="ln1332">      if(d-&gt;params.autoscale == DT_IOP_RGBLEVELS_INDEPENDENT_CHANNELS || d-&gt;params.preserve_colors == DT_RGB_NORM_NONE)</a>
+<a name="ln1333">      {</a>
+<a name="ln1334">        for(int c = 0; c &lt; 3; c++)</a>
+<a name="ln1335">        {</a>
+<a name="ln1336">          const float L_in = in[c];</a>
+<a name="ln1337"> </a>
+<a name="ln1338">          if(L_in &lt;= d-&gt;params.levels[c][0])</a>
+<a name="ln1339">          {</a>
+<a name="ln1340">            // Anything below the lower threshold just clips to zero</a>
+<a name="ln1341">            out[c] = 0.0f;</a>
+<a name="ln1342">          }</a>
+<a name="ln1343">          else if(L_in &gt;= d-&gt;params.levels[c][2])</a>
+<a name="ln1344">          {</a>
+<a name="ln1345">            const float percentage = (L_in - d-&gt;params.levels[c][0]) * mult[c];</a>
+<a name="ln1346">            out[c] = pow(percentage, d-&gt;inv_gamma[c]);</a>
+<a name="ln1347">          }</a>
+<a name="ln1348">          else</a>
+<a name="ln1349">          {</a>
+<a name="ln1350">            // Within the expected input range we can use the lookup table</a>
+<a name="ln1351">            const float percentage = (L_in - d-&gt;params.levels[c][0]) * mult[c];</a>
+<a name="ln1352">            out[c] = d-&gt;lut[c][CLAMP((int)(percentage * 0x10000ul), 0, 0xffff)];</a>
+<a name="ln1353">          }</a>
+<a name="ln1354">        }</a>
+<a name="ln1355">      }</a>
+<a name="ln1356">      else</a>
+<a name="ln1357">      {</a>
+<a name="ln1358">        const int ch_levels = 0;</a>
+<a name="ln1359"> </a>
+<a name="ln1360">        float ratio = 1.f;</a>
+<a name="ln1361">        const float lum = dt_rgb_norm(in, d-&gt;params.preserve_colors, work_profile);</a>
+<a name="ln1362">        if(lum &gt; d-&gt;params.levels[ch_levels][0])</a>
+<a name="ln1363">        {</a>
+<a name="ln1364">          float curve_lum;</a>
+<a name="ln1365">          if(lum &gt;= d-&gt;params.levels[ch_levels][2])</a>
+<a name="ln1366">          {</a>
+<a name="ln1367">            const float percentage = (lum - d-&gt;params.levels[ch_levels][0]) * mult[ch_levels];</a>
+<a name="ln1368">            curve_lum = pow(percentage, d-&gt;inv_gamma[ch_levels]);</a>
+<a name="ln1369">          }</a>
+<a name="ln1370">          else</a>
+<a name="ln1371">          {</a>
+<a name="ln1372">            // Within the expected input range we can use the lookup table</a>
+<a name="ln1373">            const float percentage = (lum - d-&gt;params.levels[ch_levels][0]) * mult[ch_levels];</a>
+<a name="ln1374">            curve_lum = d-&gt;lut[ch_levels][CLAMP((int)(percentage * 0x10000ul), 0, 0xffff)];</a>
+<a name="ln1375">          }</a>
+<a name="ln1376"> </a>
+<a name="ln1377">          ratio = curve_lum / lum;</a>
+<a name="ln1378"> </a>
+<a name="ln1379">          for(int c = 0; c &lt; 3; c++)</a>
+<a name="ln1380">          {</a>
+<a name="ln1381">            out[c] = (ratio * in[c]);</a>
+<a name="ln1382">          }</a>
+<a name="ln1383">        }</a>
+<a name="ln1384">        else</a>
+<a name="ln1385">        {</a>
+<a name="ln1386">          for(int c = 0; c &lt; 3; c++) out[c] = 0.f;</a>
+<a name="ln1387">        }</a>
+<a name="ln1388">      }</a>
+<a name="ln1389"> </a>
+<a name="ln1390">      out[3] = in[3];</a>
+<a name="ln1391">    }</a>
+<a name="ln1392">  }</a>
+<a name="ln1393">}</a>
+<a name="ln1394"> </a>
+<a name="ln1395">#ifdef HAVE_OPENCL</a>
+<a name="ln1396">int process_cl(dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, cl_mem dev_in, cl_mem dev_out,</a>
+<a name="ln1397">               const dt_iop_roi_t *const roi_in, const dt_iop_roi_t *const roi_out)</a>
+<a name="ln1398">{</a>
+<a name="ln1399">  const dt_iop_order_iccprofile_info_t *const work_profile = dt_ioppr_get_pipe_work_profile_info(piece-&gt;pipe);</a>
+<a name="ln1400"> </a>
+<a name="ln1401">  const int ch = piece-&gt;colors;</a>
+<a name="ln1402">  dt_iop_rgblevels_data_t *d = (dt_iop_rgblevels_data_t *)piece-&gt;data;</a>
+<a name="ln1403">  dt_iop_rgblevels_params_t *p = (dt_iop_rgblevels_params_t *)&amp;d-&gt;params;</a>
+<a name="ln1404">  dt_iop_rgblevels_gui_data_t *g = (dt_iop_rgblevels_gui_data_t *)self-&gt;gui_data;</a>
+<a name="ln1405">  dt_iop_rgblevels_global_data_t *gd = (dt_iop_rgblevels_global_data_t *)self-&gt;global_data;</a>
+<a name="ln1406"> </a>
+<a name="ln1407">  cl_int err = CL_SUCCESS;</a>
+<a name="ln1408"> </a>
+<a name="ln1409">  float *src_buffer = NULL;</a>
+<a name="ln1410"> </a>
+<a name="ln1411">  cl_mem dev_lutr = NULL;</a>
+<a name="ln1412">  cl_mem dev_lutg = NULL;</a>
+<a name="ln1413">  cl_mem dev_lutb = NULL;</a>
+<a name="ln1414"> </a>
+<a name="ln1415">  cl_mem dev_levels = NULL;</a>
+<a name="ln1416">  cl_mem dev_inv_gamma = NULL;</a>
+<a name="ln1417"> </a>
+<a name="ln1418">  cl_mem dev_profile_info = NULL;</a>
+<a name="ln1419">  cl_mem dev_profile_lut = NULL;</a>
+<a name="ln1420">  dt_colorspaces_iccprofile_info_cl_t *profile_info_cl;</a>
+<a name="ln1421">  cl_float *profile_lut_cl = NULL;</a>
+<a name="ln1422"> </a>
+<a name="ln1423">  const int use_work_profile = (work_profile == NULL) ? 0 : 1;</a>
+<a name="ln1424"> </a>
+<a name="ln1425">  const int devid = piece-&gt;pipe-&gt;devid;</a>
+<a name="ln1426"> </a>
+<a name="ln1427">  const int width = roi_out-&gt;width;</a>
+<a name="ln1428">  const int height = roi_out-&gt;height;</a>
+<a name="ln1429"> </a>
+<a name="ln1430">  // process auto levels</a>
+<a name="ln1431">  if(g &amp;&amp; piece-&gt;pipe-&gt;type == DT_DEV_PIXELPIPE_PREVIEW)</a>
+<a name="ln1432">  {</a>
+<a name="ln1433">    dt_pthread_mutex_lock(&amp;g-&gt;lock);</a>
+<a name="ln1434">    if(g-&gt;call_auto_levels == 1 &amp;&amp; !darktable.gui-&gt;reset)</a>
+<a name="ln1435">    {</a>
+<a name="ln1436">      g-&gt;call_auto_levels = -1;</a>
+<a name="ln1437"> </a>
+<a name="ln1438">      dt_pthread_mutex_unlock(&amp;g-&gt;lock);</a>
+<a name="ln1439"> </a>
+<a name="ln1440">      // get the image, this works only in C</a>
+<a name="ln1441">      src_buffer = dt_alloc_align(64, width * height * ch * sizeof(float));</a>
+<a name="ln1442">      if(src_buffer == NULL)</a>
+<a name="ln1443">      {</a>
+<a name="ln1444">        fprintf(stderr, &quot;[rgblevels process_cl] error allocating memory for temp table 1\n&quot;);</a>
+<a name="ln1445">        err = CL_MEM_OBJECT_ALLOCATION_FAILURE;</a>
+<a name="ln1446">        goto cleanup;</a>
+<a name="ln1447">      }</a>
+<a name="ln1448"> </a>
+<a name="ln1449">      err = dt_opencl_copy_device_to_host(devid, src_buffer, dev_in, width, height, ch * sizeof(float));</a>
+<a name="ln1450">      if(err != CL_SUCCESS)</a>
+<a name="ln1451">      {</a>
+<a name="ln1452">        fprintf(stderr, &quot;[rgblevels process_cl] error allocating memory for temp table 2\n&quot;);</a>
+<a name="ln1453">        goto cleanup;</a>
+<a name="ln1454">      }</a>
+<a name="ln1455"> </a>
+<a name="ln1456">      memcpy(&amp;g-&gt;params, p, sizeof(dt_iop_rgblevels_params_t));</a>
+<a name="ln1457"> </a>
+<a name="ln1458">      int box[4] = { 0 };</a>
+<a name="ln1459">      _get_selected_area(self, piece, g, roi_in, box);</a>
+<a name="ln1460">      _auto_levels(src_buffer, roi_in-&gt;width, roi_in-&gt;height, box, &amp;(g-&gt;params), g-&gt;channel, work_profile);</a>
+<a name="ln1461"> </a>
+<a name="ln1462">      dt_free_align(src_buffer);</a>
+<a name="ln1463">      src_buffer = NULL;</a>
+<a name="ln1464"> </a>
+<a name="ln1465">      dt_pthread_mutex_lock(&amp;g-&gt;lock);</a>
+<a name="ln1466"> </a>
+<a name="ln1467">      g-&gt;call_auto_levels = 2;</a>
+<a name="ln1468"> </a>
+<a name="ln1469">      dt_pthread_mutex_unlock(&amp;g-&gt;lock);</a>
+<a name="ln1470">    }</a>
+<a name="ln1471">    else</a>
+<a name="ln1472">    {</a>
+<a name="ln1473">      dt_pthread_mutex_unlock(&amp;g-&gt;lock);</a>
+<a name="ln1474">    }</a>
+<a name="ln1475">  }</a>
+<a name="ln1476"> </a>
+<a name="ln1477">  const int autoscale = d-&gt;params.autoscale;</a>
+<a name="ln1478">  const int preserve_colors = d-&gt;params.preserve_colors;</a>
+<a name="ln1479"> </a>
+<a name="ln1480">  dev_lutr = dt_opencl_copy_host_to_device(devid, d-&gt;lut[0], 256, 256, sizeof(float));</a>
+<a name="ln1481">  if(dev_lutr == NULL)</a>
+<a name="ln1482">  {</a>
+<a name="ln1483">    fprintf(stderr, &quot;[rgblevels process_cl] error allocating memory 1\n&quot;);</a>
+<a name="ln1484">    err = CL_MEM_OBJECT_ALLOCATION_FAILURE;</a>
+<a name="ln1485">    goto cleanup;</a>
+<a name="ln1486">  }</a>
+<a name="ln1487">  dev_lutg = dt_opencl_copy_host_to_device(devid, d-&gt;lut[1], 256, 256, sizeof(float));</a>
+<a name="ln1488">  if(dev_lutg == NULL)</a>
+<a name="ln1489">  {</a>
+<a name="ln1490">    fprintf(stderr, &quot;[rgblevels process_cl] error allocating memory 2\n&quot;);</a>
+<a name="ln1491">    err = CL_MEM_OBJECT_ALLOCATION_FAILURE;</a>
+<a name="ln1492">    goto cleanup;</a>
+<a name="ln1493">  }</a>
+<a name="ln1494">  dev_lutb = dt_opencl_copy_host_to_device(devid, d-&gt;lut[2], 256, 256, sizeof(float));</a>
+<a name="ln1495">  if(dev_lutb == NULL)</a>
+<a name="ln1496">  {</a>
+<a name="ln1497">    fprintf(stderr, &quot;[rgblevels process_cl] error allocating memory 3\n&quot;);</a>
+<a name="ln1498">    err = CL_MEM_OBJECT_ALLOCATION_FAILURE;</a>
+<a name="ln1499">    goto cleanup;</a>
+<a name="ln1500">  }</a>
+<a name="ln1501"> </a>
+<a name="ln1502">  dev_levels = dt_opencl_copy_host_to_device_constant(devid, sizeof(float) * 3 * 3, (float *)d-&gt;params.levels);</a>
+<a name="ln1503">  if(dev_levels == NULL)</a>
+<a name="ln1504">  {</a>
+<a name="ln1505">    fprintf(stderr, &quot;[rgblevels process_cl] error allocating memory 4\n&quot;);</a>
+<a name="ln1506">    err = CL_MEM_OBJECT_ALLOCATION_FAILURE;</a>
+<a name="ln1507">    goto cleanup;</a>
+<a name="ln1508">  }</a>
+<a name="ln1509"> </a>
+<a name="ln1510">  dev_inv_gamma = dt_opencl_copy_host_to_device_constant(devid, sizeof(float) * 3, (float *)d-&gt;inv_gamma);</a>
+<a name="ln1511">  if(dev_inv_gamma == NULL)</a>
+<a name="ln1512">  {</a>
+<a name="ln1513">    fprintf(stderr, &quot;[rgblevels process_cl] error allocating memory 5\n&quot;);</a>
+<a name="ln1514">    err = CL_MEM_OBJECT_ALLOCATION_FAILURE;</a>
+<a name="ln1515">    goto cleanup;</a>
+<a name="ln1516">  }</a>
+<a name="ln1517"> </a>
+<a name="ln1518">  err = dt_ioppr_build_iccprofile_params_cl(work_profile, devid, &amp;profile_info_cl, &amp;profile_lut_cl,</a>
+<a name="ln1519">                                            &amp;dev_profile_info, &amp;dev_profile_lut);</a>
+<a name="ln1520">  if(err != CL_SUCCESS) goto cleanup;</a>
+<a name="ln1521"> </a>
+<a name="ln1522">  size_t sizes[2] = { ROUNDUPWD(width), ROUNDUPHT(height) };</a>
+<a name="ln1523">  dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_levels, 0, sizeof(cl_mem), &amp;dev_in);</a>
+<a name="ln1524">  dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_levels, 1, sizeof(cl_mem), &amp;dev_out);</a>
+<a name="ln1525">  dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_levels, 2, sizeof(int), &amp;width);</a>
+<a name="ln1526">  dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_levels, 3, sizeof(int), &amp;height);</a>
+<a name="ln1527">  dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_levels, 4, sizeof(int), (void *)&amp;autoscale);</a>
+<a name="ln1528">  dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_levels, 5, sizeof(int), (void *)&amp;preserve_colors);</a>
+<a name="ln1529">  dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_levels, 6, sizeof(cl_mem), &amp;dev_lutr);</a>
+<a name="ln1530">  dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_levels, 7, sizeof(cl_mem), &amp;dev_lutg);</a>
+<a name="ln1531">  dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_levels, 8, sizeof(cl_mem), &amp;dev_lutb);</a>
+<a name="ln1532">  dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_levels, 9, sizeof(cl_mem), (void *)&amp;dev_levels);</a>
+<a name="ln1533">  dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_levels, 10, sizeof(cl_mem), (void *)&amp;dev_inv_gamma);</a>
+<a name="ln1534">  dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_levels, 11, sizeof(cl_mem), (void *)&amp;dev_profile_info);</a>
+<a name="ln1535">  dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_levels, 12, sizeof(cl_mem), (void *)&amp;dev_profile_lut);</a>
+<a name="ln1536">  dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_levels, 13, sizeof(int), (void *)&amp;use_work_profile);</a>
+<a name="ln1537">  err = dt_opencl_enqueue_kernel_2d(devid, gd-&gt;kernel_levels, sizes);</a>
+<a name="ln1538">  if(err != CL_SUCCESS)</a>
+<a name="ln1539">  {</a>
+<a name="ln1540">    fprintf(stderr, &quot;[rgblevels process_cl] error %i enqueue kernel\n&quot;, err);</a>
+<a name="ln1541">    goto cleanup;</a>
+<a name="ln1542">  }</a>
+<a name="ln1543"> </a>
+<a name="ln1544">cleanup:</a>
+<a name="ln1545">  if(dev_lutr) dt_opencl_release_mem_object(dev_lutr);</a>
+<a name="ln1546">  if(dev_lutg) dt_opencl_release_mem_object(dev_lutg);</a>
+<a name="ln1547">  if(dev_lutb) dt_opencl_release_mem_object(dev_lutb);</a>
+<a name="ln1548">  if(dev_levels) dt_opencl_release_mem_object(dev_levels);</a>
+<a name="ln1549">  if(dev_inv_gamma) dt_opencl_release_mem_object(dev_inv_gamma);</a>
+<a name="ln1550">  dt_ioppr_free_iccprofile_params_cl(&amp;profile_info_cl, &amp;profile_lut_cl, &amp;dev_profile_info, &amp;dev_profile_lut);</a>
+<a name="ln1551"> </a>
+<a name="ln1552">  if(src_buffer) dt_free_align(src_buffer);</a>
+<a name="ln1553"> </a>
+<a name="ln1554">  if(err != CL_SUCCESS) dt_print(DT_DEBUG_OPENCL, &quot;[opencl_rgblevels] couldn't enqueue kernel! %d\n&quot;, err);</a>
+<a name="ln1555"> </a>
+<a name="ln1556">  return (err == CL_SUCCESS) ? TRUE : FALSE;</a>
+<a name="ln1557">}</a>
+<a name="ln1558">#endif</a>
+<a name="ln1559"> </a>
+<a name="ln1560">// modelines: These editor modelines have been set for all relevant files by tools/update_modelines.sh</a>
+<a name="ln1561">// vim: shiftwidth=2 expandtab tabstop=2 cindent</a>
+<a name="ln1562">// kate: tab-indents: off; indent-width 2; replace-tabs on; indent-mode cstyle; remove-trailing-spaces modified;</a>
+
+</code></pre>
+<div class="balloon" rel="824"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v570/" target="_blank">V570</a> The 'p->levels[channel][1]' variable is assigned to itself.</p></div>
+<div class="balloon" rel="965"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v522/" target="_blank">V522</a> There might be dereferencing of a potential null pointer 'gd'. Check lines: 965, 963.</p></div>
+<div class="balloon" rel="999"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v522/" target="_blank">V522</a> There might be dereferencing of a potential null pointer 'c'. Check lines: 999, 996.</p></div>
+
+<link rel="stylesheet" href="highlight.css">
+<script src="highlight.pack.js"></script>
+<script src="highlightjs-line-numbers.js"></script>
+<script>hljs.initHighlightingOnLoad();</script>
+<script>hljs.initLineNumbersOnLoad();</script>
+<script>
+  $(document).ready(function() {
+      $('.balloon').each(function () {
+          var bl = $(this);
+          var line = bl.attr('rel');
+          var text = $('a[name="ln'+line+'"]').text();
+
+          var space_count = 0;
+          for(var i = 0; i<text.length; i++){
+              var char = text[i];
+              if((char !== ' ')&&(char !== '\t'))break;
+              if(char === '\t')space_count++;
+              space_count++;
+          }
+
+          bl.css('margin-left', space_count*8);
+          $('a[name="ln'+line+'"]').after(bl);
+      });
+
+      window.location = window.location;
+  });
+</script>
+</body>
+</html>

@@ -1,0 +1,691 @@
+
+<html>
+<head>
+  <link rel="stylesheet" href="../style.css"/>
+  <script src="../jquery-3.2.1.min.js"></script>
+</head>
+<body>
+<pre><code class = "cpp">
+<a name="ln1">/*</a>
+<a name="ln2">    This file is part of darktable,</a>
+<a name="ln3">    copyright (c) 2009--2012 johannes hanika.</a>
+<a name="ln4"> </a>
+<a name="ln5">    darktable is free software: you can redistribute it and/or modify</a>
+<a name="ln6">    it under the terms of the GNU General Public License as published by</a>
+<a name="ln7">    the Free Software Foundation, either version 3 of the License, or</a>
+<a name="ln8">    (at your option) any later version.</a>
+<a name="ln9"> </a>
+<a name="ln10">    darktable is distributed in the hope that it will be useful,</a>
+<a name="ln11">    but WITHOUT ANY WARRANTY; without even the implied warranty of</a>
+<a name="ln12">    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the</a>
+<a name="ln13">    GNU General Public License for more details.</a>
+<a name="ln14"> </a>
+<a name="ln15">    You should have received a copy of the GNU General Public License</a>
+<a name="ln16">    along with darktable.  If not, see &lt;http://www.gnu.org/licenses/&gt;.</a>
+<a name="ln17">*/</a>
+<a name="ln18">#ifdef HAVE_CONFIG_H</a>
+<a name="ln19">#include &quot;config.h&quot;</a>
+<a name="ln20">#endif</a>
+<a name="ln21">#include &quot;bauhaus/bauhaus.h&quot;</a>
+<a name="ln22">#include &quot;common/bilateral.h&quot;</a>
+<a name="ln23">#include &quot;common/bilateralcl.h&quot;</a>
+<a name="ln24">#include &quot;common/colorspaces.h&quot;</a>
+<a name="ln25">#include &quot;common/opencl.h&quot;</a>
+<a name="ln26">#include &quot;control/control.h&quot;</a>
+<a name="ln27">#include &quot;develop/develop.h&quot;</a>
+<a name="ln28">#include &quot;develop/imageop.h&quot;</a>
+<a name="ln29">#include &quot;develop/tiling.h&quot;</a>
+<a name="ln30">#include &quot;dtgtk/drawingarea.h&quot;</a>
+<a name="ln31">#include &quot;gui/color_picker_proxy.h&quot;</a>
+<a name="ln32">#include &quot;gui/gtk.h&quot;</a>
+<a name="ln33">#include &quot;gui/presets.h&quot;</a>
+<a name="ln34">#include &quot;iop/iop_api.h&quot;</a>
+<a name="ln35">#include &lt;assert.h&gt;</a>
+<a name="ln36">#include &lt;math.h&gt;</a>
+<a name="ln37">#include &lt;stdlib.h&gt;</a>
+<a name="ln38">#include &lt;string.h&gt;</a>
+<a name="ln39"> </a>
+<a name="ln40">DT_MODULE_INTROSPECTION(2, dt_iop_monochrome_params_t)</a>
+<a name="ln41"> </a>
+<a name="ln42">#define DT_COLORCORRECTION_INSET DT_PIXEL_APPLY_DPI(5)</a>
+<a name="ln43">#define DT_COLORCORRECTION_MAX 40.</a>
+<a name="ln44">#define PANEL_WIDTH 256.0f</a>
+<a name="ln45"> </a>
+<a name="ln46">typedef struct dt_iop_monochrome_params_t</a>
+<a name="ln47">{</a>
+<a name="ln48">  float a, b, size, highlights;</a>
+<a name="ln49">} dt_iop_monochrome_params_t;</a>
+<a name="ln50"> </a>
+<a name="ln51">typedef struct dt_iop_monochrome_data_t</a>
+<a name="ln52">{</a>
+<a name="ln53">  float a, b, size, highlights;</a>
+<a name="ln54">} dt_iop_monochrome_data_t;</a>
+<a name="ln55"> </a>
+<a name="ln56">typedef struct dt_iop_monochrome_gui_data_t</a>
+<a name="ln57">{</a>
+<a name="ln58">  GtkDrawingArea *area;</a>
+<a name="ln59">  GtkWidget *highlights;</a>
+<a name="ln60">  GtkWidget *colorpicker;</a>
+<a name="ln61">  int dragging;</a>
+<a name="ln62">  cmsHTRANSFORM xform;</a>
+<a name="ln63">  dt_iop_color_picker_t color_picker;</a>
+<a name="ln64">} dt_iop_monochrome_gui_data_t;</a>
+<a name="ln65"> </a>
+<a name="ln66">typedef struct dt_iop_monochrome_global_data_t</a>
+<a name="ln67">{</a>
+<a name="ln68">  int kernel_monochrome_filter, kernel_monochrome;</a>
+<a name="ln69">} dt_iop_monochrome_global_data_t;</a>
+<a name="ln70"> </a>
+<a name="ln71"> </a>
+<a name="ln72">const char *name()</a>
+<a name="ln73">{</a>
+<a name="ln74">  return _(&quot;monochrome&quot;);</a>
+<a name="ln75">}</a>
+<a name="ln76"> </a>
+<a name="ln77">int default_group()</a>
+<a name="ln78">{</a>
+<a name="ln79">  return IOP_GROUP_COLOR;</a>
+<a name="ln80">}</a>
+<a name="ln81"> </a>
+<a name="ln82">int flags()</a>
+<a name="ln83">{</a>
+<a name="ln84">  return IOP_FLAGS_INCLUDE_IN_STYLES | IOP_FLAGS_SUPPORTS_BLENDING | IOP_FLAGS_ALLOW_TILING;</a>
+<a name="ln85">}</a>
+<a name="ln86"> </a>
+<a name="ln87">int default_colorspace(dt_iop_module_t *self, dt_dev_pixelpipe_t *pipe, dt_dev_pixelpipe_iop_t *piece)</a>
+<a name="ln88">{</a>
+<a name="ln89">  return iop_cs_Lab;</a>
+<a name="ln90">}</a>
+<a name="ln91"> </a>
+<a name="ln92">int legacy_params(dt_iop_module_t *self, const void *const old_params, const int old_version,</a>
+<a name="ln93">                  void *new_params, const int new_version)</a>
+<a name="ln94">{</a>
+<a name="ln95">  if(old_version == 1 &amp;&amp; new_version == 2)</a>
+<a name="ln96">  {</a>
+<a name="ln97">    dt_iop_monochrome_params_t *p1 = (dt_iop_monochrome_params_t *)old_params;</a>
+<a name="ln98">    dt_iop_monochrome_params_t *p2 = (dt_iop_monochrome_params_t *)new_params;</a>
+<a name="ln99">    memcpy(p2, p1, sizeof(dt_iop_monochrome_params_t) - sizeof(float));</a>
+<a name="ln100">    p2-&gt;highlights = 0.0f;</a>
+<a name="ln101">    return 0;</a>
+<a name="ln102">  }</a>
+<a name="ln103">  return 1;</a>
+<a name="ln104">}</a>
+<a name="ln105"> </a>
+<a name="ln106">void init_presets(dt_iop_module_so_t *self)</a>
+<a name="ln107">{</a>
+<a name="ln108">  dt_iop_monochrome_params_t p;</a>
+<a name="ln109"> </a>
+<a name="ln110">  p.size = 2.3f;</a>
+<a name="ln111"> </a>
+<a name="ln112">  p.a = 32.0f;</a>
+<a name="ln113">  p.b = 64.0f;</a>
+<a name="ln114">  p.highlights = 0.0f;</a>
+<a name="ln115">  dt_gui_presets_add_generic(_(&quot;red filter&quot;), self-&gt;op, self-&gt;version(), &amp;p, sizeof(p), 1);</a>
+<a name="ln116"> </a>
+<a name="ln117">  // p.a = 64.0f;</a>
+<a name="ln118">  // p.b = -32.0f;</a>
+<a name="ln119">  // dt_gui_presets_add_generic(_(&quot;purple filter&quot;), self-&gt;op, self-&gt;version(), &amp;p, sizeof(p), 1);</a>
+<a name="ln120"> </a>
+<a name="ln121">  // p.a = -32.0f;</a>
+<a name="ln122">  // p.b = -64.0f;</a>
+<a name="ln123">  // dt_gui_presets_add_generic(_(&quot;blue filter&quot;), self-&gt;op, self-&gt;version(), &amp;p, sizeof(p), 1);</a>
+<a name="ln124"> </a>
+<a name="ln125">  // p.a = -64.0f;</a>
+<a name="ln126">  // p.b = 32.0f;</a>
+<a name="ln127">  // dt_gui_presets_add_generic(_(&quot;green filter&quot;), self-&gt;op, self-&gt;version(), &amp;p, sizeof(p), 1);</a>
+<a name="ln128">}</a>
+<a name="ln129"> </a>
+<a name="ln130">static float color_filter(const float ai, const float bi, const float a, const float b, const float size)</a>
+<a name="ln131">{</a>
+<a name="ln132">  return dt_fast_expf(-CLAMPS(((ai - a) * (ai - a) + (bi - b) * (bi - b)) / (2.0 * size), 0.0f, 1.0f));</a>
+<a name="ln133">}</a>
+<a name="ln134"> </a>
+<a name="ln135">static float envelope(const float L)</a>
+<a name="ln136">{</a>
+<a name="ln137">  const float x = CLAMPS(L / 100.0f, 0.0f, 1.0f);</a>
+<a name="ln138">  // const float alpha = 2.0f;</a>
+<a name="ln139">  const float beta = 0.6f;</a>
+<a name="ln140">  if(x &lt; beta)</a>
+<a name="ln141">  {</a>
+<a name="ln142">    // return 1.0f-fabsf(x/beta-1.0f)^2</a>
+<a name="ln143">    const float tmp = fabsf(x / beta - 1.0f);</a>
+<a name="ln144">    return 1.0f - tmp * tmp;</a>
+<a name="ln145">  }</a>
+<a name="ln146">  else</a>
+<a name="ln147">  {</a>
+<a name="ln148">    const float tmp1 = (1.0f - x) / (1.0f - beta);</a>
+<a name="ln149">    const float tmp2 = tmp1 * tmp1;</a>
+<a name="ln150">    const float tmp3 = tmp2 * tmp1;</a>
+<a name="ln151">    return 3.0f * tmp2 - 2.0f * tmp3;</a>
+<a name="ln152">  }</a>
+<a name="ln153">}</a>
+<a name="ln154"> </a>
+<a name="ln155">void process(struct dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, const void *const i, void *const o,</a>
+<a name="ln156">             const dt_iop_roi_t *const roi_in, const dt_iop_roi_t *const roi_out)</a>
+<a name="ln157">{</a>
+<a name="ln158">  dt_iop_monochrome_data_t *d = (dt_iop_monochrome_data_t *)piece-&gt;data;</a>
+<a name="ln159">  const float sigma2 = (d-&gt;size * 128.0) * (d-&gt;size * 128.0f);</a>
+<a name="ln160">// first pass: evaluate color filter:</a>
+<a name="ln161">#ifdef _OPENMP</a>
+<a name="ln162">#pragma omp parallel for default(none) \</a>
+<a name="ln163">  dt_omp_firstprivate(i, o, roi_out, sigma2) \</a>
+<a name="ln164">  shared(d) \</a>
+<a name="ln165">  schedule(static)</a>
+<a name="ln166">#endif</a>
+<a name="ln167">  for(int k = 0; k &lt; roi_out-&gt;height; k++)</a>
+<a name="ln168">  {</a>
+<a name="ln169">    const float *in = ((float *)i) + (size_t)4 * k * roi_out-&gt;width;</a>
+<a name="ln170">    float *out = ((float *)o) + (size_t)4 * k * roi_out-&gt;width;</a>
+<a name="ln171">    for(int j = 0; j &lt; roi_out-&gt;width; j++, in += 4, out += 4)</a>
+<a name="ln172">    {</a>
+<a name="ln173">      out[0] = 100.0f * color_filter(in[1], in[2], d-&gt;a, d-&gt;b, sigma2);</a>
+<a name="ln174">      out[1] = out[2] = 0.0f;</a>
+<a name="ln175">      out[3] = in[3];</a>
+<a name="ln176">    }</a>
+<a name="ln177">  }</a>
+<a name="ln178"> </a>
+<a name="ln179">  // second step: blur filter contribution:</a>
+<a name="ln180">  const float scale = piece-&gt;iscale / roi_in-&gt;scale;</a>
+<a name="ln181">  const float sigma_r = 250.0f; // does not depend on scale</a>
+<a name="ln182">  const float sigma_s = 20.0f / scale;</a>
+<a name="ln183">  const float detail = -1.0f; // bilateral base layer</a>
+<a name="ln184"> </a>
+<a name="ln185">  dt_bilateral_t *b = dt_bilateral_init(roi_in-&gt;width, roi_in-&gt;height, sigma_s, sigma_r);</a>
+<a name="ln186">  dt_bilateral_splat(b, (float *)o);</a>
+<a name="ln187">  dt_bilateral_blur(b);</a>
+<a name="ln188">  dt_bilateral_slice(b, (float *)o, (float *)o, detail);</a>
+<a name="ln189">  dt_bilateral_free(b);</a>
+<a name="ln190"> </a>
+<a name="ln191">#ifdef _OPENMP</a>
+<a name="ln192">#pragma omp parallel for default(none) \</a>
+<a name="ln193">  dt_omp_firstprivate(i, o, roi_out) \</a>
+<a name="ln194">  shared(d) \</a>
+<a name="ln195">  schedule(static)</a>
+<a name="ln196">#endif</a>
+<a name="ln197">  for(int k = 0; k &lt; roi_out-&gt;height; k++)</a>
+<a name="ln198">  {</a>
+<a name="ln199">    const float *in = ((float *)i) + (size_t)4 * k * roi_out-&gt;width;</a>
+<a name="ln200">    float *out = ((float *)o) + (size_t)4 * k * roi_out-&gt;width;</a>
+<a name="ln201">    for(int j = 0; j &lt; roi_out-&gt;width; j++, in += 4, out += 4)</a>
+<a name="ln202">    {</a>
+<a name="ln203">      const float tt = envelope(in[0]);</a>
+<a name="ln204">      const float t = tt + (1.0f - tt) * (1.0f - d-&gt;highlights);</a>
+<a name="ln205">      out[0] = (1.0f - t) * in[0]</a>
+<a name="ln206">               + t * out[0] * (1.0f / 100.0f) * in[0]; // normalized filter * input brightness</a>
+<a name="ln207">    }</a>
+<a name="ln208">  }</a>
+<a name="ln209">}</a>
+<a name="ln210"> </a>
+<a name="ln211">#ifdef HAVE_OPENCL</a>
+<a name="ln212">int process_cl(struct dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, cl_mem dev_in, cl_mem dev_out,</a>
+<a name="ln213">               const dt_iop_roi_t *const roi_in, const dt_iop_roi_t *const roi_out)</a>
+<a name="ln214">{</a>
+<a name="ln215">  dt_iop_monochrome_data_t *d = (dt_iop_monochrome_data_t *)piece-&gt;data;</a>
+<a name="ln216">  dt_iop_monochrome_global_data_t *gd = (dt_iop_monochrome_global_data_t *)self-&gt;global_data;</a>
+<a name="ln217"> </a>
+<a name="ln218">  cl_int err = -999;</a>
+<a name="ln219">  const int devid = piece-&gt;pipe-&gt;devid;</a>
+<a name="ln220"> </a>
+<a name="ln221">  const int width = roi_out-&gt;width;</a>
+<a name="ln222">  const int height = roi_out-&gt;height;</a>
+<a name="ln223">  const float sigma2 = (d-&gt;size * 128.0) * (d-&gt;size * 128.0f);</a>
+<a name="ln224"> </a>
+<a name="ln225">  // TODO: alloc new buffer, bilat filter, and go on with that</a>
+<a name="ln226">  const float scale = piece-&gt;iscale / roi_in-&gt;scale;</a>
+<a name="ln227">  const float sigma_r = 250.0f; // does not depend on scale</a>
+<a name="ln228">  const float sigma_s = 20.0f / scale;</a>
+<a name="ln229">  const float detail = -1.0f; // bilateral base layer</a>
+<a name="ln230"> </a>
+<a name="ln231">  cl_mem dev_tmp = NULL;</a>
+<a name="ln232">  dev_tmp = dt_opencl_alloc_device(devid, roi_in-&gt;width, roi_in-&gt;height, 4 * sizeof(float));</a>
+<a name="ln233"> </a>
+<a name="ln234">  dt_bilateral_cl_t *b = dt_bilateral_init_cl(devid, roi_in-&gt;width, roi_in-&gt;height, sigma_s, sigma_r);</a>
+<a name="ln235">  if(!b) goto error;</a>
+<a name="ln236"> </a>
+<a name="ln237">  size_t sizes[2] = { ROUNDUPWD(width), ROUNDUPHT(height) };</a>
+<a name="ln238">  dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_monochrome_filter, 0, sizeof(cl_mem), &amp;dev_in);</a>
+<a name="ln239">  dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_monochrome_filter, 1, sizeof(cl_mem), &amp;dev_out);</a>
+<a name="ln240">  dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_monochrome_filter, 2, sizeof(int), &amp;width);</a>
+<a name="ln241">  dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_monochrome_filter, 3, sizeof(int), &amp;height);</a>
+<a name="ln242">  dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_monochrome_filter, 4, sizeof(float), &amp;d-&gt;a);</a>
+<a name="ln243">  dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_monochrome_filter, 5, sizeof(float), &amp;d-&gt;b);</a>
+<a name="ln244">  dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_monochrome_filter, 6, sizeof(float), &amp;sigma2);</a>
+<a name="ln245">  err = dt_opencl_enqueue_kernel_2d(devid, gd-&gt;kernel_monochrome_filter, sizes);</a>
+<a name="ln246">  if(err != CL_SUCCESS) goto error;</a>
+<a name="ln247"> </a>
+<a name="ln248">  err = dt_bilateral_splat_cl(b, dev_out);</a>
+<a name="ln249">  if(err != CL_SUCCESS) goto error;</a>
+<a name="ln250">  err = dt_bilateral_blur_cl(b);</a>
+<a name="ln251">  if(err != CL_SUCCESS) goto error;</a>
+<a name="ln252">  err = dt_bilateral_slice_cl(b, dev_out, dev_tmp, detail);</a>
+<a name="ln253">  if(err != CL_SUCCESS) goto error;</a>
+<a name="ln254">  dt_bilateral_free_cl(b);</a>
+<a name="ln255">  b = NULL; // make sure we don't do double cleanup in case the next few lines err out</a>
+<a name="ln256"> </a>
+<a name="ln257">  dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_monochrome, 0, sizeof(cl_mem), &amp;dev_in);</a>
+<a name="ln258">  dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_monochrome, 1, sizeof(cl_mem), &amp;dev_tmp);</a>
+<a name="ln259">  dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_monochrome, 2, sizeof(cl_mem), &amp;dev_out);</a>
+<a name="ln260">  dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_monochrome, 3, sizeof(int), &amp;width);</a>
+<a name="ln261">  dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_monochrome, 4, sizeof(int), &amp;height);</a>
+<a name="ln262">  dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_monochrome, 5, sizeof(float), &amp;d-&gt;a);</a>
+<a name="ln263">  dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_monochrome, 6, sizeof(float), &amp;d-&gt;b);</a>
+<a name="ln264">  dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_monochrome, 7, sizeof(float), &amp;sigma2);</a>
+<a name="ln265">  dt_opencl_set_kernel_arg(devid, gd-&gt;kernel_monochrome, 8, sizeof(float), &amp;d-&gt;highlights);</a>
+<a name="ln266">  err = dt_opencl_enqueue_kernel_2d(devid, gd-&gt;kernel_monochrome, sizes);</a>
+<a name="ln267">  if(err != CL_SUCCESS) goto error;</a>
+<a name="ln268"> </a>
+<a name="ln269">  dt_opencl_release_mem_object(dev_tmp);</a>
+<a name="ln270">  return TRUE;</a>
+<a name="ln271"> </a>
+<a name="ln272">error:</a>
+<a name="ln273">  dt_opencl_release_mem_object(dev_tmp);</a>
+<a name="ln274">  dt_bilateral_free_cl(b);</a>
+<a name="ln275">  dt_print(DT_DEBUG_OPENCL, &quot;[opencl_monochrome] couldn't enqueue kernel! %d\n&quot;, err);</a>
+<a name="ln276">  return FALSE;</a>
+<a name="ln277">}</a>
+<a name="ln278">#endif</a>
+<a name="ln279"> </a>
+<a name="ln280">void tiling_callback(struct dt_iop_module_t *self, struct dt_dev_pixelpipe_iop_t *piece,</a>
+<a name="ln281">                     const dt_iop_roi_t *roi_in, const dt_iop_roi_t *roi_out,</a>
+<a name="ln282">                     struct dt_develop_tiling_t *tiling)</a>
+<a name="ln283">{</a>
+<a name="ln284">  const float scale = piece-&gt;iscale / roi_in-&gt;scale;</a>
+<a name="ln285">  const float sigma_s = 20.0f / scale;</a>
+<a name="ln286">  const float sigma_r = 250.0f;</a>
+<a name="ln287"> </a>
+<a name="ln288">  const int width = roi_in-&gt;width;</a>
+<a name="ln289">  const int height = roi_in-&gt;height;</a>
+<a name="ln290">  const int channels = piece-&gt;colors;</a>
+<a name="ln291"> </a>
+<a name="ln292">  const size_t basebuffer = width * height * channels * sizeof(float);</a>
+<a name="ln293"> </a>
+<a name="ln294">  tiling-&gt;factor = 3.0f + (float)dt_bilateral_memory_use(width, height, sigma_s, sigma_r) / basebuffer;</a>
+<a name="ln295">  tiling-&gt;maxbuf</a>
+<a name="ln296">      = fmax(1.0f, (float)dt_bilateral_singlebuffer_size(width, height, sigma_s, sigma_r) / basebuffer);</a>
+<a name="ln297">  tiling-&gt;overhead = 0;</a>
+<a name="ln298">  tiling-&gt;overlap = ceilf(4 * sigma_s);</a>
+<a name="ln299">  tiling-&gt;xalign = 1;</a>
+<a name="ln300">  tiling-&gt;yalign = 1;</a>
+<a name="ln301">  return;</a>
+<a name="ln302">}</a>
+<a name="ln303"> </a>
+<a name="ln304">void commit_params(struct dt_iop_module_t *self, dt_iop_params_t *p1, dt_dev_pixelpipe_t *pipe,</a>
+<a name="ln305">                   dt_dev_pixelpipe_iop_t *piece)</a>
+<a name="ln306">{</a>
+<a name="ln307">  dt_iop_monochrome_params_t *p = (dt_iop_monochrome_params_t *)p1;</a>
+<a name="ln308">  dt_iop_monochrome_data_t *d = (dt_iop_monochrome_data_t *)piece-&gt;data;</a>
+<a name="ln309">  d-&gt;a = p-&gt;a;</a>
+<a name="ln310">  d-&gt;b = p-&gt;b;</a>
+<a name="ln311">  d-&gt;size = p-&gt;size;</a>
+<a name="ln312">  d-&gt;highlights = p-&gt;highlights;</a>
+<a name="ln313"> </a>
+<a name="ln314">#ifdef HAVE_OPENCL</a>
+<a name="ln315">  piece-&gt;process_cl_ready = (piece-&gt;process_cl_ready &amp;&amp; !(darktable.opencl-&gt;avoid_atomics));</a>
+<a name="ln316">#endif</a>
+<a name="ln317">}</a>
+<a name="ln318"> </a>
+<a name="ln319"> </a>
+<a name="ln320"> </a>
+<a name="ln321">void init_global(dt_iop_module_so_t *module)</a>
+<a name="ln322">{</a>
+<a name="ln323">  const int program = 2; // basic.cl from programs.conf</a>
+<a name="ln324">  dt_iop_monochrome_global_data_t *gd</a>
+<a name="ln325">      = (dt_iop_monochrome_global_data_t *)malloc(sizeof(dt_iop_monochrome_global_data_t));</a>
+<a name="ln326">  module-&gt;data = gd;</a>
+<a name="ln327">  gd-&gt;kernel_monochrome_filter = dt_opencl_create_kernel(program, &quot;monochrome_filter&quot;);</a>
+<a name="ln328">  gd-&gt;kernel_monochrome = dt_opencl_create_kernel(program, &quot;monochrome&quot;);</a>
+<a name="ln329">}</a>
+<a name="ln330"> </a>
+<a name="ln331">void cleanup_global(dt_iop_module_so_t *module)</a>
+<a name="ln332">{</a>
+<a name="ln333">  dt_iop_monochrome_global_data_t *gd = (dt_iop_monochrome_global_data_t *)module-&gt;data;</a>
+<a name="ln334">  dt_opencl_free_kernel(gd-&gt;kernel_monochrome_filter);</a>
+<a name="ln335">  dt_opencl_free_kernel(gd-&gt;kernel_monochrome);</a>
+<a name="ln336">  free(module-&gt;data);</a>
+<a name="ln337">  module-&gt;data = NULL;</a>
+<a name="ln338">}</a>
+<a name="ln339"> </a>
+<a name="ln340">void gui_update(struct dt_iop_module_t *self)</a>
+<a name="ln341">{</a>
+<a name="ln342">  dt_iop_monochrome_gui_data_t *g = (dt_iop_monochrome_gui_data_t *)self-&gt;gui_data;</a>
+<a name="ln343">  dt_iop_monochrome_params_t *p = (dt_iop_monochrome_params_t *)self-&gt;params;</a>
+<a name="ln344">  dt_bauhaus_slider_set(g-&gt;highlights, p-&gt;highlights);</a>
+<a name="ln345">  g-&gt;dragging = FALSE;</a>
+<a name="ln346">  gtk_widget_queue_draw(self-&gt;widget);</a>
+<a name="ln347">}</a>
+<a name="ln348"> </a>
+<a name="ln349">void init(dt_iop_module_t *module)</a>
+<a name="ln350">{</a>
+<a name="ln351">  module-&gt;params = calloc(1, sizeof(dt_iop_monochrome_params_t));</a>
+<a name="ln352">  module-&gt;default_params = calloc(1, sizeof(dt_iop_monochrome_params_t));</a>
+<a name="ln353">  module-&gt;default_enabled = 0;</a>
+<a name="ln354">  module-&gt;params_size = sizeof(dt_iop_monochrome_params_t);</a>
+<a name="ln355">  module-&gt;gui_data = NULL;</a>
+<a name="ln356">  dt_iop_monochrome_params_t tmp = (dt_iop_monochrome_params_t){ 0., 0., 2., 0. };</a>
+<a name="ln357">  memcpy(module-&gt;params, &amp;tmp, sizeof(dt_iop_monochrome_params_t));</a>
+<a name="ln358">  memcpy(module-&gt;default_params, &amp;tmp, sizeof(dt_iop_monochrome_params_t));</a>
+<a name="ln359">}</a>
+<a name="ln360"> </a>
+<a name="ln361">void cleanup(dt_iop_module_t *module)</a>
+<a name="ln362">{</a>
+<a name="ln363">  free(module-&gt;params);</a>
+<a name="ln364">  module-&gt;params = NULL;</a>
+<a name="ln365">}</a>
+<a name="ln366"> </a>
+<a name="ln367">void init_pipe(struct dt_iop_module_t *self, dt_dev_pixelpipe_t *pipe, dt_dev_pixelpipe_iop_t *piece)</a>
+<a name="ln368">{</a>
+<a name="ln369">  piece-&gt;data = calloc(1, sizeof(dt_iop_monochrome_data_t));</a>
+<a name="ln370">  self-&gt;commit_params(self, self-&gt;default_params, pipe, piece);</a>
+<a name="ln371">}</a>
+<a name="ln372"> </a>
+<a name="ln373">void cleanup_pipe(struct dt_iop_module_t *self, dt_dev_pixelpipe_t *pipe, dt_dev_pixelpipe_iop_t *piece)</a>
+<a name="ln374">{</a>
+<a name="ln375">  free(piece-&gt;data);</a>
+<a name="ln376">  piece-&gt;data = NULL;</a>
+<a name="ln377">}</a>
+<a name="ln378"> </a>
+<a name="ln379">static gboolean dt_iop_monochrome_draw(GtkWidget *widget, cairo_t *crf, gpointer user_data)</a>
+<a name="ln380">{</a>
+<a name="ln381">  if(darktable.gui-&gt;reset) return FALSE;</a>
+<a name="ln382">  dt_iop_module_t *self = (dt_iop_module_t *)user_data;</a>
+<a name="ln383">  dt_iop_monochrome_gui_data_t *g = (dt_iop_monochrome_gui_data_t *)self-&gt;gui_data;</a>
+<a name="ln384">  dt_iop_monochrome_params_t *p = (dt_iop_monochrome_params_t *)self-&gt;params;</a>
+<a name="ln385"> </a>
+<a name="ln386">  const int inset = DT_COLORCORRECTION_INSET;</a>
+<a name="ln387">  GtkAllocation allocation;</a>
+<a name="ln388">  gtk_widget_get_allocation(widget, &amp;allocation);</a>
+<a name="ln389">  int width = allocation.width, height = allocation.height;</a>
+<a name="ln390">  cairo_surface_t *cst = dt_cairo_image_surface_create(CAIRO_FORMAT_ARGB32, width, height);</a>
+<a name="ln391">  cairo_t *cr = cairo_create(cst);</a>
+<a name="ln392">  // clear bg</a>
+<a name="ln393">  cairo_set_source_rgb(cr, .2, .2, .2);</a>
+<a name="ln394">  cairo_paint(cr);</a>
+<a name="ln395"> </a>
+<a name="ln396">  cairo_translate(cr, inset, inset);</a>
+<a name="ln397">  cairo_set_antialias(cr, CAIRO_ANTIALIAS_NONE);</a>
+<a name="ln398">  width -= 2 * inset;</a>
+<a name="ln399">  height -= 2 * inset;</a>
+<a name="ln400">  // clip region to inside:</a>
+<a name="ln401">  cairo_rectangle(cr, 0, 0, width, height);</a>
+<a name="ln402">  cairo_clip(cr);</a>
+<a name="ln403">  // flip y:</a>
+<a name="ln404">  cairo_translate(cr, 0, height);</a>
+<a name="ln405">  cairo_scale(cr, 1., -1.);</a>
+<a name="ln406">  const int cells = 8;</a>
+<a name="ln407">  for(int j = 0; j &lt; cells; j++)</a>
+<a name="ln408">    for(int i = 0; i &lt; cells; i++)</a>
+<a name="ln409">    {</a>
+<a name="ln410">      double rgb[3] = { 0.5, 0.5, 0.5 };</a>
+<a name="ln411">      cmsCIELab Lab;</a>
+<a name="ln412">      Lab.L = 53.390011;</a>
+<a name="ln413">      Lab.a = Lab.b = 0; // grey</a>
+<a name="ln414">      // dt_iop_sRGB_to_Lab(rgb, Lab, 0, 0, 1.0, 1, 1); // get grey in Lab</a>
+<a name="ln415">      Lab.a = PANEL_WIDTH * (i / (cells - 1.0) - .5);</a>
+<a name="ln416">      Lab.b = PANEL_WIDTH * (j / (cells - 1.0) - .5);</a>
+<a name="ln417">      const float f = color_filter(Lab.a, Lab.b, p-&gt;a, p-&gt;b, 40 * 40 * p-&gt;size * p-&gt;size);</a>
+<a name="ln418">      Lab.L *= f * f; // exaggerate filter a little</a>
+<a name="ln419">      cmsDoTransform(g-&gt;xform, &amp;Lab, rgb, 1);</a>
+<a name="ln420">      cairo_set_source_rgb(cr, rgb[0], rgb[1], rgb[2]);</a>
+<a name="ln421">      cairo_rectangle(cr, width * i / (float)cells, height * j / (float)cells,</a>
+<a name="ln422">                      width / (float)cells - DT_PIXEL_APPLY_DPI(1),</a>
+<a name="ln423">                      height / (float)cells - DT_PIXEL_APPLY_DPI(1));</a>
+<a name="ln424">      cairo_fill(cr);</a>
+<a name="ln425">    }</a>
+<a name="ln426">  cairo_set_antialias(cr, CAIRO_ANTIALIAS_DEFAULT);</a>
+<a name="ln427">  cairo_set_source_rgb(cr, .7, .7, .7);</a>
+<a name="ln428">  cairo_set_line_width(cr, DT_PIXEL_APPLY_DPI(2.0));</a>
+<a name="ln429">  const float x = p-&gt;a * width / PANEL_WIDTH + width * .5f, y = p-&gt;b * height / PANEL_WIDTH + height * .5f;</a>
+<a name="ln430">  cairo_arc(cr, x, y, width * .22f * p-&gt;size, 0, 2.0 * M_PI);</a>
+<a name="ln431">  cairo_stroke(cr);</a>
+<a name="ln432"> </a>
+<a name="ln433">  cairo_destroy(cr);</a>
+<a name="ln434">  cairo_set_source_surface(crf, cst, 0, 0);</a>
+<a name="ln435">  cairo_paint(crf);</a>
+<a name="ln436">  cairo_surface_destroy(cst);</a>
+<a name="ln437">  return TRUE;</a>
+<a name="ln438">}</a>
+<a name="ln439"> </a>
+<a name="ln440">static void _iop_color_picker_apply(dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece)</a>
+<a name="ln441">{</a>
+<a name="ln442">  dt_iop_monochrome_params_t *p = (dt_iop_monochrome_params_t *)self-&gt;params;</a>
+<a name="ln443"> </a>
+<a name="ln444">  if(fabsf(p-&gt;a - self-&gt;picked_color[1]) &lt; 0.0001f</a>
+<a name="ln445">     &amp;&amp; fabsf(p-&gt;b - self-&gt;picked_color[2]) &lt; 0.0001f)</a>
+<a name="ln446">  {</a>
+<a name="ln447">    // interrupt infinite loops</a>
+<a name="ln448">    return;</a>
+<a name="ln449">  }</a>
+<a name="ln450"> </a>
+<a name="ln451">  p-&gt;a = self-&gt;picked_color[1];</a>
+<a name="ln452">  p-&gt;b = self-&gt;picked_color[2];</a>
+<a name="ln453">  float da = self-&gt;picked_color_max[1] - self-&gt;picked_color_min[1];</a>
+<a name="ln454">  float db = self-&gt;picked_color_max[2] - self-&gt;picked_color_min[2];</a>
+<a name="ln455">  p-&gt;size = CLAMP((da + db)/128.0, .5, 3.0);</a>
+<a name="ln456"> </a>
+<a name="ln457">  dt_dev_add_history_item(darktable.develop, self, TRUE);</a>
+<a name="ln458">  dt_control_queue_redraw_widget(self-&gt;widget);</a>
+<a name="ln459">}</a>
+<a name="ln460"> </a>
+<a name="ln461">static gboolean dt_iop_monochrome_motion_notify(GtkWidget *widget, GdkEventMotion *event, gpointer user_data)</a>
+<a name="ln462">{</a>
+<a name="ln463">  dt_iop_module_t *self = (dt_iop_module_t *)user_data;</a>
+<a name="ln464">  dt_iop_monochrome_gui_data_t *g = (dt_iop_monochrome_gui_data_t *)self-&gt;gui_data;</a>
+<a name="ln465">  dt_iop_monochrome_params_t *p = (dt_iop_monochrome_params_t *)self-&gt;params;</a>
+<a name="ln466">  if(g-&gt;dragging)</a>
+<a name="ln467">  {</a>
+<a name="ln468">    const float old_a = p-&gt;a, old_b = p-&gt;b;</a>
+<a name="ln469">    const int inset = DT_COLORCORRECTION_INSET;</a>
+<a name="ln470">    GtkAllocation allocation;</a>
+<a name="ln471">    gtk_widget_get_allocation(widget, &amp;allocation);</a>
+<a name="ln472">    int width = allocation.width - 2 * inset, height = allocation.height - 2 * inset;</a>
+<a name="ln473">    const float mouse_x = CLAMP(event-&gt;x - inset, 0, width);</a>
+<a name="ln474">    const float mouse_y = CLAMP(height - 1 - event-&gt;y + inset, 0, height);</a>
+<a name="ln475">    p-&gt;a = PANEL_WIDTH * (mouse_x - width * 0.5f) / (float)width;</a>
+<a name="ln476">    p-&gt;b = PANEL_WIDTH * (mouse_y - height * 0.5f) / (float)height;</a>
+<a name="ln477"> </a>
+<a name="ln478">    if(old_a != p-&gt;a || old_b != p-&gt;b) dt_dev_add_history_item(darktable.develop, self, TRUE);</a>
+<a name="ln479">    gtk_widget_queue_draw(self-&gt;widget);</a>
+<a name="ln480">  }</a>
+<a name="ln481">  gint x, y;</a>
+<a name="ln482">#if GTK_CHECK_VERSION(3, 20, 0)</a>
+<a name="ln483">  gdk_window_get_device_position(event-&gt;window,</a>
+<a name="ln484">      gdk_seat_get_pointer(gdk_display_get_default_seat(gtk_widget_get_display(widget))),</a>
+<a name="ln485">      &amp;x, &amp;y, 0);</a>
+<a name="ln486">#else</a>
+<a name="ln487">  gdk_window_get_device_position(event-&gt;window,</a>
+<a name="ln488">                                 gdk_device_manager_get_client_pointer(</a>
+<a name="ln489">                                     gdk_display_get_device_manager(gdk_window_get_display(event-&gt;window))),</a>
+<a name="ln490">                                 &amp;x, &amp;y, NULL);</a>
+<a name="ln491">#endif</a>
+<a name="ln492">  return TRUE;</a>
+<a name="ln493">}</a>
+<a name="ln494"> </a>
+<a name="ln495">static gboolean dt_iop_monochrome_button_press(GtkWidget *widget, GdkEventButton *event, gpointer user_data)</a>
+<a name="ln496">{</a>
+<a name="ln497">  if(event-&gt;button == 1)</a>
+<a name="ln498">  {</a>
+<a name="ln499">    dt_iop_module_t *self = (dt_iop_module_t *)user_data;</a>
+<a name="ln500">    dt_iop_monochrome_gui_data_t *g = (dt_iop_monochrome_gui_data_t *)self-&gt;gui_data;</a>
+<a name="ln501">    dt_iop_monochrome_params_t *p = (dt_iop_monochrome_params_t *)self-&gt;params;</a>
+<a name="ln502">    dt_iop_color_picker_reset(self, TRUE);</a>
+<a name="ln503">    if(event-&gt;type == GDK_2BUTTON_PRESS)</a>
+<a name="ln504">    {</a>
+<a name="ln505">      // reset</a>
+<a name="ln506">      dt_iop_monochrome_params_t *p0 = (dt_iop_monochrome_params_t *)self-&gt;default_params;</a>
+<a name="ln507">      p-&gt;a = p0-&gt;a;</a>
+<a name="ln508">      p-&gt;b = p0-&gt;b;</a>
+<a name="ln509">      p-&gt;size = p0-&gt;size;</a>
+<a name="ln510">    }</a>
+<a name="ln511">    else</a>
+<a name="ln512">    {</a>
+<a name="ln513">      const int inset = DT_COLORCORRECTION_INSET;</a>
+<a name="ln514">      GtkAllocation allocation;</a>
+<a name="ln515">      gtk_widget_get_allocation(widget, &amp;allocation);</a>
+<a name="ln516">      int width = allocation.width - 2 * inset, height = allocation.height - 2 * inset;</a>
+<a name="ln517">      const float mouse_x = CLAMP(event-&gt;x - inset, 0, width);</a>
+<a name="ln518">      const float mouse_y = CLAMP(height - 1 - event-&gt;y + inset, 0, height);</a>
+<a name="ln519">      p-&gt;a = PANEL_WIDTH * (mouse_x - width * 0.5f) / (float)width;</a>
+<a name="ln520">      p-&gt;b = PANEL_WIDTH * (mouse_y - height * 0.5f) / (float)height;</a>
+<a name="ln521">      g-&gt;dragging = 1;</a>
+<a name="ln522">      g_object_set(G_OBJECT(widget), &quot;has-tooltip&quot;, FALSE, (gchar *)0);</a>
+<a name="ln523">    }</a>
+<a name="ln524">    gtk_widget_queue_draw(self-&gt;widget);</a>
+<a name="ln525">    return TRUE;</a>
+<a name="ln526">  }</a>
+<a name="ln527">  return FALSE;</a>
+<a name="ln528">}</a>
+<a name="ln529"> </a>
+<a name="ln530">static gboolean dt_iop_monochrome_button_release(GtkWidget *widget, GdkEventButton *event, gpointer user_data)</a>
+<a name="ln531">{</a>
+<a name="ln532">  if(event-&gt;button == 1)</a>
+<a name="ln533">  {</a>
+<a name="ln534">    dt_iop_module_t *self = (dt_iop_module_t *)user_data;</a>
+<a name="ln535">    dt_iop_monochrome_gui_data_t *g = (dt_iop_monochrome_gui_data_t *)self-&gt;gui_data;</a>
+<a name="ln536">    dt_iop_color_picker_reset(self, TRUE);</a>
+<a name="ln537">    g-&gt;dragging = 0;</a>
+<a name="ln538">    dt_dev_add_history_item(darktable.develop, self, TRUE);</a>
+<a name="ln539">    g_object_set(G_OBJECT(widget), &quot;has-tooltip&quot;, TRUE, (gchar *)0);</a>
+<a name="ln540">    return TRUE;</a>
+<a name="ln541">  }</a>
+<a name="ln542">  return FALSE;</a>
+<a name="ln543">}</a>
+<a name="ln544"> </a>
+<a name="ln545">static gboolean dt_iop_monochrome_leave_notify(GtkWidget *widget, GdkEventCrossing *event, gpointer user_data)</a>
+<a name="ln546">{</a>
+<a name="ln547">  dt_iop_module_t *self = (dt_iop_module_t *)user_data;</a>
+<a name="ln548">  dt_iop_monochrome_gui_data_t *g = (dt_iop_monochrome_gui_data_t *)self-&gt;gui_data;</a>
+<a name="ln549">  g-&gt;dragging = 0;</a>
+<a name="ln550">  gtk_widget_queue_draw(self-&gt;widget);</a>
+<a name="ln551">  return TRUE;</a>
+<a name="ln552">}</a>
+<a name="ln553"> </a>
+<a name="ln554">static gboolean dt_iop_monochrome_scrolled(GtkWidget *widget, GdkEventScroll *event, gpointer user_data)</a>
+<a name="ln555">{</a>
+<a name="ln556">  dt_iop_module_t *self = (dt_iop_module_t *)user_data;</a>
+<a name="ln557">  dt_iop_monochrome_params_t *p = (dt_iop_monochrome_params_t *)self-&gt;params;</a>
+<a name="ln558"> </a>
+<a name="ln559">  if(((event-&gt;state &amp; gtk_accelerator_get_default_mod_mask()) == darktable.gui-&gt;sidebar_scroll_mask) != dt_conf_get_bool(&quot;darkroom/ui/sidebar_scroll_default&quot;)) return FALSE;</a>
+<a name="ln560">  dt_iop_color_picker_reset(self, TRUE);</a>
+<a name="ln561"> </a>
+<a name="ln562">  gdouble delta_y;</a>
+<a name="ln563">  if(dt_gui_get_scroll_deltas(event, NULL, &amp;delta_y))</a>
+<a name="ln564">  {</a>
+<a name="ln565">    const float old_size = p-&gt;size;</a>
+<a name="ln566">    p-&gt;size = CLAMP(p-&gt;size + delta_y * 0.1, 0.5f, 3.0f);</a>
+<a name="ln567">    if(old_size != p-&gt;size) dt_dev_add_history_item(darktable.develop, self, TRUE);</a>
+<a name="ln568">    gtk_widget_queue_draw(widget);</a>
+<a name="ln569">  }</a>
+<a name="ln570"> </a>
+<a name="ln571">  return TRUE;</a>
+<a name="ln572">}</a>
+<a name="ln573"> </a>
+<a name="ln574">static void highlights_callback(GtkWidget *w, gpointer user_data)</a>
+<a name="ln575">{</a>
+<a name="ln576">  dt_iop_module_t *self = (dt_iop_module_t *)user_data;</a>
+<a name="ln577">  dt_iop_monochrome_params_t *p = (dt_iop_monochrome_params_t *)self-&gt;params;</a>
+<a name="ln578">  dt_iop_color_picker_reset(self, TRUE);</a>
+<a name="ln579">  p-&gt;highlights = dt_bauhaus_slider_get(w);</a>
+<a name="ln580">  dt_dev_add_history_item(darktable.develop, self, TRUE);</a>
+<a name="ln581">}</a>
+<a name="ln582"> </a>
+<a name="ln583">void gui_init(struct dt_iop_module_t *self)</a>
+<a name="ln584">{</a>
+<a name="ln585">  self-&gt;gui_data = malloc(sizeof(dt_iop_monochrome_gui_data_t));</a>
+<a name="ln586">  dt_iop_monochrome_gui_data_t *g = (dt_iop_monochrome_gui_data_t *)self-&gt;gui_data;</a>
+<a name="ln587"> </a>
+<a name="ln588">  g-&gt;dragging = 0;</a>
+<a name="ln589"> </a>
+<a name="ln590">  self-&gt;widget = gtk_box_new(GTK_ORIENTATION_VERTICAL, DT_BAUHAUS_SPACE);</a>
+<a name="ln591">  dt_gui_add_help_link(self-&gt;widget, dt_get_help_url(self-&gt;op));</a>
+<a name="ln592">  g-&gt;area = GTK_DRAWING_AREA(dtgtk_drawing_area_new_with_aspect_ratio(1.0));</a>
+<a name="ln593">  gtk_box_pack_start(GTK_BOX(self-&gt;widget), GTK_WIDGET(g-&gt;area), TRUE, TRUE, 0);</a>
+<a name="ln594">  gtk_widget_set_tooltip_text(GTK_WIDGET(g-&gt;area), _(&quot;drag and scroll mouse wheel to adjust the virtual color filter&quot;));</a>
+<a name="ln595"> </a>
+<a name="ln596">  gtk_widget_add_events(GTK_WIDGET(g-&gt;area), GDK_POINTER_MOTION_MASK | GDK_POINTER_MOTION_HINT_MASK</a>
+<a name="ln597">                                             | GDK_BUTTON_PRESS_MASK | GDK_BUTTON_RELEASE_MASK</a>
+<a name="ln598">                                             | GDK_LEAVE_NOTIFY_MASK | darktable.gui-&gt;scroll_mask);</a>
+<a name="ln599">  g_signal_connect(G_OBJECT(g-&gt;area), &quot;draw&quot;, G_CALLBACK(dt_iop_monochrome_draw), self);</a>
+<a name="ln600">  g_signal_connect(G_OBJECT(g-&gt;area), &quot;button-press-event&quot;, G_CALLBACK(dt_iop_monochrome_button_press), self);</a>
+<a name="ln601">  g_signal_connect(G_OBJECT(g-&gt;area), &quot;button-release-event&quot;, G_CALLBACK(dt_iop_monochrome_button_release),</a>
+<a name="ln602">                   self);</a>
+<a name="ln603">  g_signal_connect(G_OBJECT(g-&gt;area), &quot;motion-notify-event&quot;, G_CALLBACK(dt_iop_monochrome_motion_notify),</a>
+<a name="ln604">                   self);</a>
+<a name="ln605">  g_signal_connect(G_OBJECT(g-&gt;area), &quot;leave-notify-event&quot;, G_CALLBACK(dt_iop_monochrome_leave_notify), self);</a>
+<a name="ln606">  g_signal_connect(G_OBJECT(g-&gt;area), &quot;scroll-event&quot;, G_CALLBACK(dt_iop_monochrome_scrolled), self);</a>
+<a name="ln607"> </a>
+<a name="ln608">  GtkWidget *box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, DT_BAUHAUS_SPACE);</a>
+<a name="ln609"> </a>
+<a name="ln610">  g-&gt;highlights = dt_bauhaus_slider_new_with_range(self, 0.0, 1.0, 0.01, 0.0, 2);</a>
+<a name="ln611">  gtk_widget_set_tooltip_text(g-&gt;highlights, _(&quot;how much to keep highlights&quot;));</a>
+<a name="ln612">  dt_bauhaus_widget_set_label(g-&gt;highlights, NULL, _(&quot;highlights&quot;));</a>
+<a name="ln613">  gtk_box_pack_start(GTK_BOX(box), g-&gt;highlights, TRUE, TRUE, 0);</a>
+<a name="ln614">  g_signal_connect(G_OBJECT(g-&gt;highlights), &quot;value-changed&quot;, G_CALLBACK(highlights_callback), self);</a>
+<a name="ln615"> </a>
+<a name="ln616">  g-&gt;colorpicker = dtgtk_togglebutton_new(dtgtk_cairo_paint_colorpicker, CPF_STYLE_FLAT | CPF_DO_NOT_USE_BORDER, NULL);</a>
+<a name="ln617">  gtk_box_pack_end(GTK_BOX(box), GTK_WIDGET(g-&gt;colorpicker), FALSE, FALSE, 0);</a>
+<a name="ln618">  g_signal_connect(G_OBJECT(g-&gt;colorpicker), &quot;toggled&quot;, G_CALLBACK(dt_iop_color_picker_callback), &amp;g-&gt;color_picker);</a>
+<a name="ln619"> </a>
+<a name="ln620">  gtk_box_pack_end(GTK_BOX(self-&gt;widget), GTK_WIDGET(box), TRUE, TRUE, 0);</a>
+<a name="ln621"> </a>
+<a name="ln622">  cmsHPROFILE hsRGB = dt_colorspaces_get_profile(DT_COLORSPACE_SRGB, &quot;&quot;, DT_PROFILE_DIRECTION_IN)-&gt;profile;</a>
+<a name="ln623">  cmsHPROFILE hLab = dt_colorspaces_get_profile(DT_COLORSPACE_LAB, &quot;&quot;, DT_PROFILE_DIRECTION_ANY)-&gt;profile;</a>
+<a name="ln624">  g-&gt;xform = cmsCreateTransform(hLab, TYPE_Lab_DBL, hsRGB, TYPE_RGB_DBL, INTENT_PERCEPTUAL,</a>
+<a name="ln625">                                0); // cmsFLAGS_NOTPRECALC);</a>
+<a name="ln626">  dt_iop_init_single_picker(&amp;g-&gt;color_picker,</a>
+<a name="ln627">                     self,</a>
+<a name="ln628">                     GTK_WIDGET(g-&gt;colorpicker),</a>
+<a name="ln629">                     DT_COLOR_PICKER_AREA,</a>
+<a name="ln630">                     _iop_color_picker_apply);</a>
+<a name="ln631">}</a>
+<a name="ln632"> </a>
+<a name="ln633">void gui_cleanup(struct dt_iop_module_t *self)</a>
+<a name="ln634">{</a>
+<a name="ln635">  dt_iop_monochrome_gui_data_t *g = (dt_iop_monochrome_gui_data_t *)self-&gt;gui_data;</a>
+<a name="ln636">  cmsDeleteTransform(g-&gt;xform);</a>
+<a name="ln637">  free(self-&gt;gui_data);</a>
+<a name="ln638">  self-&gt;gui_data = NULL;</a>
+<a name="ln639">}</a>
+<a name="ln640"> </a>
+<a name="ln641">// modelines: These editor modelines have been set for all relevant files by tools/update_modelines.sh</a>
+<a name="ln642">// vim: shiftwidth=2 expandtab tabstop=2 cindent</a>
+<a name="ln643">// kate: tab-indents: off; indent-width 2; replace-tabs on; indent-mode cstyle; remove-trailing-spaces modified;</a>
+
+</code></pre>
+<div class="balloon" rel="99"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v512/" target="_blank">V512</a> A call of the 'memcpy' function will lead to underflow of the buffer 'p2'.</p></div>
+<div class="balloon" rel="99"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v512/" target="_blank">V512</a> A call of the 'memcpy' function will lead to underflow of the buffer 'p1'.</p></div>
+<div class="balloon" rel="327"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v522/" target="_blank">V522</a> There might be dereferencing of a potential null pointer 'gd'. Check lines: 327, 325.</p></div>
+<div class="balloon" rel="357"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v575/" target="_blank">V575</a> The potential null pointer is passed into 'memcpy' function. Inspect the first argument. Check lines: 357, 351.</p></div>
+<div class="balloon" rel="358"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v575/" target="_blank">V575</a> The potential null pointer is passed into 'memcpy' function. Inspect the first argument. Check lines: 358, 352.</p></div>
+<div class="balloon" rel="415"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v519/" target="_blank">V519</a> The 'Lab.a' variable is assigned values twice successively. Perhaps this is a mistake. Check lines: 413, 415.</p></div>
+<div class="balloon" rel="416"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v519/" target="_blank">V519</a> The 'Lab.b' variable is assigned values twice successively. Perhaps this is a mistake. Check lines: 413, 416.</p></div>
+<div class="balloon" rel="588"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/v522/" target="_blank">V522</a> There might be dereferencing of a potential null pointer 'g'. Check lines: 588, 585.</p></div>
+
+<link rel="stylesheet" href="highlight.css">
+<script src="highlight.pack.js"></script>
+<script src="highlightjs-line-numbers.js"></script>
+<script>hljs.initHighlightingOnLoad();</script>
+<script>hljs.initLineNumbersOnLoad();</script>
+<script>
+  $(document).ready(function() {
+      $('.balloon').each(function () {
+          var bl = $(this);
+          var line = bl.attr('rel');
+          var text = $('a[name="ln'+line+'"]').text();
+
+          var space_count = 0;
+          for(var i = 0; i<text.length; i++){
+              var char = text[i];
+              if((char !== ' ')&&(char !== '\t'))break;
+              if(char === '\t')space_count++;
+              space_count++;
+          }
+
+          bl.css('margin-left', space_count*8);
+          $('a[name="ln'+line+'"]').after(bl);
+      });
+
+      window.location = window.location;
+  });
+</script>
+</body>
+</html>
